@@ -17,11 +17,10 @@ use regex::Regex;
 use crate::exports::document::{is_table_delimiter, split_table_row};
 use crate::exports::model::{ExportActionItem, MeetingExport};
 use crate::exports::onenote::escape_xml;
-use crate::exports::planner;
 
 /// Headings whose text marks an action-item / task list.
 static ACTION_HEADING: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(action items?|action points?|actions|tasks?|to-?dos?|next steps?|follow[- ]?ups?)\b")
+    Regex::new(r"(?i)\b(action items?|action points?|actions|tasks?|to-?dos?|next steps?|follow[- ]?ups?|aufgaben|aktionspunkte|maßnahmen|nächste schritte|tâches|actions à mener|prochaines étapes|tareas|acciones|próximos pasos|tarefas|próximos passos|azioni|attività|prossimi passi|taken|volgende stappen|zadania|kolejne kroki|задачи|следующие шаги)\b|(?:アクションアイテム|次のステップ|行动项|待办事项|後續行動|다음 단계)")
         .expect("valid action heading regex")
 });
 
@@ -184,73 +183,198 @@ pub fn markdown_to_xhtml(markdown: &str) -> String {
     out
 }
 
-/// Extract discrete action items from the summary markdown. Looks for an
-/// "Action items"/"Tasks"/"Next steps" heading and collects the bullet list
-/// that follows it (until the next heading). Owner (`@mention` / `Owner: X`)
-/// and an ISO due date are extracted best-effort; nothing is auto-mapped to a
-/// directory user.
+/// An action found in a summary, awaiting local review.
+pub(crate) struct ActionSuggestion {
+    pub action: ExportActionItem,
+    pub done: bool,
+    pub source_key: Option<String>,
+}
+
+static SOURCE_LINK: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\[[^\]\n]*\]\(#clawscribe-source-([0-9a-f]{1,64})\)").unwrap());
+
 pub fn parse_action_items(markdown: &str) -> Vec<ExportActionItem> {
-    let mut items: Vec<ExportActionItem> = Vec::new();
+    parse_action_suggestions(markdown)
+        .into_iter()
+        .map(|item| item.action)
+        .collect()
+}
+
+pub(crate) fn parse_action_suggestions(markdown: &str) -> Vec<ActionSuggestion> {
+    let mut items = Vec::new();
     let mut in_action_section = false;
-
-    for raw in markdown.lines() {
-        let line = raw.trim_end();
-
-        // A markdown heading switches the section on/off.
+    let mut lines = markdown.lines().peekable();
+    while let Some(raw) = lines.next() {
+        let line = raw.trim();
         if let Some((_, text)) = heading_level(line) {
             in_action_section = ACTION_HEADING.is_match(text);
             continue;
         }
-        // A bold-only line (e.g. `**Decisions**`) acts as a pseudo-heading, so a
-        // section divider that isn't a `#` heading still bounds the action list.
-        if let Some(caps) = BOLD_HEADING.captures(line.trim()) {
+        if let Some(caps) = BOLD_HEADING.captures(line) {
             in_action_section = ACTION_HEADING.is_match(&caps[1]);
             continue;
         }
-        if !in_action_section {
+        if !in_action_section || line.is_empty() {
             continue;
         }
-        if line.trim().is_empty() {
+        if let Some(text) = bullet_text(line) {
+            if let Some(item) = action_suggestion(&text, None, None, None) {
+                items.push(item);
+            }
             continue;
         }
-        let Some(item_text) = bullet_text(line) else {
-            // Non-bullet prose ends the list, so we don't keep collecting items
-            // from whatever follows it under the same (or no) heading.
-            in_action_section = false;
-            continue;
-        };
-
-        let due_date = ISO_DATE.captures(&item_text).map(|c| c[1].to_string());
-
-        let owner = MENTION
-            .captures(&item_text)
-            .map(|c| c[1].to_string())
-            .or_else(|| extract_labeled_owner(&item_text));
-
-        let task = clean_task_text(&item_text);
-        if task.is_empty() {
-            continue;
+        if line.contains('|') {
+            let cells = split_table_row(line);
+            if lines
+                .peek()
+                .is_some_and(|next| is_table_delimiter(next, cells.len()))
+            {
+                lines.next();
+                let headers: Vec<_> = cells
+                    .iter()
+                    .map(|cell| cell.trim_matches('*').trim().to_lowercase())
+                    .collect();
+                let column = |names: &[&str]| {
+                    headers
+                        .iter()
+                        .position(|header| names.contains(&header.as_str()))
+                };
+                let task = column(&[
+                    "task",
+                    "action",
+                    "action item",
+                    "next step",
+                    "aufgabe",
+                    "aktion",
+                    "maßnahme",
+                    "tâche",
+                    "tarea",
+                    "acción",
+                    "tarefa",
+                    "attività",
+                ]);
+                let owner = column(&[
+                    "owner",
+                    "assignee",
+                    "assigned to",
+                    "verantwortlich",
+                    "zuständig",
+                    "responsable",
+                    "responsável",
+                    "responsabile",
+                ]);
+                let due = column(&[
+                    "due",
+                    "due date",
+                    "deadline",
+                    "fällig",
+                    "fällig am",
+                    "frist",
+                    "échéance",
+                    "fecha límite",
+                    "prazo",
+                    "scadenza",
+                ]);
+                let status = column(&["status", "state", "estado", "statut", "stato"]);
+                while lines.peek().is_some_and(|next| {
+                    !next.trim().is_empty()
+                        && next.contains('|')
+                        && heading_level(next).is_none()
+                        && bullet_text(next).is_none()
+                }) {
+                    let row = split_table_row(lines.next().unwrap());
+                    let cell = |index: Option<usize>| {
+                        index.and_then(|index| row.get(index)).map(String::as_str)
+                    };
+                    if let Some(text) = cell(task) {
+                        if let Some(mut item) =
+                            action_suggestion(text, cell(owner), cell(due), cell(status))
+                        {
+                            if item.source_key.is_none() {
+                                item.source_key = row.iter().find_map(|text| source_key(text));
+                            }
+                            items.push(item);
+                        }
+                    }
+                }
+                continue;
+            }
         }
+        // Prose ends the action list.
+        in_action_section = false;
+    }
 
-        items.push(ExportActionItem {
+    for (index, item) in items.iter_mut().enumerate() {
+        item.action.local_action_id = format!("action-{}", index + 1);
+    }
+    items
+}
+
+fn source_key(text: &str) -> Option<String> {
+    SOURCE_LINK
+        .captures(text)
+        .map(|captures| captures[1].to_owned())
+}
+
+fn action_suggestion(
+    text: &str,
+    owner: Option<&str>,
+    due: Option<&str>,
+    status: Option<&str>,
+) -> Option<ActionSuggestion> {
+    let without_sources = SOURCE_LINK.replace_all(text, "");
+    let task = clean_task_text(&without_sources);
+    if task.is_empty() || matches!(task.as_str(), "-" | "—") {
+        return None;
+    }
+    let owner = owner
+        .map(str::trim)
+        .filter(|name| {
+            !matches!(
+                name.to_lowercase().as_str(),
+                "" | "-" | "—" | "unassigned" | "nicht zugewiesen"
+            )
+        })
+        .map(str::to_owned)
+        .or_else(|| MENTION.captures(&without_sources).map(|c| c[1].to_owned()))
+        .or_else(|| extract_labeled_owner(&without_sources));
+    let due_date = ISO_DATE
+        .captures(due.unwrap_or(&without_sources))
+        .map(|c| c[1].to_owned());
+    let done = matches!(text.get(..3), Some("[x]" | "[X]"))
+        || status.is_some_and(|value| {
+            matches!(
+                value.trim().to_lowercase().as_str(),
+                "done"
+                    | "completed"
+                    | "erledigt"
+                    | "abgeschlossen"
+                    | "terminé"
+                    | "completado"
+                    | "concluído"
+                    | "completato"
+            )
+        });
+    Some(ActionSuggestion {
+        action: ExportActionItem {
             local_action_id: String::new(),
             task,
             owner,
             due_date,
             details: None,
-        });
-    }
-
-    planner::ensure_local_action_ids(&mut items);
-    items
+            legacy_action: None,
+        },
+        done,
+        source_key: source_key(text),
+    })
 }
 
+static OWNER_LABEL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(?:owner|assigned to|verantwortlich|zuständig|responsable|responsável|responsabile)\s*:").unwrap()
+});
+
 fn extract_labeled_owner(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let idx = lower
-        .find("owner:")
-        .or_else(|| lower.find("assigned to:"))?;
-    let after = &text[idx..];
+    let after = &text[OWNER_LABEL.find(text)?.start()..];
     let value = after.split(':').nth(1)?.trim();
     // Stop at common separators.
     let value = value
@@ -293,10 +417,8 @@ fn clean_task_text(text: &str) -> String {
     }
     // Drop an inline "Owner: …; Due: …" tail, the form the standard template
     // asks for, so only the task itself becomes the title.
-    if let Some(pos) = t.to_lowercase().find(" owner:") {
-        if t.is_char_boundary(pos) {
-            t.truncate(pos);
-        }
+    if let Some(label) = OWNER_LABEL.find(&t).filter(|label| label.start() > 0) {
+        t.truncate(label.start());
     }
     t.trim()
         .trim_end_matches(['-', '—', ':', '('])
@@ -306,7 +428,7 @@ fn clean_task_text(text: &str) -> String {
 
 /// Whether the summary contains at least one parsed action item.
 pub fn has_action_items(markdown: &str) -> bool {
-    !parse_action_items(&crate::summary::sources::strip_source_links(markdown)).is_empty()
+    !parse_action_items(markdown).is_empty()
 }
 
 /// A [`MeetingExport`] for OneNote: the whole summary as rendered XHTML, with no
@@ -339,6 +461,7 @@ pub fn meeting_export_for_planner(
     created_at: Option<String>,
     markdown: &str,
 ) -> MeetingExport {
+    let actions = parse_action_items(markdown);
     let markdown = crate::summary::sources::strip_source_links(markdown);
     let markdown = markdown.as_str();
     MeetingExport {
@@ -347,7 +470,7 @@ pub fn meeting_export_for_planner(
         created_at,
         executive_summary: plain_excerpt(markdown),
         decisions: Vec::new(),
-        action_items: parse_action_items(markdown),
+        action_items: actions,
         transcript_excerpt: None,
         summary_html: None,
     }
@@ -371,6 +494,21 @@ fn plain_excerpt(markdown: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_localized_lists_and_project_sync_tables() {
+        let markdown = "## Aufgaben\n- [x] Bericht senden [00:01:18](#clawscribe-source-abc123)\n\n## Entscheidungen\n- Kein Auftrag\n\n## Próximos pasos\n| **Responsable** | **Tarea** | **Fecha límite** | **Estado** |\n| --- | --- | --- | --- |\n| Éva | Enviar informe | 2026-11-20 | Completado |\n\n## Action Items\n| **Owner** | **Task** | **Due Date** | **Priority** | **Status** |\n| --- | --- | --- | --- | --- |\n| Dana | Send draft | 2026-11-22 | High | Open |";
+        let items = parse_action_items(markdown);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.task.as_str())
+                .collect::<Vec<_>>(),
+            ["Bericht senden", "Enviar informe", "Send draft"]
+        );
+        assert_eq!(items[1].owner.as_deref(), Some("Éva"));
+        assert_eq!(items[2].due_date.as_deref(), Some("2026-11-22"));
+    }
 
     #[test]
     fn xhtml_tables_escape_cells_and_close_surrounding_blocks() {

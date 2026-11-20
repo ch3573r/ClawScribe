@@ -171,15 +171,22 @@ pub fn dedupe_key(
     meeting: &MeetingExport,
     action: &ExportActionItem,
 ) -> String {
+    crate::exports::ledger::task_key(
+        &task_scope(tenant_id, user_id, destination),
+        &meeting.meeting_id,
+        &action.local_action_id,
+        &action_hash(action),
+    )
+}
+
+pub(crate) fn task_scope(
+    tenant_id: &str,
+    user_id: &str,
+    destination: &PlannerDestination,
+) -> String {
     format!(
-        "planner:{tenant}:{user}:{plan}:{bucket}:{meeting_hash}:{action_id}:{action_hash}",
-        tenant = tenant_id,
-        user = user_id,
-        plan = destination.plan_id,
-        bucket = destination.bucket_id,
-        meeting_hash = meeting.artifact_hash(),
-        action_id = action.local_action_id,
-        action_hash = action_hash(action),
+        "planner:{tenant_id}:{user_id}:{}:{}",
+        destination.plan_id, destination.bucket_id
     )
 }
 
@@ -201,6 +208,7 @@ mod tests {
             owner: None,
             due_date: None,
             details: None,
+            legacy_action: None,
         }
     }
 

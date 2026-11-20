@@ -1,11 +1,12 @@
 'use client';
 
 import { MoreHorizontal } from 'lucide-react';
-import { useRef, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { EditableTitle } from '@/components/EditableTitle';
 import { ActionIcon } from './ActionIcon';
 import { ProjectTags } from './ProjectTags';
 import { MeetingExportButtons } from './MeetingExportButtons';
+import { ReviewedActions } from './ReviewedActions';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 
 export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFinishEditing, onChange, duration, segmentCount, disabled, getMarkdown, onOpenFolder, attendance }: {
@@ -15,7 +16,9 @@ export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFin
   getMarkdown: () => Promise<string>; onOpenFolder: () => Promise<void>;
   attendance?: ReactNode;
 }) {
-  const retainTitleFocusRef = useRef(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const retainActionFocusRef = useRef(false);
+  const overflowRef = useRef<HTMLButtonElement>(null);
   const date = new Date(meeting.created_at);
   const seconds = Math.max(0, Math.floor(duration || 0));
   const length = seconds >= 3600
@@ -32,15 +35,18 @@ export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFin
       </div>
     </div>
     {attendance}
-    <MeetingExportButtons key={meeting.id} meetingId={meeting.id} meetingTitle={title} meetingCreatedAt={meeting.created_at} disabled={disabled} getMarkdown={getMarkdown} />
-    <DropdownMenu><DropdownMenuTrigger asChild><ActionIcon label="More meeting actions" className="h-9 w-9 shrink-0"><MoreHorizontal /></ActionIcon></DropdownMenuTrigger>
+    <MeetingExportButtons key={meeting.id} meetingId={meeting.id} meetingTitle={title} meetingCreatedAt={meeting.created_at} disabled={disabled} getMarkdown={getMarkdown} onReviewActions={() => setActionsOpen(true)} />
+    <DropdownMenu><DropdownMenuTrigger asChild><ActionIcon ref={overflowRef} label="More meeting actions" className="h-9 w-9 shrink-0"><MoreHorizontal /></ActionIcon></DropdownMenuTrigger>
       <DropdownMenuContent align="end" onCloseAutoFocus={event => {
-        if (retainTitleFocusRef.current) event.preventDefault();
-        retainTitleFocusRef.current = false;
+        if (retainActionFocusRef.current) event.preventDefault();
+        retainActionFocusRef.current = false;
       }}>
-        <DropdownMenuItem disabled={disabled} onSelect={() => { retainTitleFocusRef.current = true; onStartEditing(); }}>Rename meeting</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => { retainActionFocusRef.current = true; setActionsOpen(true); }}>Meeting actions</DropdownMenuItem>
+        <DropdownMenuItem disabled={disabled} onSelect={() => { retainActionFocusRef.current = true; onStartEditing(); }}>Rename meeting</DropdownMenuItem>
         {meeting.folder_path && <DropdownMenuItem onSelect={() => void onOpenFolder()}>Open recording folder</DropdownMenuItem>}
       </DropdownMenuContent>
     </DropdownMenu>
+    <ReviewedActions key={meeting.id} open={actionsOpen} onOpenChange={setActionsOpen} meetingId={meeting.id}
+      getMarkdown={getMarkdown} onReturnFocus={() => overflowRef.current?.focus()} />
   </header>;
 }

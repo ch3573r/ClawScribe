@@ -274,6 +274,10 @@ link to inspect the text, reveal it in the transcript, or play its saved audio.
 Changed or replaced passages are flagged and require regenerated references.
 Citation coverage depends on the model; inspect the passage to check the claim.
 
+Open **Meeting actions** from a saved meeting to review suggestions from the
+summary or add follow-ups manually. Saved actions keep their owner, due date,
+completion status, and any available source reference. This works offline.
+
 **Settings → Calendars** lets you import an `.ics` file or add a read-only
 subscription from a calendar provider. Upcoming meetings appear on Home, and
 the sidebar shows the next one. Choose **Use for next recording** or let
@@ -288,15 +292,17 @@ for that call after the detector observes its end. Existing Teams preferences
 remain Teams-only until you select other providers.
 See [call detection](docs/teams-detection.md).
 
-- **OneNote:** choose or create a notebook and export notes/transcripts into a
-  fresh dated section, avoiding large-library section-listing problems.
+- **OneNote:** export notes or transcripts into a new section or resume in the
+  saved section ID. Both paths work without listing sections.
 - **Planner and Microsoft To Do:** review and edit action items before exporting;
   saved export history protects supported re-export paths against duplicates.
 - **Confluence:** copy rich text into a browser draft, or publish through a
   configured self-hosted Server/Data Center REST endpoint.
 - **OpenClaw:** optional handoff of completed Meetily-compatible recording folders.
 
-Microsoft exports stop if duplicate-protection history cannot be read or saved.
+**Export history** shows Microsoft export results from the meeting and travels
+with portable backups. Microsoft exports stop if duplicate-protection history
+cannot be read or saved.
 An interrupted export with an unknown outcome is not automatically repeated;
 check the destination before creating another page or task. See
 [Microsoft export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
@@ -312,6 +318,12 @@ OpenClaw is optional. A standalone installation does not require an OpenClaw
 endpoint, token, or separate server.
 
 ## Library And Data
+
+**Meetings → Archive** puts meetings that need attention first, with actions
+for incomplete recordings, missing transcripts, and failed summaries. Use
+**Storage** to measure the library or select meetings to review which saved
+audio copies can be removed while keeping their transcripts and notes.
+See [Archive review and storage](docs/local-library.md#archive-review-and-storage).
 
 **Settings → Assistant access** lets an MCP client read the
 saved meeting library. Enable the switch, copy the configuration, and add it

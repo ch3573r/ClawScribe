@@ -16,6 +16,8 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
     '@/contexts/RecordingStateContext':{useRecordingState:()=>({})},
     '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'fixture',model:'fixture'}})},
     '@/components/LibraryBackup':{LibraryBackup:'backup'},'@/components/Knowledge/KnowledgeArchive':{KnowledgeArchive:'memory'},
+    '@/components/Archive/ArchiveMeetingRows':{ArchiveMeetingRows:'archive-rows'},'@/components/Archive/ArchiveStorageButton':{ArchiveStorageButton:'storage'},
+    './ArchiveAudioRemoval':{ArchiveAudioRemoval:'audio-removal'},
     '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
     '@/components/MeetingDetails/AttachReferenceButton':{AttachReferenceButton:'attach'},
     '@/components/ui/button':{Button:'button'},'@/components/ui/dropdown-menu':{},'@/components/ui/select':{},'@/components/ui/input-group':{InputGroupInput:'title-filter'},
@@ -76,15 +78,15 @@ test('archive empty state starts recording and imports through the shared flows'
   assert.deepEqual(calls,['record','import']);app.unmount();
 });
 
-test('archive filtering keeps controls and clear filters restores the full linked archive',()=>{
+test('archive filtering keeps controls and clear filters restores all rows',()=>{
   const app=surface('src/app/meetings/page.tsx','default');
   let tree=app.render();assert.match(text(tree),/2 meetings/);
-  assert.equal(nodes(tree).filter(node=>node.type==='link'&&node.props.href.startsWith('/meeting-details')).length,2);
+  assert.deepEqual([...nodes(tree).find(node=>node.type==='archive-rows').props.meetings.map(meeting=>meeting.id)],['b','a']);
   nodes(tree).find(node=>node.type==='title-filter').props.onChange({target:{value:'missing'}});
   tree=app.render();assert.match(text(tree),/No meetings match/);
   nodes(tree).find(node=>node.type==='button'&&text(node)==='Clear filters').props.onClick();
   tree=app.render();assert.match(text(tree),/2 meetings/);
-  assert.equal(nodes(tree).filter(node=>node.type==='link').length,2);app.unmount();
+  assert.equal(nodes(tree).find(node=>node.type==='archive-rows').props.meetings.length,2);app.unmount();
 });
 
 test('archive shows titles and passages and restores date and query when returning',()=>{
@@ -105,7 +107,12 @@ test('archive shows titles and passages and restores date and query when returni
   tree=app.render();
   assert.match(text(tree),/Matching titles/);
   assert.match(text(tree),/Fixture passage 50% 📘/);
-  assert.match(nodes(tree).find(node=>node.type==='link').props.href,/id=a&from=archive/);
+  const matchingRows=nodes(tree).find(node=>node.type==='archive-rows').props;
+  assert.deepEqual(Array.from(matchingRows.meetings,meeting=>meeting.id),['a']);
+  const rows=surface('src/components/Archive/ArchiveMeetingRows.tsx','ArchiveMeetingRows',{...matchingRows,active:false});
+  const titleLink=nodes(rows.render()).find(node=>node.type==='link'&&text(node)==='Launch review');
+  assert.equal(titleLink.props.href,'/meeting-details?id=a&from=archive');
+  rows.unmount();
   nodes(tree).find(node=>node.type==='input'&&node.props.type==='date').props.onChange({target:{value:'2026-02-01'}});
   tree=app.render();
   assert.doesNotMatch(text(tree),/Launch review/);

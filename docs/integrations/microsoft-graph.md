@@ -161,6 +161,10 @@ Graph failures should not delete local meeting artifacts.
 
 ## Export History And Recovery
 
+Choose **Export history** from a meeting’s export menu to see results and their
+dates. **Open** is available when Microsoft supplied a usable link. The history
+is stored in app data and included in portable library backups.
+
 OneNote page and Planner/To Do task creation save a pending attempt locally before
 contacting Graph, then save each result. Completed items survive an interrupted
 batch and are skipped on a matching re-export. Exports run one at a time so
@@ -175,12 +179,12 @@ saved locally, an item can have an **unknown outcome** (`unknown_after_submit`).
 ClawScribe cannot determine from that state whether Microsoft created it and
 will not automatically submit that item again. Inspect the selected destination
 for the page or task before taking further action. There is no automatic remote
-reconciliation or reset control for these entries. Changing a title or destination
-can create a different export identity and must not be used as a blind retry.
+reconciliation or reset control for these entries. A saved task keeps its identity
+across edits, and choosing a different destination starts a separate export.
 
-OneNote retains a newly created section if a page is confirmed or may have been
-created. Duplicate protection applies to matching content and destinations; it
-does not make Graph's create operations intrinsically idempotent.
+OneNote records the created section before submitting pages. Resume reuses that
+section with the same content and skips pages whose history protects them from a
+duplicate submission.
 
 ## Test And Review Checklist
 

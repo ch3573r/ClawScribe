@@ -47,6 +47,7 @@ interface PlannerExportPreviewProps {
   defaultBucketName?: string;
   getMarkdown: () => Promise<string>;
   onReport: (report: ExportReport) => void;
+  onReviewActions?: () => void;
 }
 
 /**
@@ -66,6 +67,7 @@ export function PlannerExportPreview({
   defaultBucketName,
   getMarkdown,
   onReport,
+  onReviewActions,
 }: PlannerExportPreviewProps) {
   const { modelConfig } = useConfig();
   const [rows, setRows] = useState<Row[]>([]);
@@ -225,8 +227,11 @@ export function PlannerExportPreview({
           </div>
         ) : rows.length === 0 ? (
           <div className="rounded-lg border border-border bg-muted p-6 text-center text-sm text-muted-foreground">
-            No action items were found in this summary. Generate or edit the summary so it
-            includes an &quot;Action items&quot; section, then try again.
+            <p>No open actions found. Add an action or review suggestions from the meeting summary.</p>
+            {onReviewActions && <Button type="button" variant="outline" className="mt-2" onClick={() => {
+              onOpenChange(false);
+              onReviewActions();
+            }}>Review meeting actions</Button>}
           </div>
         ) : (
           <>

@@ -11,6 +11,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use zip::write::SimpleFileOptions;
 #[path = "backup/documents.rs"]
 mod archive_documents;
+#[path = "backup/exports.rs"]
+mod archive_exports;
 
 const TABLES: &[&str] = &[
     "meetings",
@@ -48,6 +50,8 @@ struct Manifest {
     incomplete_audio: BTreeMap<usize, IncompleteAudio>,
     #[serde(default)]
     document_files: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    export_ledgers: BTreeMap<usize, crate::exports::ExportLedger>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -237,6 +241,7 @@ async fn snapshot_impl(
             files: BTreeMap::new(),
             incomplete_audio: BTreeMap::new(),
             document_files: BTreeMap::new(),
+            export_ledgers: BTreeMap::new(),
         },
         folders,
     ))
@@ -267,6 +272,7 @@ fn write_archive_impl(
         .large_file(true);
     let mut files = 0;
     let mut total = 0u64;
+    let mut history_budget = archive_exports::remaining_budget(&manifest.export_ledgers)?;
     let pending_audio: HashSet<String> = manifest.tables["recording_outcomes"]
         .iter()
         .filter(|row| {
@@ -371,6 +377,16 @@ fn write_archive_impl(
             if !entry.file_type().map_err(failure)?.is_file() {
                 return Err("Recording file links are not supported in backups.".into());
             }
+            if name == crate::exports::ledger::LEDGER_FILENAME {
+                archive_exports::capture_legacy_folder(
+                    &mut manifest.export_ledgers,
+                    index,
+                    text_field(meeting, "id")?,
+                    folder,
+                    &mut history_budget,
+                )?;
+                continue;
+            }
             let mut input = File::open(entry.path()).map_err(failure)?;
             let size = input.metadata().map_err(failure)?.len();
             has_audio |= size > 0
@@ -408,6 +424,7 @@ fn write_archive_impl(
         &mut files,
         &mut total,
     )?;
+    archive_exports::validate(&manifest)?;
     let bytes = serde_json::to_vec(&manifest).map_err(failure)?;
     if bytes.len() as u64 > MAX_MANIFEST {
         return Err("Meeting metadata exceeds the archive limit.".into());
@@ -443,7 +460,9 @@ fn unpack(
     if bytes.len() as u64 > MAX_MANIFEST {
         return Err("Archive metadata is too large.".into());
     }
-    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(failure)?;
+    let legacy_history_budget = MAX_MANIFEST - bytes.len() as u64;
+    let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(failure)?;
+    drop(bytes);
     if !matches!(manifest.version, 1 | 2)
         || manifest.format != "ClawScribe meeting archive"
         || !manifest.tables.contains_key("meetings")
@@ -464,6 +483,7 @@ fn unpack(
         if id.is_empty() || !known.insert(id) {
             return Err("Duplicate meeting identity in archive.".into());
         }
+        validate_meeting_metadata(row)?;
     }
     let documents = archive_documents::validate(&manifest)?;
     if manifest
@@ -512,6 +532,8 @@ fn unpack(
             return Err("Archive exceeds 100 GiB.".into());
         }
     }
+    archive_exports::read_legacy(&mut manifest, &mut zip, legacy_history_budget)?;
+    archive_exports::validate(&manifest)?;
     // Verify every original before creating any stage or publishing any rows.
     archive_documents::verify_zip(&mut zip, &documents)?;
     std::fs::create_dir_all(root).map_err(failure)?;
@@ -542,6 +564,16 @@ fn unpack(
     }
     archive_documents::extract_originals(&mut zip, &documents, stage.path())?;
     Ok((manifest, stage))
+}
+
+fn validate_meeting_metadata(row: &Map<String, Value>) -> Result<(), String> {
+    if let Some(link) = row.get("calendar_link").filter(|value| !value.is_null()) {
+        super::calendar::decode(link.as_str().ok_or("Invalid calendar link in archive.")?)?;
+    }
+    if let Some(actions) = row.get("reviewed_actions").filter(|value| !value.is_null()) {
+        crate::exports::actions::decode(actions.as_str().ok_or("Invalid saved meeting actions.")?)?;
+    }
+    Ok(())
 }
 
 fn text_field<'a>(row: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
@@ -1131,7 +1163,7 @@ async fn import_manifest(
     manifest: Manifest,
     stage: tempfile::TempDir,
 ) -> Result<BackupReport, String> {
-    import_manifest_impl(pool, manifest, stage, None).await
+    import_manifest_impl(pool, manifest, stage, None, None).await
 }
 
 async fn import_manifest_impl(
@@ -1139,8 +1171,10 @@ async fn import_manifest_impl(
     manifest: Manifest,
     stage: tempfile::TempDir,
     reference_root: Option<&Path>,
+    app_data: Option<&Path>,
 ) -> Result<BackupReport, String> {
     let documents = archive_documents::validate(&manifest)?;
+    archive_exports::validate(&manifest)?;
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut selected = HashSet::new();
     let mut known = HashSet::new();
@@ -1185,13 +1219,7 @@ async fn import_manifest_impl(
                 return Err("Archive contains unsupported data columns.".into());
             }
             if *table == "meetings" {
-                match source.get("calendar_link") {
-                    Some(Value::String(link)) => {
-                        super::calendar::decode(link)?;
-                    }
-                    None | Some(Value::Null) => {}
-                    _ => return Err("Invalid calendar link in archive.".into()),
-                }
+                validate_meeting_metadata(source)?;
             }
             let parent = source
                 .get(if *table == "meetings" {
@@ -1349,7 +1377,10 @@ async fn import_manifest_impl(
         .fold((0, 0), |(files, folders), (_, names)| {
             (files + names.len(), folders + 1)
         });
-    let (originals, stage) = tokio::task::spawn_blocking(move || {
+    let ledgers = archive_exports::selected(&manifest, &selected);
+    let app_data = app_data.map(Path::to_path_buf);
+    let (originals, history, stage) = tokio::task::spawn_blocking(move || {
+        let history = archive_exports::publish(ledgers, app_data.as_deref())?;
         let originals = document_restore.publish()?;
         // Only recording folders survive a successful restore. The originals
         // have their own app-owned publication guard and need no staging copy.
@@ -1358,7 +1389,7 @@ async fn import_manifest_impl(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(failure(error)),
         }
-        Ok((originals, stage))
+        Ok((originals, history, stage))
     })
     .await
     .map_err(failure)??;
@@ -1368,6 +1399,7 @@ async fn import_manifest_impl(
     tokio::spawn(async move {
         tx.commit().await.map_err(failure)?;
         originals.keep();
+        history.keep();
         if folders > 0 {
             stage.keep();
         }
@@ -1404,7 +1436,7 @@ async fn import_manifest_with_documents(
     stage: tempfile::TempDir,
     reference_root: &Path,
 ) -> Result<BackupReport, String> {
-    import_manifest_impl(pool, manifest, stage, Some(reference_root)).await
+    import_manifest_impl(pool, manifest, stage, Some(reference_root), None).await
 }
 
 #[cfg(test)]
@@ -1435,14 +1467,16 @@ async fn backup_library_to(app: AppHandle, path: PathBuf) -> Result<BackupReport
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;
     let _audio = crate::audio::inference::claim_job()?;
-    let reference_root = app
-        .path()
-        .app_data_dir()
-        .map_err(failure)?
-        .join("reference-documents");
-    let (manifest, folders) =
+    let _export = crate::exports::commands::EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Finish the Microsoft export before working with an archive.")?;
+    let app_data = app.path().app_data_dir().map_err(failure)?;
+    let reference_root = app_data.join("reference-documents");
+    let (mut manifest, folders) =
         snapshot_with_documents(app.state::<AppState>().db_manager.pool()).await?;
     tokio::task::spawn_blocking(move || {
+        let _permits = (_guard, _audio, _export);
+        archive_exports::capture(&mut manifest, &app_data)?;
         write_archive_with_documents(&path, manifest, folders, &reference_root)
     })
     .await
@@ -1466,16 +1500,23 @@ async fn restore_library_from(app: AppHandle, path: PathBuf) -> Result<BackupRep
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;
     let _audio = crate::audio::inference::claim_job()?;
-    let reference_root = app
-        .path()
-        .app_data_dir()
-        .map_err(failure)?
-        .join("reference-documents");
-    let root = app
-        .path()
-        .app_data_dir()
-        .map_err(failure)?
-        .join("restored-recordings");
+    let _export = crate::exports::commands::EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "Finish the Microsoft export before working with an archive.")?;
+    // Keep archive, audio and export ownership until any detached restore has
+    // committed or rolled back, even if the invoking window stops waiting.
+    tokio::spawn(async move {
+        let _permits = (_guard, _audio, _export);
+        restore_library_locked(app, path).await
+    })
+    .await
+    .map_err(failure)?
+}
+
+async fn restore_library_locked(app: AppHandle, path: PathBuf) -> Result<BackupReport, String> {
+    let app_data = app.path().app_data_dir().map_err(failure)?;
+    let reference_root = app_data.join("reference-documents");
+    let root = app_data.join("restored-recordings");
     let existing_ids: HashSet<String> = sqlx::query_scalar::<_, String>("SELECT id FROM meetings")
         .fetch_all(app.state::<AppState>().db_manager.pool())
         .await
@@ -1486,11 +1527,12 @@ async fn restore_library_from(app: AppHandle, path: PathBuf) -> Result<BackupRep
         tokio::task::spawn_blocking(move || unpack(&path, &root, &existing_ids))
             .await
             .map_err(failure)??;
-    let report = import_manifest_with_documents(
+    let report = import_manifest_impl(
         app.state::<AppState>().db_manager.pool(),
         manifest,
         stage,
-        &reference_root,
+        Some(&reference_root),
+        Some(&app_data),
     )
     .await?;
     let _ = app.emit("library-changed", ());
@@ -1500,6 +1542,190 @@ async fn restore_library_from(app: AppHandle, path: PathBuf) -> Result<BackupRep
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn restores_app_data_export_history_and_prevents_duplicate_remote_creates() {
+        use crate::exports::{
+            client::{GraphClient, RetryPolicy, TokioSleeper},
+            exporter::{export_planner, ExportContext},
+            ledger::{meeting_dir, ExportLedger},
+            model::ExportStatus,
+            planner::{dedupe_key, PlannerDestination},
+            transport::{GraphResponse, MockGraphTransport},
+        };
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = empty_conversation_destination().await;
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('portable','Portable meeting','2026-11-20','2026-11-20')")
+            .execute(&source).await.unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = meeting_dir(profile.path(), "portable");
+        let mut ledger = ExportLedger::load_or_new(&profile_dir, "portable").unwrap();
+        let meeting = crate::exports::markdown_notes::meeting_export_for_planner(
+            "portable",
+            "Portable meeting",
+            None,
+            "## Action items\n- Send draft\n- Call venue\n- Share report",
+        );
+        let destination = PlannerDestination {
+            plan_id: "plan".into(),
+            bucket_id: "bucket".into(),
+        };
+        let key = |index: usize| {
+            dedupe_key(
+                "tenant",
+                "user",
+                &destination,
+                &meeting,
+                &meeting.action_items[index],
+            )
+        };
+        ledger.record_success(&key(0), Some("old-task".into()), None, None);
+        ledger.begin_attempt(&key(1), None);
+        ledger.checkpoint().await.unwrap();
+
+        let calendar = super::super::calendar::tests::sample();
+        super::super::calendar::write(&source, "portable", Some(calendar.clone()), false)
+            .await
+            .unwrap();
+        let actions = crate::exports::actions::suggest_meeting_actions(
+            "## Aufgaben\n- Bericht senden".into(),
+        );
+        assert_eq!(actions.len(), 1);
+        let actions_json = serde_json::to_string(&actions).unwrap();
+        sqlx::query("UPDATE meetings SET reviewed_actions = ? WHERE id = 'portable'")
+            .bind(&actions_json)
+            .execute(&source)
+            .await
+            .unwrap();
+
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        assert_eq!(folders, vec![None]);
+        archive_exports::capture(&mut manifest, profile.path()).unwrap();
+        let history = manifest.export_ledgers.get_mut(&0).unwrap();
+        history.meeting_id = "different".into();
+        assert!(archive_exports::validate(&manifest).is_err());
+        manifest.export_ledgers.get_mut(&0).unwrap().meeting_id = "portable".into();
+        let archive = profile.path().join("portable.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+
+        let rejected = tempfile::tempdir().unwrap();
+        let rejected_pool = empty_conversation_destination().await;
+        sqlx::query("CREATE TABLE public_fixture_export_commit_failure(parent_id TEXT REFERENCES meetings(id) DEFERRABLE INITIALLY DEFERRED)")
+            .execute(&rejected_pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER public_fixture_fail_export_commit AFTER INSERT ON meetings BEGIN INSERT INTO public_fixture_export_commit_failure VALUES ('missing-public-fixture-parent'); END")
+            .execute(&rejected_pool).await.unwrap();
+        let (manifest, stage) = unpack(
+            &archive,
+            &rejected.path().join("recordings"),
+            &HashSet::new(),
+        )
+        .unwrap();
+        let stage_path = stage.path().to_path_buf();
+        assert!(
+            import_manifest_impl(&rejected_pool, manifest, stage, None, Some(rejected.path()))
+                .await
+                .is_err()
+        );
+        assert!(!stage_path.exists());
+        assert!(
+            ExportLedger::read(&meeting_dir(rejected.path(), "portable"))
+                .unwrap()
+                .is_none()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM meetings")
+            .fetch_one(&rejected_pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let fresh = tempfile::tempdir().unwrap();
+        let restored = empty_conversation_destination().await;
+        let (manifest, stage) =
+            unpack(&archive, &fresh.path().join("recordings"), &HashSet::new()).unwrap();
+        import_manifest_impl(&restored, manifest, stage, None, Some(fresh.path()))
+            .await
+            .unwrap();
+        assert_eq!(
+            super::super::calendar::read(&restored, "portable")
+                .await
+                .unwrap(),
+            Some(calendar)
+        );
+        let restored_actions: String =
+            sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = 'portable'")
+                .fetch_one(&restored)
+                .await
+                .unwrap();
+        assert_eq!(
+            crate::exports::actions::decode(&restored_actions).unwrap(),
+            actions
+        );
+        let mut ledger =
+            ExportLedger::load_or_new(&meeting_dir(fresh.path(), "portable"), "portable").unwrap();
+        let transport = MockGraphTransport::new();
+        let url = "https://graph.microsoft.com/v1.0/planner/tasks";
+        transport.queue_for_url(url, [GraphResponse::success(201, r#"{"id":"new-task"}"#)]);
+        let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+        let account = ExportContext {
+            tenant_id: "tenant",
+            user_id: "user",
+            bearer_token: "<redacted>",
+        };
+        let report = export_planner(&client, &mut ledger, &meeting, &destination, &account)
+            .await
+            .unwrap();
+        assert_eq!(report.items[0].resource_id.as_deref(), Some("old-task"));
+        assert!(!report.items[0].graph_called);
+        assert_eq!(report.items[1].status, ExportStatus::UnknownAfterSubmit);
+        assert!(!report.items[1].graph_called);
+        assert!(report.items[2].graph_called);
+        assert_eq!(client.transport().calls_for(url), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_folder_history_restores_without_creating_a_recording_folder() {
+        use crate::exports::ledger::{meeting_dir, ExportLedger, LEDGER_FILENAME};
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = crate::database::transcript_edits::tests::fixture().await;
+        let (mut manifest, _) = snapshot(&source).await.unwrap();
+        manifest.files.insert(0, vec![LEDGER_FILENAME.into()]);
+        let ledger = ExportLedger::new("review-test");
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("legacy-export.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+        for (name, bytes) in [
+            (
+                "manifest.json".to_string(),
+                serde_json::to_vec(&manifest).unwrap(),
+            ),
+            (
+                format!("recordings/0/{LEDGER_FILENAME}"),
+                serde_json::to_vec(&ledger).unwrap(),
+            ),
+        ] {
+            zip.start_file(name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let restored = empty_conversation_destination().await;
+        let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+        let report = import_manifest_impl(&restored, manifest, stage, None, Some(root.path()))
+            .await
+            .unwrap();
+        assert_eq!(report.files, 0);
+        let folder: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings")
+            .fetch_one(&restored)
+            .await
+            .unwrap();
+        assert!(folder.is_none());
+        assert_eq!(
+            ExportLedger::read(&meeting_dir(root.path(), "review-test")).unwrap(),
+            Some(ledger)
+        );
+    }
 
     pub(super) async fn conversation_fixture() -> (SqlitePool, crate::knowledge::types::AskRequest)
     {
@@ -2468,9 +2694,7 @@ mod tests {
                 std::fs::write(spool.join(".incomplete"), b"capture gap").unwrap();
             }
             let folder = root.path().to_string_lossy().into_owned();
-            let recovered = recover_audio_in_folder(folder.clone())
-                .await
-                .unwrap();
+            let recovered = recover_audio_in_folder(folder.clone()).await.unwrap();
             assert!(recovered
                 .audio_file_path
                 .unwrap()

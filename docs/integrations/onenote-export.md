@@ -8,9 +8,9 @@ OneDrive/SharePoint libraries.
 ## Current UX
 
 1. User signs in to Microsoft.
-2. User selects an existing notebook or creates a notebook.
+2. User resumes in a saved section or selects a notebook for a new section.
 3. User chooses summary, full transcript, or both, with optional speaker labels
-   and timestamps. Export creates a fresh dated section for the meeting.
+   and timestamps for a new section. Resume uses the original title and options.
 4. ClawScribe writes editable OneNote pages into that section.
 5. Local export metadata prevents accidental duplicate exports.
 
@@ -86,10 +86,12 @@ before each page create and checkpoints the result immediately afterwards.
 Matching re-exports skip confirmed pages; unavailable or invalid local history
 blocks export instead of disabling duplicate protection.
 
-An interrupted or uncertain submission is not automatically repeated. Inspect
-OneNote before creating another export, since choosing a fresh section is a new
-destination. A newly created section is retained when a page was created or its
-outcome is unknown, including a failure to save the result locally. See
+The section ID is saved before ClawScribe submits any pages. **Resume export**
+uses that ID, skips pages already created, and protects pages with an unknown
+outcome from a duplicate submission. Resume requires the same export content.
+Select **Create another section** to export different content or start over in a
+new destination. If section creation itself had an unknown outcome, inspect
+OneNote before taking that step. See
 [export history and recovery](microsoft-graph.md#export-history-and-recovery).
 
 The ledger stores:

@@ -123,6 +123,22 @@ pub async fn create_section<T: GraphTransport, S: Sleeper>(
     notebook_id: &str,
     display_name: &str,
 ) -> Result<SectionInfo, String> {
+    create_section_checked(client, token, notebook_id, display_name)
+        .await
+        .map_err(|error| error.message)
+}
+
+pub(super) struct SectionCreateError {
+    pub outcome_unknown: bool,
+    pub message: String,
+}
+
+pub(super) async fn create_section_checked<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    notebook_id: &str,
+    display_name: &str,
+) -> Result<SectionInfo, SectionCreateError> {
     let request = GraphRequest {
         method: "POST".into(),
         url: format!("{GRAPH_BASE}/me/onenote/notebooks/{notebook_id}/sections"),
@@ -131,14 +147,22 @@ pub async fn create_section<T: GraphTransport, S: Sleeper>(
         correlation_id: uuid::Uuid::new_v4().to_string(),
         headers: Vec::new(),
     };
-    match client.execute(&request, token).await {
-        GraphOutcome::Success(resp) => serde_json::from_str::<SectionInfo>(&resp.body)
-            .map_err(|e| format!("Failed to parse created section: {e}")),
-        GraphOutcome::Failed(kind, detail) => Err(match detail {
-            Some(d) => format!("Graph error ({}): {d}", kind.code()),
-            None => format!("Graph error: {}", kind.code()),
+    let unknown = || SectionCreateError {
+        outcome_unknown: true,
+        message:
+            "OneNote did not confirm the new section. Check the notebook before creating another."
+                .into(),
+    };
+    match client.execute_create(&request, token).await {
+        GraphOutcome::Success(response) => serde_json::from_str::<SectionInfo>(&response.body)
+            .ok()
+            .filter(|section| super::ledger::valid_remote_id(&section.id))
+            .ok_or_else(unknown),
+        GraphOutcome::Failed(kind, _) => Err(SectionCreateError {
+            outcome_unknown: false,
+            message: format!("OneNote could not create the section ({}).", kind.code()),
         }),
-        GraphOutcome::Unknown(msg) => Err(format!("Network error: {msg}")),
+        GraphOutcome::Unknown(_) => Err(unknown()),
     }
 }
 

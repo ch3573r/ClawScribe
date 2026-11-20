@@ -24,6 +24,7 @@ const primitives = {
   './MeetingDetails/ActionIcon': { ActionIcon: 'action-icon' },
   './ProjectTags': { ProjectTags: 'project-tags' },
   './MeetingExportButtons': { MeetingExportButtons: 'export-buttons' },
+  './ReviewedActions': { ReviewedActions: 'reviewed-actions' },
   './MeetingChat': { MeetingChat: 'meeting-chat' },
   './SummarySources': { SummarySources: 'summary-sources' },
   './TextReplaceDialog': { TextReplaceDialog: 'replace-dialog' },
@@ -74,6 +75,29 @@ test('Rename retains title focus after overflow closes and normal dismissal stil
   closeMenu(content, () => { active = 'overflow'; });
   assert.equal(active, 'overflow', 'suppression applies only to the Rename close');
   headerHooks.unmount(); titleHooks.unmount();
+});
+
+test('the saved header preserves attendance and returns focus after reviewing meeting actions', () => {
+  const hooks = createHookHarness();
+  const { MeetingHeader } = loadTsModule('src/components/MeetingDetails/MeetingHeader.tsx', { ...primitives, react: hooks.react });
+  const attendance = jsx('attendance', {});
+  const props = {
+    meeting: { id: 'example', created_at: '2026-01-01T12:00:00Z' }, title: 'Review', segmentCount: 2, disabled: false,
+    onStartEditing() {}, onFinishEditing() {}, onChange() {}, getMarkdown: async () => '', onOpenFolder: async () => {}, attendance,
+  };
+  const render = () => nodes(hooks.render(() => MeetingHeader(props)));
+  let tree = render();
+  assert.ok(tree.includes(attendance));
+  let focused = false;
+  tree.find(node => node.type === 'action-icon').props.ref.current = { focus() { focused = true; } };
+  tree.find(node => node.type === 'menu-item' && text(node) === 'Meeting actions').props.onSelect();
+  tree = render();
+  closeMenu(tree.find(node => node.type === 'menu-content'), () => assert.fail('menu steals dialog focus'));
+  const dialog = tree.find(node => node.type === 'reviewed-actions');
+  assert.equal(dialog.props.open, true);
+  dialog.props.onReturnFocus();
+  assert.equal(focused, true);
+  hooks.unmount();
 });
 
 const summaryProps = {

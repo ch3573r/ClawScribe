@@ -9,6 +9,7 @@ import { MeetingBookmarks } from './MeetingBookmarks';
 import { Button } from '@/components/ui/button';
 
 interface TranscriptPanelProps {
+  openTranscription?: boolean;
   speakerSegments?: TranscriptSegmentData[];
   sourceAttributionEnabled?: boolean;
   focusedSource?: { id: string; request: number };
@@ -40,6 +41,7 @@ interface TranscriptPanelProps {
 }
 
 export function TranscriptPanel({
+  openTranscription = false,
   focusedSource,
   speakerSegments,
   sourceAttributionEnabled,
@@ -70,6 +72,9 @@ export function TranscriptPanel({
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [transcribeOpen, setTranscribeOpen] = useState(false);
   useEffect(() => { setEditing(null); setReplaceOpen(false); setTranscribeOpen(false); }, [meetingId]);
+  useEffect(() => {
+    if (openTranscription && meetingFolderPath) setTranscribeOpen(true);
+  }, [meetingId, openTranscription, meetingFolderPath]);
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {

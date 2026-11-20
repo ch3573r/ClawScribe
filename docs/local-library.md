@@ -1,5 +1,39 @@
 # Local meeting library
 
+## Archive review and storage
+
+Open **Meetings → Archive** to see transcript and summary status alongside
+titles, dates, and project tags. **Meetings that need attention** puts saved
+meetings with recording warnings, missing transcripts, or failed or cancelled
+summary jobs before the rest of the archive. The title and project filters
+apply to both groups. Use the row action to open transcription, review the
+recording, retry a recording-folder copy, or return to the summary. Starting transcription or generation
+still requires a choice in the existing meeting tools. A missing summary
+alone is optional. Recovery files from another computer must be recovered there.
+
+Use **Storage** for measured file sizes of audio and recovery files in
+registered saved meeting folders, the library database and indexes, reference
+originals, and local database snapshots. Sizes use filesystem metadata and
+count each shared recording folder once. Unavailable recording folders and
+skipped files are reported. Unattached interrupted recordings, user-created
+backup ZIPs, and model downloads are outside these totals.
+
+To free space, choose **Review saved audio** in a meeting row's menu, or use
+**Select meetings → Review selected audio**. Selection applies to the currently
+visible rows, up to 100 at a time. The confirmation lists the eligible copies
+with their sizes and explains which meetings must keep their audio. Only the
+exact reviewed copy can be removed. The app checks again before each removal
+and keeps audio when a recording or transcription job is active, the folder
+is shared or linked, no transcript is saved, recovery data is present, or
+changes to the recording-folder copy are pending. Older recordings, including
+older retranscriptions, may lack the information needed to verify ownership.
+
+Removal is permanent and turns off playback and retranscription from that
+copy. The meeting, transcript, summaries, notes, reference originals,
+recording-folder support files, and existing backups remain available.
+Imported originals outside the meeting folder remain where they were.
+ClawScribe only removes audio after confirmation.
+
 ## Local assistant access
 
 Open **Settings → Assistant access** and enable **Allow
@@ -213,15 +247,18 @@ are preserved, and cleanup skips active recording.
 ## Backup and restore
 
 Open **Meetings → Backup and restore** to save or restore a ZIP archive. Finish
-active recording, import, and retranscription work first. The native job permit
-prevents these operations from overlapping an archive operation. Keep the app open
-until it completes.
+active recording, import, retranscription, and Microsoft export work first. The
+app prevents these operations from overlapping an archive operation. Keep the
+app open until it completes.
 
 Backups contain saved meetings, transcripts and correction history, notes,
 summaries, per-meeting summary context, linked calendar events and attendance,
-meeting chat, project tags, bookmarks, attached reference originals and
-extracted blocks, and supported recording files.
-Microsoft export history (`exports.json`) is retained with the recording folder.
+meeting chat, project tags, bookmarks, reviewed actions, attached reference
+originals and extracted blocks, and supported recording files. The archive
+includes Microsoft export history from app data, including for meetings without
+a recording folder. Restore preserves task and page duplicate protection and
+saved OneNote sections in the new profile. Existing meetings keep their own
+history. Older archives restore the export history they contain.
 Provider settings, credentials, model downloads, UI preferences, and unfinished
 recording recovery spools are excluded. Missing
 recording folders are reported by meeting title without blocking the backup;

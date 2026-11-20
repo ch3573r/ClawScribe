@@ -9,7 +9,7 @@ tasks only in the signed-in user's selected To Do list.
 1. User signs in to Microsoft 365.
 2. User chooses a To Do list in Settings → Microsoft 365.
 3. User opens To Do export from a meeting summary.
-4. ClawScribe parses the summary action items into a review dialog.
+4. ClawScribe loads open reviewed meeting actions or suggests tasks from the summary.
 5. User edits titles/notes and deselects anything that should not be created.
 6. ClawScribe creates the selected tasks through Microsoft Graph.
 
@@ -42,9 +42,9 @@ owners to Azure AD users or assign tasks to other people.
 ## Duplicate Protection
 
 Microsoft To Do task creation is not naturally idempotent. ClawScribe keeps a
-local export ledger keyed by tenant, user, list, meeting artifact hash, action
-ID, and reviewed title hash. Re-exporting the same reviewed task skips the
-already-created task; editing the title creates a new task intentionally.
+local history keyed by account, list, meeting, and saved action ID. Re-exporting
+the same saved action skips the existing task even when its title or the selected
+batch changes. Existing history is used when its original action and title match.
 
 The ledger saves each pending attempt before contacting Graph and each result
 afterwards. Unreadable history or a failed write stops export. Interrupted or

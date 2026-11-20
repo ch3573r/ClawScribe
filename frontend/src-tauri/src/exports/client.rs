@@ -96,11 +96,35 @@ impl<T: GraphTransport, S: Sleeper> GraphClient<T, S> {
 
     /// Send a request, retrying retriable failures with backoff.
     pub async fn execute(&self, request: &GraphRequest, bearer_token: &str) -> GraphOutcome {
+        self.execute_with(request, bearer_token, false).await
+    }
+
+    /// Retry an explicitly throttled create. A server error can mask a
+    /// successful submission, so it needs review instead of automatic replay.
+    pub(super) async fn execute_create(
+        &self,
+        request: &GraphRequest,
+        bearer_token: &str,
+    ) -> GraphOutcome {
+        self.execute_with(request, bearer_token, true).await
+    }
+
+    async fn execute_with(
+        &self,
+        request: &GraphRequest,
+        bearer_token: &str,
+        is_create: bool,
+    ) -> GraphOutcome {
         let mut attempt = 1;
         loop {
             match self.transport.send(request, bearer_token).await {
                 Ok(resp) if resp.is_success() => return GraphOutcome::Success(resp),
                 Ok(resp) => {
+                    if is_create && resp.status >= 500 {
+                        return GraphOutcome::Unknown(
+                            "The service did not confirm creation.".into(),
+                        );
+                    }
                     let kind = GraphErrorKind::from_status(resp.status, resp.error_code.as_deref());
                     if kind.is_retriable() && attempt < self.policy.max_attempts {
                         let delay = backoff_delay(attempt, resp.retry_after_secs, &self.policy);

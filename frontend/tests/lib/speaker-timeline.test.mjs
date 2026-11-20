@@ -276,6 +276,7 @@ test('meeting header metadata displays the total segment count', () => {
     './ActionIcon': { ActionIcon: 'icon-button' },
     './ProjectTags': { ProjectTags: 'tags' },
     './MeetingExportButtons': { MeetingExportButtons: 'exports' },
+    './ReviewedActions': { ReviewedActions: 'reviewed-actions' },
     '@/components/ui/dropdown-menu': {},
   });
   try {

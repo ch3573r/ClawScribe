@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetState
 import {
   AlertCircle,
   ChevronDown,
-  ChevronRight,
   FileText,
   Mic,
   RefreshCw,
@@ -15,13 +14,14 @@ import {
 import { Button } from "@/components/ui/button";
 import { PageSection } from "@/components/ui/page-section";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { LibraryBackup } from "@/components/LibraryBackup";
+import { ArchiveMeetingRows } from "@/components/Archive/ArchiveMeetingRows";
+import { ArchiveStorageButton } from "@/components/Archive/ArchiveStorageButton";
+import { formatArchiveDate } from "@/lib/archive-review";
 import { KnowledgeArchive } from "@/components/Knowledge/KnowledgeArchive";
 import { bookmarkTime, matchesProjectFilter, type ProjectFilter } from "@/lib/library";
 import { libraryScope } from "@/lib/knowledge-state";
@@ -64,19 +64,6 @@ function timeValue(value?: string): number {
   return Number.isFinite(time) ? time : 0;
 }
 
-function formatMeetingDate(value?: string): string {
-  if (!value) return "Saved meeting";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Saved meeting";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
-
 export default function MeetingsPage() {
   const router = useRouter();
   const { openImportDialog } = useImportDialog();
@@ -102,6 +89,7 @@ export default function MeetingsPage() {
   const [projectFilter, setProjectFilter] = useState(archiveView.projectFilter);
   const [memoryProject, setMemoryProject] = useState(noProjectFilter);
   useEffect(() => { archiveView = { query, from, to, sortMode, projectFilter }; }, [query, from, to, sortMode, projectFilter]);
+  const [archiveRevision, setArchiveRevision] = useState(0);
   const tagOptions = useMemo(() => [...new Map(projectTags.map(row => [row.tag.toLowerCase(), row.tag])).values()].sort((a, b) => a.localeCompare(b)), [projectTags]);
 
   const hasQuery = !!query.trim();
@@ -144,6 +132,7 @@ export default function MeetingsPage() {
     try {
       await refetchMeetings();
     } finally {
+      setArchiveRevision(current => current + 1);
       setIsRefreshing(false);
     }
   }, [refetchMeetings]);
@@ -218,7 +207,7 @@ export default function MeetingsPage() {
             </h1>
           </div>
 
-          {tab === "archive" && <div className="flex flex-wrap items-center gap-2"><LibraryBackup /><Button variant="outline" disabled={isRefreshing}
+          {tab === "archive" && <div className="flex flex-wrap items-center gap-2"><LibraryBackup /><ArchiveStorageButton /><Button variant="outline" disabled={isRefreshing}
             onClick={handleRefresh}
             className="inline-flex w-fit items-center gap-2 rounded-md border border-border bg-card px-4 py-2 text-sm font-medium text-foreground shadow-sm transition hover:bg-muted"
           >
@@ -303,29 +292,14 @@ export default function MeetingsPage() {
           {!invalidDates && !searching && !searchError && (!hasQuery || visibleMeetings.length > 0 || (!passages.length && !results?.limited)) && <PageSection className="min-w-0 rounded-lg border border-border bg-card shadow-sm" aria-label={hasQuery ? "Matching titles" : "Saved meetings"}>
             {hasQuery && visibleMeetings.length > 0 && <h2 className="border-b border-border px-6 py-3 text-sm font-semibold">Matching titles</h2>}
             {visibleMeetings.length > 0 ? (
-              <TooltipProvider><div className="divide-y divide-border">
-                {visibleMeetings.map((meeting) => (
-                  <Tooltip key={meeting.id}>
-                    <TooltipTrigger asChild><Link
-                      href={`/meeting-details?id=${encodeURIComponent(meeting.id)}&from=archive`}
-                      onClick={() => setCurrentMeeting({ id: meeting.id, title: meeting.title })}
-                      className="flex w-full items-center gap-4 rounded-md px-6 py-4 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <h3 className="truncate text-[15px] font-medium text-foreground">
-                          {meeting.title}
-                        </h3>
-                        <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                          <span>{formatMeetingDate(meeting.created_at)}</span>
-                          <span>{projectTags.filter(tag => tag.meeting_id === meeting.id).map(tag => tag.tag).join(' · ')}</span>
-                        </div>
-                      </div>
-                      <ChevronRight aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    </Link></TooltipTrigger>
-                    <TooltipContent className="max-w-sm break-words">{meeting.title}</TooltipContent>
-                  </Tooltip>
-                ))}
-              </div></TooltipProvider>
+              <ArchiveMeetingRows
+                active={tab === "archive"}
+                meetings={visibleMeetings}
+                projectTags={projectTags}
+                revision={archiveRevision}
+                librarySize={meetings.length}
+                onOpen={setCurrentMeeting}
+              />
             ) : meetingsError && meetings.length === 0 ? (
               <div role="alert" className="flex flex-col items-center justify-center px-6 py-16 text-center">
                 <span className="flex h-12 w-12 items-center justify-center rounded-md border border-error-border/30 bg-error text-error-foreground">
@@ -361,7 +335,7 @@ export default function MeetingsPage() {
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
                     <h3 className="break-words text-sm font-medium">{hit.title}</h3>
-                    <p className="text-xs text-muted-foreground">{formatMeetingDate(hit.date)}{hit.speaker ? ` · ${hit.speaker}` : ""}{hit.start_seconds != null ? ` · ${bookmarkTime(hit.start_seconds)}` : ""}</p>
+                    <p className="text-xs text-muted-foreground">{formatArchiveDate(hit.date)}{hit.speaker ? ` · ${hit.speaker}` : ""}{hit.start_seconds != null ? ` · ${bookmarkTime(hit.start_seconds)}` : ""}</p>
                   </div>
                   <Button variant="outline" size="sm" aria-label={`Show passage in ${hit.title}`} onClick={() => {
                     const url = transcriptPassageUrl(hit.evidence, true);

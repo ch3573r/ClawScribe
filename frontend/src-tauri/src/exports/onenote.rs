@@ -236,6 +236,7 @@ mod tests {
                 owner: None,
                 due_date: Some("2026-06-20".into()),
                 details: None,
+                legacy_action: None,
             }],
             transcript_excerpt: transcript,
             summary_html: None,

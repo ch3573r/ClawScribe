@@ -281,9 +281,13 @@ impl RetranscriptionFileUpdate {
             }),
             _ => return Err("Could not read recording metadata".into()),
         };
+        let original_audio = crate::library::archive::storage::owned_audio_name(&metadata, meeting);
         let fields = metadata
             .as_object_mut()
             .ok_or("Invalid recording metadata")?;
+        if let Some(name) = original_audio {
+            fields.insert("archive_saved_audio".into(), serde_json::json!(name));
+        }
         let changes = serde_json::Map::from_iter([
             (
                 "retranscribed_at".into(),

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { MeetingExportOptions } from "@/lib/meetingExportContent";
 
 export interface MicrosoftConnectionInfo {
   state:
@@ -32,6 +33,22 @@ export interface ExportReport {
   overall: string;
   connectionState: string | null;
   items: ExportItemResult[];
+}
+
+export interface OneNoteResume {
+  id: string;
+  sectionName: string;
+  pageTitle: string;
+  options: MeetingExportOptions | null;
+  startedAt: string;
+  canResume: boolean;
+}
+
+export interface MeetingExportHistory {
+  destination: string;
+  status: string;
+  at: string | null;
+  webUrl: string | null;
 }
 
 export interface NotebookInfo {
@@ -227,6 +244,8 @@ export const microsoftExportService = {
     markdown: string,
     notebookId: string,
     sectionName: string,
+    options: MeetingExportOptions,
+    resumeId: string | null,
   ): Promise<ExportReport> {
     return invoke<ExportReport>("export_meeting_to_onenote_section", {
       meetingId,
@@ -234,7 +253,17 @@ export const microsoftExportService = {
       markdown,
       notebookId,
       sectionName,
+      options,
+      resumeId,
     });
+  },
+
+  async listOneNoteResumes(meetingId: string): Promise<OneNoteResume[]> {
+    return invoke("list_onenote_resumes", { meetingId });
+  },
+
+  async getMeetingExportHistory(meetingId: string): Promise<MeetingExportHistory[]> {
+    return invoke("get_meeting_export_history", { meetingId });
   },
 
   async exportMeetingMarkdownToPlanner(

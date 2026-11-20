@@ -27,6 +27,7 @@ function MeetingDetailsContent() {
   const meetingId = searchParams.get('id');
   const evidenceToken = searchParams.get('evidence');
   const fromArchive = searchParams.get('from') === 'archive';
+  const archiveAction = searchParams.get('archiveAction');
   const { setCurrentMeeting, refetchMeetings, stopSummaryPolling } = useSidebar();
   const router = useRouter();
   const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsResponse | null>(null);
@@ -306,6 +307,7 @@ function MeetingDetailsContent() {
     meeting={meetingDetails}
     evidenceToken={evidenceToken}
     fromArchive={fromArchive}
+    archiveAction={archiveAction}
     summaryData={meetingSummary}
     summaryJob={summaryJob}
     onMeetingUpdated={async () => {

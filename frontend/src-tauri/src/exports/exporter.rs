@@ -92,7 +92,7 @@ fn parse_resource(body: &str) -> (Option<String>, Option<String>) {
                 .and_then(|w| w.get("href"))
                 .and_then(|h| h.as_str())
         })
-        .map(|s| s.to_string());
+        .and_then(super::ledger::microsoft_web_url);
     (id, web_url)
 }
 
@@ -150,7 +150,7 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
         );
         return (from_ledger(dedupe_key, local_id, ledger), true);
     }
-    let (mut result, stop) = match client.execute(&request, token).await {
+    let (mut result, stop) = match client.execute_create(&request, token).await {
         GraphOutcome::Success(resp) => {
             let (id, url) = parse_resource(&resp.body);
             ledger.record_success(&dedupe_key, id.clone(), url.clone(), now_rfc3339());
@@ -196,7 +196,7 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
             ledger.record_failure(
                 &dedupe_key,
                 ExportStatus::UnknownAfterSubmit,
-                Some("network".to_string()),
+                Some("submission_unconfirmed".to_string()),
                 now_rfc3339(),
             );
             (
@@ -206,7 +206,7 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
                     status: ExportStatus::UnknownAfterSubmit,
                     resource_id: None,
                     web_url: None,
-                    code: Some("network".to_string()),
+                    code: Some("submission_unconfirmed".to_string()),
                     graph_called: true,
                 },
                 true,
@@ -312,8 +312,18 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
     let mut items = Vec::new();
 
     for action in &meeting.action_items {
-        let dedupe_key =
-            planner::dedupe_key(ctx.tenant_id, ctx.user_id, destination, meeting, action);
+        let scope = planner::task_scope(ctx.tenant_id, ctx.user_id, destination);
+        let dedupe_key = ledger
+            .existing_task_key(
+                &scope,
+                &meeting.meeting_id,
+                &action.local_action_id,
+                &planner::action_hash(action),
+                action.legacy_action.as_ref(),
+            )
+            .unwrap_or_else(|| {
+                planner::dedupe_key(ctx.tenant_id, ctx.user_id, destination, meeting, action)
+            });
         let local_id = action.local_action_id.clone();
 
         if ledger.already_succeeded(&dedupe_key).is_some() || !ledger.may_attempt(&dedupe_key) {
@@ -376,7 +386,18 @@ pub async fn export_todo<T: GraphTransport, S: Sleeper>(
     let mut items = Vec::new();
 
     for action in &meeting.action_items {
-        let dedupe_key = todo::dedupe_key(ctx.tenant_id, ctx.user_id, destination, meeting, action);
+        let scope = todo::task_scope(ctx.tenant_id, ctx.user_id, destination);
+        let dedupe_key = ledger
+            .existing_task_key(
+                &scope,
+                &meeting.meeting_id,
+                &action.local_action_id,
+                &todo::action_hash(action),
+                action.legacy_action.as_ref(),
+            )
+            .unwrap_or_else(|| {
+                todo::dedupe_key(ctx.tenant_id, ctx.user_id, destination, meeting, action)
+            });
         let local_id = action.local_action_id.clone();
 
         if ledger.already_succeeded(&dedupe_key).is_some() || !ledger.may_attempt(&dedupe_key) {
@@ -601,6 +622,7 @@ mod tests {
                     owner: None,
                     due_date: None,
                     details: None,
+                    legacy_action: None,
                 },
                 ExportActionItem {
                     local_action_id: "action-2".into(),
@@ -608,6 +630,7 @@ mod tests {
                     owner: None,
                     due_date: None,
                     details: None,
+                    legacy_action: None,
                 },
                 ExportActionItem {
                     local_action_id: "action-3".into(),
@@ -615,6 +638,7 @@ mod tests {
                     owner: None,
                     due_date: None,
                     details: None,
+                    legacy_action: None,
                 },
             ],
             transcript_excerpt: None,
@@ -810,6 +834,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn planner_and_todo_reconcile_legacy_success_across_selections() {
+        let mut first = meeting();
+        first.action_items.truncate(1);
+        let mut next = meeting();
+        next.action_items.truncate(2);
+        let action = &first.action_items[0];
+        let account = ctx();
+        let planner = PlannerDestination {
+            plan_id: "plan-1".into(),
+            bucket_id: "bucket-1".into(),
+        };
+        let todo = ToDoDestination {
+            list_id: "list-1".into(),
+        };
+        let mut history = ExportLedger::new(&first.meeting_id);
+        for (scope, hash) in [
+            (
+                "planner:tenant:user:plan-1:bucket-1",
+                planner::action_hash(action),
+            ),
+            ("todo:tenant:user:list-1", todo::action_hash(action)),
+        ] {
+            history.record_success(
+                &format!(
+                    "{scope}:{}:{}:{hash}",
+                    first.artifact_hash(),
+                    action.local_action_id
+                ),
+                Some("old-task".into()),
+                None,
+                None,
+            );
+        }
+        let transport = MockGraphTransport::new();
+        transport.queue_for_url(
+            &planner_url(),
+            [GraphResponse::success(201, r#"{"id":"new-task"}"#)],
+        );
+        transport.queue_for_url(
+            &todo_tasks_url(&todo.list_id),
+            [GraphResponse::success(201, r#"{"id":"new-task"}"#)],
+        );
+        let client = client(transport);
+        for report in [
+            export_planner(&client, &mut history, &next, &planner, &account)
+                .await
+                .unwrap(),
+            export_todo(&client, &mut history, &next, &todo, &account)
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(report.items.len(), 2);
+            assert_eq!(report.items[0].resource_id.as_deref(), Some("old-task"));
+            assert!(!report.items[0].graph_called);
+            assert!(report.items[1].graph_called);
+            assert_eq!(report.items[1].resource_id.as_deref(), Some("new-task"));
+        }
+    }
+
+    #[tokio::test]
     async fn duplicate_retry_skips_graph() {
         let transport = MockGraphTransport::new();
         let mut m = meeting();
@@ -894,9 +978,9 @@ mod tests {
             &planner_url(),
             [
                 GraphResponse::success(201, r#"{"id":"task-1"}"#),
-                GraphResponse::failure(503, None),
-                GraphResponse::failure(503, None),
-                GraphResponse::failure(503, None),
+                GraphResponse::failure(429, None),
+                GraphResponse::failure(429, None),
+                GraphResponse::failure(429, None),
                 GraphResponse::success(201, r#"{"id":"task-3"}"#),
             ],
         );

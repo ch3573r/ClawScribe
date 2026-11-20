@@ -391,7 +391,7 @@ export function SummaryPanel({
   );
 
   return (
-    <div tabIndex={0} onKeyDown={event => {
+    <div id="meeting-summary-panel" tabIndex={0} onKeyDown={event => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h' && aiSummary && !isSummaryLoading) { event.preventDefault(); setReplaceOpen(true); }
     }} className="flex-1 min-h-[24rem] min-w-0 flex flex-col bg-card overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
       <div ref={toolbarRef} className="meeting-summary-toolbar shrink-0 border-b border-border px-3 py-2">

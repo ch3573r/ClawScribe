@@ -35,6 +35,7 @@ export default function PageContent({
   meeting,
   evidenceToken,
   fromArchive,
+  archiveAction,
   summaryData,
   summaryJob,
   onMeetingUpdated,
@@ -54,6 +55,7 @@ export default function PageContent({
   meeting: any;
   evidenceToken?: string | null;
   fromArchive?: boolean;
+  archiveAction?: string | null;
   summaryData: Summary | null;
   summaryJob: SummaryJobSnapshot | null;
   onMeetingUpdated?: () => Promise<void>;
@@ -137,6 +139,13 @@ export default function PageContent({
   // Audio actions operate on the recording folder. The player/timeline waits for
   // a resolved media file, which can lag behind freshly saved recordings.
   const hasRecordingFolder = Boolean(meeting.folder_path);
+  useEffect(() => {
+    if (archiveAction === 'summary') {
+      document.getElementById('meeting-summary-panel')?.focus();
+    } else if (archiveAction === 'files') {
+      document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
+    }
+  }, [archiveAction]);
 
   // Custom hooks
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
@@ -322,6 +331,7 @@ export default function PageContent({
       )}
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
         <TranscriptPanel
+          openTranscription={archiveAction === 'transcribe'}
           focusedSource={focusedSource}
           speakerSegments={timelineSegments}
           sourceAttributionEnabled={sourceAttributionEnabled}

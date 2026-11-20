@@ -305,26 +305,11 @@ pub(crate) fn export_ledger_dir<R: Runtime>(
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
-    let safe: String = meeting_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let safe = if safe.trim_matches('-').is_empty() {
-        "meeting".to_string()
-    } else {
-        safe
-    };
-    Ok(base.join("export-ledgers").join(safe))
+    Ok(super::ledger::meeting_dir(&base, meeting_id))
 }
 
 // The desktop app is single-instance. Serialize ledger owners across export dialogs.
-static EXPORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static EXPORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Serializes ledger owners and keeps an installer restart from interrupting
 /// an outbound write or its ledger checkpoint.
@@ -595,19 +580,7 @@ fn sanitize_onenote_section_name(raw: &str) -> String {
     }
 }
 
-fn section_is_confirmed_empty(report: &exporter::ExportReport) -> bool {
-    !report.items.iter().any(|item| {
-        item.status.is_terminal_success()
-            || item.status == ExportStatus::UnknownAfterSubmit
-            || item.resource_id.is_some()
-    })
-}
-
-/// Export a meeting's summary to OneNote by creating a fresh section in the
-/// chosen notebook (named by the caller, e.g. `2026-06-16: Standup`) and writing
-/// the notes into it. Creating a section is not subject to the 5,000-item
-/// enumeration limit (error 10008), so this works for notebooks whose OneDrive
-/// library is too large to list sections from.
+/// Create or resume a section directly by ID, without enumerating sections.
 #[tauri::command]
 pub async fn export_meeting_to_onenote_section<R: Runtime>(
     app: AppHandle<R>,
@@ -617,64 +590,137 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     markdown: String,
     notebook_id: String,
     section_name: String,
+    options: Option<super::ledger::OneNoteOptions>,
+    resume_id: Option<String>,
 ) -> Result<ExportReportResponse, String> {
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Notes.Create").await?;
-
-    let section_name = sanitize_onenote_section_name(&section_name);
-
-    let transport = ReqwestGraphTransport::new();
-    let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-
     let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
-    ledger.checkpoint().await?;
-
-    // Do not enumerate sections here. Some OneDrive/SharePoint libraries trip
-    // Graph's OneNote 10008 scan limit even when the selected notebook is small.
-    // Creating a new dated section directly is the reliable export path.
-    let section = discovery::create_section(&client, &token, &notebook_id, &section_name).await?;
-
-    let meeting_export = crate::exports::markdown_notes::meeting_export_for_onenote(
-        &meeting_id,
-        &meeting_title,
-        None,
-        &markdown,
+    let client = GraphClient::new(
+        ReqwestGraphTransport::new(),
+        TokioSleeper,
+        RetryPolicy::default(),
     );
-
     let ctx = ExportContext {
         tenant_id: &tenant_id,
         user_id: &user_id,
         bearer_token: &token,
     };
-
-    let report = exporter::export_onenote(
+    let report = super::onenote_resume::export_section(
         &client,
         &mut ledger,
-        &meeting_export,
-        &OneNoteTarget {
-            section_id: section.id.clone(),
-        },
         &ctx,
+        super::onenote_resume::SectionRequest {
+            notebook_id,
+            section_name: sanitize_onenote_section_name(&section_name),
+            page_title: meeting_title,
+            markdown,
+            options,
+            resume_id,
+        },
     )
-    .await;
-    ledger.checkpoint().await?;
-
-    // Preserve sections when a create may have landed, including failed local checkpoints.
-    if section_is_confirmed_empty(&report) {
-        if let Err(e) = discovery::delete_section(&client, &token, &section.id).await {
-            log::warn!(
-                "OneNote: couldn't clean up empty section {} after a failed export: {e}",
-                section.id
-            );
-        }
-    }
-
+    .await?;
     if report.connection_state == Some(MicrosoftConnectionState::Expired) {
-        let mut inner = state.inner.write().await;
-        inner.connection_state = MicrosoftConnectionState::Expired;
+        state.inner.write().await.connection_state = MicrosoftConnectionState::Expired;
     }
-
     Ok(report.into())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OneNoteResume {
+    id: String,
+    section_name: String,
+    page_title: String,
+    options: Option<super::ledger::OneNoteOptions>,
+    started_at: String,
+    can_resume: bool,
+}
+
+#[tauri::command]
+pub async fn list_onenote_resumes<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, MicrosoftAuthState>,
+    meeting_id: String,
+) -> Result<Vec<OneNoteResume>, String> {
+    let account = state
+        .inner
+        .read()
+        .await
+        .current_token
+        .as_ref()
+        .map(|token| (token.tenant_id.clone(), token.user_id.clone()));
+    let Some((tenant_id, user_id)) = account else {
+        return Ok(Vec::new());
+    };
+    let ledger = load_ledger(&app, &meeting_id).await?;
+    let mut resumes: Vec<_> = ledger
+        .onenote_sections
+        .into_iter()
+        .filter(|(_, section)| section.tenant_id == tenant_id && section.user_id == user_id)
+        .map(|(id, section)| OneNoteResume {
+            id,
+            section_name: section.section_name,
+            page_title: section.page_title,
+            options: section.options,
+            started_at: section.started_at,
+            can_resume: section.section_id.is_some(),
+        })
+        .collect();
+    resumes.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    Ok(resumes)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingExportHistory {
+    destination: &'static str,
+    status: ExportStatus,
+    at: Option<String>,
+    web_url: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_meeting_export_history<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+) -> Result<Vec<MeetingExportHistory>, String> {
+    let ledger = load_ledger(&app, &meeting_id).await?;
+    let mut history: Vec<_> = ledger
+        .entries
+        .into_iter()
+        .filter_map(|(key, item)| {
+            let destination = match key.split(':').next()? {
+                "onenote" => "OneNote",
+                "planner" => "Planner",
+                "todo" => "Microsoft To Do",
+                _ => return None,
+            };
+            Some(MeetingExportHistory {
+                destination,
+                status: item.status,
+                at: item.last_attempt_at,
+                web_url: item
+                    .web_url
+                    .as_deref()
+                    .and_then(super::ledger::microsoft_web_url),
+            })
+        })
+        .collect();
+    history.extend(
+        ledger
+            .onenote_sections
+            .into_values()
+            .filter(|section| section.section_id.is_none())
+            .map(|section| MeetingExportHistory {
+                destination: "OneNote section",
+                status: ExportStatus::UnknownAfterSubmit,
+                at: Some(section.started_at),
+                web_url: None,
+            }),
+    );
+    history.sort_by(|a, b| b.at.cmp(&a.at));
+    Ok(history)
 }
 
 #[tauri::command]
@@ -742,16 +788,31 @@ pub struct PlannerTaskPreview {
 /// created in Planner.
 #[tauri::command]
 pub async fn preview_planner_tasks(
+    state: tauri::State<'_, crate::state::AppState>,
     meeting_id: String,
     meeting_title: String,
     markdown: String,
 ) -> Result<Vec<PlannerTaskPreview>, String> {
-    let meeting_export = crate::exports::markdown_notes::meeting_export_for_planner(
+    let mut meeting_export = crate::exports::markdown_notes::meeting_export_for_planner(
         &meeting_id,
         &meeting_title,
         None,
         &markdown,
     );
+    if let Some(actions) = super::actions::load(state.db_manager.pool(), &meeting_id).await? {
+        meeting_export.action_items = actions
+            .into_iter()
+            .filter(|action| !action.done)
+            .map(|action| super::model::ExportActionItem {
+                local_action_id: action.id,
+                task: action.title,
+                owner: action.owner,
+                due_date: action.due_date,
+                details: None,
+                legacy_action: action.legacy_action,
+            })
+            .collect();
+    }
     let previews = meeting_export
         .action_items
         .iter()
@@ -771,11 +832,12 @@ pub async fn preview_planner_tasks(
 
 #[tauri::command]
 pub async fn preview_todo_tasks(
+    state: tauri::State<'_, crate::state::AppState>,
     meeting_id: String,
     meeting_title: String,
     markdown: String,
 ) -> Result<Vec<PlannerTaskPreview>, String> {
-    preview_planner_tasks(meeting_id, meeting_title, markdown).await
+    preview_planner_tasks(state, meeting_id, meeting_title, markdown).await
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -830,6 +892,17 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         return Err("No tasks selected to export.".to_string());
     }
 
+    let reviewed = super::actions::load(
+        app.state::<crate::state::AppState>().db_manager.pool(),
+        &meeting_id,
+    )
+    .await?;
+    let legacy_for = |id: &str| {
+        reviewed
+            .as_ref()
+            .and_then(|actions| actions.iter().find(|action| action.id == id))
+            .and_then(|action| action.legacy_action.clone())
+    };
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
 
     let mut by_bucket: BTreeMap<String, Vec<PlannerTaskInput>> = BTreeMap::new();
@@ -861,6 +934,7 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
             .map(|t| crate::exports::model::ExportActionItem {
                 // Preserve the preview's local id so the dedupe key is stable
                 // across reordering/deselection; do not regenerate per bucket.
+                legacy_action: legacy_for(&t.local_id),
                 local_action_id: t.local_id,
                 task: t.title,
                 owner: t.owner,
@@ -950,6 +1024,17 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
         return Err("No tasks selected to export.".to_string());
     }
 
+    let reviewed = super::actions::load(
+        app.state::<crate::state::AppState>().db_manager.pool(),
+        &meeting_id,
+    )
+    .await?;
+    let legacy_for = |id: &str| {
+        reviewed
+            .as_ref()
+            .and_then(|actions| actions.iter().find(|action| action.id == id))
+            .and_then(|action| action.legacy_action.clone())
+    };
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
@@ -961,6 +1046,7 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
     let mut action_items: Vec<crate::exports::model::ExportActionItem> = tasks
         .into_iter()
         .map(|t| crate::exports::model::ExportActionItem {
+            legacy_action: legacy_for(&t.local_id),
             local_action_id: t.local_id,
             task: t.title,
             owner: t.owner,
@@ -1496,31 +1582,5 @@ mod export_history_tests {
         assert_eq!(token.granted_scopes, "User.Read Notes.Create");
         assert!(inner.sign_in_cancel.is_none());
         assert!(!inner.finish_sign_in_failure(0));
-    }
-
-    #[test]
-    fn section_cleanup_preserves_confirmed_and_uncertain_pages() {
-        for (status, resource_id, empty) in [
-            (ExportStatus::Failed, None, true),
-            (ExportStatus::Succeeded, Some("page-id"), false),
-            (ExportStatus::UnknownAfterSubmit, None, false),
-            (ExportStatus::UnknownAfterSubmit, Some("page-id"), false),
-            (ExportStatus::Failed, Some("page-id"), false),
-        ] {
-            let report = exporter::ExportReport {
-                overall: status,
-                connection_state: None,
-                items: vec![exporter::ItemResult {
-                    dedupe_key: "key".into(),
-                    local_id: "item".into(),
-                    status,
-                    resource_id: resource_id.map(str::to_owned),
-                    web_url: None,
-                    code: None,
-                    graph_called: true,
-                }],
-            };
-            assert_eq!(section_is_confirmed_empty(&report), empty);
-        }
     }
 }
