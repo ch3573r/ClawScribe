@@ -879,6 +879,9 @@ impl AudioCapture {
 
     /// Handle stream errors with enhanced disconnect detection
     pub fn handle_stream_error(&self, error: cpal::StreamError) {
+        if !self.state.is_recording() {
+            return;
+        }
         error!("Audio stream error for {}: {}", self.device.name, error);
 
         let error_str = error.to_string().to_lowercase();
@@ -904,7 +907,15 @@ impl AudioCapture {
             AudioError::StreamFailed
         };
 
-        self.state.report_error(audio_error);
+        if matches!(audio_error, AudioError::DeviceDisconnected)
+            || (self.device_type == DeviceType::System
+                && self.state.get_microphone_device().is_some())
+        {
+            self.state
+                .mark_source_missing(self.device.clone(), self.device_type.clone());
+        } else {
+            self.state.report_error(audio_error);
+        }
     }
 }
 
@@ -1089,6 +1100,9 @@ impl AudioPipeline {
         // Previous bug: Loop checked `while self.state.is_recording()` which caused early exit when
         // stop_recording() was called, losing flush signals and remaining chunks in the pipeline
         loop {
+            if self.state.live_transcription_disabled() {
+                self.vad_processor = None;
+            }
             // Receive audio chunks with timeout
             match tokio::time::timeout(
                 std::time::Duration::from_millis(50), // Shorter timeout for responsiveness
@@ -1355,6 +1369,9 @@ impl AudioPipeline {
     }
 
     async fn flush_remaining_audio(&mut self) -> Result<()> {
+        if self.state.live_transcription_disabled() {
+            self.vad_processor = None;
+        }
         info!(
             "Flushing remaining audio from pipeline (processed {} chunks)",
             self.processed_chunks

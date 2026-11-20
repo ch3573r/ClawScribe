@@ -11,6 +11,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { NO_SECRET, withRefreshedKeyStatus, withoutSecrets, type SecretStatus } from '@/lib/secret-key';
 import { loadBehaviorSettings, mirrorLegacyBehavior, refreshBehaviorSettings } from '@/lib/behaviorSettings';
 import { toast } from 'sonner';
+import { useAudioDeviceInventory } from '@/hooks/useAudioDeviceInventory';
 
 export interface OllamaModel {
   name: string;
@@ -61,6 +62,9 @@ interface ConfigContextType {
   // Device configuration
   selectedDevices: SelectedDevices;
   setSelectedDevices: (devices: SelectedDevices) => void;
+  audioDeviceInventory: ReturnType<typeof useAudioDeviceInventory>;
+  devicePreferencesStatus: 'loading' | 'ready' | 'error';
+  refreshDevicePreferences: () => Promise<void>;
 
   // Language preference
   selectedLanguage: string;
@@ -122,10 +126,18 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string>('');
 
   // Device configuration state
-  const [selectedDevices, setSelectedDevices] = useState<SelectedDevices>({
+  const [selectedDevices, updateSelectedDevices] = useState<SelectedDevices>({
     micDevice: null,
     systemDevice: null
   });
+  const [devicePreferencesStatus, setDevicePreferencesStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const devicePreferencesRevision = useRef(0);
+  const audioDeviceInventory = useAudioDeviceInventory();
+  const setSelectedDevices = useCallback((devices: SelectedDevices) => {
+    devicePreferencesRevision.current++;
+    updateSelectedDevices(devices);
+    setDevicePreferencesStatus('ready');
+  }, []);
 
   // Language preference state
   // The core owns the language: it applies it at start-up and the value shown
@@ -323,20 +335,20 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Load device preferences on mount
+  const refreshDevicePreferences = useCallback(async () => {
+    const request = ++devicePreferencesRevision.current;
+    setDevicePreferencesStatus('loading');
+    try {
+      const prefs = await configService.getRecordingPreferences();
+      if (request === devicePreferencesRevision.current) setSelectedDevices(selectedDevicesFromPreferences(prefs));
+    } catch {
+      if (request === devicePreferencesRevision.current) setDevicePreferencesStatus('error');
+    }
+  }, [setSelectedDevices]);
   useEffect(() => {
-    const loadDevicePreferences = async () => {
-      try {
-        const prefs = await configService.getRecordingPreferences();
-        if (prefs && (prefs.preferred_mic_device || prefs.preferred_system_device)) {
-          setSelectedDevices(selectedDevicesFromPreferences(prefs));
-          console.log('Loaded device preferences:', prefs);
-        }
-      } catch (error) {
-        console.log('No device preferences found or failed to load:', error);
-      }
-    };
-    loadDevicePreferences();
-  }, []);
+    void refreshDevicePreferences();
+    return () => { devicePreferencesRevision.current++; };
+  }, [refreshDevicePreferences]);
 
   // Calculate model options based on available models
   const modelOptions: Record<ModelConfig['provider'], string[]> = {
@@ -472,6 +484,9 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setTranscriptModelConfig,
     selectedDevices,
     setSelectedDevices,
+    audioDeviceInventory,
+    devicePreferencesStatus,
+    refreshDevicePreferences,
     selectedLanguage,
     setSelectedLanguage: handleSetSelectedLanguage,
     models,
@@ -491,6 +506,10 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     refreshProviderKeyStatus,
     transcriptModelConfig,
     selectedDevices,
+    setSelectedDevices,
+    audioDeviceInventory,
+    devicePreferencesStatus,
+    refreshDevicePreferences,
     selectedLanguage,
     handleSetSelectedLanguage,
     models,

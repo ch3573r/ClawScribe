@@ -97,14 +97,15 @@ pub struct RecordingState {
     // Core recording state
     is_recording: AtomicBool,
     capture_incomplete: AtomicBool,
+    capture_gap_signal: tokio::sync::Notify,
+    live_transcription_disabled: AtomicBool,
     is_paused: AtomicBool,
-    is_reconnecting: AtomicBool, // NEW: Attempting to reconnect to device
 
     // Audio devices
     microphone_device: Mutex<Option<Arc<AudioDevice>>>,
     system_device: Mutex<Option<Arc<AudioDevice>>>,
     // Track which device is disconnected for reconnection attempts
-    disconnected_device: Mutex<Option<(Arc<AudioDevice>, DeviceType)>>,
+    disconnected_devices: Mutex<Vec<(Arc<AudioDevice>, DeviceType)>>,
 
     // Audio pipeline
     audio_sender: Mutex<Option<mpsc::Sender<AudioChunk>>>,
@@ -142,12 +143,13 @@ impl RecordingState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             capture_incomplete: AtomicBool::new(false),
+            capture_gap_signal: tokio::sync::Notify::new(),
+            live_transcription_disabled: AtomicBool::new(false),
             is_recording: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
-            is_reconnecting: AtomicBool::new(false),
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
-            disconnected_device: Mutex::new(None),
+            disconnected_devices: Mutex::new(Vec::new()),
             audio_sender: Mutex::new(None),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
@@ -199,7 +201,7 @@ impl RecordingState {
         // Without this, Arc<AudioDevice> references persist and keep the mic active
         *self.microphone_device.lock().unwrap() = None;
         *self.system_device.lock().unwrap() = None;
-        *self.disconnected_device.lock().unwrap() = None;
+        self.disconnected_devices.lock().unwrap().clear();
         log::info!("Recording stopped, device references cleared");
     }
 
@@ -251,25 +253,30 @@ impl RecordingState {
         self.is_recording() && !self.is_paused()
     }
 
-    // Reconnection state management
-    pub fn start_reconnecting(&self, device: Arc<AudioDevice>, device_type: DeviceType) {
-        self.is_reconnecting.store(true, Ordering::SeqCst);
-        *self.disconnected_device.lock().unwrap() = Some((device, device_type));
-        log::info!("Started reconnection attempt for device");
+    pub fn mark_source_missing(&self, device: Arc<AudioDevice>, device_type: DeviceType) {
+        let mut pending = self.disconnected_devices.lock().unwrap();
+        pending.retain(|(_, source)| *source != device_type);
+        pending.push((device, device_type));
+        self.mark_capture_incomplete();
     }
 
-    pub fn stop_reconnecting(&self) {
-        self.is_reconnecting.store(false, Ordering::SeqCst);
-        *self.disconnected_device.lock().unwrap() = None;
-        log::info!("Stopped reconnection attempt");
+    pub fn mark_source_reconnected(&self, device_type: &DeviceType) {
+        self.disconnected_devices
+            .lock()
+            .unwrap()
+            .retain(|(_, source)| source != device_type);
     }
 
-    pub fn is_reconnecting(&self) -> bool {
-        self.is_reconnecting.load(Ordering::SeqCst)
+    pub fn disconnected_devices(&self) -> Vec<(Arc<AudioDevice>, DeviceType)> {
+        self.disconnected_devices.lock().unwrap().clone()
     }
 
-    pub fn get_disconnected_device(&self) -> Option<(Arc<AudioDevice>, DeviceType)> {
-        self.disconnected_device.lock().unwrap().clone()
+    pub fn clear_active_device(&self, device_type: &DeviceType) {
+        let device = match device_type {
+            DeviceType::Microphone => &self.microphone_device,
+            DeviceType::System => &self.system_device,
+        };
+        *device.lock().unwrap() = None;
     }
 
     // Device management
@@ -294,12 +301,27 @@ impl RecordingState {
         *self.audio_sender.lock().unwrap() = Some(sender);
     }
 
+    pub(crate) fn disable_live_transcription(&self) {
+        self.live_transcription_disabled
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn live_transcription_disabled(&self) -> bool {
+        self.live_transcription_disabled.load(Ordering::Acquire)
+    }
+
     pub fn capture_incomplete(&self) -> bool {
         self.capture_incomplete.load(Ordering::Acquire)
     }
 
+    pub(crate) async fn wait_for_capture_gap(&self) {
+        self.capture_gap_signal.notified().await;
+    }
+
     pub fn mark_capture_incomplete(&self) {
-        self.capture_incomplete.store(true, Ordering::Release);
+        if !self.capture_incomplete.swap(true, Ordering::AcqRel) {
+            self.capture_gap_signal.notify_one();
+        }
     }
 
     pub fn send_audio_chunk(&self, chunk: AudioChunk) -> Result<()> {
@@ -534,10 +556,9 @@ impl RecordingState {
     // Cleanup
     pub fn cleanup(&self) {
         self.stop_recording();
-        self.stop_reconnecting();
         *self.microphone_device.lock().unwrap() = None;
         *self.system_device.lock().unwrap() = None;
-        *self.disconnected_device.lock().unwrap() = None;
+        self.disconnected_devices.lock().unwrap().clear();
         *self.audio_sender.lock().unwrap() = None;
         *self.last_error.lock().unwrap() = None;
         *self.error_callback.lock().unwrap() = None;
@@ -559,12 +580,13 @@ impl Default for RecordingState {
     fn default() -> Self {
         Self {
             capture_incomplete: AtomicBool::new(false),
+            capture_gap_signal: tokio::sync::Notify::new(),
+            live_transcription_disabled: AtomicBool::new(false),
             is_recording: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
-            is_reconnecting: AtomicBool::new(false),
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
-            disconnected_device: Mutex::new(None),
+            disconnected_devices: Mutex::new(Vec::new()),
             audio_sender: Mutex::new(None),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),

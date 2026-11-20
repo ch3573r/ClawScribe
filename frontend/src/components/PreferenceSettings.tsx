@@ -10,6 +10,7 @@ import { Switch } from "./ui/switch";
 import { Meta, SettingsCard, SettingsRow, SettingsStack } from "./ui/settings-layout";
 import { NoteRow } from "./settings/settings-parts";
 import { UpdateChannelSettings } from "./UpdateChannelSettings";
+import { PendingRecordingNotes } from "./PendingRecordingNotes";
 import Analytics from "@/lib/analytics";
 import { useConfig, type NotificationSettings } from "@/contexts/ConfigContext";
 import { getAutoUpdateCheckEnabled, setAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
@@ -234,6 +235,9 @@ export function PreferenceSettings() {
             )}
           </SettingsRow>
         )}
+        <SettingsRow title="Pending recording notes" description="Review local notes and summary preferences for recordings awaiting recovery">
+          <PendingRecordingNotes disabled={recordingState.isRecording} />
+        </SettingsRow>
       </SettingsCard>
     </SettingsStack>
   );

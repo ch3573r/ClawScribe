@@ -341,11 +341,11 @@ export function ParakeetModelManager({
         results={pcResults}
         testAction={pcTest ? <PcTestAction test={test} /> : undefined}
         testReport={pcTest ? <PcTestReport test={test} /> : undefined}
-        onSelect={modelName => {
+        onSelect={onModelSelect ? modelName => {
           if (models.find(model => model.name === modelName)?.status === 'Available') {
             void selectModel(modelName);
           }
-        }}
+        } : undefined}
         onDownload={modelName => void downloadModel(modelName)}
         onCancel={modelName => void cancelDownload(modelName)}
         onDelete={modelName => void deleteModel(modelName)}

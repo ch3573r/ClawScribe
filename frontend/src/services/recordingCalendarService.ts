@@ -1,12 +1,47 @@
 import { getICalendarSnapshot, refreshICalendars } from "@/services/icalService";
 import { microsoftExportService, type CalendarEvent } from "@/services/microsoftExportService";
 import {
-  matchOngoingCalendar, microsoftCalendarRevision, overlappingCalendarLinks,
-  type MeetingCalendarLink, type OngoingCalendarMatch,
+  getActiveRecordingCalendar, matchOngoingCalendar, microsoftCalendarRevision, overlappingCalendarLinks, setActiveRecordingCalendar,
+  type MeetingCalendarLink, type OngoingCalendarMatch, type RecordingCalendar,
 } from "@/lib/meetingCalendar";
+import { invoke } from "@tauri-apps/api/core";
 
 const CALENDAR_START_BUDGET_MS = 1_250;
 const CALENDAR_REVIEW_BUDGET_MS = 8_000;
+
+export function readRecordingCalendar(sessionId: string): Promise<{ link: MeetingCalendarLink | null; revision: number }> {
+  return invoke("get_active_recording_calendar", { sessionId });
+}
+
+export function writeRecordingCalendar(sessionId: string, revision: number, link: MeetingCalendarLink | null): Promise<number> {
+  return invoke("set_active_recording_calendar", { sessionId, revision, link });
+}
+
+export async function resolveRecordingCalendar(
+  initial: RecordingCalendar,
+  now: number,
+  microsoftRevision: number,
+): Promise<void> {
+  const match = await findOngoingRecordingCalendar(now).catch(() => ({ status: "unavailable" as const, matches: [] }));
+  if (getActiveRecordingCalendar(initial.sessionId) !== initial) return;
+  const signedOut = microsoftCalendarRevision !== microsoftRevision;
+  const matches = signedOut ? match.matches.filter(link => link.source !== "microsoft") : match.matches;
+  let status = signedOut ? "unavailable" as const : match.status;
+  let link = status === "matched" ? matches[0] : null;
+  let revision = initial.revision;
+  if (link) {
+    try {
+      revision = await writeRecordingCalendar(initial.sessionId, revision, link);
+    } catch {
+      link = null;
+      status = "unavailable";
+    }
+  }
+  if (getActiveRecordingCalendar(initial.sessionId) === initial &&
+      (signedOut || microsoftCalendarRevision === microsoftRevision)) {
+    setActiveRecordingCalendar({ ...initial, ...match, status, matches, link, revision });
+  }
+}
 
 /** Reads every connected calendar once and names the sources that could not be read. */
 async function readCalendars(from: number, to: number, budgetMs: number) {

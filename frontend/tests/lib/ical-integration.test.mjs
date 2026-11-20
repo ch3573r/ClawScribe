@@ -25,16 +25,19 @@ test('Microsoft sign-out preserves imported appointments and clears legacy Micro
   let changes = 0;
   win.addEventListener('clawscribe-pending-calendar-changed', () => changes++);
   links.setPendingCalendar(ical);
-  links.beginRecordingCalendar({ link: ical, matches: [], status: 'none', fallbackTitle: 'Recording' }, links.getNextCalendarChoice());
-  links.setPendingCalendar(ical);
+  links.setActiveRecordingCalendar({ sessionId: 'active', revision: 1, link: ical, matches: [], status: 'none' });
+  const microsoft = links.parseCalendarLink(JSON.stringify(legacy));
+  links.setActiveRecordingCalendar({ sessionId: 'microsoft', revision: 1, link: microsoft, matches: [microsoft, ical], status: 'matched' });
   win.localStorage.setItem(links.LEGACY_MEETING_CALENDAR_PREFIX + 'new', JSON.stringify(ical));
   win.localStorage.setItem(links.LEGACY_MEETING_CALENDAR_PREFIX + 'old', JSON.stringify(legacy));
   links.clearMicrosoftCalendarLinks();
   assert.equal(win.localStorage.getItem(links.LEGACY_MEETING_CALENDAR_PREFIX + 'old'), null);
   assert.equal(links.parseCalendarLink(win.localStorage.getItem(links.LEGACY_MEETING_CALENDAR_PREFIX + 'new')).sourceId, 'a');
-  assert.equal(links.getActiveRecordingCalendar().link.source, 'ical');
+  assert.equal(links.getActiveRecordingCalendar('active').link.source, 'ical');
+  assert.equal(links.getActiveRecordingCalendar('microsoft').link, null);
+  assert.deepEqual(Array.from(links.getActiveRecordingCalendar('microsoft').matches), [ical]);
   assert.equal(links.getPendingCalendar().sourceId, 'a');
-  assert.ok(changes >= 3);
+  assert.equal(changes, 1);
 });
 
 const calendar = { id: 'file-id', name: 'Team', kind: 'file' };

@@ -24,11 +24,10 @@
 //! deleted here.
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const MAX_MARKER_BYTES: u64 = 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DIR_ENTRIES: usize = 20_000;
 const LEGACY_CHECKPOINT_SECONDS: f64 = 10.0;
@@ -109,6 +108,8 @@ pub struct InterruptedScan {
     pub truncated: bool,
     /// A recording is running and its folder could not be told, so nothing was listed.
     pub recording_active: bool,
+    /// Requested browser cache IDs that are already saved or were deleted.
+    pub resolved_cache_ids: Vec<String>,
 }
 
 /// A path as text for comparison: both slash directions and (on Windows) letter
@@ -184,12 +185,28 @@ fn snapshot_summary(folder: &Path) -> (u32, Option<f64>) {
 /// Whether and why one folder is an interrupted recording. `registered` is the
 /// library meeting the folder is saved as, if any. The folder must already be
 /// known not to be a link and not to be the running recording's.
-pub(crate) fn classify_folder(folder: &Path, registered: Option<&str>) -> Option<InterruptedRecording> {
-    // This app's own marker; a `metadata.json` of any other shape is foreign.
-    if !crate::database::meeting_files::has_app_marker(folder, None) {
+fn classify_folder_with_deletions(
+    folder: &Path,
+    registered: Option<&str>,
+    registered_ids: &HashSet<String>,
+    deleted: &HashSet<String>,
+) -> Option<InterruptedRecording> {
+    use crate::database::meeting_files;
+    let marker = crate::database::meeting_files::read_marker(folder)?;
+    if meeting_files::has_invalid_marker_id(&marker) {
         return None;
     }
-    let marker = read_json(&folder.join("metadata.json"), MAX_MARKER_BYTES)?;
+    let recording_id = meeting_files::recording_id(&marker);
+    let stamped = meeting_files::stamped_meeting_id(&marker);
+    // A different restored copy owns the ID. Never offer to save, repair or
+    // discard this copy via the path that is absent from the library.
+    if [stamped, recording_id]
+        .into_iter()
+        .flatten()
+        .any(|id| registered != Some(id) && (deleted.contains(id) || registered_ids.contains(id)))
+    {
+        return None;
+    }
     let status = marker.get("status").and_then(Value::as_str).unwrap_or("");
 
     let has_final_audio = FINAL_AUDIO_NAMES
@@ -211,6 +228,9 @@ pub(crate) fn classify_folder(folder: &Path, registered: Option<&str>) -> Option
         reasons.push("unfinished_audio");
     }
     if registered.is_none() {
+        if status == "completed" && recording_id.is_some() {
+            reasons.push("library_handoff_pending");
+        }
         if status != "completed" && matches!(outcome, Ok(None)) {
             reasons.push("did_not_finish");
         }
@@ -245,6 +265,7 @@ pub(crate) fn classify_folder(folder: &Path, registered: Option<&str>) -> Option
     let reason = match reasons[0] {
         "unfinished_audio" => "The recorded audio was not finished into a file",
         "did_not_finish" => "The recording stopped unexpectedly",
+        "library_handoff_pending" => "The recording ended before it could be added to your library",
         _ => "The recording ended with problems and was not saved to your library",
     }
     .to_string();
@@ -276,6 +297,8 @@ pub(crate) struct ScanInput<'a> {
     pub kept: &'a [String],
     /// Folder key -> library meeting id.
     pub registered: &'a HashMap<String, String>,
+    pub registered_ids: &'a HashSet<String>,
+    pub deleted: &'a HashSet<String>,
     pub active: ActiveFolder,
     pub limits: Limits,
 }
@@ -343,7 +366,14 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
                     continue;
                 }
                 let registered = input.registered.get(&key).map(String::as_str);
-                let Some(mut found) = classify_folder(&path, registered) else { continue };
+                let Some(mut found) = classify_folder_with_deletions(
+                    &path,
+                    registered,
+                    input.registered_ids,
+                    input.deleted,
+                ) else {
+                    continue;
+                };
                 found.kept = input
                     .kept
                     .iter()
@@ -411,12 +441,18 @@ pub(crate) fn preview_lines(folder: &Path, limit: usize) -> Vec<PreviewLine> {
 // ---- commands -----------------------------------------------------------------
 
 async fn registered_rows(pool: &sqlx::SqlitePool) -> Result<Vec<(String, String)>, String> {
-    sqlx::query_as(
-        "SELECT id, folder_path FROM meetings WHERE folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|_| "Could not read the library".to_string())
+    sqlx::query_as("SELECT id, COALESCE(folder_path, '') FROM meetings")
+        .fetch_all(pool)
+        .await
+        .map_err(|_| "Could not read the library".to_string())
+}
+
+async fn deleted_recording_ids(pool: &sqlx::SqlitePool) -> Result<HashSet<String>, String> {
+    sqlx::query_scalar("SELECT meeting_id FROM recording_library_deletions")
+        .fetch_all(pool)
+        .await
+        .map(|ids| ids.into_iter().collect())
+        .map_err(|_| "Could not read deleted recording IDs".to_string())
 }
 
 /// Folder key -> meeting id for each saved folder, by its own text, and by its
@@ -432,6 +468,9 @@ fn registered_map(
     let started = Instant::now();
     let mut map = HashMap::new();
     for (id, folder) in rows {
+        if folder.trim().is_empty() {
+            continue;
+        }
         let local = crate::local_path::is_local_path_text(&folder);
         if !local && !crate::trusted_roots::text_allowed(&folder, roots) {
             continue;
@@ -462,9 +501,20 @@ fn kept_folders<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<String> {
 pub async fn find_interrupted_recordings<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::state::AppState>,
+    cache_ids: Option<Vec<String>>,
 ) -> Result<InterruptedScan, String> {
     let roots = super::recording_preferences::recording_roots(&app).await;
     let rows = registered_rows(state.db_manager.pool()).await?;
+    let deleted = deleted_recording_ids(state.db_manager.pool()).await?;
+    let registered_ids: HashSet<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+    let resolved_cache_ids = {
+        cache_ids
+            .unwrap_or_default()
+            .into_iter()
+            .take(Limits::default().max_examined)
+            .filter(|id| registered_ids.contains(id) || deleted.contains(id))
+            .collect()
+    };
     let active = super::recording_commands::active_recording_folder();
     let kept = kept_folders(&app);
     tokio::task::spawn_blocking(move || {
@@ -473,8 +523,21 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
         let started = Instant::now();
         let registered = registered_map(rows, &roots, REGISTERED_BUDGET);
         let limits = Limits::default();
-        let limits = Limits { time_limit: limits.time_limit.saturating_sub(started.elapsed()), ..limits };
-        scan(&ScanInput { roots: &roots, kept: &kept, registered: &registered, active, limits })
+        let limits = Limits {
+            time_limit: limits.time_limit.saturating_sub(started.elapsed()),
+            ..limits
+        };
+        let mut result = scan(&ScanInput {
+            roots: &roots,
+            kept: &kept,
+            registered: &registered,
+            registered_ids: &registered_ids,
+            deleted: &deleted,
+            active,
+            limits,
+        });
+        result.resolved_cache_ids = resolved_cache_ids;
+        result
     })
     .await
     .map_err(|_| "Could not look for interrupted recordings".to_string())
@@ -539,7 +602,7 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
     let roots = super::recording_preferences::recording_roots(&app).await;
     let rows = registered_rows(state.db_manager.pool()).await?;
     let active = super::recording_commands::active_recording_folder();
-    let (authorised, meeting_id) = tokio::task::spawn_blocking(move || -> Result<(String, String), String> {
+    let (authorised, meeting_id, transcribes) = tokio::task::spawn_blocking(move || -> Result<(String, String, bool), String> {
         let authorised = crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
         if matches!(active, ActiveFolder::Unknown)
             || matches!(&active, ActiveFolder::Folder(running) if folder_key(running) == folder_key(Path::new(&authorised)))
@@ -556,7 +619,9 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
             })
             .cloned()
             .ok_or_else(|| "This recording is not saved in your library".to_string())?;
-        Ok((authorised, meeting))
+        let transcribes = crate::database::meeting_files::read_marker(Path::new(&authorised))
+            .is_some_and(|marker| super::recording_mode::marker_transcribes(&marker));
+        Ok((authorised, meeting, transcribes))
     })
     .await
     .map_err(|_| "Could not repair the recording".to_string())??;
@@ -572,13 +637,16 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
         }
         // The meeting no longer has a failed audio save; a partial recovery says
         // the capture had gaps.
-        let _ = sqlx::query(
-            "UPDATE recording_outcomes SET audio_save_failed = 0, capture_incomplete = ? WHERE meeting_id = ?",
+        let updated = sqlx::query(
+            "UPDATE recording_outcomes SET audio_save_failed = 0, capture_incomplete = capture_incomplete OR ? WHERE meeting_id = ?",
         )
         .bind(i64::from(status.status == "partial"))
         .bind(&meeting_id)
         .execute(state.db_manager.pool())
         .await;
+        if transcribes && updated.is_ok_and(|result| result.rows_affected() == 1) {
+            super::recording_commands::wake_saved_recording_summary(&app, meeting_id.clone());
+        }
     }
     Ok(RepairedRecording { meeting_id, audio_status: status.status, audio_path: status.audio_file_path })
 }
@@ -595,21 +663,40 @@ pub async fn discard_interrupted_recording<R: tauri::Runtime>(
 ) -> Result<(), String> {
     let roots = super::recording_preferences::recording_roots(&app).await;
     let rows = registered_rows(state.db_manager.pool()).await?;
+    let deleted = deleted_recording_ids(state.db_manager.pool()).await?;
     let active = super::recording_commands::active_recording_folder();
-    tokio::task::spawn_blocking(move || {
+    let recording_id = tokio::task::spawn_blocking(move || {
+        let registered_ids = rows.iter().map(|(id, _)| id.clone()).collect();
         let registered = registered_map(rows, &roots, REGISTERED_BUDGET);
-        discard_folder(&folder, &roots, &registered, &active)
+        discard_folder(
+            &folder,
+            &roots,
+            &registered,
+            &registered_ids,
+            &active,
+            &deleted,
+        )
     })
-        .await
-        .map_err(|_| "Could not delete the recording".to_string())?
+    .await
+    .map_err(|_| "Could not delete the recording".to_string())??;
+    if let Some(recording_id) = recording_id {
+        crate::library::discard_recording_drafts(state.db_manager.pool(), &recording_id)
+            .await
+            .map_err(|_| {
+                "The recording was deleted, but its pending notes or calendar link could not be removed."
+            })?;
+    }
+    Ok(())
 }
 
 pub(crate) fn discard_folder(
     folder: &str,
     roots: &[PathBuf],
     registered: &HashMap<String, String>,
+    registered_ids: &HashSet<String>,
     active: &ActiveFolder,
-) -> Result<(), String> {
+    deleted: &HashSet<String>,
+) -> Result<Option<String>, String> {
     const REFUSED: &str = "This recording cannot be deleted from here.";
     let authorised = crate::database::meeting_files::authorize_new_meeting_folder(folder, roots)?;
     let path = PathBuf::from(&authorised);
@@ -625,19 +712,79 @@ pub(crate) fn discard_folder(
     if registered.contains_key(&key) || canonical_key.as_ref().is_some_and(|key| registered.contains_key(key)) {
         return Err(REFUSED.into());
     }
-    if classify_folder(&path, None).is_none() {
+    if classify_folder_with_deletions(&path, None, registered_ids, deleted).is_none() {
         return Err(REFUSED.into());
     }
     let others: Vec<PathBuf> = registered
         .keys()
         .map(PathBuf::from)
         .collect();
-    crate::database::meeting_files::remove_recording_folder(&path, "", roots, &others)
+    let marker = crate::database::meeting_files::read_marker(&path).ok_or(REFUSED)?;
+    let id = crate::database::meeting_files::stamped_meeting_id(&marker)
+        .or_else(|| crate::database::meeting_files::recording_id(&marker));
+    crate::database::meeting_files::remove_recording_folder(&path, id.unwrap_or(""), roots, &others)?;
+    Ok(crate::database::meeting_files::recording_id(&marker).map(str::to_owned).or_else(|| id.map(str::to_owned)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clean_stop_with_pending_handoff_is_recoverable_until_saved_or_deleted() {
+        let base = tempfile::tempdir().unwrap();
+        let folder = base.path();
+        let id = "meeting-4f7b980e-b123-4ca9-82e7-927204456483";
+        marker(folder, "completed", None);
+        let path = folder.join("metadata.json");
+        let mut metadata: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        metadata["recording_id"] = serde_json::json!(id);
+        std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        std::fs::write(folder.join("audio.mp4"), [1u8]).unwrap();
+        let mut deleted = std::collections::HashSet::new();
+        assert_eq!(
+            classify_folder_with_deletions(folder, None, &HashSet::new(), &deleted)
+                .unwrap()
+                .reasons,
+            ["library_handoff_pending"]
+        );
+        assert!(
+            classify_folder_with_deletions(folder, Some(id), &HashSet::new(), &deleted).is_none()
+        );
+        let elsewhere = HashSet::from([id.to_owned()]);
+        assert!(classify_folder_with_deletions(folder, None, &elsewhere, &deleted).is_none());
+        deleted.insert(id.to_owned());
+        assert!(classify_folder_with_deletions(folder, None, &HashSet::new(), &deleted).is_none());
+    }
+
+    #[test]
+    fn a_stamped_unfinished_recording_is_recoverable_in_a_fresh_library() {
+        let base = tempfile::tempdir().unwrap();
+        let roots = [base.path().to_path_buf()];
+        let folder = make(base.path(), "unfinished");
+        let id = "meeting-4f7b980e-b123-4ca9-82e7-927204456483";
+        marker(&folder, "error", Some(id));
+        spool(&folder, 2);
+        let registered = HashSet::from([id.to_owned()]);
+        let empty = HashSet::new();
+        assert_eq!(
+            classify_folder_with_deletions(&folder, None, &empty, &empty)
+                .unwrap()
+                .reasons[0],
+            "unfinished_audio",
+        );
+        assert!(classify_folder_with_deletions(&folder, None, &empty, &registered).is_none());
+        assert!(discard_folder(
+            &folder.to_string_lossy(),
+            &roots,
+            &HashMap::new(),
+            &registered,
+            &ActiveFolder::None,
+            &empty
+        )
+        .is_err());
+        assert!(folder.is_dir());
+    }
 
     fn marker(folder: &Path, status: &str, id: Option<&str>) {
         let mut value = serde_json::json!({
@@ -677,8 +824,21 @@ mod tests {
         folder
     }
 
-    fn run(roots: &[PathBuf], registered: &HashMap<String, String>, active: ActiveFolder, limits: Limits) -> InterruptedScan {
-        scan(&ScanInput { roots, kept: &[], registered, active, limits })
+    fn run(
+        roots: &[PathBuf],
+        registered: &HashMap<String, String>,
+        active: ActiveFolder,
+        limits: Limits,
+    ) -> InterruptedScan {
+        scan(&ScanInput {
+            roots,
+            kept: &[],
+            registered,
+            registered_ids: &registered.values().cloned().collect(),
+            deleted: &HashSet::new(),
+            active,
+            limits,
+        })
     }
 
     fn names(scan: &InterruptedScan) -> Vec<String> {
@@ -765,13 +925,13 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let root = base.path().join("recordings");
         let saved_ok = make(&root, "saved-ok");
-        marker(&saved_ok, "recording", Some("meeting-1"));
+        marker(&saved_ok, "recording", None);
         let saved_finished = make(&root, "saved-with-audio");
-        marker(&saved_finished, "completed", Some("meeting-2"));
+        marker(&saved_finished, "completed", None);
         spool(&saved_finished, 2);
         std::fs::write(saved_finished.join("audio.mp4"), b"audio").unwrap();
         let saved_unfinished = make(&root, "saved-no-audio");
-        marker(&saved_unfinished, "completed", Some("meeting-3"));
+        marker(&saved_unfinished, "completed", None);
         spool(&saved_unfinished, 2);
         let mut registered = HashMap::new();
         for (folder, id) in [(&saved_ok, "meeting-1"), (&saved_finished, "meeting-2"), (&saved_unfinished, "meeting-3")] {
@@ -919,8 +1079,19 @@ mod tests {
         marker(&keptf, "recording", None);
         let other = make(&root, "other");
         marker(&other, "recording", None);
-        let kept = vec![format!("{}/", keptf.to_string_lossy().to_uppercase().replace('\\', "/"))];
-        let result = scan(&ScanInput { roots: &[root], kept: &kept, registered: &HashMap::new(), active: ActiveFolder::None, limits: Limits::default() });
+        let kept = vec![format!(
+            "{}/",
+            keptf.to_string_lossy().to_uppercase().replace('\\', "/")
+        )];
+        let result = scan(&ScanInput {
+            roots: &[root],
+            kept: &kept,
+            registered: &HashMap::new(),
+            registered_ids: &HashSet::new(),
+            deleted: &HashSet::new(),
+            active: ActiveFolder::None,
+            limits: Limits::default(),
+        });
         assert_eq!(result.recordings.len(), 2);
         for found in &result.recordings {
             #[cfg(windows)]
@@ -962,7 +1133,15 @@ mod tests {
         let folder = make(&root, "meeting");
         marker(&folder, "recording", None);
         crate::local_path::mark_remote_for_tests(&share);
-        let result = scan(&ScanInput { roots: &[root], kept: &[], registered: &HashMap::new(), active: ActiveFolder::None, limits: Limits::default() });
+        let result = scan(&ScanInput {
+            roots: &[root],
+            kept: &[],
+            registered: &HashMap::new(),
+            registered_ids: &HashSet::new(),
+            deleted: &HashSet::new(),
+            active: ActiveFolder::None,
+            limits: Limits::default(),
+        });
         assert_eq!(names(&result), vec!["meeting"]);
     }
 
@@ -1001,7 +1180,15 @@ mod tests {
         let active = ActiveFolder::Folder(running.clone());
         for refused in [&saved, &running, &finished, &foreign, &outside, &root.join("missing")] {
             assert!(
-                discard_folder(&refused.to_string_lossy(), &roots, &registered, &active).is_err(),
+                discard_folder(
+                    &refused.to_string_lossy(),
+                    &roots,
+                    &registered,
+                    &HashSet::new(),
+                    &active,
+                    &HashSet::new()
+                )
+                .is_err(),
                 "{}",
                 refused.display()
             );
@@ -1009,10 +1196,37 @@ mod tests {
                 assert!(refused.exists(), "{} was kept", refused.display());
             }
         }
-        assert!(discard_folder(r"\\server\share\victim", &roots, &registered, &active).is_err());
-        assert!(discard_folder(&victim.to_string_lossy(), &roots, &registered, &ActiveFolder::Unknown).is_err());
-        assert!(victim.exists(), "nothing is deleted while a recording's folder is unknown");
-        discard_folder(&victim.to_string_lossy(), &roots, &registered, &active).unwrap();
+        assert!(discard_folder(
+            r"\\server\share\victim",
+            &roots,
+            &registered,
+            &HashSet::new(),
+            &active,
+            &HashSet::new()
+        )
+        .is_err());
+        assert!(discard_folder(
+            &victim.to_string_lossy(),
+            &roots,
+            &registered,
+            &HashSet::new(),
+            &ActiveFolder::Unknown,
+            &HashSet::new()
+        )
+        .is_err());
+        assert!(
+            victim.exists(),
+            "nothing is deleted while a recording's folder is unknown"
+        );
+        discard_folder(
+            &victim.to_string_lossy(),
+            &roots,
+            &registered,
+            &HashSet::new(),
+            &active,
+            &HashSet::new(),
+        )
+        .unwrap();
         assert!(!victim.exists());
         assert!(saved.exists() && running.exists() && finished.exists() && foreign.exists() && outside.exists());
     }

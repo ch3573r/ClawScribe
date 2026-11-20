@@ -32,6 +32,7 @@ from the source version.
 - [Hosted transcription smoke test](hosted-transcription-smoke.md)
 - [GPU acceleration](GPU_ACCELERATION.md)
 - [Teams detection](teams-detection.md)
+- [Recording from the tray, shortcuts and command line](tray-and-recording-control.md)
 - [Optional OpenClaw handoff](openclaw-handoff.md)
 - [Integration backlog](integrations-backlog.md)
 

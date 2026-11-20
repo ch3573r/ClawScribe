@@ -1168,6 +1168,8 @@ async fn recording_recovery(profile: &Path) -> Result<(String, PathBuf), String>
         roots: &roots,
         kept: &kept,
         registered: &registered,
+        registered_ids: &Default::default(),
+        deleted: &Default::default(),
         active: interrupted::ActiveFolder::None,
         limits: interrupted::Limits::default(),
     });

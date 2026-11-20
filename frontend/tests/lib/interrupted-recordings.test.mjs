@@ -139,6 +139,31 @@ test('a failed disk scan leaves the browser list as it was', async () => {
   h.hooks.unmount();
 });
 
+test('a saved or deleted native recording cannot reappear from the browser cache', async () => {
+  const h = harness({
+    browserMeetings: [
+      browser('committed', 'saved-folder', { lastUpdated: old }),
+      browser('deleted', 'retained-folder', { lastUpdated: old }),
+      browser('pending', undefined, { lastUpdated: old }),
+    ],
+    scan: { recordings: [], resolvedCacheIds: ['committed', 'deleted'] },
+  });
+  const found = await h.render().checkForRecoverableTranscripts();
+  assert.deepEqual(json(found.map(entry => entry.meetingId)), ['pending']);
+  assert.deepEqual(json(h.calls[0][1].cacheIds), ['committed', 'deleted', 'pending']);
+  assert.ok(!h.names().includes('has_audio_checkpoints'));
+  h.hooks.unmount();
+});
+
+test('recovering a clean Stop handoff does not mark its complete transcript as partial', async () => {
+  const h = harness({ scan: { recordings: [disk('pending-folder', { reasons: ['library_handoff_pending'] })] } });
+  await h.render().checkForRecoverableTranscripts();
+  await h.render().recoverMeeting(h.render().recoverableMeetings[0].meetingId);
+  assert.equal(h.saves[0][3].transcription_incomplete, false);
+  assert.equal(h.saves[0][4], true);
+  h.hooks.unmount();
+});
+
 test('a recording only on disk is recovered through audio recovery and the normal save, then released', async () => {
   const h = harness({ scan: { recordings: [disk('C:\\Rec\\two', { title: 'Only on disk' })], truncated: false, recordingActive: false } });
   await h.render().checkForRecoverableTranscripts();

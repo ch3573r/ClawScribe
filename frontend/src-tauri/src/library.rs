@@ -3,14 +3,16 @@ pub(crate) mod archive;
 pub mod backup;
 pub mod calendar;
 pub mod context;
+pub mod pending_recording_notes;
+pub(crate) mod recording_calendar;
 pub mod summary_bookmarks;
 
 use crate::state::AppState;
 use serde::Serialize;
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::io::Write;
 use std::path::Path;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 #[derive(Serialize, sqlx::FromRow)]
 pub struct MeetingTag {
@@ -34,7 +36,7 @@ fn clean_label(value: &str, max: usize) -> Result<String, String> {
 }
 
 pub(crate) async fn attach_bookmarks(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE meeting_bookmarks SET meeting_id = (SELECT id FROM meetings WHERE meetings.folder_path = meeting_bookmarks.folder_path LIMIT 1) WHERE meeting_id IS NULL AND EXISTS (SELECT 1 FROM meetings WHERE meetings.folder_path = meeting_bookmarks.folder_path)")
+    sqlx::query("UPDATE meeting_bookmarks SET meeting_id = (SELECT id FROM meetings WHERE meetings.folder_path = meeting_bookmarks.folder_path LIMIT 1) WHERE meeting_id IS NULL AND recording_id IS NULL AND EXISTS (SELECT 1 FROM meetings WHERE meetings.folder_path = meeting_bookmarks.folder_path)")
         .execute(pool).await?;
     Ok(())
 }
@@ -44,7 +46,7 @@ pub(crate) async fn cleanup_orphaned_bookmarks(pool: &SqlitePool) -> Result<(), 
         return Ok(());
     }
     let candidates: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, folder_path FROM meeting_bookmarks WHERE meeting_id IS NULL AND folder_path IS NOT NULL
+        "SELECT id, folder_path FROM meeting_bookmarks WHERE meeting_id IS NULL AND recording_id IS NULL AND folder_path IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM meetings WHERE meetings.folder_path = meeting_bookmarks.folder_path)",
     ).fetch_all(pool).await?;
     for (id, folder) in candidates {
@@ -55,7 +57,7 @@ pub(crate) async fn cleanup_orphaned_bookmarks(pool: &SqlitePool) -> Result<(), 
         if crate::audio::recording_commands::is_recording().await {
             return Ok(());
         }
-        sqlx::query("DELETE FROM meeting_bookmarks WHERE id = ? AND folder_path = ? AND meeting_id IS NULL
+        sqlx::query("DELETE FROM meeting_bookmarks WHERE id = ? AND folder_path = ? AND meeting_id IS NULL AND recording_id IS NULL
                     AND NOT EXISTS (SELECT 1 FROM meetings WHERE meetings.folder_path = meeting_bookmarks.folder_path)")
             .bind(id).bind(folder).execute(pool).await?;
     }
@@ -130,27 +132,177 @@ pub async fn list_meeting_bookmarks(
 }
 
 #[tauri::command]
-pub async fn add_meeting_bookmark(
-    app: AppHandle,
+pub async fn add_meeting_bookmark<R: Runtime>(
+    app: AppHandle<R>,
     meeting_id: Option<String>,
     seconds: Option<f64>,
     label: String,
+    session_id: Option<String>,
 ) -> Result<(), String> {
     let label = clean_label(&label, 160)?;
-    let (folder, seconds) = if meeting_id.is_some() {
-        (None, seconds.ok_or("Choose a bookmark time.")?)
-    } else {
-        let (folder, seconds) = crate::audio::recording_commands::bookmark_position()?;
-        (Some(folder), seconds)
+    let Some(meeting_id) = meeting_id else {
+        let session_id = session_id.ok_or("The recording identity is missing.")?;
+        return save_live_bookmark(&app, &session_id, &label).await;
     };
-    if !seconds.is_finite() || !(0.0..=604800.0).contains(&seconds) {
-        return Err("Invalid bookmark time.".into());
-    }
-    sqlx::query("INSERT INTO meeting_bookmarks (id, meeting_id, folder_path, seconds, label) VALUES (?, ?, ?, ?, ?)")
-        .bind(uuid::Uuid::new_v4().to_string()).bind(meeting_id).bind(folder).bind(seconds).bind(label)
+    let seconds = seconds.ok_or("Choose a bookmark time.")?;
+    validate_bookmark_time(seconds)?;
+    sqlx::query("INSERT INTO meeting_bookmarks (id, meeting_id, seconds, label) VALUES (?, ?, ?, ?)")
+        .bind(uuid::Uuid::new_v4().to_string()).bind(meeting_id).bind(seconds).bind(label)
         .execute(app.state::<AppState>().db_manager.pool()).await.map_err(|_| "Could not save bookmark.")?;
     let _ = app.emit("library-changed", ());
     Ok(())
+}
+
+fn validate_bookmark_time(seconds: f64) -> Result<(), String> {
+    if !seconds.is_finite() || !(0.0..=604800.0).contains(&seconds) {
+        return Err("Invalid bookmark time.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_live_recording_bookmarks(
+    app: AppHandle,
+    session_id: String,
+) -> Result<LiveRecordingBookmarks, String> {
+    let (recording_id, _, _) = crate::audio::recording_commands::bookmark_position(&session_id)?;
+    let state = app
+        .try_state::<AppState>()
+        .ok_or("The meeting library is unavailable.")?;
+    let mut tx = state
+        .db_manager
+        .pool()
+        .begin()
+        .await
+        .map_err(|_| "Could not load recording notes.")?;
+    let bookmarks = sqlx::query_as(
+        "SELECT id, seconds, label FROM meeting_bookmarks
+         WHERE recording_id = ? AND meeting_id IS NULL
+         ORDER BY seconds DESC, id LIMIT 100",
+    )
+    .bind(&recording_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|_| "Could not load recording notes.")?;
+    let include_in_summary = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM recording_summary_bookmarks WHERE recording_id = ?)",
+    )
+    .bind(&recording_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| "Could not load the summary preference.")?;
+    tx.commit()
+        .await
+        .map_err(|_| "Could not load recording notes.")?;
+    Ok(LiveRecordingBookmarks {
+        bookmarks,
+        include_in_summary,
+    })
+}
+
+#[derive(Serialize)]
+pub struct LiveRecordingBookmarks {
+    bookmarks: Vec<Bookmark>,
+    include_in_summary: bool,
+}
+
+#[tauri::command]
+pub async fn set_live_summary_bookmarks(
+    app: AppHandle,
+    session_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut tx = begin_recording_bookmark_write(&app).await?;
+    let (recording_id, _, _) = crate::audio::recording_commands::bookmark_position(&session_id)?;
+    let query = if enabled {
+        "INSERT INTO recording_summary_bookmarks (recording_id) VALUES (?) ON CONFLICT (recording_id) DO NOTHING"
+    } else {
+        "DELETE FROM recording_summary_bookmarks WHERE recording_id = ?"
+    };
+    sqlx::query(query)
+        .bind(recording_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Could not save the summary preference.")?;
+    tx.commit()
+        .await
+        .map_err(|_| "Could not save the summary preference.")?;
+    Ok(())
+}
+
+async fn begin_recording_bookmark_write<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Transaction<'static, Sqlite>, String> {
+    // Take the reservation before reading capture state. A matching Stop
+    // saves through the same database and will attach this row at commit.
+    let state = app
+        .try_state::<AppState>()
+        .ok_or("The meeting library is unavailable.")?;
+    state
+        .db_manager
+        .pool()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| "Could not save changes to the meeting library.".into())
+}
+
+async fn save_live_bookmark<R: Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    label: &str,
+) -> Result<(), String> {
+    let mut tx = begin_recording_bookmark_write(app).await?;
+    let (recording_id, folder, seconds) =
+        crate::audio::recording_commands::bookmark_position(session_id)?;
+    validate_bookmark_time(seconds)?;
+    sqlx::query("INSERT INTO meeting_bookmarks (id, folder_path, seconds, label, recording_id) VALUES (?, ?, ?, ?, ?)")
+        .bind(uuid::Uuid::new_v4().to_string()).bind(folder).bind(seconds).bind(label).bind(recording_id)
+        .execute(&mut *tx).await.map_err(|_| "Could not save bookmark.")?;
+    tx.commit().await.map_err(|_| "Could not save bookmark.")?;
+    let _ = app.emit("library-changed", ());
+    Ok(())
+}
+
+pub(crate) async fn discard_recording_drafts(
+    pool: &SqlitePool,
+    recording_id: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    remove_pending_bookmarks(&mut tx, recording_id).await?;
+    sqlx::query("DELETE FROM recording_calendar_drafts WHERE recording_id = ?")
+        .bind(recording_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
+
+async fn remove_pending_bookmarks(
+    connection: &mut sqlx::SqliteConnection,
+    recording_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM meeting_bookmarks WHERE recording_id = ? AND meeting_id IS NULL")
+        .bind(recording_id)
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("DELETE FROM recording_summary_bookmarks WHERE recording_id = ?")
+        .bind(recording_id)
+        .execute(connection)
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn bookmark_active_recording<R: Runtime>(app: &AppHandle<R>) {
+    let Some(session_id) = crate::audio::recording_commands::active_bookmark_session() else {
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let saved = save_live_bookmark(&app, &session_id, "Review this").await.is_ok();
+        if !saved {
+            log::warn!("Could not save a recording bookmark");
+        }
+        let _ = app.emit("recording-bookmark-result", saved);
+    });
 }
 
 #[tauri::command]
@@ -438,7 +590,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO meeting_bookmarks VALUES ('mark', NULL, 'synthetic-folder', 12.5, 'Decision')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO meeting_bookmarks (id, meeting_id, folder_path, seconds, label) VALUES ('mark', NULL, 'synthetic-folder', 12.5, 'Decision')").execute(&pool).await.unwrap();
         attach_bookmarks(&pool).await.unwrap();
         let owner: String = sqlx::query_scalar("SELECT meeting_id FROM meeting_bookmarks")
             .fetch_one(&pool)
@@ -466,6 +618,63 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0);
         }
+    }
+
+    #[tokio::test]
+    async fn live_notes_follow_the_recording_id_through_rollback_and_recovery() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::raw_sql(
+            "UPDATE meetings SET folder_path = 'old-folder' WHERE id = 'review-test';
+             INSERT INTO meeting_bookmarks (id, folder_path, seconds, label, recording_id) VALUES
+             ('a', 'old-folder', 11.5, 'A note', 'recording-a'),
+             ('b', 'old-folder', 23.0, 'B note', 'recording-b');
+             INSERT INTO recording_summary_bookmarks (recording_id) VALUES ('recording-a');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        attach_bookmarks(&pool).await.unwrap();
+        let owners = || {
+            sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT id, meeting_id FROM meeting_bookmarks ORDER BY id",
+            )
+            .fetch_all(&pool)
+        };
+        let unattached = [
+            (String::from("a"), None::<String>),
+            (String::from("b"), None),
+        ];
+        assert_eq!(owners().await.unwrap(), unattached);
+
+        let insert = "INSERT INTO meetings (id, title, folder_path, created_at, updated_at)
+                      VALUES ('recording-a', 'Recovered meeting', 'moved-folder', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query(insert).execute(&mut *tx).await.unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(owners().await.unwrap(), unattached);
+
+        sqlx::query(insert).execute(&pool).await.unwrap();
+        let recovered = (String::from("a"), Some(String::from("recording-a")));
+        assert_eq!(
+            owners().await.unwrap(),
+            [recovered.clone(), (String::from("b"), None)]
+        );
+        let saved: (f64, String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT seconds, label, folder_path, recording_id FROM meeting_bookmarks WHERE id = 'a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(saved, (11.5, String::from("A note"), None, None));
+        let context = super::summary_bookmarks::append_context(&pool, "recording-a", String::new())
+            .await
+            .unwrap();
+        assert!(context.ends_with("- [00:00:11] A note"));
+        assert!(!context.contains("B note"));
+        discard_recording_drafts(&pool, "recording-b")
+            .await
+            .unwrap();
+        assert_eq!(owners().await.unwrap(), [recovered]);
     }
 
     #[tokio::test]
@@ -544,7 +753,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO meeting_bookmarks VALUES ('mark', NULL, 'synthetic-folder', 12.5, 'Review')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO meeting_bookmarks (id, meeting_id, folder_path, seconds, label) VALUES ('mark', NULL, 'synthetic-folder', 12.5, 'Review')").execute(&pool).await.unwrap();
         crate::database::repositories::meeting::MeetingsRepository::delete_meeting(
             &pool,
             "review-test",

@@ -2,16 +2,20 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
-import { createHookHarness, flush } from './hook-harness.mjs';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
+
+// The decisions and timing of call detection (when a call starts a recording,
+// when its end stops it, how long a prompt waits) are made by the core and
+// tested there. These tests cover what stays in the window: carrying out the
+// starts the core asks for without navigating, showing prompts and notices,
+// and keeping the core's settings in line.
 
 const path = name => fileURLToPath(new URL('../../src/' + name, import.meta.url));
-const call = { provider: 'googleMeet', window: '9-a', key: 'room-a' };
-const snapshot = (active = [], openWindows = [], ended = []) => ({ supported: true, complete: true, active, openWindows, ended });
 
 function setupWindow() {
   const entries = new Map();
   const target = new EventTarget();
-  target.localStorage = { getItem: key => entries.get(key) ?? null, setItem: (key,value) => entries.set(key,value) };
+  target.localStorage = { getItem: key => entries.get(key) ?? null, setItem: (key, value) => entries.set(key, value) };
   globalThis.window = target;
   return loadTsModule(path('lib/autoRecord.ts'));
 }
@@ -24,94 +28,203 @@ test('upgrades retain Teams-only consent and begin with automatic stopping off',
   assert.equal(prefs.getCallSettings().mode, 'prompt');
 });
 
-test('a hidden tab, incomplete snapshot or interrupted poll resets consecutive closure evidence', () => {
-  const { ObservedCalls } = setupWindow();
-  const seen = new ObservedCalls();
-  seen.remember(call);
-  for (const unknown of [snapshot([], [call.window]), { ...snapshot(), complete: false }, snapshot([call],[call.window])]) {
-    assert.equal(seen.update(snapshot()).length, 0);
-    assert.equal(seen.update(snapshot()).length, 0);
-    assert.equal(seen.update(unknown).length, 0);
-  }
-  seen.interrupted();
-  assert.equal(seen.update(snapshot()).length, 0);
-  assert.equal(seen.update(snapshot()).length, 0);
-  assert.equal(seen.update(snapshot([], [call.window], [call]))[0], call.key);
-});
-
-function poller(mode, autoStop, recording = false) {
+function app(options = {}) {
   const prefs = setupWindow();
-  const settings = { mode, providers: ['googleMeet'], autoStop };
-  prefs.setCallSettings(settings);
+  if (options.local) prefs.setCallSettings(options.local);
   const hooks = createHookHarness();
-  const state = { isRecording: recording, setStatus() {} };
-  const starts = [], stops = [], prompts = [];
-  let scan = snapshot([call], [call.window]), timer;
-  window.setTimeout = fn => { timer = fn; return 1; };
-  window.clearTimeout = () => {};
-  const toast = Object.assign((title, options) => { prompts.push(options); return prompts.length; }, {
-    dismiss() {}, success() {}, error() {},
+  const handlers = new Map();
+  const unlistened = [];
+  const state = { isRecording: false, isStarting: false, isStopping: false, isProcessing: false, isSaving: false, setStatus: (...args) => statuses.push(args), ...options.state };
+  const statuses = [], starts = [], answers = [], toasts = [], dismissed = [], confirmed = [], failures = [], corePushed = [];
+  const navigation = [];
+  // Navigation or a reload would go through these; the component must not touch them.
+  window.sessionStorage = { setItem: (...args) => navigation.push(['sessionStorage', ...args]) };
+  window.location = { assign: (...args) => navigation.push(['location', ...args]) };
+  const toast = Object.assign((title, details) => { toasts.push({ title, ...details }); return toasts.length; }, {
+    dismiss: id => dismissed.push(id), success: title => toasts.push({ title, tone: 'success' }), error: title => toasts.push({ title, tone: 'error' }),
   });
-  const { TeamsAutoRecord } = loadTsModule(path('components/TeamsAutoRecord.tsx'), {
-    react: hooks.react, sonner: { toast }, '@/lib/autoRecord': prefs,
-    '@/contexts/RecordingStateContext': { useRecordingState: () => state, RecordingStatus: {STARTING:'starting', ERROR:'error'} },
-    '@/hooks/useRecordingStart': { useStartRecordingSession: () => async source => {
-      starts.push(source); state.isRecording = true; return {sessionId:'synthetic-recorder-id'};
-    } },
-    '@/services/teamsDetectionService': { getCallDetectionStatus: async () => {
-      if (!scan) throw Error('poll failed'); return scan;
-    } },
-    '@/services/recordingService': { recordingService: {
-      getRecordingState: async () => ({ is_recording: state.isRecording }),
-      stopDetectedCall: async id => { stops.push(id); return true; },
-    } },
+  let coreSettings = options.core ?? null;
+  const { RecordingRequests } = loadTsModule(path('components/RecordingRequests.tsx'), {
+    react: hooks.react,
+    sonner: { toast },
+    '@tauri-apps/api/event': { listen: async (name, handler) => { handlers.set(name, handler); return () => unlistened.push(name); } },
+    '@/lib/autoRecord': prefs,
+    '@/contexts/RecordingStateContext': { useRecordingState: () => state, RecordingStatus: { ERROR: 'error' } },
+    '@/hooks/useRecordingStart': {
+      START_BUSY: 'recording_start_busy',
+      reportStartFailure: error => failures.push(error),
+      useStartRecordingSession: () => async (source, requestId) => {
+        starts.push([source, requestId]);
+        if (options.start) return options.start(source, requestId);
+        state.isRecording = true;
+        return 'synthetic-session';
+      },
+    },
+    '@/services/callDetectionService': {
+      getCoreCallSettings: async () => coreSettings,
+      setCoreCallSettings: async value => { corePushed.push(value); coreSettings = value; },
+      getPendingStartRequest: async () => options.pendingRequest ?? null,
+      getPendingCallPrompt: async () => options.pendingPrompt ?? null,
+      finishStartRequest: async (requestId, status) => { answers.push({ requestId, status }); return true; },
+      confirmCallPrompt: async key => { confirmed.push(key); },
+    },
   });
-  hooks.render(TeamsAutoRecord);
-  return { hooks, starts, stops, prompts, prefs, settings, state,
-    scan: value => { scan = value; }, tick: async value => { scan = value; await timer(); await flush(); } };
+  hooks.render(() => RecordingRequests({ ready: options.ready ?? true }));
+  return {
+    hooks, prefs, state, statuses, starts, answers, toasts, dismissed, confirmed, failures, corePushed, navigation,
+    emit: async (name, payload) => { await handlers.get(name)({ payload }); await flush(); },
+    has: name => handlers.has(name), unlistened,
+  };
 }
 
-test('only the detected recording is stopped after sustained confirmed absence', async () => {
-  const app = poller('auto', true);
+const request = (source, requestId = 'request-1', provider = null) => ({ requestId, source, provider });
+
+test('a start from the tray, a shortcut or the command line forwards each native request once', async () => {
+  const window_ = app();
   await flush();
-  assert.equal(app.starts.length, 1);
-  await app.tick(snapshot([], [call.window]));
-  await app.tick(snapshot());
-  await app.tick(null);
-  await app.tick(snapshot());
-  await app.tick(snapshot());
-  assert.deepEqual(app.stops, []);
-  await app.tick(snapshot());
-  assert.deepEqual(app.stops, ['synthetic-recorder-id']);
-  await app.tick(snapshot());
-  assert.equal(app.stops.length, 1);
-  app.hooks.unmount();
+  for (const source of ['tray', 'shortcut', 'cli']) {
+    window_.state.isRecording = false;
+    await window_.emit('recording-start-requested', request(source, `request-${source}`));
+  }
+  assert.deepEqual(window_.starts, ['tray', 'shortcut', 'cli'].map(source => ['remote_request', `request-${source}`]));
+  assert.deepEqual(window_.answers, [], 'native owns success once the request is claimed');
+  assert.deepEqual(window_.navigation, [], 'the page and its drafts stay where they are');
+  // A request the core repeats is not acted on twice.
+  window_.state.isRecording = false;
+  await window_.emit('recording-start-requested', request('tray', 'request-tray'));
+  assert.equal(window_.starts.length, 3);
+  window_.hooks.unmount();
 });
 
-test('a manual session or revoked auto-stop grant leaves the recorder running', async () => {
-  for (const manual of [true,false]) {
-    const app = poller('auto', true, manual);
+test('a start while another recording step is under way starts nothing and says so', async () => {
+  for (const busy of ['isRecording', 'isStarting', 'isStopping', 'isProcessing', 'isSaving']) {
+    const window_ = app({ state: { [busy]: true } });
     await flush();
-    if (!manual) app.prefs.setCallSettings({ ...app.settings, autoStop:false });
-    for (let i=0;i<4;i++) await app.tick(snapshot());
-    assert.deepEqual(app.stops, []);
-    if (manual) assert.equal(app.starts.length, 0);
-    app.hooks.unmount();
+    await window_.emit('recording-start-requested', request('tray'));
+    assert.deepEqual(window_.starts, [], busy);
+    assert.deepEqual(window_.answers.map(answer => answer.status), ['busy'], busy);
+    window_.hooks.unmount();
   }
 });
 
-test('stale prompts recheck call evidence and respect switching detection off', async () => {
-  const app = poller('prompt', false);
+test('a detected call passes its request ID for native validation', async () => {
+  const window_ = app();
   await flush();
-  const prompt = app.prompts[0];
-  app.scan(snapshot());
+  await window_.emit('recording-start-requested', request('call', 'request-call', 'teams'));
+  assert.deepEqual(window_.starts, [['detected_call', 'request-call']]);
+  assert.deepEqual(window_.answers, []);
+  window_.hooks.unmount();
+});
+
+test('an early failure is answered as retryable except a full disk', async () => {
+  const failing = app({ start: async () => { throw new Error('device missing'); } });
+  await flush();
+  await failing.emit('recording-start-requested', request('tray'));
+  assert.equal(failing.failures.length, 1);
+  assert.deepEqual(failing.answers.map(answer => answer.status), ['failed']);
+  failing.hooks.unmount();
+
+  const full = app({ start: async () => { throw 'Not enough free disk space to record. Free some space and try again.'; } });
+  await flush();
+  await full.emit('recording-start-requested', request('call', 'request-full', 'zoom'));
+  assert.deepEqual(full.answers.map(answer => answer.status), ['refused']);
+  full.hooks.unmount();
+});
+
+test('a desktop request during setup is refused and starts no capture', async () => {
+  const window_ = app({ ready: false, pendingRequest: request('call', 'setup-call', 'teams') });
+  await flush();
+  assert.deepEqual(window_.starts, []);
+  assert.deepEqual(window_.answers, [{ requestId: 'setup-call', status: 'refused' }]);
+  window_.hooks.unmount();
+});
+
+test('a call prompt asks first, goes through the core and goes away with the call', async () => {
+  const window_ = app();
+  await flush();
+  await window_.emit('call-detection-prompt', { key: 'room-a', provider: 'googleMeet', retry: false });
+  const prompt = window_.toasts.at(-1);
+  assert.equal(prompt.title, 'Google Meet call detected');
+  assert.equal(prompt.action.label, 'Record');
   prompt.action.onClick();
   await flush();
-  assert.equal(app.starts.length, 0);
-  app.scan(snapshot([call], [call.window]));
-  app.prefs.setCallSettings({ ...app.settings, mode:'off' });
+  assert.deepEqual(window_.confirmed, ['room-a']);
+  await window_.emit('call-detection-prompt-cleared');
+  assert.equal(window_.dismissed.length >= 1, true);
+  // An answer to a prompt that is no longer showing does nothing.
   prompt.action.onClick();
   await flush();
-  assert.equal(app.starts.length, 0);
-  app.hooks.unmount();
+  assert.deepEqual(window_.confirmed, ['room-a']);
+  window_.hooks.unmount();
+});
+
+test('a failed automatic start offers to try again', async () => {
+  const window_ = app();
+  await flush();
+  await window_.emit('call-detection-prompt', { key: 'room-a', provider: 'teams', retry: true });
+  const prompt = window_.toasts.at(-1);
+  assert.equal(prompt.title, 'Could not record the Microsoft Teams call');
+  assert.equal(prompt.action.label, 'Try again');
+  window_.hooks.unmount();
+});
+
+test('notices from the core say what happened to the call recording', async () => {
+  const window_ = app();
+  await flush();
+  await window_.emit('call-detection-notice', { kind: 'started', provider: 'webex', label: 'Webex' });
+  await window_.emit('call-detection-notice', { kind: 'stopped', provider: 'webex', label: 'Webex' });
+  await window_.emit('call-detection-notice', { kind: 'stop-failed', provider: 'webex', label: 'Webex' });
+  assert.deepEqual(window_.toasts.map(toast => toast.title), [
+    'Recording started for Webex',
+    'Call ended. Recording stopped.',
+    'Could not finish the call recording. ClawScribe will retry. You can also stop it manually.',
+  ]);
+  window_.hooks.unmount();
+});
+
+test('a request or prompt that arrived before the window listened is picked up', async () => {
+  const window_ = app({
+    pendingRequest: request('cli', 'early-request'),
+    pendingPrompt: { key: 'room-b', provider: 'zoom', retry: false },
+  });
+  await flush();
+  await flush();
+  assert.deepEqual(window_.starts, [['remote_request', 'early-request']]);
+  assert.equal(window_.toasts.at(-1).title, 'Zoom call detected');
+  window_.hooks.unmount();
+});
+
+test('the core keeps its own call settings and receives the saved ones the first time', async () => {
+  const saved = { mode: 'prompt', providers: ['teams', 'zoom'], autoStop: true };
+  const first = app({ local: saved });
+  await flush();
+  assert.equal(JSON.stringify(first.corePushed), JSON.stringify([saved]), 'the first time the saved settings are handed over');
+  first.hooks.unmount();
+
+  const core = { mode: 'auto', providers: ['googleMeet'], autoStop: false };
+  const second = app({ local: saved, core });
+  await flush();
+  assert.deepEqual(second.corePushed, [], 'the core keeps its own');
+  assert.deepEqual(JSON.parse(JSON.stringify(second.prefs.getCallSettings())), core);
+  second.hooks.unmount();
+
+  const same = app({ local: saved, core: saved });
+  await flush();
+  assert.deepEqual(same.corePushed, []);
+  same.hooks.unmount();
+});
+
+test('unmount removes the listeners while the claimed start remains native-owned', async () => {
+  const pending = deferred();
+  const window_ = app({ start: () => pending.promise });
+  await flush();
+  void window_.emit('recording-start-requested', request('tray', 'slow'));
+  await flush();
+  window_.hooks.unmount();
+  assert.ok(window_.unlistened.includes('recording-start-requested'));
+  assert.ok(window_.unlistened.includes('call-detection-prompt'));
+  assert.ok(window_.unlistened.includes('call-detection-notice'));
+  pending.resolve('synthetic-session');
+  await flush();
+  assert.deepEqual(window_.answers, []);
 });

@@ -14,8 +14,7 @@ pub mod worker;
 
 // Re-export commonly used types
 pub use engine::{
-    get_or_init_transcription_engine, get_or_init_whisper, validate_transcription_model_ready,
-    TranscriptionEngine,
+    get_or_init_transcription_engine, validate_transcription_model_ready, TranscriptionEngine,
 };
 pub use nemotron_provider::NemotronProvider;
 pub use parakeet_provider::ParakeetProvider;

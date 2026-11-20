@@ -1,9 +1,10 @@
-import React, { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useOnboarding } from '@/contexts/OnboardingContext';
+import { finishRecordingSetup } from '@/lib/onboarding-recording';
+import type { RecordingMode } from '@/contexts/RecordingStateContext';
 import {
   WelcomeStep,
   PermissionsStep,
-  DownloadProgressStep,
   SetupOverviewStep,
 } from './steps';
 
@@ -13,7 +14,12 @@ interface OnboardingFlowProps {
 
 export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
   const { currentStep } = useOnboarding();
-  const [isMac, setIsMac] = React.useState(false);
+  const [isMac, setIsMac] = useState(false);
+  const [permissionStep, setPermissionStep] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const finishingRef = useRef(false);
+  const choice = useRef<{ mode: RecordingMode; localNotesModel: string | null } | null>(null);
 
   useEffect(() => {
     // Check if running on macOS
@@ -31,18 +37,34 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
     checkPlatform();
   }, []);
 
-  // 4-Step Onboarding Flow (System-Recommended Models):
-  // Step 1: Welcome - Introduce ClawScribe features
-  // Step 2: Setup Overview - Database initialization + show recommended downloads
-  // Step 3: Download Progress - Download Parakeet + Summary Model (auto-selected based on platform/RAM)
-  // Step 4: Permissions - Request mic + system audio (macOS only)
+  const finish = async () => {
+    if (!choice.current || finishingRef.current) return;
+    finishingRef.current = true;
+    setFinishing(true);
+    setError(null);
+    try {
+      await finishRecordingSetup(choice.current.mode, choice.current.localNotesModel);
+      onComplete();
+    } catch {
+      setError('Could not finish setup. Try again.');
+    } finally {
+      finishingRef.current = false;
+      setFinishing(false);
+    }
+  };
+
+  const choose = (mode: RecordingMode, localNotesModel: string | null) => {
+    choice.current = { mode, localNotesModel };
+    if (isMac) setPermissionStep(true);
+    else void finish();
+  };
 
   return (
     <div className="onboarding-flow">
-      {currentStep === 1 && <WelcomeStep />}
-      {currentStep === 2 && <SetupOverviewStep />}
-      {currentStep === 3 && <DownloadProgressStep />}
-      {currentStep === 4 && isMac && <PermissionsStep />}
+      {currentStep === 1 && !permissionStep &&
+        <WelcomeStep onRecordAudio={() => choose('audio_only', null)} finishing={finishing} error={error} />}
+      {currentStep === 2 && !permissionStep && <SetupOverviewStep onChoose={choose} finishing={finishing} error={error} />}
+      {permissionStep && <PermissionsStep onFinish={finish} finishing={finishing} error={error} />}
     </div>
   );
 }

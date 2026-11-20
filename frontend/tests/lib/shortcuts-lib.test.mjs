@@ -18,10 +18,11 @@ test('shortcuts are shown as separate keycaps', () => {
   assert.deepEqual([...lib.keycaps('Ctrl+Digit1')], ['Ctrl', '1']);
 });
 
-test('duplicates and defaults are detected across all three actions', () => {
+test('duplicates and defaults include the recording bookmark shortcut', () => {
   const bindings = { ...lib.DEFAULT_BINDINGS };
   assert.equal(lib.duplicateAction(bindings, 'startStop', 'Ctrl+Shift+F10'), 'pauseResume');
   assert.equal(lib.duplicateAction(bindings, 'startStop', 'Ctrl+Shift+F9'), null);
   assert.equal(lib.isDefaultBindings(bindings), true);
   assert.equal(lib.isDefaultBindings({ ...bindings, toggleWindow: 'Ctrl+Alt+KeyH' }), false);
+  assert.equal(lib.duplicateAction(bindings, 'startStop', 'Ctrl+Shift+F8'), 'bookmarkRecording');
 });

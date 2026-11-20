@@ -100,7 +100,6 @@ export const LEGACY_MEETING_CALENDAR_PREFIX = "clawscribe.meetingCalendar.";
 export const PENDING_CALENDAR_CHANGED = "clawscribe-pending-calendar-changed";
 export const ACTIVE_CALENDAR_CHANGED = "clawscribe-active-calendar-changed";
 const PENDING_KEY = "clawscribe.pendingCalendar";
-const ACTIVE_KEY = "clawscribe.recordingCalendar";
 const SKIP_VALUE = '"skip"';
 
 type LegacyLink = Omit<MeetingCalendarLink, "source" | "attendees"> & {
@@ -172,32 +171,35 @@ export function clearPendingCalendar(): void {
 }
 
 export interface RecordingCalendar extends OngoingCalendarMatch {
+  sessionId: string;
+  startedAt?: number;
+  revision: number;
   link: MeetingCalendarLink | null;
-  fallbackTitle: string;
 }
 
-let activeRecording: RecordingCalendar | null | undefined;
+// Suggestions are transient. The choice and attendance live in the core.
+const activeRecordings = new Map<string, RecordingCalendar>();
+const stoppedSessions = new Set<string>();
 
-export function getActiveRecordingCalendar(): RecordingCalendar | null {
-  if (activeRecording !== undefined) return activeRecording;
-  try {
-    const raw = sessionValue(ACTIVE_KEY);
-    return raw ? JSON.parse(raw) as RecordingCalendar : null;
-  } catch { return null; }
+export function getActiveRecordingCalendar(sessionId: string): RecordingCalendar | null {
+  return activeRecordings.get(sessionId) ?? null;
 }
 
-export function setActiveRecordingCalendar(active: RecordingCalendar | null) {
-  activeRecording = active;
-  try {
-    if (active) window.sessionStorage.setItem(ACTIVE_KEY, JSON.stringify(active));
-    else window.sessionStorage.removeItem(ACTIVE_KEY);
-  } catch { /* The current session still has the in-memory snapshot. */ }
+export function setActiveRecordingCalendar(active: RecordingCalendar): boolean {
+  if (stoppedSessions.has(active.sessionId)) return false;
+  activeRecordings.set(active.sessionId, active);
   window.dispatchEvent(new Event(ACTIVE_CALENDAR_CHANGED));
+  return true;
 }
 
-export function beginRecordingCalendar(active: RecordingCalendar, choice: ReturnType<typeof getNextCalendarChoice>) {
-  setActiveRecordingCalendar(active);
-  // A choice changed during lookup or startup belongs to the next recording.
+export function clearActiveRecordingCalendar(sessionId: string): void {
+  stoppedSessions.add(sessionId);
+  if (stoppedSessions.size > 32) stoppedSessions.delete(stoppedSessions.values().next().value!);
+  if (activeRecordings.delete(sessionId)) window.dispatchEvent(new Event(ACTIVE_CALENDAR_CHANGED));
+}
+
+export function consumeNextCalendarChoice(choice: ReturnType<typeof getNextCalendarChoice>): void {
+  // A choice changed during startup belongs to the next recording.
   if (selectionVersion === choice.version && (choice.link || choice.skip)) clearPendingCalendar();
 }
 
@@ -211,14 +213,14 @@ export function clearMicrosoftCalendarLinks(): void {
   microsoftCalendarRevision++;
   const pending = getPendingCalendar();
   if (pending?.source === "microsoft" && !isReviewedCalendar(pending)) clearPendingCalendar();
-  const active = getActiveRecordingCalendar();
-  if (active && (active.link?.source === "microsoft" || active.matches.some(link => link.source === "microsoft"))) {
-    const drop = active.link?.source === "microsoft" && !isReviewedCalendar(active.link);
-    setActiveRecordingCalendar({
-      ...active,
-      link: drop ? null : active.link,
-      matches: active.matches.filter(link => link.source !== "microsoft"),
-    });
+  for (const active of activeRecordings.values()) {
+    if (active.link?.source === "microsoft" || active.matches.some(link => link.source === "microsoft")) {
+      setActiveRecordingCalendar({
+        ...active,
+        link: active.link?.source === "microsoft" && !isReviewedCalendar(active.link) ? null : active.link,
+        matches: active.matches.filter(link => link.source !== "microsoft"),
+      });
+    }
   }
   try {
     const store = window.localStorage;

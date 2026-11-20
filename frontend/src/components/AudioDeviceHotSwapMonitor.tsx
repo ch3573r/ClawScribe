@@ -1,152 +1,97 @@
 'use client';
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { toast } from 'sonner';
-import { recordingService, ReconnectionStatus } from '@/services/recordingService';
+import { recordingService, type ReconnectionStatus } from '@/services/recordingService';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 
-type DeviceType = 'Microphone' | 'SystemAudio';
-
-interface DisconnectedDevice {
-  name: string;
-  deviceType: DeviceType;
-}
-
-const HOT_SWAP_TOAST_ID = 'audio-device-hot-swap';
-
-function labelForDeviceType(deviceType: DeviceType): string {
-  return deviceType === 'Microphone' ? 'Microphone' : 'System audio';
-}
-
-function deviceFromStatus(status: ReconnectionStatus): DisconnectedDevice | null {
-  const device = status.disconnected_device;
-  if (!device) return null;
-  return {
-    name: device.name,
-    deviceType: device.device_type,
-  };
-}
+type Device = ReconnectionStatus['disconnected_devices'][number];
+const deviceTypes = ['Microphone', 'SystemAudio'] as const;
+const label = (type: Device['device_type']) => type === 'Microphone' ? 'Microphone' : 'System audio';
+const toastId = (type: Device['device_type']) => `audio-device-hot-swap-${type}`;
 
 export function AudioDeviceHotSwapMonitor() {
-  const { isRecording } = useRecordingState();
-  const reconnectingRef = useRef(false);
-  const activeDeviceRef = useRef<DisconnectedDevice | null>(null);
-  const retryReconnectRef = useRef<(device: DisconnectedDevice) => void>(() => {});
+  const { isRecording, sessionId } = useRecordingState();
+  useEffect(() => {
+    if (!isRecording || !sessionId) return;
+    let disposed = false;
+    let polling = false;
+    let reconnecting = false;
+    const visible = new Set<Device['device_type']>();
 
-  const showDisconnectedToast = useCallback((device: DisconnectedDevice) => {
-    activeDeviceRef.current = device;
-    toast.warning(`${labelForDeviceType(device.deviceType)} disconnected`, {
-      id: HOT_SWAP_TOAST_ID,
-      description: `${device.name} is not available. Recording stays open while ClawScribe waits for the device.`,
-      action: {
-        label: 'Retry',
-        onClick: () => {
-          retryReconnectRef.current(device);
-        },
-      },
-      duration: Infinity,
-    });
-  }, []);
-
-  const retryReconnect = useCallback(async (device: DisconnectedDevice) => {
-    if (reconnectingRef.current) return;
-    reconnectingRef.current = true;
-
-    toast.loading(`Reconnecting ${labelForDeviceType(device.deviceType).toLowerCase()}...`, {
-      id: HOT_SWAP_TOAST_ID,
-      description: device.name,
-      duration: Infinity,
-    });
-
-    try {
-      const connected = await recordingService.attemptDeviceReconnect(device.name, device.deviceType);
-      if (connected) {
-        activeDeviceRef.current = null;
-        toast.success(`${labelForDeviceType(device.deviceType)} reconnected`, {
-          id: HOT_SWAP_TOAST_ID,
-          description: device.name,
-          duration: 5000,
-        });
-      } else {
-        showDisconnectedToast(device);
-      }
-    } catch (error) {
-      toast.error(`Could not reconnect ${labelForDeviceType(device.deviceType).toLowerCase()}`, {
-        id: HOT_SWAP_TOAST_ID,
-        description: String(error),
-        action: {
-          label: 'Retry',
-          onClick: () => {
-            retryReconnectRef.current(device);
-          },
-        },
+    const showRetry = (device: Device, detail?: string) => {
+      visible.add(device.device_type);
+      toast.warning(`${label(device.device_type)} unavailable`, {
+        id: toastId(device.device_type),
+        description: detail ?? `${device.name} is missing from this recording. Try reconnecting.`,
+        action: { label: 'Retry', onClick: () => { void reconnect(device); } },
         duration: Infinity,
       });
-    } finally {
-      reconnectingRef.current = false;
-    }
-  }, [showDisconnectedToast]);
-
-  useEffect(() => {
-    retryReconnectRef.current = (device) => {
-      void retryReconnect(device);
     };
-  }, [retryReconnect]);
 
-  useEffect(() => {
-    if (!isRecording) {
-      activeDeviceRef.current = null;
-      reconnectingRef.current = false;
-      toast.dismiss(HOT_SWAP_TOAST_ID);
-      return;
-    }
-
-    let cancelled = false;
-
-    const poll = async () => {
-      if (cancelled) return;
-
+    const reconnect = async (device: Device) => {
+      if (disposed || reconnecting) return;
+      reconnecting = true;
+      toast.loading(`Reconnecting ${label(device.device_type).toLowerCase()}...`, {
+        id: toastId(device.device_type), description: device.name,
+      });
       try {
-        const event = await recordingService.pollAudioDeviceEvents();
-
-        if (event?.type === 'DeviceDisconnected') {
-          showDisconnectedToast({
-            name: event.device_name,
-            deviceType: event.device_type,
+        const result = await recordingService.attemptDeviceReconnect(device.name, device.device_type, sessionId);
+        if (disposed) return;
+        if (result.reconnected) {
+          visible.delete(device.device_type);
+          toast.success(`${label(device.device_type)} reconnected`, {
+            id: toastId(device.device_type), description: device.name,
           });
-          return;
-        }
-
-        if (event?.type === 'DeviceReconnected') {
-          const device = {
-            name: event.device_name,
-            deviceType: event.device_type,
-          };
-          activeDeviceRef.current = device;
-          await retryReconnect(device);
-          return;
-        }
-
-        const status = await recordingService.getReconnectionStatus();
-        const disconnectedDevice = deviceFromStatus(status);
-        if (disconnectedDevice && !activeDeviceRef.current) {
-          showDisconnectedToast(disconnectedDevice);
+        } else {
+          const active = device.device_type === 'SystemAudio' ? result.microphone_active : result.system_audio_active;
+          const other = device.device_type === 'SystemAudio' ? 'Microphone' : 'System audio';
+          showRetry(device, active ? `${other} capture continues. Retry the missing source.` : undefined);
         }
       } catch (error) {
-        console.warn('[AudioDeviceHotSwapMonitor] Poll failed:', error);
+        if (!disposed) showRetry(device, String(error));
+      } finally {
+        reconnecting = false;
+      }
+    };
+
+    const poll = async () => {
+      if (disposed || polling || reconnecting) return;
+      polling = true;
+      try {
+        const event = await recordingService.pollAudioDeviceEvents();
+        if (disposed) return;
+        const status = await recordingService.getReconnectionStatus();
+        if (disposed || status.is_reconnecting || reconnecting) return;
+        const pending = new Map(status.disconnected_devices.map(device => [device.device_type, device]));
+        for (const type of visible) {
+          if (!pending.has(type)) {
+            toast.dismiss(toastId(type));
+            visible.delete(type);
+          }
+        }
+        for (const device of pending.values()) {
+          if (!visible.has(device.device_type)) showRetry(device);
+        }
+        if (event?.type === 'DeviceReconnected') {
+          const device = pending.get(event.device_type);
+          if (device?.name === event.device_name) await reconnect(device);
+        }
+      } catch {
+        if (!disposed) console.warn('Could not check recording audio devices.');
+      } finally {
+        polling = false;
       }
     };
 
     void poll();
-    const intervalId = window.setInterval(() => {
-      void poll();
-    }, 1500);
-
+    const interval = window.setInterval(() => { void poll(); }, 1500);
     return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
+      disposed = true;
+      window.clearInterval(interval);
+      for (const type of deviceTypes) toast.dismiss(toastId(type));
     };
-  }, [isRecording, retryReconnect, showDisconnectedToast]);
+  }, [isRecording, sessionId]);
 
   return null;
 }

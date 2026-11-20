@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, type ReactNode } from "react";
+import { useConfig } from "@/contexts/ConfigContext";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -59,30 +59,11 @@ function DeviceRow({ id, title, defaultLabel, placeholder, emptyText, value, opt
 
 /** Microphone and system audio devices used for new recordings. */
 export function AudioDevicesCard({ selectedDevices, onDeviceChange, disabled = false, feed, meterPaused = false }: AudioDevicesCardProps) {
-  const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchDevices = useCallback(async () => {
-    try {
-      setError(null);
-      setDevices(await invoke<AudioDevice[]>("get_audio_devices"));
-    } catch (problem) {
-      console.error("Failed to fetch audio devices:", problem);
-      setError("Could not load audio devices. Check your system audio settings.");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => { void fetchDevices(); }, [fetchDevices]);
-
-  const reload = () => {
-    setRefreshing(true);
-    void fetchDevices();
-  };
+  const { audioDeviceInventory } = useConfig();
+  const { data, status, refresh: reload } = audioDeviceInventory;
+  useEffect(() => { void reload(); }, [reload]);
+  const devices = data?.devices ?? [];
+  const loading = status === "checking";
 
   const chooseMicrophone = (deviceName: string) => {
     onDeviceChange({ ...selectedDevices, micDevice: deviceName === "default" ? null : deviceName });
@@ -111,18 +92,18 @@ export function AudioDevicesCard({ selectedDevices, onDeviceChange, disabled = f
     <SettingsCard
       title="Audio devices"
       description="Used for new recordings"
-      aria-busy={loading || refreshing}
+      aria-busy={loading}
       actions={
-        <Button variant="ghost" size="icon" aria-label="Reload devices" title="Reload devices" disabled={loading || refreshing || disabled} onClick={reload}>
+        <Button variant="ghost" size="icon" aria-label="Recheck devices" title="Recheck devices" disabled={loading} onClick={reload}>
           <RefreshCw aria-hidden="true" />
         </Button>
       }
     >
       {loading ? (
         <SettingsRow title="Loading audio devices" />
-      ) : error ? (
-        <SettingsRow title="Audio devices unavailable" description={error}>
-          <Button variant="outline" size="sm" onClick={reload} disabled={refreshing}>Try again</Button>
+      ) : status === "error" ? (
+        <SettingsRow title="Audio devices unavailable" description="Could not check audio devices. Check the system sound settings and try again.">
+          <Button variant="outline" size="sm" onClick={reload} disabled={loading}>Try again</Button>
         </SettingsRow>
       ) : (
         <>

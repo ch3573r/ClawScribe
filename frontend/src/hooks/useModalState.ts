@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
+import type { LiveModelFailure } from '@/lib/start-error';
 
 export type ModalType =
   | 'modelSelector'
@@ -26,6 +27,8 @@ interface UseModalStateReturn {
   showModal: (name: ModalType, message?: string) => void;
   hideModal: (name: ModalType) => void;
   hideAllModals: () => void;
+  modelStartFailure: LiveModelFailure | null;
+  dismissModelStartFailure: () => void;
 }
 
 /**
@@ -38,6 +41,18 @@ interface UseModalStateReturn {
  * - Auto-close on model download completion
  */
 export function useModalState(transcriptModelConfig?: TranscriptModelProps): UseModalStateReturn {
+  const [modelStartFailure, setModelStartFailure] = useState<LiveModelFailure | null>(null);
+  useEffect(() => {
+    let active = true;
+    const subscription = listen<LiveModelFailure>('live-model-start-failed', ({ payload }) => {
+      if (active) setModelStartFailure(payload);
+    });
+    void subscription.catch(() => {});
+    return () => {
+      active = false;
+      void subscription.then(unlisten => unlisten()).catch(() => {});
+    };
+  }, []);
   // Modal visibility state
   const [modals, setModals] = useState<ModalState>({
     modelSelector: false,
@@ -183,5 +198,7 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
     showModal,
     hideModal,
     hideAllModals,
+    modelStartFailure,
+    dismissModelStartFailure: () => setModelStartFailure(null),
   };
 }

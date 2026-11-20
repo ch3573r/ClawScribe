@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import {
   ArrowRight,
@@ -10,9 +10,8 @@ import {
   FileText,
   Languages,
   Mic,
-  Radio,
   Settings2,
-  ShieldCheck,
+  RefreshCw,
   Sparkles,
   Upload,
   Volume2,
@@ -24,20 +23,23 @@ import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useConfig } from "@/contexts/ConfigContext";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
-import { useRecordingState } from "@/contexts/RecordingStateContext";
+import { RecordingStatus, useRecordingState } from "@/contexts/RecordingStateContext";
 import {
   getAudioDeviceDisplayName,
-  isExplicitAudioDevice,
+  audioSourceReadiness,
+  type AudioDevice,
 } from "@/lib/audioDevicePreferences";
+import type { useLiveTranscriptionReadiness } from "@/hooks/useLiveTranscriptionReadiness";
+import { LIVE_MODEL_FAILURE_MESSAGE, transcriptionSettingsPath } from "@/lib/start-error";
+import { useCloudTranscription } from "@/hooks/useCloudTranscription";
 
 interface HomeDashboardProps {
-  canRecord: boolean;
+  liveReadiness: ReturnType<typeof useLiveTranscriptionReadiness>;
   isRecording: boolean;
   isProcessingStop: boolean;
   isRecordingDisabled: boolean;
   meetingName?: string;
   onRecordingStart: () => void;
-  onRecordingStop: (callApi?: boolean) => void;
   onStopInitiated: () => void;
   onTranscriptionError: (message: string) => void;
 }
@@ -79,13 +81,12 @@ function formatMeetingDate(value?: string): string {
 }
 
 export function HomeDashboard({
-  canRecord,
+  liveReadiness,
   isRecording,
   isProcessingStop,
   isRecordingDisabled,
   meetingName,
   onRecordingStart,
-  onRecordingStop,
   onStopInitiated,
   onTranscriptionError,
 }: HomeDashboardProps) {
@@ -93,63 +94,89 @@ export function HomeDashboard({
   const {
     selectedDevices,
     selectedLanguage,
-    transcriptModelConfig,
+    audioDeviceInventory,
+    devicePreferencesStatus,
+    refreshDevicePreferences,
   } = useConfig();
   const { openImportDialog } = useImportDialog();
   const recordingState = useRecordingState();
   const router = useRouter();
 
   const recentMeetings = useMemo(() => meetings.slice(0, 5), [meetings]);
-  const micLabel = getAudioDeviceDisplayName(
-    selectedDevices.micDevice,
-    "System default microphone",
-  );
-  const systemLabel = getAudioDeviceDisplayName(
-    selectedDevices.systemDevice,
-    "System default output",
-  );
-  const providerLabel =
-    PROVIDER_LABELS[transcriptModelConfig.provider] ?? transcriptModelConfig.provider;
-  const languageLabel =
-    LANGUAGE_LABELS[selectedLanguage] ?? selectedLanguage.toUpperCase();
-  const isLocalTranscription = ["localWhisper", "parakeet", "nemotron"].includes(
-    transcriptModelConfig.provider,
-  );
-
+  const { enabled: hostedEnabled, loaded: hostedSettingLoaded } = useCloudTranscription();
+  const { data: inventory, status: inventoryStatus, refresh } = audioDeviceInventory;
+  useEffect(() => { void refresh(); }, [refresh]);
+  const checkingDevices = inventoryStatus === "checking" || devicePreferencesStatus === "loading";
+  const deviceCheckFailed = inventoryStatus === "error" || devicePreferencesStatus === "error";
+  const micReady = inventory && audioSourceReadiness(inventory, "Input", selectedDevices.micDevice);
+  const systemReady = inventory && audioSourceReadiness(inventory, "Output", selectedDevices.systemDevice);
+  const audioOnly = recordingState.recordingMode === "audio_only";
+  const modelIssue = audioOnly ? null : liveReadiness.data?.modelIssue;
+  const checkingModel = !audioOnly && !liveReadiness.data && !liveReadiness.error;
+  const modelCheckFailed = !audioOnly && liveReadiness.error;
+  const provider = liveReadiness.data?.provider;
+  const providerLabel = provider ? PROVIDER_LABELS[provider] : null;
+  const batch = liveReadiness.data?.hostedBatchProvider;
+  const languageLabel = LANGUAGE_LABELS[selectedLanguage] ?? selectedLanguage.toUpperCase();
+  const firstFailure = deviceCheckFailed ? "Could not check audio devices"
+    : checkingDevices ? "Checking audio devices"
+    : micReady === "preferred_unavailable" ? "Preferred microphone unavailable"
+    : micReady !== "available" ? "Default microphone unavailable"
+    : systemReady === "preferred_unavailable" ? "Preferred output unavailable"
+    : !recordingState.recordingMode ? "Choose a recording mode"
+    : checkingModel ? "Checking speech model"
+    : modelCheckFailed ? "Could not check speech model"
+    : modelIssue ? "Live transcription needs attention"
+    : null;
+  const micOnly = !deviceCheckFailed && !checkingDevices && micReady === "available" && systemReady === "default_unavailable";
+  const canStart = !firstFailure && !recordingState.isSavingMode;
   const appStatus = isRecording
     ? recordingState.isPaused
       ? { label: "Paused", dot: "bg-warning-foreground", ring: "ring-warning-foreground/20" }
       : { label: "Recording", dot: "bg-error-foreground", ring: "ring-error-foreground/20" }
-    : canRecord
-      ? { label: "Ready to record", dot: "bg-success-foreground", ring: "ring-success-foreground/20" }
-      : { label: "Microphone required", dot: "bg-warning-foreground", ring: "ring-warning-foreground/20" };
+    : firstFailure || micOnly || recordingState.status === RecordingStatus.ERROR
+      ? { label: firstFailure ?? (micOnly ? "Microphone only" : "Previous start failed"), dot: "bg-warning-foreground", ring: "ring-warning-foreground/20" }
+      : { label: "Ready to record", dot: "bg-success-foreground", ring: "ring-success-foreground/20" };
 
+  const deviceMeta = (type: AudioDevice["device_type"], preferred: string | null) => {
+    if (deviceCheckFailed) return "Could not check device";
+    if (checkingDevices || !inventory) return "Checking devices";
+    const result = audioSourceReadiness(inventory, type, preferred);
+    if (result === "preferred_unavailable") return "Preferred device unavailable";
+    if (result === "default_unavailable") return "No system default";
+    return preferred ? "Preferred device connected" : "Follows system default";
+  };
+
+  const openRecordingSettings = () => router.push("/settings?tab=recording");
+  const openTranscriptionSettings = () => router.push(transcriptionSettingsPath(provider));
   const signalSteps = [
     {
-      number: "01",
       icon: Mic,
       label: "Microphone",
-      value: micLabel,
-      meta: isExplicitAudioDevice(selectedDevices.micDevice) ? "Preferred device" : "Follows Windows default",
-      onClick: () => router.push("/settings?tab=recording"),
+      value: getAudioDeviceDisplayName(selectedDevices.micDevice, inventory?.defaultMicrophone ?? "System default microphone"),
+      meta: deviceMeta("Input", selectedDevices.micDevice),
+      onClick: openRecordingSettings,
     },
     {
-      number: "02",
       icon: Volume2,
-      label: "Meeting audio",
-      value: systemLabel,
-      meta: isExplicitAudioDevice(selectedDevices.systemDevice) ? "Preferred device" : "Follows Windows default",
-      onClick: () => router.push("/settings?tab=recording"),
+      label: "System audio",
+      value: getAudioDeviceDisplayName(selectedDevices.systemDevice, inventory?.defaultOutput ?? "System default output"),
+      meta: deviceMeta("Output", selectedDevices.systemDevice),
+      onClick: openRecordingSettings,
     },
     {
-      number: "03",
       icon: AudioLines,
-      label: "Transcription",
-      value: recordingState.recordingMode === 'audio_only' ? 'After recording' : providerLabel,
-      meta: recordingState.recordingMode === 'audio_only' ? 'Audio only · no speech model' : `${languageLabel} · ${isLocalTranscription ? "On-device" : "Hosted"}`,
-      onClick: () => router.push("/settings?tab=transcription"),
+      label: "Live transcription",
+      value: audioOnly ? "Off in audio-only mode" : providerLabel ?? (checkingModel ? "Checking engine" : "Engine unavailable"),
+      meta: audioOnly ? "Transcribe from the saved meeting" : providerLabel ? `${languageLabel} · On this device` : "On-device engine required",
+      onClick: openTranscriptionSettings,
     },
   ];
+
+  const recheckDevices = () => {
+    void refresh();
+    if (devicePreferencesStatus === "error") void refreshDevicePreferences();
+  };
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto bg-background text-foreground">
@@ -161,15 +188,15 @@ export function HomeDashboard({
               Capture workspace
             </div>
             <h1 className="text-3xl font-semibold tracking-[-0.03em] text-foreground md:text-4xl">
-              Everything ready for the next conversation.
+              Record a meeting
             </h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground md:text-base">
-              Check the signal path, start the recording, and keep the meeting in one place.
+              Check your audio devices and choose how to record.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-            <div className="inline-flex h-10 items-center gap-2.5 rounded-md border border-border bg-card px-3.5 text-sm text-muted-foreground shadow-sm">
+            <div role="status" className="inline-flex h-10 items-center gap-2.5 rounded-md border border-border bg-card px-3.5 text-sm text-muted-foreground shadow-sm">
               <span className={`h-2 w-2 rounded-full ring-4 ${appStatus.dot} ${appStatus.ring}`} />
               {appStatus.label}
             </div>
@@ -209,10 +236,6 @@ export function HomeDashboard({
                     Record this meeting
                   </h2>
                 </div>
-                <div className="hidden items-center gap-2 rounded-md border border-border bg-background/75 px-3 py-2 font-mono text-[11px] tracking-wider text-muted-foreground backdrop-blur-sm sm:flex">
-                  <Radio className="h-3.5 w-3.5 text-primary" />
-                  Microphone + system audio
-                </div>
               </div>
 
               <div className="flex flex-1 flex-col items-center justify-center py-10 text-center">
@@ -220,50 +243,49 @@ export function HomeDashboard({
                   <AudioLines className="h-6 w-6" />
                 </div>
                 <p className="max-w-md text-sm leading-6 text-muted-foreground">
-                  {canRecord
-                    ? "Capture your microphone and meeting audio together. Choose live transcription or save the audio to transcribe later."
-                    : "Grant microphone access before starting a capture."}
+                  {audioOnly ? "Audio is saved on this device for later transcription." : "Live speech recognition runs on this device."}
                 </p>
 
-                <div className="mt-7 rounded-lg border border-border bg-background/85 p-5 shadow-lg backdrop-blur-sm">
-                  {canRecord ? (
-                    <div className="space-y-4">
-                    <RecordingModeSelect />
-                    <RecordingControls
-                      variant="dashboard"
-                      isRecording={recordingState.isRecording}
-                      onRecordingStop={onRecordingStop}
-                      onRecordingStart={onRecordingStart}
-                      onTranscriptReceived={() => {}}
-                      onStopInitiated={onStopInitiated}
-                      onTranscriptionError={onTranscriptionError}
-                      isRecordingDisabled={isRecordingDisabled || recordingState.isSavingMode || recordingState.recordingMode === null}
-                      isParentProcessing={isProcessingStop}
-                      selectedDevices={selectedDevices}
-                      meetingName={meetingName}
-                    />
-                    </div>
-                  ) : (
-                    <div className="max-w-sm rounded-md border border-warning-border/30 bg-warning px-4 py-3 text-left text-sm text-warning-foreground">
-                      Microphone access is required before recording.
+                <div className="mt-7 space-y-4 rounded-lg border border-border bg-background/85 p-5 shadow-lg backdrop-blur-sm">
+                  <RecordingModeSelect />
+                  {micOnly && <p role="status" className="max-w-sm text-sm text-warning-foreground">No default output is available. Only your microphone will be recorded.</p>}
+                  {deviceCheckFailed && <p role="alert" className="max-w-sm text-sm text-destructive">Could not verify the audio devices or load their preferences. Recheck devices to try again.</p>}
+                  {(micReady === "preferred_unavailable" || micReady === "default_unavailable" || systemReady === "preferred_unavailable") &&
+                    <p role="status" className="max-w-sm text-sm text-warning-foreground">Reconnect the device or choose an available device in Recording settings.</p>}
+                  {modelIssue && <p role="status" className="max-w-sm text-sm text-warning-foreground">{LIVE_MODEL_FAILURE_MESSAGE[modelIssue]}</p>}
+                  {modelCheckFailed && <Button variant="outline" onClick={() => void liveReadiness.refresh()}>Recheck speech model</Button>}
+                  {(modelIssue || modelCheckFailed) && (
+                    <div className="flex flex-wrap justify-center gap-2">
+                      <Button variant="outline" onClick={openTranscriptionSettings}>Transcription settings</Button>
+                      <Button variant="outline" disabled={recordingState.isSavingMode}
+                        onClick={() => void recordingState.setRecordingMode("audio_only")}>Use audio-only mode</Button>
                     </div>
                   )}
+                  <RecordingControls
+                    variant="dashboard"
+                    isRecording={recordingState.isRecording}
+                    onRecordingStart={onRecordingStart}
+                    onTranscriptReceived={() => {}}
+                    onStopInitiated={onStopInitiated}
+                    onTranscriptionError={onTranscriptionError}
+                    isRecordingDisabled={isRecordingDisabled || !canStart}
+                    isParentProcessing={isProcessingStop}
+                    selectedDevices={selectedDevices}
+                    meetingName={meetingName}
+                  />
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4 text-xs text-muted-foreground">
-                <span className="inline-flex items-center gap-2">
-                  {isLocalTranscription ? (
-                    <ShieldCheck className="h-4 w-4 text-success-foreground" />
-                  ) : (
-                    <Radio className="h-4 w-4 text-primary" />
-                  )}
-                  {isLocalTranscription ? "Transcription stays on this device" : "Hosted transcription is selected"}
+                <span>
+                  {batch
+                    ? `${PROVIDER_LABELS[batch]} · Hosted file transcription${hostedSettingLoaded && !hostedEnabled ? " (off)" : ""}`
+                    : "Audio capture stays on this device"}
                 </span>
                 <Button
                   variant="ghost"
                   type="button"
-                  onClick={() => router.push("/settings?tab=recording")}
+                  onClick={openRecordingSettings}
                   className="h-auto whitespace-normal p-0 text-xs hover:bg-transparent inline-flex items-center gap-1.5 font-medium text-foreground transition-colors hover:text-primary"
                 >
                   Recording settings <ArrowRight className="!h-3.5 !w-3.5" />
@@ -282,27 +304,24 @@ export function HomeDashboard({
                   Signal path
                 </h2>
                 <p className="mt-1 text-sm leading-5 text-muted-foreground">
-                  Settings changes appear here immediately.
+                  Devices and engine for the next recording.
                 </p>
               </div>
               <Settings2 className="mt-1 h-5 w-5 text-primary" />
             </div>
 
-            <div className="relative mt-6 space-y-3 before:absolute before:bottom-7 before:left-[1.15rem] before:top-7 before:w-px before:bg-border">
+            <div className="mt-6 space-y-3">
               {signalSteps.map((step) => (
                 <Button
                   variant="ghost"
-                  key={step.number}
+                  key={step.label}
                   type="button"
                   onClick={step.onClick}
-                  className="h-auto whitespace-normal font-normal group relative grid w-full grid-cols-[2.3rem_minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border bg-background px-3 py-3.5 text-left transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-foreground"
+                  className="h-auto whitespace-normal font-normal group relative grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border bg-background px-3 py-3.5 text-left transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-foreground"
                 >
-                  <span className="relative z-10 flex h-9 w-9 items-center justify-center rounded-full border border-border bg-card font-mono text-[10px] text-muted-foreground group-hover:border-primary/40 group-hover:text-primary">
-                    {step.number}
-                  </span>
+                  <step.icon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
                   <span className="min-w-0">
                     <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <step.icon className="!h-3.5 !w-3.5" />
                       {step.label}
                     </span>
                     <span className="mt-1 block truncate text-sm font-medium text-foreground" title={step.value}>
@@ -317,14 +336,9 @@ export function HomeDashboard({
               ))}
             </div>
 
-            <Button
-              variant="ghost"
-              type="button"
-              onClick={() => router.push("/settings?tab=recording")}
-              className="h-auto whitespace-normal mt-5 inline-flex w-full items-center justify-center gap-2 rounded-md border border-border bg-muted px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-primary/40 hover:bg-primary/10 hover:text-foreground"
-            >
-              <Settings2 className="h-4 w-4 text-primary" />
-              Configure audio devices
+            <Button variant="outline" className="mt-5 w-full" onClick={recheckDevices} disabled={checkingDevices}>
+              <RefreshCw aria-hidden="true" />
+              Recheck devices
             </Button>
           </aside>
         </div>
@@ -410,7 +424,7 @@ export function HomeDashboard({
                 {
                   icon: Languages,
                   label: "Transcription setup",
-                  detail: `${providerLabel} · ${languageLabel}`,
+                  detail: "Speech engines and models",
                   onClick: () => router.push("/settings?tab=transcription"),
                 },
                 {

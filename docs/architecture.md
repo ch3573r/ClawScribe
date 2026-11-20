@@ -192,9 +192,14 @@ the available PCM spool in one pass with a duration-scaled deadline and recovers
 it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. Both paths accept a readable temporary tail at the next sequence
 position. Torn temporary writes record a gap without preventing spool cleanup;
 unreadable published chunks retain their originals. Playback uses scoped asset-protocol byte ranges and an HTML audio
-element. Periodic transcript snapshots continue during silence; the library-save
-command reads the backend snapshot when saving a finished recording, falling
-back to the UI transcript with a warning if that snapshot is unavailable. New
+element. A coalescing worker writes transcript snapshots during recording and
+silence. Transcript ingestion never waits for snapshot disk I/O. Native Stop
+commits its finalized transcript and outcome to SQLite before announcing the
+saved meeting. The recording ID in the original folder marker makes that handoff
+idempotent. Interrupted recordings can finish a handoff after a crash or a
+database error. The library records deleted recording IDs in the same transaction
+as deletion, so retained folders and stale recovery cache entries stay out of
+the recovery list. New
 capture creates no checkpoint folder or periodic AAC encodes. The legacy
 checkpoint reader and merge fallback remain available for older meetings. The
 recovery dialog probes raw chunks (including a readable temporary tail), recovered
@@ -223,9 +228,10 @@ The check uses the same preferred recovery file as playback/retranscription; a
 longer alternate file cannot authorize cleanup. Publishing a recovered format
 removes the superseded recovery format only after the new file is safely written. Frontend release requests require a canonical registered meeting
 folder; incomplete chunks retain their originals.
-Shared stop ownership suppresses duplicate completion
-events, and a SQLite write reservation protects the folder lookup and insert
-against concurrent saves.
+Shared stop ownership suppresses duplicate completion events. Quit waits on the
+same native Stop with a deadline. The webview associates its cleanup with the
+stopped recording ID. If a new recording starts, delayed work from the earlier
+Stop leaves the new session's state and navigation alone.
 `audio/outcome.rs` persists recording failures before the completion event;
 meeting/transcript/outcome database writes share a transaction. New schema is
 added through a migration; shipped migrations remain unchanged.
@@ -268,6 +274,45 @@ mode always enables the recording saver, omits VAD/model validation and the live
 recognition worker, and skips automatic summary/OpenClaw handoff. Capture and the
 retained audio spool use the existing paths. Later transcription uses the existing
 reviewed retranscription flow and its configured local/cloud preference.
+If model validation fails after capture opens and audio saving is enabled, the
+session continues in audio-only mode with its captured prefix. A failed capture
+source can be retried without reopening the other stream. The saved meeting
+retains a capture-gap warning even when the missing source reconnects.
+
+On first launch, **Record audio now** opens Home in audio-only mode without
+starting a download. Live transcription setup requires an available speech
+model. Local notes use a separate download action and save a local summary
+provider only after the chosen model is available. Completing setup with a
+model deferred does not mark it downloaded. Completed installations keep
+their existing mode and provider preferences.
+
+The core resolves the live engine for both recording startup and Home.
+Hosted file transcription uses a separate preference, and live recording
+uses Parakeet when a supported hosted provider is configured. Home checks
+model files before recording. Startup still validates that the engine can
+load and returns distinct failures for missing, downloading, unusable, and
+unsupported models. Home offers audio-only recording and routes to the
+appropriate engine settings.
+
+Calendar choices and attendance edits are staged by the native recording ID
+in the local library database. Automatic matching uses the capture request
+time and starts after native startup. The live session ID and an edit revision
+guard each update. Native Stop closes edit admission and saves the calendar,
+transcript, recording outcome, timestamped notes and note-sharing choice in one
+transaction. Interrupted recording recovery uses the same handoff. Existing IDs
+and library-local deletion records prevent duplicate registration.
+
+The core wakes automatic notes after a live recording's transaction commits
+and releases the recording job. Recovery can wake the same job after it
+registers or repairs the saved recording. The summary worker reads the
+committed calendar and notes under their existing review and consent rules.
+
+Home and Recording settings share one device inventory, refreshed on device
+change, window focus, and manual recheck. Home distinguishes unavailable
+preferred devices from an absent default system output, which permits
+microphone-only recording. Device preferences are published to the UI after
+the core saves them. Audio-only mode always saves audio and leaves the live
+audio-saving and source attribution preferences in place.
 
 `database/transcript_edits.rs` applies corrections with optimistic text checks in
 one transaction. The first recognized text is retained in `original_transcript`;
@@ -547,9 +592,16 @@ Live-transcript IndexedDB copies are removed after SQLite save and library
 deletion. Startup cleanup runs once from the root layout and removes only aged
 saved copies; unsaved recovery data never expires automatically.
 
-Startup removes unattached live bookmarks only when their recording folder is
-gone and no saved meeting owns that folder. Existing recovery folders and
-attached bookmarks are retained, and cleanup skips active recordings.
+Live bookmarks use the durable recording ID from the folder marker. The meeting
+insert attaches pending bookmarks in the same SQLite transaction. Legacy
+folder-based bookmarks still attach by path and are cleaned up at startup when
+the folder is gone. Per-meeting summary consent is stored in SQLite and included
+in library backups. The shared core summary context reads consent and notes in
+one query.
+Pending notes and consent for an unsaved recording are retained across missing
+or moved folders. Storage settings can explicitly remove the reviewed metadata
+for one recording ID. The library transaction rechecks the identity, pending
+state, and absence of a saved meeting before removing it.
 
 Restored recording outcomes retain whether recovery files were excluded from the
 archive. Those meetings direct recovery to the original computer; they do not

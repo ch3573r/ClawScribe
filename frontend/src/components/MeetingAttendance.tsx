@@ -14,6 +14,7 @@ import {
   ACTIVE_CALENDAR_CHANGED, getActiveRecordingCalendar, type MeetingCalendarLink,
   sameCalendarEvent, setActiveRecordingCalendar,
 } from "@/lib/meetingCalendar";
+import { readRecordingCalendar, writeRecordingCalendar } from "@/services/recordingCalendarService";
 import {
   getMeetingCalendar, setMeetingCalendar, MEETING_SERIES_TEMPLATE_CHANGED,
 } from "@/lib/meetingCalendarStore";
@@ -167,19 +168,43 @@ function AttendanceDialog({ link, options = [], label, onSave, disabled, childre
   );
 }
 
-export function RecordingCalendarReview({ disabled, onTitleChange }: {
+export function RecordingCalendarReview({ disabled, sessionId }: {
   disabled: boolean;
-  onTitleChange: (title: string) => void;
+  sessionId: string;
 }) {
-  const [active, setActive] = useState(getActiveRecordingCalendar);
+  const [active, setActive] = useState(() => getActiveRecordingCalendar(sessionId));
+  const [loadFailed, setLoadFailed] = useState(false);
   const [checking, setChecking] = useState(false);
   useEffect(() => {
-    const sync = () => setActive(getActiveRecordingCalendar());
+    let disposed = false;
+    const sync = () => {
+      setActive(getActiveRecordingCalendar(sessionId));
+      if (getActiveRecordingCalendar(sessionId)) setLoadFailed(false);
+    };
+    const hydrate = async (refresh = false) => {
+      const before = getActiveRecordingCalendar(sessionId);
+      if (before && !refresh) return;
+      try {
+        const draft = await readRecordingCalendar(sessionId);
+        if (disposed || getActiveRecordingCalendar(sessionId) !== before) return;
+        setActiveRecordingCalendar({ sessionId, status: "none", matches: [], ...before, ...draft });
+      } catch {
+        if (!disposed && !getActiveRecordingCalendar(sessionId)) setLoadFailed(true);
+      }
+    };
+    const signOut = () => { void hydrate(true); };
     window.addEventListener(ACTIVE_CALENDAR_CHANGED, sync);
+    window.addEventListener("clawscribe-microsoft-calendar-cleared", signOut);
     sync();
-    return () => window.removeEventListener(ACTIVE_CALENDAR_CHANGED, sync);
-  }, []);
-  if (!active || (!active.link && active.status === "none")) return null;
+    void hydrate();
+    return () => {
+      disposed = true;
+      window.removeEventListener(ACTIVE_CALENDAR_CHANGED, sync);
+      window.removeEventListener("clawscribe-microsoft-calendar-cleared", signOut);
+    };
+  }, [sessionId]);
+  if (loadFailed) return <p role="status" className="text-sm text-muted-foreground">Could not load this recording’s calendar.</p>;
+  if (!active || active.sessionId !== sessionId || (!active.link && active.status === "none")) return null;
   const status = active.link ? eventTitle(active.link)
     : active.status === "ambiguous" ? "Multiple ongoing calendar events"
     : active.status === "unavailable"
@@ -191,9 +216,9 @@ export function RecordingCalendarReview({ disabled, onTitleChange }: {
     if (checking || !active) return;
     setChecking(true);
     try {
-      const match = await findOngoingRecordingCalendar(Date.now());
+      const match = await findOngoingRecordingCalendar(active.startedAt ?? Date.now());
       // Ignore a result that arrives after the person or the recording changed the selection.
-      if (getActiveRecordingCalendar() === active) setActiveRecordingCalendar({ ...active, ...match, link: active.link });
+      if (getActiveRecordingCalendar(sessionId) === active) setActiveRecordingCalendar({ ...active, ...match, link: active.link });
     } catch { /* The status stays as it was. */ } finally {
       setChecking(false);
     }
@@ -210,9 +235,11 @@ export function RecordingCalendarReview({ disabled, onTitleChange }: {
         <AttendanceDialog link={active.link} options={active.matches}
           label={active.link ? "Review attendance" : "Choose event"} disabled={disabled}
           onSave={async link => {
-            if (getActiveRecordingCalendar() !== active) throw new Error("The recording calendar changed.");
-            setActiveRecordingCalendar({ ...active, link, ...(link ? {} : { status: "none", matches: [] }) });
-            onTitleChange(link?.subject?.trim() || active.fallbackTitle);
+            if (getActiveRecordingCalendar(sessionId) !== active) throw new Error("The recording calendar changed.");
+            const revision = await writeRecordingCalendar(sessionId, active.revision, link);
+            if (getActiveRecordingCalendar(sessionId) === active) {
+              setActiveRecordingCalendar({ ...active, link, revision, ...(link ? {} : { status: "none", matches: [] }) });
+            }
           }} />
       )}
     </div>

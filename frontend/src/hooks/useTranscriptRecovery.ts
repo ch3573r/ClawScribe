@@ -54,9 +54,22 @@ export async function fetchRecoveryCandidates(
     return isWithinRetention && isOldEnough;
   });
 
-  // Verify audio checkpoint availability for each meeting
+  let scan = EMPTY_DISK_SCAN;
+  let scanFailed = false;
+  try {
+    scan = readDiskScan(await invoke<unknown>('find_interrupted_recordings', {
+      cacheIds: recentMeetings.map(meeting => meeting.meetingId),
+    }));
+  } catch (error) {
+    console.warn('Could not look for interrupted recordings on disk:', error);
+    scanFailed = true;
+  }
+  const resolvedCacheIds = new Set(scan.resolvedCacheIds);
+  const pendingMeetings = recentMeetings.filter(meeting => !resolvedCacheIds.has(meeting.meetingId));
+
+  // Verify audio checkpoint availability for each pending meeting.
   const meetingsWithAudioStatus = await Promise.all(
-    recentMeetings.map(async (meeting) => {
+    pendingMeetings.map(async (meeting) => {
       if (meeting.folderPath) {
         try {
           const hasAudio = await invoke<boolean>('has_audio_checkpoints', {
@@ -80,14 +93,6 @@ export async function fetchRecoveryCandidates(
     })
   );
 
-  let scan = EMPTY_DISK_SCAN;
-  let scanFailed = false;
-  try {
-    scan = readDiskScan(await invoke<unknown>('find_interrupted_recordings'));
-  } catch (error) {
-    console.warn('Could not look for interrupted recordings on disk:', error);
-    scanFailed = true;
-  }
   const merged = mergeRecoveryCandidates(meetingsWithAudioStatus, scan.recordings);
   // A recording the user asked not to be asked about again is left out, and
   // counted, so Settings can still offer to show it.
@@ -250,7 +255,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       recording.folder,
       {
         audio_save_failed: audioRecoveryStatus?.status === 'failed',
-        transcription_incomplete: recording.hasTranscript,
+        transcription_incomplete: recording.hasTranscript && !recording.reasons.includes('library_handoff_pending'),
         capture_incomplete: audioRecoveryStatus?.status === 'partial',
       },
       // The core reads the transcript snapshot from the folder.
@@ -302,18 +307,8 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       const transcripts = await indexedDBService.getTranscripts(meetingId);
       transcripts.sort((a, b) => (a.sequenceId || 0) - (b.sequenceId || 0));
 
-      // 3. Check for folder path
-      let folderPath = metadata.folderPath;
-
-
-      if (!folderPath) {
-        // Try to get from backend (might exist if only app crashed, not system)
-        try {
-          folderPath = await invoke<string>('get_meeting_folder_path');
-        } catch (error) {
-          folderPath = undefined;
-        }
-      }
+      // Recovery only uses the folder recorded for this entry.
+      const folderPath = metadata.folderPath;
 
       // 4. Attempt audio recovery if folder path exists
       let audioRecoveryStatus: AudioRecoveryStatus | null = null;

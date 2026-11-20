@@ -30,6 +30,7 @@ import { setCloudTranscription } from "@/lib/cloudTranscription";
 import { useCloudTranscription } from "@/hooks/useCloudTranscription";
 import { useSourceAttribution } from "@/hooks/useSourceAttribution";
 import { TRANSCRIPTION_OPTIONS_ID } from "@/components/settings/transcriptionAnchors";
+import { useRecordingState } from "@/contexts/RecordingStateContext";
 
 
 const UNAPPLIED_MESSAGE = "Not active yet. It will apply when the current task finishes.";
@@ -122,9 +123,12 @@ export function TranscriptionOptions() {
 
   // Source attribution (Me / Participants), default off. It depends on saved audio.
   const sourceAttribution = useSourceAttribution();
-  const [audioSavingEnabled, setAudioSavingEnabled] = useState(true);
+  const { recordingMode } = useRecordingState();
+  const liveMode = recordingMode === "live";
+  const [audioSavingEnabled, setAudioSavingEnabled] = useState(false);
 
   useEffect(() => {
+    if (!liveMode) return;
     let cancelled = false;
 
     const syncAvailability = async () => {
@@ -141,9 +145,10 @@ export function TranscriptionOptions() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [liveMode]);
 
   const onToggleSourceAttribution = async (checked: boolean) => {
+    if (!liveMode || !audioSavingEnabled) return;
     setSourceError(null);
     try {
       const enabled = await setSourceAttribution(checked);
@@ -227,15 +232,16 @@ export function TranscriptionOptions() {
         title={<BetaTitle>Label lines as Me or Participants</BetaTitle>}
         description={<>
           Based on which source was louder. Still mislabels often
-          {!audioSavingEnabled && <Note>Turn on Save audio recordings in Recording first. This depends on saved audio and stays off without it.</Note>}
+          {!liveMode && <Note>Available in live transcription mode with audio saving enabled.</Note>}
+          {liveMode && !audioSavingEnabled && <Note>Turn on Save audio recordings in Recording first. This depends on saved audio and stays off without it.</Note>}
           {sourceError && <Note>{sourceError}</Note>}
         </>}
       >
         <Switch
           id="source-attribution"
-          checked={audioSavingEnabled && sourceAttribution}
+          checked={liveMode && audioSavingEnabled && sourceAttribution}
           onCheckedChange={onToggleSourceAttribution}
-          disabled={!audioSavingEnabled}
+          disabled={!liveMode || !audioSavingEnabled}
         />
       </SettingsRow>
 

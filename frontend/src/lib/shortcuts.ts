@@ -2,6 +2,7 @@ export interface ShortcutBindings {
   startStop: string;
   pauseResume: string;
   toggleWindow: string;
+  bookmarkRecording: string;
 }
 
 export type ShortcutAction = keyof ShortcutBindings;
@@ -10,12 +11,14 @@ export const SHORTCUT_ACTIONS: { key: ShortcutAction; label: string }[] = [
   { key: "startStop", label: "Start or stop recording" },
   { key: "pauseResume", label: "Pause or resume recording" },
   { key: "toggleWindow", label: "Show or hide ClawScribe" },
+  { key: "bookmarkRecording", label: "Bookmark this moment while recording" },
 ];
 
 export const DEFAULT_BINDINGS: ShortcutBindings = {
   startStop: "Ctrl+Shift+F9",
   pauseResume: "Ctrl+Shift+F10",
   toggleWindow: "Ctrl+Shift+F11",
+  bookmarkRecording: "Ctrl+Shift+F8",
 };
 
 // Combos Windows or common apps reserve. The OS will not let us own these.

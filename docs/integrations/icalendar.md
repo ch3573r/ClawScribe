@@ -15,16 +15,20 @@ credential storage.
 **Upcoming meetings** on Home shows the next five meetings across your
 configured calendars for the coming week. The Calendars page lists more
 occurrences. **Use for next recording** takes priority over automatic matching.
-Without a selection, ClawScribe links a single timed event in progress across
-enabled Microsoft 365 and iCalendar sources. Recording can start without a
-link if events overlap or a source is unavailable. Choose an available event
-during recording, unlink a wrong match, or use **Skip calendar for next
-recording** on Home.
+Without a selection, capture starts first. ClawScribe then looks for a single
+timed event that was in progress at the start across enabled Microsoft 365 and
+iCalendar sources. Choose an available event during recording if events overlap
+or a source is unavailable. You can unlink a wrong match or use **Skip calendar
+for next recording** on Home.
 
 Open **Review attendance** while recording or **Attendance** in the saved
 meeting. Invitees start unchecked. Automatic and manual summaries receive only
 calendar names you confirm by checking. Review during recording to include
 attendance in an automatic summary, or review after saving and regenerate.
+Active edits survive a window reload and are included when an interrupted
+recording is recovered in the same library. Saved links and attendance are
+included in library backups.
+
 Links and attendance are saved with the meeting and included in library backups.
 
 An event that ClawScribe links automatically is local convenience. It can name

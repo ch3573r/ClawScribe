@@ -10,26 +10,55 @@ pub enum Provider {
     GoogleMeet,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CallWindow {
-    provider: Provider,
-    window: String,
-    key: String,
+impl Provider {
+    /// Every provider in the order the settings list them.
+    pub const ALL: [Provider; 4] = [
+        Provider::Teams,
+        Provider::Zoom,
+        Provider::Webex,
+        Provider::GoogleMeet,
+    ];
+
+    /// The name shown to the user.
+    pub fn label(self) -> &'static str {
+        match self {
+            Provider::Teams => "Microsoft Teams",
+            Provider::Zoom => "Zoom",
+            Provider::Webex => "Webex",
+            Provider::GoogleMeet => "Google Meet",
+        }
+    }
 }
 
-#[derive(Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallWindow {
+    pub(crate) provider: Provider,
+    pub(crate) window: String,
+    pub(crate) key: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallScan {
-    supported: bool,
-    complete: bool,
-    active: Vec<CallWindow>,
-    ended: Vec<CallWindow>,
-    open_windows: Vec<String>,
+    pub(crate) supported: bool,
+    pub(crate) complete: bool,
+    pub(crate) active: Vec<CallWindow>,
+    pub(crate) ended: Vec<CallWindow>,
+    pub(crate) open_windows: Vec<String>,
 }
 
 #[tauri::command]
 pub async fn get_call_detection_status(
+    providers: Vec<Provider>,
+    watched: Vec<String>,
+) -> Result<CallScan, String> {
+    scan(providers, watched).await
+}
+
+/// One scan of the selected providers, run off the async workers. Shared by the
+/// settings check and the core's call monitor.
+pub(crate) async fn scan(
     providers: Vec<Provider>,
     watched: Vec<String>,
 ) -> Result<CallScan, String> {

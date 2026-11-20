@@ -22,11 +22,23 @@ App updates, other interface languages, full-screen browser modes, or hidden
 toolbars can prevent a match. The check reports provider names. It does not
 save browser addresses or inspect the values of web forms.
 
-While detection is enabled, ClawScribe polls about every 12 seconds. It
-requires a single identified call before starting a recording and checks the
-evidence again when you act on a prompt. Recording uses the selected audio
-devices, recording mode and pending calendar title. A calendar selection is
-optional. Detection requires no Microsoft sign-in.
+While detection is enabled, ClawScribe checks about every 12 seconds. The
+checks run in the application core, not in the window, so they keep their
+schedule while the window is hidden in the tray. It requires a single
+identified call before starting a recording and checks the evidence again when
+you act on a prompt. Recording uses the selected audio devices, recording mode
+and pending calendar title. A calendar selection is optional. Detection
+requires no Microsoft sign-in.
+
+With **Prompt me to record**, the question appears in the window and, while it
+is waiting, as **Record this ... call** in the tray menu, so it can be answered
+without opening the window. It stays until the call ends, you answer, or you
+change the detection settings. If an automatic start fails, the same prompt
+returns as **Try again**, except for a full disk, where trying again cannot
+help.
+
+The settings are kept by the core as well as the window. The first time, the
+ones saved by earlier versions are handed to the core, which then keeps its own.
 
 ## When the call ends
 
@@ -48,10 +60,14 @@ automatic stopping for the current recording.
 
 `get_call_detection_status` checks the selected providers off the UI thread.
 It returns opaque call/window identifiers, in-call and ended observations,
-and whether the scan completed. The poller binds a detected start to the
-session ID returned by that start. The recorder checks both the detector
-ownership and the ID under its stop guard before stopping capture. The
-usual post-processing listener saves the stopped meeting on any page.
+and whether the scan completed. The core's monitor
+(`teams_detection/monitor.rs`) uses the same scan, decides, and counts three
+completed checks before a call is over. The window carries out the start,
+because it knows the chosen devices and the calendar title, and reports the
+session ID it got. The monitor binds the detected start to that session ID and
+stops it itself when the call ends. The recorder checks both the detector
+ownership and the ID under its stop guard before stopping capture. The usual
+post-processing listener saves the stopped meeting on any page.
 
 **Settings → Diagnostics → Teams detection status** remains available for
 troubleshooting Teams window-title and process signals. Its compatibility
@@ -62,7 +78,8 @@ commands are `get_teams_detection_config` and `get_teams_detection_status`.
 
 On the designated self-hosted machine, try a pre-join screen and an active call
 for each selected provider. Check that prompt and automatic modes record once,
-including from another ClawScribe page. Check that switching browser tabs,
+including from another ClawScribe page and with the window closed to the tray.
+In prompt mode, answer once from the tray menu and once from the window. Check that switching browser tabs,
 locking the desktop, and hiding call controls keep capture running. Leave
 the call with automatic stopping on, then verify the saved microphone and
 system audio, transcript, and a second recording. Repeat with a manually

@@ -19,6 +19,14 @@ impl RecordingMode {
     }
 }
 
+/// Old recording markers predate the mode field and only supported live capture.
+pub(crate) fn marker_transcribes(marker: &serde_json::Value) -> bool {
+    match marker.get("recording_mode") {
+        None => true,
+        Some(value) => value.as_str() == Some("live"),
+    }
+}
+
 pub fn load<R: Runtime>(app: &AppHandle<R>) -> Result<RecordingMode, String> {
     let store = app
         .store("recording_mode.json")
@@ -69,6 +77,14 @@ pub async fn set_recording_mode<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_live_and_legacy_recordings_can_wake_recovered_summaries() {
+        assert!(marker_transcribes(&serde_json::json!({})));
+        assert!(marker_transcribes(&serde_json::json!({"recording_mode": "live"})));
+        assert!(!marker_transcribes(&serde_json::json!({"recording_mode": "audio_only"})));
+        assert!(!marker_transcribes(&serde_json::json!({"recording_mode": "unknown"})));
+    }
     #[test]
     fn audio_only_always_preserves_audio_and_never_transcribes() {
         assert!(!RecordingMode::AudioOnly.transcribes());

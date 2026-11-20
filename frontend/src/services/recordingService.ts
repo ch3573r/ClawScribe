@@ -7,6 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import type { MeetingCalendarLink } from '@/lib/meetingCalendar';
 
 export interface RecordingState {
   session_id?: string | null;
@@ -17,6 +18,15 @@ export interface RecordingState {
   is_active: boolean;
   recording_duration: number | null;
   active_duration: number | null;
+}
+
+interface RecordingStartedPayload {
+  session_id?: string | null;
+  recording_generation?: string | null;
+  recording_mode?: 'live' | 'audio_only';
+  recording_id?: string | null;
+  folder_path?: string | null;
+  meeting_name?: string | null;
 }
 
 export interface RecordingStoppedPayload {
@@ -30,6 +40,10 @@ export interface RecordingStoppedPayload {
   message: string;
   folder_path?: string;
   meeting_name?: string;
+  meeting_id?: string | null;
+  recording_id?: string | null;
+  transcript_count?: number;
+  library_save_failed?: boolean;
 }
 
 export type AudioDeviceEvent =
@@ -49,10 +63,16 @@ export type AudioDeviceEvent =
 
 export interface ReconnectionStatus {
   is_reconnecting: boolean;
-  disconnected_device?: {
+  disconnected_devices: {
     name: string;
     device_type: 'Microphone' | 'SystemAudio';
-  } | null;
+  }[];
+}
+
+export interface ReconnectResult {
+  reconnected: boolean;
+  microphone_active: boolean;
+  system_audio_active: boolean;
 }
 
 /**
@@ -95,24 +115,27 @@ export class RecordingService {
   /**
    * Start recording with device configuration and meeting name
    * @param micDeviceName - Microphone device name (null for default)
-   * @param systemDeviceName - System audio device name (null for none)
+   * @param systemDeviceName - System audio device name (null for default when available)
    * @param meetingName - Meeting name/title
-   * @returns Promise<void>
+   * @returns Native recording session ID
    */
   async startRecordingWithDevices(
     micDeviceName: string | null,
     systemDeviceName: string | null,
-    meetingName: string
-  ): Promise<void> {
+    meetingName: string,
+    calendarLink?: MeetingCalendarLink | null,
+    requestId?: string,
+    summaryLanguage?: string | null,
+  ): Promise<string> {
     return invoke('start_recording_with_devices_and_meeting', {
       micDeviceName,
       systemDeviceName,
-      meetingName
+      meetingName,
+      useDefaultMicrophone: true,
+      calendarLink,
+      requestId,
+      summaryLanguage,
     });
-  }
-
-  async startDetectedCall(micDeviceName: string | null, systemDeviceName: string | null, meetingName: string): Promise<string> {
-    return invoke('start_detected_call_recording', { micDeviceName, systemDeviceName, meetingName });
   }
 
   async stopDetectedCall(sessionId: string): Promise<boolean> {
@@ -154,10 +177,11 @@ export class RecordingService {
     return invoke<ReconnectionStatus>('get_reconnection_status');
   }
 
-  async attemptDeviceReconnect(deviceName: string, deviceType: 'Microphone' | 'SystemAudio'): Promise<boolean> {
-    return invoke<boolean>('attempt_device_reconnect', {
+  async attemptDeviceReconnect(deviceName: string, deviceType: 'Microphone' | 'SystemAudio', sessionId: string): Promise<ReconnectResult> {
+    return invoke<ReconnectResult>('attempt_device_reconnect', {
       deviceName,
       deviceType,
+      sessionId,
     });
   }
 
@@ -168,8 +192,9 @@ export class RecordingService {
    * @param callback - Function to call when recording starts
    * @returns Promise that resolves to unlisten function
    */
-  async onRecordingStarted(callback: (mode: 'live' | 'audio_only', sessionId?: string | null, generation?: string | null) => void): Promise<UnlistenFn> {
-    return listen<{recording_mode?: 'live' | 'audio_only'; session_id?: string | null; recording_generation?: string | null}>('recording-started', event => callback(event.payload.recording_mode ?? 'live', event.payload.session_id, event.payload.recording_generation));
+  async onRecordingStarted(callback: (mode: 'live' | 'audio_only', sessionId?: string | null, generation?: string | null, metadata?: RecordingStartedPayload) => void): Promise<UnlistenFn> {
+    return listen<RecordingStartedPayload>('recording-started', ({ payload }) =>
+      callback(payload.recording_mode ?? 'live', payload.session_id, payload.recording_generation, payload));
   }
 
   /**

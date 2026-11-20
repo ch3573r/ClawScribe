@@ -32,7 +32,7 @@ export function TranscriptPanel({
   assistance,
 }: TranscriptPanelProps) {
   // Contexts
-  const { transcripts, transcriptContainerRef, copyTranscript, setMeetingTitle } = useTranscripts();
+  const { transcripts, transcriptContainerRef, copyTranscript } = useTranscripts();
   const { selectedLanguage } = useConfig();
   const { isRecording, isPaused, status, sessionMode, sessionId } = useRecordingState();
   const { checkPermissions, isChecking, hasSystemAudio, hasMicrophone } = usePermissionCheck();
@@ -75,7 +75,7 @@ export function TranscriptPanel({
                 )}
               </ButtonGroup>
             </div>
-            {isRecording && <RecordingCalendarReview disabled={isStopping || isProcessingStop} onTitleChange={setMeetingTitle} />}
+            {isRecording && sessionId && <RecordingCalendarReview key={sessionId} sessionId={sessionId} disabled={isStopping || isProcessingStop} />}
             {isRecording && sessionMode === 'live' && sessionId && selectedLanguage === 'auto' && (
                 <LiveSourceLanguages key={sessionId} sessionId={sessionId} />
             )}

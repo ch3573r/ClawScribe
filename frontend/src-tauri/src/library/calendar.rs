@@ -53,6 +53,8 @@ pub struct CalendarLink {
     #[serde(default)]
     reviewed: bool,
     #[serde(default)]
+    reviewed: bool,
+    #[serde(default)]
     attendees: Vec<Attendee>,
 }
 
@@ -120,6 +122,22 @@ fn opaque_id(value: &str, max: usize) -> bool {
 }
 
 impl CalendarLink {
+    pub(crate) fn source(&self) -> CalendarSource {
+        self.source
+    }
+
+    pub(crate) fn subject(&self) -> Option<&str> {
+        self.subject.as_deref()
+    }
+
+    pub(crate) fn is_reviewed(&self) -> bool {
+        self.reviewed
+            || self
+                .attendees
+                .iter()
+                .any(|person| person.attendance != Attendance::Unreviewed)
+    }
+
     pub(crate) fn normalized(mut self) -> Result<Self, String> {
         if !opaque_id(&self.event_id, 2048) {
             return Err("The calendar event ID is invalid.".into());
@@ -423,18 +441,31 @@ pub(crate) async fn migrate_legacy(
 /// matched automatically came from the account and is cleared; its title then
 /// stays local because it may still be the invitation's subject.
 pub(crate) async fn clear_microsoft(pool: &SqlitePool) -> Result<(), String> {
-    sqlx::query(
-        "UPDATE meetings SET calendar_link = 'null'
-         WHERE json_extract(calendar_link, '$.source') = 'microsoft'
-           AND COALESCE(json_extract(calendar_link, '$.reviewed'), 0) = 0
-           AND NOT EXISTS (
-               SELECT 1 FROM json_each(calendar_link, '$.attendees')
-               WHERE CASE WHEN type = 'object' THEN json_extract(value, '$.attendance') END
-                     IN ('present', 'absent'))",
-    )
-    .execute(pool)
-    .await
-    .map_err(|_| "Could not clear Microsoft calendar links.".to_string())?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|_| "Could not clear Microsoft calendar links.".to_string())?;
+    // Invalid data in a saved record cannot block clearing other records.
+    const UNREVIEWED_MICROSOFT: &str = "CASE WHEN json_valid(calendar_link) THEN
+        json_extract(calendar_link, '$.source') = 'microsoft'
+        AND COALESCE(json_extract(calendar_link, '$.reviewed'), 0) = 0
+        AND NOT EXISTS (SELECT 1 FROM json_each(calendar_link, '$.attendees')
+            WHERE json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END, '$.attendance') IN ('present', 'absent'))
+        ELSE 0 END";
+    let saved = format!("UPDATE meetings SET calendar_link = 'null' WHERE {UNREVIEWED_MICROSOFT}");
+    sqlx::query(&saved)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| "Could not clear Microsoft calendar links.".to_string())?;
+    let active = format!("UPDATE recording_calendar_drafts SET calendar_link = 'null', revision = revision + 1 WHERE {UNREVIEWED_MICROSOFT}");
+    sqlx::query(&active)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| "Could not clear Microsoft calendar links.".to_string())?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| "Could not clear Microsoft calendar links.".to_string())?;
     Ok(())
 }
 

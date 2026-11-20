@@ -45,7 +45,7 @@ import { installTeamsDetectionDebugBridge } from '@/services/teamsDetectionServi
 import { useRouter } from 'next/navigation'
 import { ThemeInitializer } from '@/components/ThemeSettings'
 import { AppShortcuts } from '@/components/AppShortcuts'
-import { TeamsAutoRecord } from '@/components/TeamsAutoRecord'
+import { RecordingRequests } from '@/components/RecordingRequests'
 import { AudioDeviceHotSwapMonitor } from '@/components/AudioDeviceHotSwapMonitor'
 
 
@@ -131,8 +131,7 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   const router = useRouter()
-  const [showOnboarding, setShowOnboarding] = useState(false)
-  const [onboardingCompleted, setOnboardingCompleted] = useState(false)
+  const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null)
 
   useEffect(() => {
     const close = listen('summary-flush-on-close', () => { void flushMeetingDrafts().catch(() => {}); });
@@ -178,20 +177,12 @@ export default function RootLayout({
     invoke<{ completed: boolean } | null>('get_onboarding_status')
       .then((status) => {
         const isComplete = status?.completed ?? false
-        setOnboardingCompleted(isComplete)
-
-        if (!isComplete) {
-          console.log('[Layout] Onboarding not completed, showing onboarding flow')
-          setShowOnboarding(true)
-        } else {
-          console.log('[Layout] Onboarding completed, showing main app')
-        }
+        setShowOnboarding(!isComplete)
       })
       .catch((error) => {
         console.error('[Layout] Failed to check onboarding status:', error)
         // Default to showing onboarding if we can't check
         setShowOnboarding(true)
-        setOnboardingCompleted(false)
       })
   }, [])
 
@@ -203,27 +194,6 @@ export default function RootLayout({
       return () => document.removeEventListener('contextmenu', handleContextMenu);
     }
   }, []);
-  useEffect(() => {
-    // Listen for tray recording toggle request
-    const unlisten = listen('request-recording-toggle', () => {
-      console.log('[Layout] Received request-recording-toggle from tray');
-
-      if (showOnboarding) {
-        toast.error("Please complete setup first", {
-          description: "You need to finish onboarding before you can start recording."
-        });
-      } else {
-        // If in main app, forward to useRecordingStart via window event
-        console.log('[Layout] Forwarding to start-recording-from-sidebar');
-        window.dispatchEvent(new CustomEvent('start-recording-from-sidebar'));
-      }
-    });
-
-    return () => {
-      unlisten.then(fn => fn());
-    };
-  }, [showOnboarding]);
-
   // Surface non-fatal warnings raised by the recording pipeline.
   useEffect(() => {
     const unlisten = listen<string>('recording-warning', (event) => {
@@ -316,7 +286,7 @@ export default function RootLayout({
 
   // Listen for drag-drop events
   useEffect(() => {
-    if (showOnboarding) return; // Don't handle drops during onboarding
+    if (showOnboarding !== false) return;
 
     const unlisteners: UnlistenFn[] = [];
     const cleanedUpRef = { current: false };
@@ -381,8 +351,6 @@ export default function RootLayout({
 
   const handleOnboardingComplete = () => {
     console.log('[Layout] Onboarding completed, reloading app')
-    setShowOnboarding(false)
-    setOnboardingCompleted(true)
     // Optionally reload the window to ensure all state is fresh
     window.location.reload()
   }
@@ -409,20 +377,19 @@ export default function RootLayout({
                               {/* Download progress toast provider - listens for background downloads */}
                               <DownloadProgressToastProvider />
 
-                              {/* Auto-start recording when a Teams meeting is detected (opt-in) */}
-                              <TeamsAutoRecord />
+                              <RecordingRequests ready={showOnboarding === false} />
 
                               {/* Show onboarding or main app */}
                               {showOnboarding ? (
                                 <div className="pt-[var(--titlebar-height)]">
                                   <OnboardingFlow onComplete={handleOnboardingComplete} />
                                 </div>
-                              ) : (
+                              ) : showOnboarding === false ? (
                                 <div className="flex pt-[var(--titlebar-height)]">
                                   <Sidebar />
                                   <MainContent>{children}</MainContent>
                                 </div>
-                              )}
+                              ) : null}
                               {/* Import audio overlay and dialog */}
                               <ImportDropOverlay visible={showDropOverlay} />
                               <AppImportDialog

@@ -303,7 +303,7 @@ test('using notes as summary priorities is off by default and changes only with 
     assert.equal(ui.storage.get('meeting-1'), true);
     toggle = ui.render().find(node => node.type === 'switch');
     assert.equal(toggle.props.checked, true);
-    assert.match(text(ui.render().find(node => node.type === 'accordion-content' || node.type === 'AccordionContent')), /Sends these notes to the summary model.*Off by default/);
+    assert.match(text(ui.render().find(node => node.type === 'accordion-content' || node.type === 'AccordionContent')), /first 40 notes in timestamp order.*Off by default/);
     await toggle.props.onCheckedChange(false);
     assert.equal(ui.storage.get('meeting-1'), false);
     another.render(); await flush();

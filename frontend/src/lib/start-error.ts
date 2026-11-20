@@ -19,6 +19,32 @@ export function isDiskSpaceRefusal(error: unknown): boolean {
 
 export interface StartErrorDisplay { title: string; message: string }
 
+export type LiveModelFailure = 'missing' | 'downloading' | 'load_failed' | 'unsupported_provider';
+
+export function liveModelStartFailure(error: unknown): LiveModelFailure | null {
+  switch (startErrorText(error)) {
+    case 'live_model:missing': return 'missing';
+    case 'live_model:downloading': return 'downloading';
+    case 'live_model:load_failed': return 'load_failed';
+    case 'live_model:unsupported_provider': return 'unsupported_provider';
+    default: return null;
+  }
+}
+
+export const LIVE_MODEL_FAILURE_MESSAGE: Record<LiveModelFailure, string> = {
+  missing: 'Download a speech model in Transcription settings.',
+  downloading: 'The speech model is still downloading. Try again when it finishes.',
+  load_failed: 'ClawScribe could not load the speech model. Retry or choose another model in Transcription settings.',
+  unsupported_provider: 'Choose an on-device speech engine in Transcription settings.',
+};
+
+export function transcriptionSettingsPath(provider?: string | null): string {
+  const engine = provider === 'parakeet' || provider === 'localWhisper' || provider === 'nemotron'
+    ? `&engine=${provider}`
+    : '';
+  return `/settings?tab=transcription${engine}`;
+}
+
 /**
  * What the Start button's error panel says. A refused start for a full disk
  * carries its own complete explanation and is shown whole, ahead of the guesses

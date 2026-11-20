@@ -235,6 +235,7 @@ async fn snapshot_impl(
         .retain(|row| row.get("meeting_id").is_some_and(Value::is_string));
     for row in tables.get_mut("meeting_bookmarks").unwrap() {
         row.insert("folder_path".into(), Value::Null);
+        row.remove("recording_id");
     }
     Ok((
         Manifest {
@@ -1309,6 +1310,7 @@ async fn import_manifest_impl(
             }
             if *table == "meeting_bookmarks" {
                 row.insert("folder_path".into(), Value::Null);
+                row.remove("recording_id");
             }
             // Interrupted remote summary jobs cannot resume on the destination machine.
             if *table == "summary_processes"
@@ -1345,8 +1347,13 @@ async fn import_manifest_impl(
                     _ => return Err("Invalid archive field type.".into()),
                 }
             }
+            query.push(")");
+            if *table == "meeting_summary_bookmarks" {
+                // The meeting insert can already have transferred local consent
+                // from the same interrupted recording.
+                query.push(" ON CONFLICT (meeting_id) DO NOTHING");
+            }
             query
-                .push(")")
                 .build()
                 .execute(&mut *tx)
                 .await

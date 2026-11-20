@@ -1,11 +1,12 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { recordingService } from '@/services/recordingService';
+import { recordingService, type RecordingStoppedPayload } from '@/services/recordingService';
 import { knowledgeService } from '@/services/knowledgeService';
 import { recordingIdentity, compareGeneration, sameIdentity, type RecordingIdentity } from '@/lib/recording-identity';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { toast } from 'sonner';
 export type RecordingMode = 'live' | 'audio_only';
 
 /**
@@ -48,10 +49,11 @@ interface RecordingStateContextType extends RecordingState {
   recordingMode: RecordingMode | null;
   modeError: string | null;
   isSavingMode: boolean;
-  setRecordingMode: (mode: RecordingMode) => Promise<void>;
+  setRecordingMode: (mode: RecordingMode) => Promise<boolean>;
   // NEW: Setters for status management
   setStatus: (status: RecordingStatus, message?: string) => void;
   subscribeLifecycle: (callback: (status: RecordingStatus) => void) => () => void;
+  subscribeStopped: (callback: RecordingStoppedListener) => () => void;
   retryVerification: () => void;
 
   // Computed helpers (derived from status)
@@ -60,6 +62,8 @@ interface RecordingStateContextType extends RecordingState {
   isProcessing: boolean;
   isSaving: boolean;
 }
+
+type RecordingStoppedListener = (payload: RecordingStoppedPayload, isCurrent: () => boolean) => void;
 
 const RecordingStateContext = createContext<RecordingStateContextType | null>(null);
 
@@ -91,10 +95,10 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     return () => { active = false; void subscription.then(unlisten => unlisten()).catch(() => {}); };
   }, []);
   const setRecordingMode = useCallback(async (mode: RecordingMode) => {
-    if (modeSave.current) return;
+    if (modeSave.current) return false;
     modeSave.current = true; setIsSavingMode(true); setModeError(null);
-    try { await invoke('set_recording_mode', { mode }); modeVersion.current++; updateRecordingMode(mode); }
-    catch { setModeError('Could not save recording mode. Please retry.'); }
+    try { await invoke('set_recording_mode', { mode }); modeVersion.current++; updateRecordingMode(mode); return true; }
+    catch { setModeError('Could not save recording mode. Please retry.'); return false; }
     finally { modeSave.current = false; setIsSavingMode(false); }
   }, []);
   const [state, setState] = useState<RecordingState>({
@@ -111,6 +115,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
   });
 
   const lifecycleListeners = useRef(new Set<(status: RecordingStatus) => void>());
+  const stoppedListeners = useRef(new Set<RecordingStoppedListener>());
   const lifecycleStatus = useRef(RecordingStatus.IDLE);
   const lifecycleRevision = useRef(0);
   const retryStartWork = useRef<() => void>(() => {});
@@ -118,6 +123,10 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
   const subscribeLifecycle = useCallback((callback: (status: RecordingStatus) => void) => {
     lifecycleListeners.current.add(callback);
     return () => { lifecycleListeners.current.delete(callback); };
+  }, []);
+  const subscribeStopped = useCallback((callback: RecordingStoppedListener) => {
+    stoppedListeners.current.add(callback);
+    return () => { stoppedListeners.current.delete(callback); };
   }, []);
 
   const setStatus = useCallback((status: RecordingStatus, message?: string) => {
@@ -262,8 +271,6 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     void Promise.all([
       subscribe(recordingService.onRecordingStarted((mode, sessionId, generation) => {
         if (!active) return;
-        if ([RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING,
-          RecordingStatus.COMPLETED, RecordingStatus.ERROR].includes(lifecycleStatus.current)) return;
         const identity = recordingIdentity(sessionId, generation);
         if (!identity || (stoppedGeneration && compareGeneration(identity.generation, stoppedGeneration) <= 0)) return;
         if (lifecycleOwner) {
@@ -275,6 +282,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         // order. Only a canonical snapshot may promote the matching producer.
         const newProducer = !sameIdentity(lifecycleOwner, identity);
         lifecycleOwner = identity;
+        if (newProducer) lifecycleRevision.current++;
         revision++;
         retryStart = null;
         setState(prev => prev.verificationError === null && !newProducer ? prev : {
@@ -304,22 +312,22 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         queuedStart = null;
         retryStart = null;
         revision++;
-        lifecycleRevision.current++;
-        if (![RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING]
-          .includes(lifecycleStatus.current)) lifecycleStatus.current = RecordingStatus.STOPPING;
+        const stopRevision = ++lifecycleRevision.current;
+        const status = payload?.library_save_failed === undefined
+          ? RecordingStatus.STOPPING
+          : payload.library_save_failed ? RecordingStatus.ERROR : RecordingStatus.IDLE;
+        lifecycleStatus.current = status;
         stopPolling();
         lifecycleListeners.current.forEach(callback => callback(RecordingStatus.STOPPING));
-        setState(prev => {
-          const status = [RecordingStatus.STOPPING, RecordingStatus.PROCESSING_TRANSCRIPTS, RecordingStatus.SAVING]
-            .includes(prev.status) ? prev.status : RecordingStatus.STOPPING;
-          return {
+        setState(prev => ({
             ...prev, status,
-            statusMessage: status === RecordingStatus.STOPPING ? 'Stopping recording...' : prev.statusMessage,
+            statusMessage: payload?.library_save_failed ? payload.message : undefined,
             sessionId: null, isRecording: false, isPaused: false, isActive: false,
             recordingDuration: null, activeDuration: null,
             verificationError: null,
-          };
-        });
+        }));
+        if (payload) stoppedListeners.current.forEach(callback => callback(payload,
+          () => active && stopRevision === lifecycleRevision.current));
       })),
       subscribe(recordingService.onRecordingPaused(() => {
         if (!active) return;
@@ -343,15 +351,29 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
   }, []);
 
   // NEW: Computed helpers from status
+  useEffect(() => {
+    let active = true;
+    const subscription = listen<boolean>('recording-bookmark-result', ({ payload: saved }) => {
+      if (!active) return;
+      if (saved) toast.success('Bookmark saved');
+      else toast.error('Could not add bookmark. Check that the recording is still running.');
+    });
+    void subscription.catch(() => {});
+    return () => {
+      active = false;
+      void subscription.then(unlisten => unlisten()).catch(() => {});
+    };
+  }, []);
+
   const contextValue = useMemo(() => ({
     recordingMode, modeError, isSavingMode, setRecordingMode,
     ...state,
-    setStatus, subscribeLifecycle, retryVerification,
+    setStatus, subscribeLifecycle, subscribeStopped, retryVerification,
     isStarting: state.status === RecordingStatus.STARTING,
     isStopping: state.status === RecordingStatus.STOPPING,
     isProcessing: state.status === RecordingStatus.PROCESSING_TRANSCRIPTS,
     isSaving: state.status === RecordingStatus.SAVING,
-  }), [state, setStatus, subscribeLifecycle, retryVerification, recordingMode, modeError, isSavingMode, setRecordingMode]);
+  }), [state, setStatus, subscribeLifecycle, subscribeStopped, retryVerification, recordingMode, modeError, isSavingMode, setRecordingMode]);
 
   return (
     <RecordingStateContext.Provider value={contextValue}>

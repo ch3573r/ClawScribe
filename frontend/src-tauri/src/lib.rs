@@ -67,8 +67,10 @@ pub mod openai;
 pub mod openclaw;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod power;
 pub mod self_test;
 pub mod shortcuts;
+pub mod start_request;
 pub mod state;
 pub mod summary;
 pub mod teams_detection;
@@ -106,6 +108,9 @@ async fn start_recording<R: Runtime>(
 ) -> Result<(), String> {
     log_info!("Recording start requested");
 
+    if !tray::check_can_record(&app).await {
+        return Err("recording_setup_incomplete".into());
+    }
     if is_recording().await {
         return Err("Recording already in progress".to_string());
     }
@@ -394,6 +399,26 @@ async fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
         .map_err(|e| format!("Failed to list audio devices: {}", e))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingDeviceInventory {
+    devices: Vec<AudioDevice>,
+    default_microphone: Option<String>,
+    default_output: Option<String>,
+}
+
+#[tauri::command]
+async fn get_recording_device_inventory() -> Result<RecordingDeviceInventory, String> {
+    let devices = get_audio_devices().await?;
+    Ok(RecordingDeviceInventory {
+        devices,
+        default_microphone: audio::default_input_device().ok().map(|device| device.name),
+        default_output: audio::default_output_device()
+            .ok()
+            .map(|device| device.name),
+    })
+}
+
 #[tauri::command]
 async fn trigger_microphone_permission() -> Result<bool, String> {
     trigger_audio_permission()
@@ -406,22 +431,38 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
-) -> Result<(), String> {
-    start_named_session(app, mic_device_name, system_device_name, meeting_name)
-        .await
-        .map(drop)
-}
-
-#[tauri::command]
-async fn start_detected_call_recording<R: Runtime>(
-    app: AppHandle<R>,
-    mic_device_name: Option<String>,
-    system_device_name: Option<String>,
-    meeting_name: Option<String>,
+    use_default_microphone: Option<bool>,
+    calendar_link: Option<library::calendar::CalendarLink>,
+    summary_language: Option<String>,
+    request_id: Option<String>,
 ) -> Result<String, String> {
-    let id = start_named_session(app, mic_device_name, system_device_name, meeting_name).await?;
-    audio::recording_commands::mark_detected_call(&id);
-    Ok(id)
+    let request = request_id
+        .as_deref()
+        .map(start_request::claim)
+        .transpose()?;
+    let result = if !tray::check_can_record(&app).await {
+        Err("recording_setup_incomplete".into())
+    } else if let Err(error) = request.as_ref().map(|claim| claim.check_call()).transpose() {
+        Err(error)
+    } else {
+        start_named_session(
+            app,
+            mic_device_name,
+            system_device_name,
+            meeting_name,
+            audio::recording_commands::SelectedStart {
+                use_default_microphone: use_default_microphone.unwrap_or(false),
+                calendar_link,
+                summary_language,
+                request: request.as_ref(),
+            },
+        )
+        .await
+    };
+    if let Some(request) = request {
+        request.complete(&result);
+    }
+    result
 }
 
 async fn start_named_session<R: Runtime>(
@@ -429,6 +470,7 @@ async fn start_named_session<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
+    options: audio::recording_commands::SelectedStart<'_>,
 ) -> Result<String, String> {
     log_info!("Recording start requested");
 
@@ -436,23 +478,14 @@ async fn start_named_session<R: Runtime>(
     let meeting_name_for_notification = meeting_name.clone();
 
     // Call the recording module functions that support meeting names
-    let recording_result = match (mic_device_name.clone(), system_device_name.clone()) {
-        (None, None) => {
-            log_info!("Starting recording with default devices");
-            audio::recording_commands::start_recording_with_meeting_name(app.clone(), meeting_name)
-                .await
-        }
-        _ => {
-            log_info!("Starting recording with selected devices");
-            audio::recording_commands::start_recording_with_devices_and_meeting(
-                app.clone(),
-                mic_device_name,
-                system_device_name,
-                meeting_name,
-            )
-            .await
-        }
-    };
+    let recording_result = audio::recording_commands::start_selected_session(
+        app.clone(),
+        mic_device_name,
+        system_device_name,
+        meeting_name,
+        options,
+    )
+    .await;
 
     match recording_result {
         Ok(session_id) => {
@@ -648,9 +681,17 @@ pub fn run() {
             if let Err(e) = tray::create_tray(_app.handle()) {
                 log::error!("Failed to create system tray: {}", e);
             }
+            // Tray icon and tooltip follow the recorder, and the PC is kept
+            // awake only while audio is captured. Independent of the tray
+            // itself, so the power request works even without one.
+            tray::start_lifecycle(_app.handle());
 
             // Register global recording shortcuts (persisted or defaults).
             shortcuts::init_from_storage(_app.handle());
+
+            // Call detection runs here, on the core's own schedule, so a window
+            // hidden in the tray cannot slow it down.
+            teams_detection::monitor::spawn(_app.handle().clone());
 
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
@@ -776,9 +817,15 @@ pub fn run() {
             library::calendar::migrate_legacy_meeting_calendars,
             library::calendar::get_meeting_series_template,
             library::calendar::set_meeting_series_template,
+            library::recording_calendar::get_active_recording_calendar,
+            library::recording_calendar::set_active_recording_calendar,
             library::list_meeting_tags,
             library::set_meeting_tags,
             library::list_meeting_bookmarks,
+            library::list_live_recording_bookmarks,
+            library::set_live_summary_bookmarks,
+            library::pending_recording_notes::list_pending_recording_notes,
+            library::pending_recording_notes::delete_pending_recording_notes,
             library::add_meeting_bookmark,
             library::delete_meeting_bookmark,
             library::rename_meeting_bookmark,
@@ -843,8 +890,9 @@ pub fn run() {
             nemotron_engine::commands::nemotron_cancel_download,
             // Parallel processing commands
             get_audio_devices,
+            get_recording_device_inventory,
+            audio::transcription::engine::get_live_transcription_readiness,
             trigger_microphone_permission,
-            start_detected_call_recording,
             audio::recording_commands::stop_detected_call_recording,
             audio::transcription::worker::get_live_source_languages,
             start_recording_with_devices_and_meeting,
@@ -882,6 +930,12 @@ pub fn run() {
             teams_detection::get_teams_detection_config,
             teams_detection::get_teams_detection_status,
             teams_detection::calls::get_call_detection_status,
+            teams_detection::monitor::get_call_detection_settings,
+            teams_detection::monitor::set_call_detection_settings,
+            teams_detection::monitor::get_pending_call_prompt,
+            teams_detection::monitor::confirm_call_detection_prompt,
+            start_request::finish_recording_start,
+            start_request::get_pending_start_request,
             // Audio recovery commands (for transcript recovery feature)
             audio::incremental_saver::recover_audio_from_checkpoints,
             audio::incremental_saver::cleanup_checkpoints,
@@ -962,7 +1016,6 @@ pub fn run() {
             summary::commands::api_restore_previous_summary,
             summary::edit_exit::api_set_summary_edits_pending,
             summary::edit_exit::api_finish_summary_edit_exit,
-            exit_guard::recording_exit_save_finished,
             summary::edit_exit::api_summary_edit_exit_failed,
             summary::commands::api_get_meeting_summary_language,
             summary::commands::api_save_meeting_summary_language,
@@ -1145,6 +1198,7 @@ pub fn run() {
                 }
                 tauri::RunEvent::Exit => {
                     log::info!("Application exiting, cleaning up resources...");
+                    power::release();
                     tauri::async_runtime::block_on(async {
                         // Clean up database connection and checkpoint WAL
                         if let Some(app_state) = _app_handle.try_state::<state::AppState>() {

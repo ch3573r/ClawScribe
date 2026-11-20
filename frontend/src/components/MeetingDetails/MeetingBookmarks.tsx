@@ -12,13 +12,25 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { cn } from '@/lib/utils';
 import { bookmarkTime, MeetingBookmark } from '@/lib/library';
 
-export function LiveBookmarkButton({ disabled, className }: { disabled?: boolean; className?: string }) {
+interface LiveBookmarkProps {
+  sessionId: string | null;
+  disabled?: boolean;
+  className?: string;
+}
+
+const liveButtonClassName = "h-auto gap-0 rounded-none p-0 whitespace-normal text-[length:inherit] font-normal hover:bg-transparent hover:text-current";
+
+function saveLiveBookmark(sessionId: string, label: string) {
+  return invoke('add_meeting_bookmark', { meetingId: null, seconds: null, sessionId, label });
+}
+
+export function LiveBookmarkButton({ sessionId, disabled, className }: LiveBookmarkProps) {
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
-  return <Button variant="ghost" type="button" className={cn("h-auto gap-0 rounded-none p-0 whitespace-normal text-[length:inherit] font-normal hover:bg-transparent hover:text-current", className)} aria-label="Bookmark this moment" disabled={disabled || busy} onClick={async () => {
-    if (pending.current) return;
+  return <Button variant="ghost" type="button" className={cn(liveButtonClassName, className)} aria-label="Bookmark this moment" disabled={!sessionId || disabled || busy} onClick={async () => {
+    if (!sessionId || disabled || pending.current) return;
     pending.current = true; setBusy(true);
-    try { await invoke('add_meeting_bookmark', { meetingId: null, seconds: null, label: 'Review this' }); toast.success('Meeting bookmarked', { description: 'Rename it in the saved meeting.' }); }
+    try { await saveLiveBookmark(sessionId, 'Review this'); toast.success('Bookmark saved', { description: 'Rename it in the saved meeting.' }); }
     catch (error) { toast.error('Could not add bookmark', { description: String(error) }); }
     finally { pending.current = false; setBusy(false); }
   }}>{busy ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" /> : <BookmarkPlus size={16} />}</Button>;
@@ -120,7 +132,7 @@ export function MeetingBookmarks({ meetingId, currentTime, onSeek, addOpen = fal
     {!onSeek && <p className="mt-2 text-xs text-muted-foreground">Audio playback is unavailable for this meeting.</p>}
     <label className="mt-3 flex items-start gap-2 text-xs text-muted-foreground">
       <Switch aria-label="Use bookmarks as summary priorities" checked={usePriorities === true} disabled={busy || usePriorities === null} onCheckedChange={setSummaryPriorities} />
-      <span><span className="block font-medium text-foreground">Use as summary priorities</span>Sends these notes to the summary model for this meeting, including when summaries run automatically. Off by default.</span>
+      <span><span className="block font-medium text-foreground">Use as summary priorities</span>Sends the first 40 notes in timestamp order to the summary model, including for automatic summaries. Off by default.</span>
     </label>
     {prioritiesError && <p role="alert" className="mt-2 text-destructive">Could not load the summary preference. <Button variant="ghost" className="h-auto p-0 underline" onClick={() => setRevision(r => r + 1)}>Retry</Button></p>}
   </AccordionContent></AccordionItem></Accordion>}

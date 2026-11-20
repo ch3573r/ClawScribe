@@ -407,76 +407,79 @@ impl AudioStreamManager {
         system_device: Option<Arc<AudioDevice>>,
         recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
     ) -> Result<()> {
-        use super::capture::get_current_backend;
-        let backend = get_current_backend();
-        info!("🎙️ Starting audio streams with backend: {:?}", backend);
-
-        // Start microphone stream
-        if let Some(mic_device) = microphone_device {
-            info!(
-                "🎤 Creating microphone stream: {} (always uses CPAL)",
-                mic_device.name
-            );
-            match AudioStream::create(
-                mic_device.clone(),
-                self.state.clone(),
-                DeviceType::Microphone,
-                recording_sender.clone(),
-            )
-            .await
-            {
-                Ok(stream) => {
-                    self.state.set_microphone_device(mic_device);
-                    self.microphone_stream = Some(stream);
-                    info!("✅ Microphone stream created successfully");
-                }
-                Err(e) => {
-                    error!("❌ Failed to create microphone stream: {}", e);
-                    return Err(e);
-                }
-            }
-        } else {
-            info!("ℹ️ No microphone device specified, skipping microphone stream");
+        if let Some(device) = microphone_device {
+            self.start_source(device, DeviceType::Microphone, recording_sender.clone())
+                .await?;
         }
 
-        // Start system audio stream
-        if let Some(sys_device) = system_device {
-            info!(
-                "🔊 Creating system audio stream: {} (backend: {:?})",
-                sys_device.name, backend
-            );
-            match AudioStream::create(
-                sys_device.clone(),
-                self.state.clone(),
-                DeviceType::System,
-                recording_sender.clone(),
-            )
-            .await
+        if let Some(device) = system_device {
+            if self
+                .start_source(device.clone(), DeviceType::System, recording_sender)
+                .await
+                .is_err()
             {
-                Ok(stream) => {
-                    self.state.set_system_device(sys_device);
-                    self.system_stream = Some(stream);
-                    info!("✅ System audio stream created with {:?} backend", backend);
-                }
-                Err(e) => {
-                    warn!("⚠️ Failed to create system audio stream: {}", e);
-                    // Don't fail if only system audio fails — but tell the user,
-                    // since the recording will silently have no system audio.
-                    self.state.report_warning(
-                        "Couldn't capture system audio from the selected device. Some outputs (e.g. a digital/S-PDIF output) can't be captured — pick the output device your meeting audio actually plays through (Settings → audio device).",
-                    );
-                }
+                self.state.mark_source_missing(device, DeviceType::System);
+                self.state.report_warning(
+                    "Could not capture system audio from the selected output. Retry the connection or choose a different output for your next recording.",
+                );
             }
-        } else {
-            info!("ℹ️ No system device specified, skipping system audio stream");
         }
 
-        // Ensure at least one stream was created
-        if self.microphone_stream.is_none() && self.system_stream.is_none() {
+        if !self.has_active_streams() {
             return Err(anyhow::anyhow!("No audio streams could be created"));
         }
-
         Ok(())
+    }
+
+    async fn start_source(
+        &mut self,
+        device: Arc<AudioDevice>,
+        device_type: DeviceType,
+        sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+    ) -> Result<()> {
+        let stream = AudioStream::create(
+            device.clone(),
+            self.state.clone(),
+            device_type.clone(),
+            sender,
+        )
+        .await?;
+        match device_type {
+            DeviceType::Microphone => {
+                self.state.set_microphone_device(device);
+                self.microphone_stream = Some(stream);
+            }
+            DeviceType::System => {
+                self.state.set_system_device(device);
+                self.system_stream = Some(stream);
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace only the requested source. A failed open leaves the other
+    /// source's stream running and the requested source's slot empty.
+    pub async fn reconnect_source(
+        &mut self,
+        device: Arc<AudioDevice>,
+        device_type: DeviceType,
+    ) -> Result<()> {
+        let stream = match device_type {
+            DeviceType::Microphone => self.microphone_stream.take(),
+            DeviceType::System => self.system_stream.take(),
+        };
+        self.state.clear_active_device(&device_type);
+        if let Some(stream) = stream {
+            let _ = stream.stop();
+        }
+        self.start_source(device, device_type, None).await
+    }
+
+    pub fn source_active(&self, device_type: &DeviceType) -> bool {
+        match device_type {
+            DeviceType::Microphone => self.microphone_stream.is_some(),
+            DeviceType::System => self.system_stream.is_some(),
+        }
     }
 
     /// Stop all audio streams

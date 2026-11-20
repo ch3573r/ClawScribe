@@ -142,8 +142,8 @@ audio and recovery. A torn temporary tail records a gap without retaining the
 spool; unreadable published chunks and originals needed after a failed save
 are retained.
 
-Stopped duration and completion time are saved before the final encode; a crash
-during encoding leaves a stopped, unfinished meeting rather than an active recording.
+Stopped duration and completion time are saved before the final encode. A crash
+during encoding leaves a stopped, unfinished meeting available to recovery.
 Final audio is encoded once from available raw chunks, avoiding repeated AAC
 priming at checkpoint joins. Missing or unreadable chunks do not prevent saving
 the rest. The encode deadline scales with recording duration (one fifth of the
@@ -173,14 +173,15 @@ access rather than decoding the whole recording into webview memory.
 
 Stop has one shared owner across the app, tray and shortcut. Recording duration
 is frozen before transcription drain, and device-error limits apply to a recent
-30-second window. Transcript snapshots flush every 15 seconds even during silence
-and once more before audio finalization. Library saving uses that backend snapshot
-and continues if the optional transcription status refresh fails. An unavailable
-or invalid snapshot falls back to the UI transcript with a visible review warning.
+30-second window. A background worker writes transcript snapshots during silence
+and once more before audio finalization. The core saves the finalized transcript
+and outcome directly to the library. If the library write fails after the files
+are saved, open **Interrupted recordings** to finish saving the meeting.
 Transcript, audio and metadata writes each get an independent attempt; failures
-are reported together. The app-wide post-processing guard and transactional folder
-lookup prevent concurrent or delayed stop callbacks from creating duplicate
-library entries. Failed starts
+are reported together. Each recording has a stable library ID. Retries reuse it,
+and library deletion leaves retained recording files out of recovery. A failed
+microphone or system-audio stream can be retried while the other source keeps
+recording. The capture-gap warning stays with the saved meeting. Failed starts
 stop their background workers; empty owned folders are removed, while possible
 recovery data is retained with an error status.
 

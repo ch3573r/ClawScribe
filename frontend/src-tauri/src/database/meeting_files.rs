@@ -107,13 +107,19 @@ pub(crate) fn has_app_marker(folder: &Path, meeting_id: Option<&str>) -> bool {
     let Some(marker) = read_marker(folder) else {
         return false;
     };
-    match (marker.get("meeting_id").and_then(|value| value.as_str()), meeting_id) {
-        (Some(written), Some(expected)) => written == expected,
-        (Some(_), None) | (None, _) => true,
-    }
+    meeting_id.is_none_or(|expected| {
+        if let Some(written) = marker.get("meeting_id").filter(|value| !value.is_null()) {
+            return written.as_str() == Some(expected);
+        }
+        marker
+            .get("recording_id")
+            .filter(|value| !value.is_null())
+            .is_none()
+            || recording_id(&marker) == Some(expected)
+    })
 }
 
-fn read_marker(folder: &Path) -> Option<serde_json::Value> {
+pub(crate) fn read_marker(folder: &Path) -> Option<serde_json::Value> {
     let path = folder.join("metadata.json");
     let metadata = std::fs::symlink_metadata(&path).ok()?;
     if !metadata.is_file() || is_link(&metadata) || metadata.len() > MAX_MARKER_BYTES {
@@ -124,23 +130,45 @@ fn read_marker(folder: &Path) -> Option<serde_json::Value> {
     (text("version") && text("transcript_file")).then_some(value)
 }
 
+/// The stable meeting ID assigned before audio capture starts.
+pub(crate) fn recording_id(marker: &serde_json::Value) -> Option<&str> {
+    marker_id(marker, "recording_id")
+}
+
+pub(crate) fn stamped_meeting_id(marker: &serde_json::Value) -> Option<&str> {
+    marker_id(marker, "meeting_id")
+}
+
+fn marker_id<'a>(marker: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    let id = marker.get(field)?.as_str()?;
+    let raw = id.strip_prefix("meeting-")?;
+    let uuid = uuid::Uuid::parse_str(raw).ok()?;
+    (uuid.hyphenated().to_string() == raw).then_some(id)
+}
+
+pub(crate) fn has_invalid_marker_id(marker: &serde_json::Value) -> bool {
+    ["meeting_id", "recording_id"].into_iter().any(|field| {
+        marker.get(field).is_some_and(|value| !value.is_null())
+            && marker_id(marker, field).is_none()
+    })
+}
+
 /// Writes the meeting id into the folder's marker so the folder can later be
 /// tied to exactly this meeting. A marker that already names a meeting is left.
 pub(crate) fn stamp_meeting_id(folder: &Path, meeting_id: &str) -> Result<(), String> {
     let Some(mut marker) = read_marker(folder) else {
         return Err("The recording marker is missing".into());
     };
-    if marker.get("meeting_id").and_then(|value| value.as_str()).is_some() {
-        return Ok(());
+    if let Some(existing) = marker.get("meeting_id").and_then(|value| value.as_str()) {
+        return if existing == meeting_id {
+            Ok(())
+        } else {
+            Err("The recording marker already belongs to a meeting".into())
+        };
     }
     marker["meeting_id"] = serde_json::json!(meeting_id);
     let json = serde_json::to_vec_pretty(&marker).map_err(|_| "Could not write the marker")?;
-    let temp = folder.join(".metadata.json.tmp");
-    std::fs::write(&temp, json).map_err(|_| "Could not write the marker")?;
-    std::fs::rename(&temp, folder.join("metadata.json")).map_err(|_| {
-        let _ = std::fs::remove_file(&temp);
-        "Could not write the marker".to_string()
-    })
+    crate::library::atomic_write(&folder.join("metadata.json"), &json)
 }
 
 /// The folder a webview may attach to a new meeting: one this process created,
@@ -709,7 +737,7 @@ mod tests {
         stamp_meeting_id(base.path(), "meeting-1").unwrap();
         assert!(has_app_marker(base.path(), Some("meeting-1")));
         assert!(!has_app_marker(base.path(), Some("meeting-2")));
-        stamp_meeting_id(base.path(), "meeting-2").unwrap();
+        assert!(stamp_meeting_id(base.path(), "meeting-2").is_err());
         assert!(has_app_marker(base.path(), Some("meeting-1")), "an existing id is kept");
         assert!(stamp_meeting_id(&base.path().join("missing"), "meeting-1").is_err());
     }

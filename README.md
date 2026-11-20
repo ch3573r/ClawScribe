@@ -59,21 +59,32 @@ instance from a Stream Deck, AutoHotkey, or a script:
 
 Example: `"C:\Path\To\ClawScribe.exe" --toggle-recording`. The flags only work
 on an instance that is already running; launching the app with a flag does not
-start a recording.
+start a recording. A start from the command line, the tray or a global shortcut
+runs in the background: the window keeps its page and any unsaved text, and it
+is not brought to the front. See
+[Recording from the tray, shortcuts and command line](docs/tray-and-recording-control.md).
 
 ## Capture And Transcription
 
 - Microphone and system-audio capture from the local Windows session.
 - Live transcription, audio/video import, and retranscription with a different
   model or language selection.
-- **Record now, transcribe later:** choose audio-only mode on Home or in
-  Recording settings. It always saves audio, skips the speech model and live
-  transcription, and leaves a **Transcribe** action on the saved meeting.
+- **Record now, transcribe later:** choose **Record audio now** on first launch
+  to open Home in audio-only mode without a model download. Audio-only mode
+  always saves audio and leaves a **Transcribe** action on the saved meeting.
+  Live transcription and the local notes model can be set up independently.
+  If a speech model fails after capture opens, a session with audio saving
+  enabled continues in audio-only mode.
+- **Check recording readiness:** Home shows the microphone, system output, and
+  on-device live engine. **Recheck devices** refreshes the list after a change.
+  Any hosted file-transcription preference is shown separately.
 - Recording continues after temporary queue pressure or spool-write failures,
   with incomplete audio reported visibly. Playback streams saved recordings.
   Stop saves available audio even if transcript backup writes fail, and capture
-  gaps are reported separately from save failures. Repeated Stop actions reuse
-  the same library meeting. Recovery originals use about 700 MB per hour while recording; choose a local
+  gaps are reported even after a source reconnects. Retry a missing source
+  without interrupting the other source. Stop saves one library meeting and
+  leaves the recording available in **Interrupted recordings** if the library
+  write fails. Recovery originals use about 700 MB per hour while recording. Choose a local
   folder with enough space. See [recording and recovery](docs/meeting-quality.md).
 - Correct transcript passages or preview literal find-and-replace across the
   entire meeting. Original recognition and segment timing are retained; undo
@@ -223,9 +234,9 @@ without these checks.
 - **Project tags:** choose existing labels from a searchable list or create new
   ones, then filter the archive and transcript search by one or more projects
   (matching any or all), or show untagged meetings.
-- **Meeting bookmarks:** mark a moment while recording, then label and revisit it
-  from the saved transcript panel. Add timestamped notes during playback and
-  choose whether to include them in summaries for that meeting.
+- **Meeting bookmarks and notes:** mark a moment from the recording bar, tray, or
+  keyboard. Add timestamped notes while recording or during playback, then revisit
+  them in the saved transcript. Choose whether to include them in meeting summaries.
 
 Generate template-based meeting summaries from the transcript and optional
 context, regenerate notes, and chat about the selected meeting. Per-meeting summary

@@ -29,6 +29,7 @@ export interface DiskScan {
   recordings: DiskRecording[];
   truncated: boolean;
   recordingActive: boolean;
+  resolvedCacheIds?: string[];
 }
 
 export type RecoverySource = "browser" | "disk";
@@ -93,7 +94,10 @@ export function readDiskScan(value: unknown): DiskScan {
   const recordings = Array.isArray(source.recordings)
     ? source.recordings.map(readRecording).filter((recording): recording is DiskRecording => recording !== null)
     : [];
-  return { recordings, truncated: source.truncated === true, recordingActive: source.recordingActive === true };
+  const resolvedCacheIds = Array.isArray(source.resolvedCacheIds)
+    ? source.resolvedCacheIds.filter((id): id is string => typeof id === 'string') : [];
+  return { recordings, truncated: source.truncated === true, recordingActive: source.recordingActive === true,
+    ...(resolvedCacheIds.length > 0 ? { resolvedCacheIds } : {}) };
 }
 
 /** A recording found only on disk, shaped like an entry of the browser list. */

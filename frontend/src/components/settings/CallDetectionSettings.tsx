@@ -14,6 +14,7 @@ import {
   CALL_PROVIDERS, getCallSettings, setCallSettings,
   type CallProvider, type CallSettings, type TeamsDetectionMode,
 } from "@/lib/autoRecord";
+import { setCoreCallSettings } from "@/services/callDetectionService";
 
 /** How ClawScribe reacts when a call is detected, and a manual check of the same scan. */
 export function CallDetectionSettings() {
@@ -24,8 +25,11 @@ export function CallDetectionSettings() {
     update(getCallSettings());
   }, []);
 
-  const change = (next: CallSettings) => {
+  // The core watches for calls, so it gets the settings first; the copy kept
+  // here follows only once the core has them.
+  const change = async (next: CallSettings) => {
     try {
+      await setCoreCallSettings(next);
       setCallSettings(next);
       update(next);
       reset();

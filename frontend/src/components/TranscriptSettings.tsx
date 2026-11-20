@@ -55,6 +55,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [keyStatus, setKeyStatus] = useState<SecretStatus>(NO_SECRET);
     const [allowUnencrypted, setAllowUnencrypted] = useState(transcriptModelConfig.allowUnencrypted ?? false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+    const [liveModelRepair, setLiveModelRepair] = useState(false);
     const [cloudModel, setCloudModel] = useState<string>(transcriptModelConfig.model || 'whisper-1');
     const [cloudWhisperBaseUrl, setCloudWhisperBaseUrl] = useState<string>(transcriptModelConfig.baseUrl || 'https://api.openai.com/v1');
     const [maiEndpoint, setMaiEndpoint] = useState<string>(transcriptModelConfig.endpoint || '');
@@ -63,6 +64,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const router = useRouter();
     const { enabled: cloudTranscriptionEnabled, loaded: cloudTranscriptionLoaded } = useCloudTranscription();
     const isCloudProvider = uiProvider === 'cloud-whisper' || uiProvider === 'mai-transcribe';
+    const hostedProviderSaved = transcriptModelConfig.provider === 'cloud-whisper' || transcriptModelConfig.provider === 'mai-transcribe';
+    const parakeetDownloadOnly = liveModelRepair && hostedProviderSaved && uiProvider === 'parakeet';
     const localEngineNames = { localWhisper: 'Whisper', parakeet: 'Parakeet', nemotron: 'Nemotron' };
     const savedLocalProvider = transcriptModelConfig.provider as keyof typeof localEngineNames;
     const liveEngine = localEngineNames[savedLocalProvider];
@@ -73,9 +76,15 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
-        setUiProvider(transcriptModelConfig.provider);
+        const engine = pcTest && typeof window !== 'undefined'
+            ? new URLSearchParams(window.location?.search).get('engine')
+            : null;
+        setLiveModelRepair(engine === 'parakeet');
+        setUiProvider(engine === 'parakeet' || engine === 'localWhisper' || engine === 'nemotron'
+            ? engine
+            : transcriptModelConfig.provider);
         setAllowUnencrypted(transcriptModelConfig.allowUnencrypted ?? false);
-    }, [transcriptModelConfig.provider]);
+    }, [pcTest, transcriptModelConfig.provider]);
 
     useEffect(() => {
         if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet' || transcriptModelConfig.provider === 'nemotron') {
@@ -301,7 +310,9 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                 <SettingsRow
                     title="Engine"
                     htmlFor="transcription-engine"
-                    description={isCloudProvider
+                    description={parakeetDownloadOnly
+                        ? 'Parakeet is used for live recordings. Downloading a model here keeps your hosted file-transcription preference'
+                        : isCloudProvider
                         ? `Used for Import and Enhance (whole-file). Live recordings always transcribe on this device with ${liveEngineLabel}`
                         : engineDescription}
                 >
@@ -309,6 +320,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                         value={uiProvider}
                         onValueChange={(value) => {
                             const provider = value as TranscriptModelProps['provider'];
+                            setLiveModelRepair(false);
                             setUiProvider(provider);
                             setAllowUnencrypted(false);
                             if (provider !== 'localWhisper' && provider !== 'parakeet' && provider !== 'nemotron') {
@@ -389,8 +401,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             {uiProvider === 'parakeet' && (
                 <ParakeetModelManager
                     selectedModel={transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : undefined}
-                    onModelSelect={handleParakeetModelSelect}
-                    autoSave={true}
+                    onModelSelect={parakeetDownloadOnly ? undefined : handleParakeetModelSelect}
+                    autoSave={!parakeetDownloadOnly}
                     pcTest={pcTest ? parakeetTestTarget : undefined}
                 />
             )}

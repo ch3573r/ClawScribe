@@ -62,15 +62,13 @@ test('starting one recording preserves an explicit choice made for the next reco
   assert.ok(links.setPendingCalendar(first));
   const original = links.getNextCalendarChoice();
   assert.ok(links.setPendingCalendar(second));
-  links.beginRecordingCalendar({ link: first, status: 'none', matches: [], fallbackTitle: 'Recording' }, original);
-  assert.equal(links.getActiveRecordingCalendar().link.eventId, 'first');
+  links.consumeNextCalendarChoice(original);
   assert.equal(links.getNextCalendarChoice().link.eventId, 'second');
   assert.ok(links.setPendingCalendar(null, true));
   const skip = links.getNextCalendarChoice();
   assert.equal(skip.skip, true);
-  links.beginRecordingCalendar({ link: null, status: 'none', matches: [], fallbackTitle: 'Recording' }, skip);
+  links.consumeNextCalendarChoice(skip);
   assert.equal(links.getNextCalendarChoice().skip, false);
-  assert.equal(links.getActiveRecordingCalendar().link, null);
 });
 
 function legacyStore(t, outcomes, onCall = () => {}) {
@@ -157,21 +155,20 @@ test('signing out keeps reviewed attendance and clears only what came from the a
   const reviewed = { ...links.calendarLinkFromEvent(event('reviewed')), reviewed: true };
   const automatic = links.calendarLinkFromEvent(event('automatic'));
   const fromFile = links.calendarLinkFromEvent(event('file-event', { sourceId: 'calendar' }));
-  links.beginRecordingCalendar(
-    { link: reviewed, status: 'ambiguous', matches: [reviewed, automatic, fromFile], fallbackTitle: 'Recording' },
-    links.getNextCalendarChoice(),
-  );
+  links.setActiveRecordingCalendar({
+    sessionId: 'active', revision: 1, link: reviewed, status: 'ambiguous', matches: [reviewed, automatic, fromFile],
+  });
   links.clearMicrosoftCalendarLinks();
-  const active = links.getActiveRecordingCalendar();
+  const active = links.getActiveRecordingCalendar('active');
   assert.equal(active.link.eventId, 'reviewed');
   // Current-account candidates are transient; imported calendars are unaffected.
   assert.deepEqual(Array.from(active.matches, match => match.eventId), ['file-event']);
   assert.ok(store.getItem(prefix + 'kept'));
   assert.equal(store.getItem(prefix + 'dropped'), null);
   assert.ok(store.getItem(prefix + 'file'));
-  links.setActiveRecordingCalendar({ link: automatic, status: 'matched', matches: [automatic], fallbackTitle: 'Recording' });
+  links.setActiveRecordingCalendar({ sessionId: 'active', revision: 2, link: automatic, status: 'matched', matches: [automatic] });
   links.clearMicrosoftCalendarLinks();
-  assert.equal(links.getActiveRecordingCalendar().link, null);
+  assert.equal(links.getActiveRecordingCalendar('active').link, null);
   assert.ok(links.setPendingCalendar(automatic));
   links.clearMicrosoftCalendarLinks();
   assert.equal(links.getPendingCalendar(), null);
@@ -266,13 +263,124 @@ test('a stalled subscription stays within the recording lookup budget', async t 
   stalled.resolve();
 });
 
+test('capture starts before calendar lookup and a late match cannot bind the replacement recording', async t => {
+  const links = withStorage(t);
+  const calendar = deferred();
+  const native = deferred();
+  const calls = [];
+  const hooks = createHookHarness();
+  const api = loadTsModule('src/services/recordingCalendarService.ts', {
+    '@/lib/meetingCalendar': links,
+    '@/services/icalService': {
+      refreshICalendars: () => calendar.promise,
+      getICalendarSnapshot: () => ({ events: [], issues: {} }),
+    },
+    '@/services/microsoftExportService': { microsoftExportService: {
+      connectionStatus: async () => { calls.push('lookup'); return { state: 'connected' }; },
+      listCalendarEvents: async () => [{ ...event('late'), start: '2000-01-01T00:00:00Z', end: '2099-01-01T00:00:00Z' }],
+    } },
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      calls.push([command, args.sessionId]);
+      if (command === 'get_active_recording_calendar') return { link: null, revision: 0 };
+      assert.fail('The stopped session may not persist a late match');
+    } },
+  });
+  const noop = () => {};
+  const config = { selectedDevices: { micDevice: null, systemDevice: 'Selected audio (output)' }, devicePreferencesStatus: 'ready' };
+  const state = { setStatus: noop };
+  const { useStartRecordingSession, DEVICE_PREFERENCES_UNAVAILABLE } = loadTsModule('src/hooks/useRecordingStart.ts', {
+    react: hooks.react,
+    '@/lib/meetingCalendar': links,
+    '@/services/recordingCalendarService': api,
+    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ setIsMeetingActive: noop }) },
+    '@/contexts/ConfigContext': { useConfig: () => config },
+    '@/contexts/RecordingStateContext': { useRecordingState: () => state, RecordingStatus: { STARTING: 'starting', ERROR: 'error' } },
+    '@/services/recordingService': { recordingService: { startRecordingWithDevices: (...args) => {
+      calls.push(['start', ...args]);
+      return native.promise;
+    } } },
+    '@/lib/recordingNotification': { showRecordingNotification: noop },
+    '@/lib/speakerDetectionCancellation': { offerSpeakerDetectionCancellation: async () => {} },
+    '@/lib/analytics': { __esModule: true, default: { trackButtonClick: noop } },
+  });
+  t.after(() => hooks.unmount());
+  for (const status of ['loading', 'error']) {
+    config.devicePreferencesStatus = status;
+    await assert.rejects(hooks.render(useStartRecordingSession)('remote_request', 'tray-claim'),
+      error => error === DEVICE_PREFERENCES_UNAVAILABLE);
+    assert.deepEqual(calls, []);
+  }
+  config.devicePreferencesStatus = 'ready';
+  const start = hooks.render(useStartRecordingSession);
+  const first = start('detected_call', 'call-claim');
+  assert.equal(calls[0][0], 'start');
+  assert.equal(calls[0][2], 'Selected audio (output)');
+  assert.equal(calls[0][5], 'call-claim');
+  assert.equal(calls.includes('lookup'), false);
+  await assert.rejects(start('home_page'), error => error === 'recording_start_busy');
+  native.resolve('session-a');
+  assert.equal(await first, 'session-a');
+  await flush();
+  assert.ok(calls.includes('lookup'));
+  assert.ok(links.getActiveRecordingCalendar('session-a'));
+
+  links.clearActiveRecordingCalendar('session-a');
+  const replacement = { sessionId: 'session-b', revision: 1, status: 'none', matches: [], link: links.calendarLinkFromEvent(event('chosen')) };
+  links.setActiveRecordingCalendar(replacement);
+  calendar.resolve();
+  await flush();
+  assert.equal(links.getActiveRecordingCalendar('session-a'), null);
+  assert.equal(links.getActiveRecordingCalendar('session-b'), replacement);
+  assert.equal(calls.some(call => call[0] === 'set_active_recording_calendar'), false);
+});
+
+test('sign-out during startup keeps a stale Microsoft calendar subject out of the active session', async t => {
+  const links = withStorage(t);
+  const native = deferred();
+  const read = deferred();
+  const invitation = links.calendarLinkFromEvent(event('former-account', { subject: 'Invitation subject' }));
+  links.setPendingCalendar(invitation);
+  const calls = [];
+  const hooks = createHookHarness();
+  const noop = () => {};
+  const { useStartRecordingSession } = loadTsModule('src/hooks/useRecordingStart.ts', {
+    react: hooks.react,
+    '@/lib/meetingCalendar': links,
+    '@/services/recordingCalendarService': {
+      readRecordingCalendar: () => read.promise,
+      resolveRecordingCalendar: () => assert.fail('Explicit selection must never start calendar lookup'),
+    },
+    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ setIsMeetingActive: noop }) },
+    '@/contexts/ConfigContext': { useConfig: () => ({ selectedDevices: { micDevice: null, systemDevice: null }, devicePreferencesStatus: 'ready' }) },
+    '@/contexts/RecordingStateContext': { useRecordingState: () => ({ setStatus: noop }), RecordingStatus: { STARTING: 'starting' } },
+    '@/services/recordingService': { recordingService: { startRecordingWithDevices: (...args) => {
+      calls.push(args);
+      return native.promise;
+    } } },
+    '@/lib/recordingNotification': { showRecordingNotification: noop },
+    '@/lib/analytics': { __esModule: true, default: { trackButtonClick: noop } },
+  });
+  t.after(() => hooks.unmount());
+  const started = hooks.render(useStartRecordingSession)('sidebar_direct');
+  assert.match(calls[0][2], /^Meeting /);
+  assert.equal(calls[0][3].subject, invitation.subject);
+  links.clearMicrosoftCalendarLinks();
+  native.resolve('active');
+  await started;
+  read.resolve({ link: invitation, revision: 1 }); // The old account's response can arrive late.
+  await flush();
+  assert.equal(links.getPendingCalendar(), null);
+  assert.equal(links.getActiveRecordingCalendar('active'), null);
+});
+
 test('the active recording review checks attendance explicitly and can unlink the event', async t => {
   const links = withStorage(t);
   let lookupResult = { status: 'none', matches: [] };
   const link = links.calendarLinkFromEvent(event('active', {
     attendees: [{ name: 'Present person', email: null }, { name: 'Other invitee', email: null }],
   }));
-  links.beginRecordingCalendar({ link, status: 'matched', matches: [link], fallbackTitle: 'Recording' }, links.getNextCalendarChoice());
+  let durable = { link, revision: 1 };
+  const edits = [];
   const review = createHookHarness();
   const dialog = createHookHarness();
   t.after(() => { review.unmount(); dialog.unmount(); });
@@ -293,16 +401,29 @@ test('the active recording review checks attendance explicitly and can unlink th
     'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
     '@tauri-apps/api/core': {}, sonner: {},
     '@/lib/meetingCalendar': links, '@/lib/meetingCalendarStore': {},
-    '@/services/recordingCalendarService': { findOngoingRecordingCalendar: async () => lookupResult, findCalendarEventsBetween: async () => ({ matches: [], unavailable: [] }) },
+    '@/services/recordingCalendarService': {
+      findOngoingRecordingCalendar: async () => lookupResult,
+      findCalendarEventsBetween: async () => ({ matches: [], unavailable: [] }),
+      readRecordingCalendar: async id => { assert.equal(id, 'recording'); return durable; },
+      writeRecordingCalendar: async (id, revision, link) => {
+        assert.equal(id, 'recording');
+        assert.equal(revision, durable.revision);
+        edits.push({ id, revision, link });
+        durable = { link, revision: revision + 1 };
+        return durable.revision;
+      },
+    },
     ...Object.fromEntries(Object.entries(controls).map(([path, names]) => [
       '@/components/ui/' + path, Object.fromEntries(names.map(name => [name, name])),
     ])),
   });
-  const titles = [];
   let current = review.react;
+  const renderReview = () => review.render(() => RecordingCalendarReview({ disabled: false, sessionId: 'recording' }));
+  renderReview();
+  await flush();
   const render = () => {
     current = review.react;
-    const view = review.render(() => RecordingCalendarReview({ disabled: false, onTitleChange: title => titles.push(title) }));
+    const view = renderReview();
     const child = nodes(view).find(node => node.type?.name === 'AttendanceDialog');
     assert.ok(child);
     current = dialog.react;
@@ -315,24 +436,23 @@ test('the active recording review checks attendance explicitly and can unlink th
   checkboxes[0].props.onCheckedChange(true);
   find('Button', 'Save attendance').props.onClick();
   await flush();
-  assert.deepEqual(Array.from(links.getActiveRecordingCalendar().link.attendees, person => person.attendance),
+  assert.deepEqual(Array.from(durable.link.attendees, person => person.attendance),
     ['present', 'unreviewed']);
-  // Saving the dialog is the review that releases the title and checked names.
-  assert.equal(links.getActiveRecordingCalendar().link.reviewed, true);
+  assert.equal(durable.link.reviewed, true);
   find('Dialog').props.onOpenChange(true);
   find('Button', 'Unlink event').props.onClick();
   await flush();
-  assert.equal(links.getActiveRecordingCalendar().link, null);
-  assert.deepEqual(titles, ['Planning', 'Recording']);
+  assert.equal(durable.link, null);
+  assert.deepEqual(edits.map(({ revision }) => revision), [1, 2]);
+  assert.equal(links.getActiveRecordingCalendar('recording').link, null);
 });
 
 test('a partial calendar result can be checked again from the recording review', async t => {
   const links = withStorage(t);
   const found = links.calendarLinkFromEvent(event('found'));
-  links.beginRecordingCalendar(
-    { link: null, status: 'unavailable', matches: [], unavailable: ['Microsoft 365'], fallbackTitle: 'Recording' },
-    links.getNextCalendarChoice(),
-  );
+  links.setActiveRecordingCalendar({
+    sessionId: 'active', revision: 0, startedAt: now, link: null, status: 'unavailable', matches: [], unavailable: ['Microsoft 365'],
+  });
   const review = createHookHarness();
   t.after(() => review.unmount());
   const jsx = (type, props) => ({ type, props });
@@ -349,12 +469,15 @@ test('a partial calendar result can be checked again from the recording review',
     'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
     '@tauri-apps/api/core': {}, sonner: {},
     '@/lib/meetingCalendar': links, '@/lib/meetingCalendarStore': {},
-    '@/services/recordingCalendarService': { findOngoingRecordingCalendar: async () => lookupResult },
+    '@/services/recordingCalendarService': { findOngoingRecordingCalendar: async when => {
+      assert.equal(when, now);
+      return lookupResult;
+    } },
     ...Object.fromEntries(Object.entries(controls).map(([path, names]) => [
       '@/components/ui/' + path, Object.fromEntries(names.map(name => [name, name])),
     ])),
   });
-  const render = () => nodes(review.render(() => RecordingCalendarReview({ disabled: false, onTitleChange: () => {} })));
+  const render = () => nodes(review.render(() => RecordingCalendarReview({ disabled: false, sessionId: 'active' })));
   const text = view => view.filter(node => node.props.role === 'status').map(node => node.props.children).join('');
   assert.match(text(render()), /Could not read Microsoft 365/);
   // Still unavailable: the status stays and the action stays available.
@@ -367,8 +490,8 @@ test('a partial calendar result can be checked again from the recording review',
   const view = render();
   assert.match(text(view), /Found an ongoing calendar event/);
   // The event is only a candidate until the person chooses it; nothing was linked or retitled.
-  assert.equal(links.getActiveRecordingCalendar().link, null);
-  assert.equal(links.getActiveRecordingCalendar().matches[0].eventId, 'found');
+  assert.equal(links.getActiveRecordingCalendar('active').link, null);
+  assert.equal(links.getActiveRecordingCalendar('active').matches[0].eventId, 'found');
   assert.ok(!view.some(node => node.type === 'Button' && node.props.children === 'Check again'));
 });
 

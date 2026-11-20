@@ -162,7 +162,7 @@ test('Confluence is one card of rows with both methods, no export-flow box and a
 });
 
 function callCard(options={}) {
-  const hooks=createHookHarness(),saved=[];
+  const hooks=createHookHarness(),saved=[],core=[];
   const scans=options.scans??[];
   const {CallDetectionSettings}=loadTsModule('src/components/settings/CallDetectionSettings.tsx',baseMocks(hooks,{
     '@/lib/autoRecord':{
@@ -170,9 +170,10 @@ function callCard(options={}) {
       getCallSettings:()=>({mode:options.mode??'off',providers:['teams'],autoStop:false}),
       setCallSettings:value=>saved.push(value),
     },
+    '@/services/callDetectionService':{setCoreCallSettings:async value=>{if(options.coreFails) throw new Error('not saved');core.push(value);}},
     '@/services/teamsDetectionService':{getCallDetectionStatus:async providers=>{scans.push(providers);return options.scan??{supported:true,complete:true,active:[],ended:[],openWindows:[]};}},
   }));
-  return {...hooks,saved,scans,render:()=>hooks.render(CallDetectionSettings)};
+  return {...hooks,saved,core,scans,render:()=>hooks.render(CallDetectionSettings)};
 }
 
 test('call detection saves settings, offers one check and reports a plain result with its time',async()=>{
@@ -180,15 +181,26 @@ test('call detection saves settings, offers one check and reports a plain result
   app.render();let tree=app.render();
   assert.equal(tree.props.title,'Call detection');
   assert.equal(nodes(tree).filter(node=>node.type==='Checkbox').length,4);
-  nodes(tree).find(node=>node.type==='Select').props.onValueChange('auto');
+  nodes(tree).find(node=>node.type==='Select').props.onValueChange('auto');await flush();
   assert.equal(app.saved.at(-1).mode,'auto');
-  nodes(app.render()).find(node=>node.type==='Switch').props.onCheckedChange(true);
+  assert.equal(app.core.at(-1).mode,'auto','the core, which watches for calls, gets the same settings');
+  nodes(app.render()).find(node=>node.type==='Switch').props.onCheckedChange(true);await flush();
   assert.equal(app.saved.at(-1).autoStop,true);
+  assert.equal(app.core.at(-1).autoStop,true);
   tree=app.render();assert.match(text(tree),/Not checked yet/);
   const check=()=>nodes(app.render()).find(node=>node.type==='Button'&&/Check now|Checking/.test(text(node)));
   await check().props.onClick();await flush();
   tree=app.render();assert.equal(JSON.stringify(app.scans),'[["teams"]]');
   assert.match(text(tree),/No call right now/);assert.match(text(tree),/Checked \d/);
+  app.unmount();
+});
+
+test('call detection keeps the old settings when the core could not save the new ones',async()=>{
+  const app=callCard({mode:'prompt',coreFails:true});
+  app.render();const tree=app.render();
+  nodes(tree).find(node=>node.type==='Select').props.onValueChange('auto');await flush();
+  assert.deepEqual(app.saved,[],'nothing is kept that the core does not have');
+  assert.deepEqual(app.core,[]);
   app.unmount();
 });
 

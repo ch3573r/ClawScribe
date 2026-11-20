@@ -109,9 +109,11 @@ for (const enabled of [true, false]) {
       '@tauri-apps/api/core': { invoke: async () => null },
       sonner: { toast: { success() {}, error() {} } },
     });
+    let inspectLiveEngine = false;
     const render = () => hooks.render(() => TranscriptSettings({
       transcriptModelConfig: { provider: 'mai-transcribe', model: 'mai-transcribe-1.5' },
       setTranscriptModelConfig: value => saves.push(value),
+      pcTest: inspectLiveEngine,
     }));
     const first = render();
     assert.equal(nodes(first).find(node => node.type === 'Select').props.value, 'mai-transcribe');
@@ -131,6 +133,14 @@ for (const enabled of [true, false]) {
     }
     preferenceChanged(!enabled);
     assert.equal(nodes(render()).find(node => node.type === 'Select').props.value, 'mai-transcribe');
+    inspectLiveEngine = true;
+    globalThis.window.location = { search: '?tab=transcription&engine=parakeet' };
+    render();
+    const repair = render();
+    const manager = nodes(repair).find(node => node.type === 'ParakeetModelManager');
+    assert.equal(manager.props.autoSave, false);
+    assert.equal(manager.props.onModelSelect, undefined);
+    assert.match(text(repair), /keeps your hosted file-transcription preference/);
     assert.equal(saves.length, 0);
     hooks.unmount();
   });

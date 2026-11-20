@@ -16,6 +16,7 @@ import {
 import Analytics from '@/lib/analytics';
 import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateContext';
 import { LiveBookmarkButton } from '@/components/MeetingDetails/MeetingBookmarks';
+import { LiveRecordingNotes } from '@/components/LiveRecordingNotes';
 import { Button } from '@/components/ui/button';
 import { RecordingLevelMeter } from '@/components/RecordingLevelMeter';
 import { describeStartError } from '@/lib/start-error';
@@ -24,7 +25,6 @@ import { toast } from 'sonner';
 
 interface RecordingControlsProps {
   isRecording: boolean;
-  onRecordingStop: (callApi?: boolean) => void;
   onRecordingStart: () => void;
   onTranscriptReceived: (summary: SummaryResponse) => void;
   onTranscriptionError?: (message: string) => void;
@@ -41,7 +41,6 @@ interface RecordingControlsProps {
 
 export const RecordingControls: React.FC<RecordingControlsProps> = ({
   isRecording,
-  onRecordingStop,
   onRecordingStart,
   onTranscriptReceived,
   onTranscriptionError,
@@ -153,7 +152,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       setIsProcessing(false);
       // Track successful transcription
       Analytics.trackTranscriptionSuccess();
-      onRecordingStop(true);
     } catch (error) {
       console.error("Failed to stop recording:");
       if (isNothingToStop(error)) {
@@ -167,7 +165,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     } finally {
       setIsStopping(false);
     }
-  }, [onRecordingStop]);
+  }, [recordingState]);
 
   const handleStopRecording = useCallback(async () => {
     if (!isRecording || isStarting || isStopping) {
@@ -321,7 +319,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         }
       });
     };
-  }, [onRecordingStop, onTranscriptionError]);
+  }, [onTranscriptionError]);
 
   const isDashboard = variant === 'dashboard';
   const shellClassName = isDashboard
@@ -449,12 +447,20 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <span className="inline-flex">
-                            <LiveBookmarkButton className={secondaryButtonClassName} disabled={isStopping || isPausing || isResuming} />
+                            <LiveBookmarkButton sessionId={recordingState.sessionId} className={secondaryButtonClassName} disabled={isStopping || isPausing || isResuming} />
                           </span>
                         </TooltipTrigger>
                         <TooltipContent>
                           <p>Bookmark this moment</p>
                         </TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="inline-flex">
+                            <LiveRecordingNotes key={recordingState.sessionId} sessionId={recordingState.sessionId} className={secondaryButtonClassName} disabled={isStopping || isPausing || isResuming} />
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent><p>Add timestamped note</p></TooltipContent>
                       </Tooltip>
                       <Tooltip>
                         <TooltipTrigger asChild>

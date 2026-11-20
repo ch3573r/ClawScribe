@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createHookHarness, flush } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
-function setup(t, { recording = { is_recording: true, is_paused: false, is_active: true }, uiStatus = 'RECORDING', uiRecording = true, stop = async () => {}, exitSaveFailure = false, stopRecordingFails = null } = {}) {
+function setup(t, { recording = { is_recording: true, is_paused: false, is_active: true }, uiStatus = 'RECORDING', uiRecording = true, openFolderFails = false, stopRecordingFails = null } = {}) {
   const previousWindow = globalThis.window;
   const hooks = createHookHarness();
   const events = new Map();
@@ -16,13 +16,11 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
     addEventListener: (name, callback) => windowListeners.set(name, callback),
     removeEventListener: name => windowListeners.delete(name),
   };
-  const stopHandler = async value => { calls.push(['handleRecordingStop', value]); return stop(value); };
-  let stopHandlerVersion = 0;
   const { RecordingPostProcessingProvider } = loadTsModule('src/contexts/RecordingPostProcessingProvider.tsx', {
     react: hooks.react,
     'react/jsx-runtime': { jsx: () => null, jsxs: () => null, Fragment: 'Fragment' },
     '@tauri-apps/api/event': { listen: async (name, callback) => { subscriptions.push(name); events.set(name, callback); return () => events.delete(name); } },
-    '@tauri-apps/api/core': { invoke: async command => { calls.push(['invoke', command]); if (exitSaveFailure) throw new Error('Synthetic failure'); } },
+    '@tauri-apps/api/core': { invoke: async command => { calls.push(['invoke', command]); if (openFolderFails) throw new Error('Synthetic failure'); } },
     '@tauri-apps/api/path': { appDataDir: async () => 'synthetic-data' },
     sonner: { toast: {
       error: (title, options) => toasts.push({ title, ...options }),
@@ -30,11 +28,7 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
       warning: (title, options) => toasts.push({ kind: 'warning', title, ...options }),
       dismiss: id => dismissed.push(id),
     } },
-    '@/hooks/useRecordingStop': { useRecordingStop: () => {
-      // A new function every render, as the real hook gives while meetings change.
-      const version = ++stopHandlerVersion;
-      return { handleRecordingStop: value => { calls.push(['version', version]); return stopHandler(value); }, setIsStopping: value => calls.push(['setIsStopping', value]) };
-    } },
+    '@/hooks/useRecordingStop': { useRecordingStop: () => {} },
     '@/contexts/RecordingStateContext': {
       useRecordingState: () => ({ isRecording: uiRecording, isStopping: false, status: uiStatus, setStatus: value => calls.push(['setStatus', value]) }),
       RecordingStatus: Object.fromEntries(['IDLE', 'STARTING', 'RECORDING', 'STOPPING'].map(value => [value, value])),
@@ -60,7 +54,7 @@ test('Stop from the sidebar saves the recording without needing the Home page', 
   app.windowListeners.get('stop-recording-from-sidebar')();
   await flush();
   assert.deepEqual(app.calls.filter(([name]) => name !== 'version'), [
-    ['setIsStopping', true], ['stop_recording', true], ['handleRecordingStop', true],
+    ['setStatus', 'STOPPING'], ['stop_recording', true],
   ]);
 });
 
@@ -81,17 +75,12 @@ test('nothing is stopped when no recording is running', async t => {
   assert.deepEqual(app.calls.filter(([name]) => name !== 'version'), []);
 });
 
-test('listeners subscribe once, however often the stop handler changes', async t => {
+test('listeners subscribe once across repeated renders', async t => {
   const app = setup(t);
   await flush();
   for (let index = 0; index < 5; index++) app.render();
   await flush();
-  assert.deepEqual([...app.subscriptions].sort(), ['batch-job-preempted', 'recording-disk-space-low', 'recording-error', 'recording-stop-complete', 'recording-stop-failed', 'recording-stopped']);
-  app.events.get('recording-stop-complete')({ payload: true });
-  await flush();
-  const versions = app.calls.filter(([name]) => name === 'version');
-  assert.equal(versions.length, 1);
-  assert.ok(versions[0][1] >= 6, 'the newest handler runs');
+  assert.deepEqual([...app.subscriptions].sort(), ['batch-job-preempted', 'recording-disk-space-low', 'recording-error', 'recording-stop-failed', 'recording-stopped']);
 });
 
 test('a capture failure that stopped the session shows a lasting error and saves what was captured', async t => {
@@ -103,7 +92,7 @@ test('a capture failure that stopped the session shows a lasting error and saves
   assert.equal(app.toasts[0].title, 'Recording stopped');
   assert.equal(app.toasts[0].duration, Infinity);
   assert.match(app.toasts[0].description, /Audio device was disconnected/);
-  assert.ok(app.calls.some(([name, value]) => name === 'handleRecordingStop' && value === true));
+  assert.ok(app.calls.some(([name]) => name === 'stop_recording'));
 });
 
 test('a recoverable error is reported and the recording keeps running', async t => {
@@ -137,15 +126,6 @@ test('a batch job stopped for the recording is announced without claiming it is 
   assert.equal(app.toasts[1].title, 'A running job is being stopped for the recording');
 });
 
-test('the listener runs the stop handler and leaves the exit confirmation to it', async t => {
-  const app = setup(t, { stop: async () => { throw new Error('Synthetic save failure'); } });
-  await flush();
-  app.events.get('recording-stop-complete')({ payload: true });
-  await flush();
-  assert.ok(app.calls.some(([name, value]) => name === 'handleRecordingStop' && value === true));
-  assert.ok(!app.calls.some(([name]) => name === 'invoke'), 'the provider does not confirm itself');
-});
-
 test('low disk space shows a lasting warning with the free space, no path, and one action', async t => {
   const app = setup(t);
   await flush();
@@ -172,7 +152,7 @@ test('the warning action opens the recordings folder with the existing command',
 });
 
 test('a folder that cannot be opened is reported', async t => {
-  const app = setup(t, { exitSaveFailure: true });
+  const app = setup(t, { openFolderFails: true });
   await flush();
   app.events.get('recording-disk-space-low')({ payload: { freeBytes: 500_000_000, folder: 'x' } });
   app.toasts[0].action.onClick();
@@ -197,7 +177,7 @@ test('a Stop the core refuses shows its message, skips the save flow and returns
     await flush();
     const names = app.calls.filter(([name]) => name !== 'version').map(([name]) => name);
     assert.ok(!names.includes('handleRecordingStop'), 'the save flow is not run for a recording that is still running');
-    assert.deepEqual(app.calls.filter(([name]) => name === 'setStatus'), [['setStatus', 'RECORDING']]);
+    assert.deepEqual(app.calls.filter(([name]) => name === 'setStatus'), [['setStatus', 'STOPPING'], ['setStatus', 'RECORDING']]);
     const shown = app.toasts.filter(toast => toast.title === 'Could not stop the recording');
     assert.equal(shown.length, 1);
     assert.equal(shown[0].description, NOT_RESPONDING);

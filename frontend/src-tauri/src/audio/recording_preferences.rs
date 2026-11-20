@@ -323,31 +323,24 @@ pub fn generate_recording_filename(format: &str) -> String {
 pub async fn load_recording_preferences<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<RecordingPreferences> {
-    // Try to load from Tauri store
-    let store = match app.store("recording_preferences.json") {
-        Ok(store) => store,
-        Err(e) => {
-            warn!("Failed to access store: {}, using defaults", e);
-            return Ok(RecordingPreferences::default());
+    let store = app.store("recording_preferences.json")?;
+    let mut stored = store.get("preferences");
+    if stored.is_none() {
+        // Store initialization can silently ignore a corrupt or unreadable
+        // file. Only a missing file/key may use first-run defaults.
+        let fresh = store.clone();
+        match tokio::task::spawn_blocking(move || fresh.reload()).await? {
+            Ok(()) => stored = store.get("preferences"),
+            Err(tauri_plugin_store::Error::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
-    };
-
-    // Try to get the preferences from store
-    let mut prefs = if let Some(value) = store.get("preferences") {
-        match serde_json::from_value::<RecordingPreferences>(value.clone()) {
-            Ok(p) => {
-                info!("Loaded recording preferences from store");
-                normalize_platform_preferences(p)
-            }
-            Err(e) => {
-                warn!("Failed to deserialize preferences: {}, using defaults", e);
-                RecordingPreferences::default()
-            }
-        }
-    } else {
-        info!("No stored preferences found, using defaults");
-        RecordingPreferences::default()
-    };
+    }
+    let mut prefs = stored
+        .map(serde_json::from_value::<RecordingPreferences>)
+        .transpose()?
+        .map(normalize_platform_preferences)
+        .unwrap_or_default();
 
     if migrate_legacy_recordings_folder(&mut prefs) {
         info!(
@@ -390,6 +383,8 @@ pub async fn save_recording_preferences<R: Runtime>(
     app: &AppHandle<R>,
     preferences: &RecordingPreferences,
 ) -> Result<()> {
+    // Check the folder before changing either the in-memory or on-disk state.
+    ensure_recordings_directory(&preferences.save_folder)?;
     info!("Saving recording preferences: save_folder={:?}, auto_save={}, format={}, mic={:?}, system={:?}",
           preferences.save_folder, preferences.auto_save, preferences.file_format,
           preferences.preferred_mic_device, preferences.preferred_system_device);
@@ -410,13 +405,15 @@ pub async fn save_recording_preferences<R: Runtime>(
     let _remembering = PREVIOUS_FOLDERS_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let old_folder = store
-        .get("preferences")
+    let previous_preferences = store.get("preferences");
+    let previous_folders = store.get(PREVIOUS_SAVE_FOLDERS_KEY);
+    let old_folder = previous_preferences
+        .as_ref()
         .and_then(|value| value.get("save_folder").cloned())
         .and_then(|value| serde_json::from_value::<PathBuf>(value).ok());
     if let Some(old_folder) = old_folder {
-        let remembered = store
-            .get(PREVIOUS_SAVE_FOLDERS_KEY)
+        let remembered = previous_folders
+            .clone()
             .and_then(|value| serde_json::from_value::<Vec<PathBuf>>(value).ok())
             .unwrap_or_default();
         let updated = remember_previous_folder(&remembered, &old_folder, &preferences.save_folder);
@@ -429,9 +426,20 @@ pub async fn save_recording_preferences<R: Runtime>(
     store.set("preferences", prefs_value);
 
     // Persist to disk
-    store
-        .save()
-        .map_err(|e| anyhow::anyhow!("Failed to save store to disk: {}", e))?;
+    if let Err(error) = store.save() {
+        for (key, value) in [
+            ("preferences", previous_preferences),
+            (PREVIOUS_SAVE_FOLDERS_KEY, previous_folders),
+        ] {
+            match value {
+                Some(previous) => store.set(key, previous),
+                None => {
+                    store.delete(key);
+                }
+            }
+        }
+        return Err(anyhow::anyhow!("Failed to save store to disk: {}", error));
+    }
 
     info!("Successfully persisted recording preferences to disk");
 
@@ -443,9 +451,6 @@ pub async fn save_recording_preferences<R: Runtime>(
             crate::audio::capture::set_current_backend(backend);
         }
     }
-
-    // Ensure the directory exists
-    ensure_recordings_directory(&preferences.save_folder)?;
 
     Ok(())
 }

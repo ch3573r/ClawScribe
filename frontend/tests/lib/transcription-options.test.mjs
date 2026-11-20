@@ -46,6 +46,7 @@ function setup(t, options = {}) {
     '@/lib/cloudTranscription': { setCloudTranscription: async enabled => { calls.push(['cloud', enabled]); if (state.cloudFails) throw new Error('not saved'); } },
     '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ enabled: state.cloud, loaded: !state.cloudUnread, failed: !!state.cloudUnread }) },
     '@/hooks/useSourceAttribution': { useSourceAttribution: () => state.attribution },
+    '@/contexts/RecordingStateContext': { useRecordingState: () => ({ recordingMode: state.recordingMode ?? 'live' }) },
     '@/components/settings/transcriptionAnchors': { TRANSCRIPTION_OPTIONS_ID: 'transcription-options' },
   });
   t.after(() => hooks.unmount());
@@ -121,6 +122,16 @@ test('source attribution needs saved audio and says so', async t => {
   await flush();
   await enabled.control('source-attribution').props.onCheckedChange(true);
   assert.deepEqual(enabled.calls.at(-1), ['attribution', true]);
+});
+
+test('audio-only mode does not change saved live source attribution', async t => {
+  const ui = setup(t, { recordingMode: 'audio_only', audioSaving: false, attribution: true });
+  ui.render();
+  await flush();
+  assert.match(text(ui.row('source-attribution')), /Available in live transcription mode/);
+  assert.equal(ui.control('source-attribution').props.disabled, true);
+  await ui.control('source-attribution').props.onCheckedChange(false);
+  assert.ok(ui.calls.every(([command]) => !['refresh-attribution', 'attribution'].includes(command)));
 });
 
 test('cloud transcription asks for consent before turning on and turns off without asking', async t => {

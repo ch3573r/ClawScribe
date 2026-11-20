@@ -1,11 +1,13 @@
 use anyhow::Result;
-use log::{error, info, warn};
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_store::StoreExt;
 
+use crate::audio::recording_mode::{self, RecordingMode};
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
+use crate::summary::summary_engine::{self, ModelManagerState};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OnboardingStatus {
@@ -18,7 +20,7 @@ pub struct OnboardingStatus {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ModelStatus {
-    pub parakeet: String, // "downloaded" | "not_downloaded" | "downloading"
+    pub parakeet: String, // Legacy status or a downloaded/deferred setup snapshot
     pub summary: String,  // Generic field for summary model (Qwen 3.5 or legacy Gemma variants)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_summary_model: Option<String>,
@@ -38,6 +40,14 @@ impl Default for OnboardingStatus {
             last_updated: chrono::Utc::now().to_rfc3339(),
         }
     }
+}
+
+pub(crate) fn is_complete<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.store("onboarding-status.json")
+        .ok()
+        .and_then(|store| store.get("status"))
+        .and_then(|value| serde_json::from_value::<OnboardingStatus>(value).ok())
+        .is_some_and(|status| status.completed)
 }
 
 /// Load onboarding status from store
@@ -100,13 +110,19 @@ pub async fn save_onboarding_status<R: Runtime>(
     let status_value = serde_json::to_value(&status)
         .map_err(|e| anyhow::anyhow!("Failed to serialize onboarding status: {}", e))?;
 
-    // Save to store
+    let previous = store.get("status");
     store.set("status", status_value);
 
-    // Persist to disk
-    store
-        .save()
-        .map_err(|e| anyhow::anyhow!("Failed to save onboarding store to disk: {}", e))?;
+    if let Err(error) = store.save() {
+        if let Some(previous) = previous {
+            store.set("status", previous);
+        } else {
+            store.delete("status");
+        }
+        return Err(anyhow::anyhow!(
+            "Failed to save onboarding store to disk: {error}"
+        ));
+    }
 
     info!("Successfully persisted onboarding status to disk");
     Ok(())
@@ -168,54 +184,64 @@ pub async fn save_onboarding_status_cmd<R: Runtime>(
 pub async fn complete_onboarding<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
-    model: String,
+    mode: RecordingMode,
+    local_notes_model: Option<String>,
 ) -> Result<(), String> {
-    info!("Completing onboarding with builtin-ai model: {}", model);
-
-    // Step 1: Save model configuration to SQLite database FIRST
-    let pool = state.db_manager.pool();
-
-    // Onboarding always uses builtin-ai (local LLM)
-    if let Err(e) =
-        SettingsRepository::save_model_config(pool, "builtin-ai", &model, "large-v3", None).await
-    {
-        error!("Failed to save builtin-ai model config: {}", e);
-        return Err(format!("Failed to save builtin-ai model config: {}", e));
-    }
-    info!("Saved builtin-ai model config: model={}", model);
-
-    // Save transcription model config (parakeet provider) - always parakeet
-    if let Err(e) = SettingsRepository::save_transcript_config(
-        pool,
-        "parakeet",
-        crate::config::DEFAULT_PARAKEET_MODEL,
-    )
-    .await
-    {
-        error!("Failed to save transcription model config: {}", e);
-        return Err(format!("Failed to save transcription model config: {}", e));
-    }
-    info!(
-        "Saved transcription model config: provider=parakeet, model={}",
-        crate::config::DEFAULT_PARAKEET_MODEL
-    );
-
-    // Step 2: Only NOW mark onboarding as complete (after DB operations succeed)
     let mut status = load_onboarding_status(&app)
         .await
-        .map_err(|e| format!("Failed to load onboarding status: {}", e))?;
+        .map_err(|_| "Could not read setup status")?;
+    if status.completed {
+        return Ok(());
+    }
 
+    // Audio-only setup has no model dependency. Completed setup is durable;
+    // live model availability after setup is always read from the engine.
+    status.model_status.parakeet = if mode == RecordingMode::Live {
+        crate::parakeet_engine::commands::parakeet_init().await?;
+        if !crate::parakeet_engine::commands::parakeet_has_available_models().await? {
+            return Err("No speech model is available".into());
+        }
+        "downloaded".into()
+    } else {
+        "deferred".into()
+    };
+
+    status.model_status.summary = "deferred".into();
+    status.model_status.selected_summary_model = None;
+    if let Some(model) = local_notes_model {
+        if summary_engine::get_model_by_name(&model).is_none() {
+            return Err("Unknown local notes model".into());
+        }
+        let ready = summary_engine::builtin_ai_is_model_ready(
+            app.clone(),
+            app.state::<ModelManagerState>(),
+            model.clone(),
+            Some(true),
+        )
+        .await
+        .unwrap_or(false);
+        if ready {
+            SettingsRepository::save_model_config(
+                state.db_manager.pool(),
+                "builtin-ai",
+                &model,
+                "large-v3",
+                None,
+            )
+            .await
+            .map_err(|_| "Could not save the local notes model preference")?;
+            status.model_status.summary = "downloaded".into();
+            status.model_status.selected_summary_model = Some(model);
+        }
+    }
+
+    recording_mode::set_recording_mode(app.clone(), mode).await?;
     status.completed = true;
-    status.current_step = 4; // Max step (4 on macOS with permissions, 3 on other platforms)
-    status.model_status.parakeet = "downloaded".to_string();
-    status.model_status.summary = "downloaded".to_string();
-    status.model_status.selected_summary_model = Some(model.clone());
-
+    status.current_step = 4;
     save_onboarding_status(&app, &status)
         .await
-        .map_err(|e| format!("Failed to save completed onboarding status: {}", e))?;
-
-    info!("Onboarding completed successfully with model: {}", model);
+        .map_err(|_| "Could not save completed setup")?;
+    crate::tray::update_tray_menu(&app);
     Ok(())
 }
 

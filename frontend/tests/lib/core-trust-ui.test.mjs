@@ -65,7 +65,7 @@ test("the interface never passes a file path it made up to the commands that rea
   const layout = read("src/app/layout.tsx");
   assert.match(layout, /files-dropped/);
   assert.doesNotMatch(layout, /tauri:\/\/drag-drop/, "the paths come from the core's event, not the webview's drop event");
-  const onboarding = read("src/contexts/OnboardingContext.tsx");
+  const onboarding = read("src/lib/onboarding-recording.ts");
   assert.match(onboarding, /import_legacy_database_if_present/);
   assert.doesNotMatch(onboarding, /legacyDbPath|check_homebrew_database/);
 });

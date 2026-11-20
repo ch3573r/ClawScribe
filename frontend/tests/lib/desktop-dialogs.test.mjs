@@ -118,7 +118,7 @@ test('permission settings errors give platform-neutral recovery instructions',as
     '../OnboardingContainer':{OnboardingContainer:'onboarding'},'../shared':{PermissionRow:'permission'},
     '@/contexts/OnboardingContext':{useOnboarding:()=>({permissions:{microphone:'denied',systemAudio:'denied'}})},
   });
-  const tree=hooks.render(PermissionsStep);
+  const tree=hooks.render(() => PermissionsStep({ onFinish: async () => {}, finishing: false, error: null }));
   for(const row of nodes(tree).filter(node=>node.type==='permission')) await row.props.onAction();
   assert.equal(errors.length,2);assert.ok(errors.every(message=>/settings/i.test(message)&&/try again/i.test(message)));
   assert.ok(errors.every(message=>!/System Preferences|Audio Capture|console/.test(message)));hooks.unmount();

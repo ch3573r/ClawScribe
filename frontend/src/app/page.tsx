@@ -15,19 +15,20 @@ import { LiveAssistancePanel } from '@/components/LiveAssistancePanel';
 import { HomeDashboard } from '@/components/HomeDashboard';
 import { RecordingControls } from '@/components/RecordingControls';
 import { useModalState } from '@/hooks/useModalState';
-import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
-import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
 import { RECOVERY_OPEN_ALL, RECOVERY_OPEN_REQUEST } from '@/lib/interruptedRecordings';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 import { errorText } from '@/lib/errorText';
+import { useLiveTranscriptionReadiness } from '@/hooks/useLiveTranscriptionReadiness';
+import { LIVE_MODEL_FAILURE_MESSAGE, transcriptionSettingsPath } from '@/lib/start-error';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
 export default function Home() {
   // Local page state (not moved to contexts)
-  const [isRecording, setIsRecordingState] = useState(false);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
 
   // Use contexts for state management
@@ -36,20 +37,19 @@ export default function Home() {
   const recordingState = useRecordingState();
 
   // Extract status from global state
-  const { status, isStarting, isStopping, isProcessing, isSaving } = recordingState;
+  const { status, isRecording, isStarting, isStopping, isProcessing, isSaving } = recordingState;
 
   // Hooks
   const { hasMicrophone } = usePermissionCheck();
-  const { setIsMeetingActive, sidebarOffset, isSidebarResizing, refetchMeetings } = useSidebar();
-  const { modals, messages, showModal, hideModal } = useModalState(transcriptModelConfig);
-  const { isRecordingDisabled, setIsRecordingDisabled } = useRecordingStateSync(isRecording, setIsRecordingState, setIsMeetingActive);
-  const { handleRecordingStart } = useRecordingStart(isRecording, setIsRecordingState);
-
-  // Get handleRecordingStop function and setIsStopping (state comes from global context)
-  const { handleRecordingStop, setIsStopping } = useRecordingStop(
-    setIsRecordingState,
-    setIsRecordingDisabled
+  const { sidebarOffset, isSidebarResizing, refetchMeetings } = useSidebar();
+  const { modals, messages, showModal, hideModal, modelStartFailure, dismissModelStartFailure } = useModalState(transcriptModelConfig);
+  const liveReadiness = useLiveTranscriptionReadiness(
+    recordingState.recordingMode === 'live',
+    transcriptModelConfig.provider,
+    transcriptModelConfig.model,
   );
+  const isRecordingDisabled = isStarting || isStopping || isProcessing || isSaving;
+  const { handleRecordingStart } = useRecordingStart();
 
   // Recovery hook
   const {
@@ -199,6 +199,24 @@ export default function Home() {
         messages={messages}
         onClose={hideModal}
       />
+      <Dialog open={modelStartFailure !== null} onOpenChange={open => { if (!open) dismissModelStartFailure(); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Live transcription couldn’t start</DialogTitle>
+            <DialogDescription>{modelStartFailure && LIVE_MODEL_FAILURE_MESSAGE[modelStartFailure]}</DialogDescription>
+          </DialogHeader>
+          {recordingState.modeError && <p role="alert" className="text-sm text-destructive">{recordingState.modeError}</p>}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => {
+              dismissModelStartFailure();
+              router.push(transcriptionSettingsPath(liveReadiness.data?.provider));
+            }}>Transcription settings</Button>
+            <Button disabled={recordingState.isSavingMode} onClick={async () => {
+              if (await recordingState.setRecordingMode('audio_only')) dismissModelStartFailure();
+            }}>Use audio-only mode</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Recovery Dialog */}
       <TranscriptRecovery
@@ -233,10 +251,9 @@ export default function Home() {
                       <RecordingControls
                         variant="floating"
                         isRecording={recordingState.isRecording}
-                        onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}
                         onRecordingStart={handleRecordingStart}
                         onTranscriptReceived={() => {}}
-                        onStopInitiated={() => setIsStopping(true)}
+                        onStopInitiated={() => recordingState.setStatus(RecordingStatus.STOPPING)}
                         onTranscriptionError={(message) => showModal('errorAlert', message)}
                         isRecordingDisabled={isRecordingDisabled}
                         isParentProcessing={isProcessingStop}
@@ -255,14 +272,13 @@ export default function Home() {
           </>
         ) : (
           <HomeDashboard
-            canRecord={hasMicrophone || isRecording}
+            liveReadiness={liveReadiness}
             isRecording={recordingState.isRecording}
             isProcessingStop={isProcessingStop}
             isRecordingDisabled={isRecordingDisabled}
             meetingName={meetingTitle}
             onRecordingStart={handleRecordingStart}
-            onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}
-            onStopInitiated={() => setIsStopping(true)}
+            onStopInitiated={() => recordingState.setStatus(RecordingStatus.STOPPING)}
             onTranscriptionError={(message) => {
               showModal('errorAlert', message);
             }}

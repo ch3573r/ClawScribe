@@ -21,7 +21,7 @@ interface ParakeetModelTableProps {
   testAction?: ReactNode;
   /** Outcome of the latest test, shown under the table. */
   testReport?: ReactNode;
-  onSelect: (modelName: string) => void;
+  onSelect?: (modelName: string) => void;
   onDownload: (modelName: string) => void;
   onCancel: (modelName: string) => void;
   onDelete: (modelName: string) => void;
@@ -71,7 +71,7 @@ function RowActions({ model, inUse, onSelect, onDownload, onCancel, onDelete }: 
     case "available":
       return (
         <div className="flex items-center justify-end gap-1">
-          {!inUse && <Button variant="outline" size="sm" aria-label={`Use ${name}`} onClick={() => onSelect(model.name)}>Use</Button>}
+          {!inUse && onSelect && <Button variant="outline" size="sm" aria-label={`Use ${name}`} onClick={() => onSelect(model.name)}>Use</Button>}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`More actions for ${name}`}>

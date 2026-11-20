@@ -41,27 +41,3 @@ export function setCallSettings(settings: CallSettings) {
 export function getTeamsDetectionMode() { return getCallSettings().mode; }
 export function setTeamsDetectionMode(mode: TeamsDetectionMode) { setCallSettings({ ...getCallSettings(), mode }); }
 export function getAutoRecordEnabled() { return getTeamsDetectionMode() === "auto"; }
-
-// A different browser tab, hidden toolbar, inaccessible desktop or failed poll
-// cannot prove that the call ended. Count only positive closure observations.
-export function endedOnScan(call: CallWindow, scan: CallScan): boolean {
-  return scan.supported && scan.complete && !scan.active.some(active => active.provider === call.provider) &&
-    (scan.ended.some(ended => ended.key === call.key) || !scan.openWindows.includes(call.window));
-}
-
-export class ObservedCalls {
-  private calls = new Map<string, { call: CallWindow; misses: number }>();
-  has(call: CallWindow) { return this.calls.has(call.key); }
-  ownsObservation(call: CallWindow) { return this.calls.get(call.key)?.call === call; }
-  windows() { return [...new Set([...this.calls.values()].map(({ call }) => call.window))]; }
-  remember(call: CallWindow) { this.calls.set(call.key, { call, misses: 0 }); }
-  interrupted() { for (const item of this.calls.values()) item.misses = 0; }
-  update(scan: CallScan): string[] {
-    const ended: string[] = [];
-    for (const [key,item] of this.calls) {
-      item.misses = endedOnScan(item.call, scan) ? item.misses + 1 : 0;
-      if (item.misses >= 3) { ended.push(key); this.calls.delete(key); }
-    }
-    return ended;
-  }
-}
