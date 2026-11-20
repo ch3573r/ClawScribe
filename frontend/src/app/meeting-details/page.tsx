@@ -155,10 +155,18 @@ function MeetingDetailsContent() {
   useEffect(() => {
     return () => {
       if (meetingId) {
-        stopSummaryPolling(meetingId);
+        // A background poll (automatic summary started while the user was
+        // elsewhere) is not this page's to stop.
+        stopSummaryPolling(meetingId, { keepBackground: true });
       }
     };
   }, [meetingId, stopSummaryPolling]);
+
+  // The recording flow can hand an already open meeting over to this page by
+  // adding source=recording. Check again then; the first check ran without it.
+  useEffect(() => {
+    if (source === 'recording') setHasCheckedAutoGen(false);
+  }, [source]);
 
   useEffect(() => {
 

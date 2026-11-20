@@ -75,6 +75,7 @@ export function loadTsModule(filePath, mocks = {}) {
     require: localRequire,
     window: globalThis.window,
     document: globalThis.document,
+    URLSearchParams: globalThis.URLSearchParams,
     Event: globalThis.Event,
     CustomEvent: globalThis.CustomEvent,
     setTimeout: globalThis.setTimeout,

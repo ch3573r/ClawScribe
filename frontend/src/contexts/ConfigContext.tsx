@@ -200,8 +200,10 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
         if (config) {
           console.log('[ConfigContext] Loaded saved transcript config:', config);
           setTranscriptModelConfig({
-            provider: config.provider || 'parakeet',
-            model: config.model || 'parakeet-tdt-0.6b-v3-int8',
+            // A saved config with a blank provider runs Whisper in the core (the
+            // Settings page reads it the same way); only no saved config means Parakeet.
+            provider: config.provider || 'localWhisper',
+            model: config.model || (config.provider ? 'parakeet-tdt-0.6b-v3-int8' : 'large-v3'),
             apiKey: config.apiKey || null,
             baseUrl: config.baseUrl || null,
             allowUnencrypted: config.allowUnencrypted ?? false,

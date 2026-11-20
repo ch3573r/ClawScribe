@@ -115,3 +115,25 @@ test('Tauri string failures are reported and stop polling', async t => {
   assert.equal(updates[0].error, 'Synthetic database failure');
   assert.equal(timers.size, 0);
 });
+
+test('leaving the meeting page stops its own poll but not a background one', async t => {
+  const { render, timers } = setup(t, async () => ({ status: 'pending' }));
+  render().startSummaryPolling('a', 'a', () => {}, { background: true });
+  render().startSummaryPolling('b', 'b', () => {});
+  render();
+  assert.equal(timers.size, 2);
+  render().stopSummaryPolling('a', { keepBackground: true });
+  assert.equal(timers.size, 2, 'the automatic summary started elsewhere keeps polling');
+  render().stopSummaryPolling('b', { keepBackground: true });
+  assert.equal(timers.size, 1, 'a poll the page started is stopped');
+  render().stopSummaryPolling('a');
+  assert.equal(timers.size, 0, 'an explicit stop still stops a background poll');
+});
+
+test('a poll the page starts replaces a background poll and becomes the page\'s own', async t => {
+  const { render, timers } = setup(t, async () => ({ status: 'pending' }));
+  render().startSummaryPolling('a', 'a', () => {}, { background: true });
+  render().startSummaryPolling('a', 'a', () => {});
+  render().stopSummaryPolling('a', { keepBackground: true });
+  assert.equal(timers.size, 0);
+});

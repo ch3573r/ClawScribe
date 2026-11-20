@@ -47,6 +47,8 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
             }
         }
         "check_updates" => check_updates_handler(app),
+        // `exit` raises `RunEvent::ExitRequested`; `exit_guard` stops and saves
+        // an active recording before this exit goes through.
         "quit" => app.exit(0),
         _ => {}
     }

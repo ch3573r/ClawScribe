@@ -31,7 +31,7 @@ export function PermissionsStep() {
     if (permissions.microphone === 'denied') {
       // Try to open system settings
       try {
-        await invoke('open_system_settings');
+        await invoke('open_system_settings', { preferencePane: 'Privacy_Microphone' });
       } catch {
         toast.error('Could not open system settings. Open your microphone privacy settings, allow ClawScribe access, then try again.');
       }
@@ -63,7 +63,7 @@ export function PermissionsStep() {
     if (permissions.systemAudio === 'denied') {
       // Try to open system settings
       try {
-        await invoke('open_system_settings');
+        await invoke('open_system_settings', { preferencePane: 'Privacy_ScreenCapture' });
       } catch {
         toast.error('Could not open system settings. Check your audio and privacy settings for ClawScribe, then try again.');
       }

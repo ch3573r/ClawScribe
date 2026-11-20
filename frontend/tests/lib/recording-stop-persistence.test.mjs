@@ -26,8 +26,11 @@ for (const failure of ['status', 'subscription', 'duplicate', 'fallback']) {
     try {
       const { useRecordingStop } = loadTsModule('src/hooks/useRecordingStop.ts', {
         react: hooks.react,
-        'next/navigation': { useRouter: () => ({ push: noop }) },
-        '@tauri-apps/api/event': { listen: async name => {
+        'next/navigation': { useRouter: () => ({ push: noop }), usePathname: () => '/' },
+        '@/contexts/ConfigContext': { useConfig: () => ({ modelConfig: {}, isAutoSummary: false }) },
+        '@/lib/auto-summary': { startAutomaticSummary: asyncNoop },
+        '@tauri-apps/api/core': { invoke: async () => {} },
+      '@tauri-apps/api/event': { listen: async name => {
           if (name === 'transcription-complete' && failure === 'subscription') throw new Error('Synthetic subscription failure');
           return noop;
         } },

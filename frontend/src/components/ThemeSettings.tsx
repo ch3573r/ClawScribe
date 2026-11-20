@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { Monitor, Moon, Sparkles, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Meta, SettingsCard, SettingsColumns, SettingsRow, StatusText } from "@/components/ui/settings-layout";
+import { useDraftCommit } from "@/hooks/useDraftCommit";
 import { cn } from "@/lib/utils";
 import {
   accentColors,
@@ -98,15 +99,24 @@ const segmentClasses = (selected: boolean) => cn(
   selected ? "bg-muted text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
 );
 
-/** Name field for a font installed on this PC, with a note when Windows does not have it. */
+/**
+ * Name field for a font installed on this PC, with a note when Windows does not
+ * have it. The typed text stays here; the font is applied, stored and checked
+ * when typing pauses (500 ms), on Enter and on leaving the field, so the page
+ * does not flicker through partial names.
+ */
 function InstalledFontField({ value, onChange, className }: { value: string; onChange: (name: string) => void; className?: string }) {
-  const name = cleanFontName(value);
-  const missing = name !== "" && !isFontInstalled(name);
+  const { draft, setDraft, commit, pending } = useDraftCommit(value, onChange);
+  const committedName = cleanFontName(value);
+  const installed = useMemo(() => committedName === "" || isFontInstalled(committedName), [committedName]);
+  const missing = !pending && !installed;
   return (
     <div className={cn("grid gap-2", className)}>
       <Input
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => { if (event.key === "Enter") commit(); }}
         aria-label="Font name"
         placeholder="For example Calibri"
         spellCheck={false}
@@ -116,7 +126,7 @@ function InstalledFontField({ value, onChange, className }: { value: string; onC
       />
       {missing
         ? <StatusText tone="warning" className="whitespace-normal text-[13px]">Not found on this PC. The Windows font is used instead.</StatusText>
-        : !name && <p className="text-[13px] leading-5 text-muted-foreground">Type the name as Windows shows it under Settings, Personalisation, Fonts.</p>}
+        : !cleanFontName(draft) && <p className="text-[13px] leading-5 text-muted-foreground">Type the name as Windows shows it under Settings, Personalisation, Fonts.</p>}
     </div>
   );
 }
@@ -288,6 +298,7 @@ export function ThemeSettings() {
       </SettingsCard>
 
       <SettingsCard title="Interface font" description="Used across the app">
+        <div>
         <div role="radiogroup" aria-label="Interface font" className="divide-y divide-border/60">
           {fontPreferences.map((font) => {
             const selected = font === fonts.font;
@@ -319,16 +330,19 @@ export function ThemeSettings() {
                   </span>
                   {selected && <Meta>In use</Meta>}
                 </button>
-                {font === "custom" && selected && (
-                  <InstalledFontField
-                    value={fonts.customFont}
-                    onChange={(customFont) => handleFontsChange({ customFont })}
-                    className="pb-4 pl-[3.25rem] pr-5"
-                  />
-                )}
               </div>
             );
           })}
+        </div>
+        {/* Outside the radio group: a text field is not one of its choices. The
+            Installed font option is the last row, so this sits directly under it. */}
+        {fonts.font === "custom" && (
+          <InstalledFontField
+            value={fonts.customFont}
+            onChange={(customFont) => handleFontsChange({ customFont })}
+            className="pb-4 pl-[3.25rem] pr-5"
+          />
+        )}
         </div>
       </SettingsCard>
 

@@ -301,43 +301,84 @@ pub async fn run_transcription_pc_test(
     provider: String,
     model: String,
 ) -> Result<PcTestResult, String> {
-    let job = super::inference::claim_job()?;
+    // A starting recording cancels the test through this token. Cancelling is
+    // handled exactly like the test timeout: the measurement is dropped and the
+    // cleanup task below restores the previously loaded model before the slot
+    // is released. The test never writes to the library.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    // Once the measurement has finished only the model restore is left, which
+    // a cancel cannot shorten, so a late cancel reports that it has no effect.
+    let measured = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_job: super::inference::CancelBatchJob = {
+        let (cancel, measured) = (cancel.clone(), measured.clone());
+        Arc::new(move || {
+            if measured.load(Ordering::SeqCst) {
+                return false;
+            }
+            cancel.cancel();
+            true
+        })
+    };
+    let job = super::inference::claim_batch_job_without_preemption(
+        super::inference::BatchJob::PcTest,
+        cancel_job,
+    )?;
     if provider == "nemotron" {
         nemotron::nemotron_init(app)
             .await
             .map_err(|_| MODEL_UNAVAILABLE)?;
     }
     // Closing a settings view cannot strand the tested model in the shared slot.
-    tokio::spawn(run_test(job, provider, model))
+    tokio::spawn(run_test(job, cancel, measured, provider, model))
         .await
         .map_err(|_| "The PC test could not finish.".to_string())?
 }
 
+const PC_TEST_STOPPED: &str = "The PC test was stopped because a recording started.";
+
+enum Interrupted {
+    Cancelled,
+    TimedOut,
+}
+
 async fn run_test(
-    job: tokio::sync::OwnedSemaphorePermit,
+    job: super::inference::BatchPermit,
+    cancel: tokio_util::sync::CancellationToken,
+    measured_flag: Arc<std::sync::atomic::AtomicBool>,
     provider: String,
     model: String,
 ) -> Result<PcTestResult, String> {
+    if cancel.is_cancelled() {
+        return Err(PC_TEST_STOPPED.into());
+    }
     let lifecycle = super::common::acquire_engine_lifecycle_lock().await;
     let engine = LocalEngine::get(&provider).await?;
     let previous = engine.current_model().await;
-    let result = tokio::time::timeout(TEST_TIMEOUT, async {
-        if previous.as_deref() != Some(model.as_str()) {
-            engine.load(&model).await?;
-        }
-        let actual_model = engine.current_model().await.ok_or(MODEL_UNAVAILABLE)?;
-        measure(&engine, actual_model).await
-    })
-    .await;
-    // A timed-out in-process call can still own its native model lock. Cleanup
-    // retains both gates until FFI is finished, even if the UI has returned.
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(Interrupted::Cancelled),
+        result = tokio::time::timeout(TEST_TIMEOUT, async {
+            if previous.as_deref() != Some(model.as_str()) {
+                engine.load(&model).await?;
+            }
+            let actual_model = engine.current_model().await.ok_or(MODEL_UNAVAILABLE)?;
+            measure(&engine, actual_model).await
+        }) => result.map_err(|_| Interrupted::TimedOut),
+    };
+    measured_flag.store(true, Ordering::SeqCst);
+    // A cancelled or timed-out in-process call can still own its native model
+    // lock. Cleanup retains both gates until FFI is finished and the previous
+    // model is restored, even if the UI has returned.
     let cleanup = tokio::spawn(async move {
         let (_job, _lifecycle) = (job, lifecycle);
         engine.restore(previous).await
     });
-    let measured = result.map_err(|_| {
-        "The PC test timed out. Wait for the speech engine to finish and try a smaller model."
-            .to_string()
+    let measured = result.map_err(|interrupted| match interrupted {
+        Interrupted::Cancelled => PC_TEST_STOPPED.to_string(),
+        Interrupted::TimedOut => {
+            "The PC test timed out. Wait for the speech engine to finish and try a smaller model."
+                .to_string()
+        }
     })?;
     tokio::time::timeout(TEST_TIMEOUT, cleanup)
         .await

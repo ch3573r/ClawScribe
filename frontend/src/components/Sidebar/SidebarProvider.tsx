@@ -64,8 +64,8 @@ interface SidebarContextType {
   setTranscriptServerAddress: (address: string) => void;
   // Summary polling management
   activeSummaryPolls: Map<string, NodeJS.Timeout>;
-  startSummaryPolling: (meetingId: string, processId: string, onUpdate: (result: any) => void) => void;
-  stopSummaryPolling: (meetingId: string) => void;
+  startSummaryPolling: (meetingId: string, processId: string, onUpdate: (result: any) => void, options?: { background?: boolean }) => void;
+  stopSummaryPolling: (meetingId: string, options?: { keepBackground?: boolean }) => void;
   // Refetch meetings from backend
   refetchMeetings: () => Promise<void>;
 
@@ -230,17 +230,14 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       // Track recording initiation from sidebar
       Analytics.trackButtonClick('start_recording', 'sidebar');
     } else {
-      // Already recording - clicking the indicator stops the recording.
-      // The recording screen is the home route, so navigate there if needed
-      // so the stop handler (mounted on Home) can process the stop.
+      // Already recording - clicking the indicator stops the recording. The
+      // app-wide RecordingPostProcessingProvider handles it, so it works from
+      // any page without navigating.
       console.log('Stopping recording from sidebar');
-      if (pathname !== '/') {
-        router.push('/');
-      }
       window.dispatchEvent(new CustomEvent('stop-recording-from-sidebar'));
       Analytics.trackButtonClick('stop_recording', 'sidebar');
     }
-    // The actual recording start/stop is handled in the Home component
+    // Starting is handled by the Home component; stopping by the provider.
   };
 
   // Function to search through meeting transcripts

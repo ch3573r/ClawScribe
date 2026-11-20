@@ -8,11 +8,17 @@ export function useSummaryPolling() {
   const polls = useRef(new Map<string, NodeJS.Timeout>());
   const [activeSummaryPolls, setActiveSummaryPolls] = useState(new Map<string, NodeJS.Timeout>());
 
-  const stopSummaryPolling = useCallback((meetingId: string) => {
+  // Polls started with no meeting page behind them (the automatic summary after a
+  // recording ended elsewhere). Leaving that meeting's page must not stop them.
+  const background = useRef(new Set<string>());
+
+  const stopSummaryPolling = useCallback((meetingId: string, options?: { keepBackground?: boolean }) => {
+    if (options?.keepBackground && background.current.has(meetingId)) return;
     const timer = polls.current.get(meetingId);
     if (timer !== undefined) {
       clearInterval(timer);
       polls.current.delete(meetingId);
+      background.current.delete(meetingId);
       setActiveSummaryPolls(new Map(polls.current));
     }
   }, []);
@@ -21,8 +27,10 @@ export function useSummaryPolling() {
     meetingId: string,
     _processId: string,
     onUpdate: (result: any) => void | Promise<void>,
+    options?: { background?: boolean },
   ) => {
     stopSummaryPolling(meetingId);
+    if (options?.background) background.current.add(meetingId);
     let pollCount = 0;
     let inFlight = false;
     const timer = setInterval(async () => {
@@ -66,6 +74,7 @@ export function useSummaryPolling() {
   useEffect(() => () => {
     polls.current.forEach(timer => clearInterval(timer));
     polls.current.clear();
+    background.current.clear();
   }, []);
 
   return { activeSummaryPolls, startSummaryPolling, stopSummaryPolling };

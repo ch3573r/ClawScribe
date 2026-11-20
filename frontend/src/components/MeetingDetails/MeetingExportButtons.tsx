@@ -345,7 +345,7 @@ export function MeetingExportButtons({
   const openPlanner = useCallback(() => {
     if (!hasPlannerDestination(getExportDestinations())) {
       toast.info("Pick a Planner plan and default bucket first", {
-        description: "Settings → Add-ons → Planner task export.",
+        description: "Settings → Microsoft 365 → Planner.",
       });
       return;
     }
@@ -355,7 +355,7 @@ export function MeetingExportButtons({
   const openToDo = useCallback(() => {
     if (!hasToDoDestination(getExportDestinations())) {
       toast.info("Pick a Microsoft To Do list first", {
-        description: "Settings → Add-ons → Microsoft To Do export.",
+        description: "Settings → Microsoft 365 → To Do.",
       });
       return;
     }
@@ -391,7 +391,7 @@ export function MeetingExportButtons({
         const spaceKey = confluenceSpaceKey?.trim();
         if (!baseUrl || !spaceKey) {
           toast.info("Finish Confluence REST setup first", {
-            description: "Settings → Add-ons → Confluence export.",
+            description: "Settings → Confluence.",
           });
           return;
         }

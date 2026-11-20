@@ -108,7 +108,7 @@ export function PlannerExportPreview({
         }));
         setRows(baseRows);
 
-        // Optional AI polish (Settings → Add-ons → Planner). Reviewed below, so a
+        // Optional AI polish (Settings → Microsoft 365 → Planner). Reviewed below, so a
         // poor rewrite never lands silently; on failure we keep the raw titles.
         // All providers (including Codex, via its app-server) are supported.
         const aiPolish = getExportDestinations().plannerAiPolish ?? false;

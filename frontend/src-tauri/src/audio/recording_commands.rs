@@ -396,6 +396,16 @@ async fn finish_model_validation(pending: Option<ModelValidation>) -> Result<(),
     }
 }
 
+const CAPTURE_HALTED_DURING_START: &str =
+    "Recording could not start because audio capture stopped. Check your microphone and try again.";
+
+/// True when capture stopped itself after the streams opened: a fatal error, or
+/// a burst of recoverable ones. The capture state is marked recording by a
+/// successful `start_recording`, so a cleared flag means it was halted since.
+fn capture_halted_during_start(state: &super::recording_state::RecordingState) -> bool {
+    state.has_fatal_error() || !state.is_recording()
+}
+
 fn report_model_validation_failure<R: Runtime>(app: &AppHandle<R>, validation_error: &str) {
     error!("Model validation failed");
     // actionable: false shows a toast instead of a modal; download progress
@@ -530,7 +540,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     info!("Starting recording with default devices");
 
     let mode = super::recording_mode::load(&app)?;
-    let job = super::inference::claim_job_preempting_local_summary(
+    // A recording pre-empts a local summary or a cancellable batch job
+    // (retranscription, import, speaker detection, PC test). A running
+    // recording holds an unregistered permit and is never pre-empted.
+    let job = super::inference::claim_job_for_recording(
+        &app,
         "Local summary stopped because a recording started. Generate it again afterwards.",
     )
     .await?;
@@ -746,6 +760,14 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         "✅ Transcription model validation passed in {:?}",
         validation_timer.elapsed()
     );
+    // The streams have been open since `start_recording`. A fatal capture error
+    // during the model load has already emitted `recording-error` and halted
+    // the capture state; committing now would mark a session that takes no
+    // audio as recording. Discard it like a failed model load.
+    if capture_halted_during_start(manager.get_state()) {
+        manager.abort_start().await;
+        return Err(CAPTURE_HALTED_DURING_START.to_string());
+    }
     let recording_generation = live_startup.recording_generation;
     let live_session_id = live_startup.commit();
     info!(
@@ -841,7 +863,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     info!("Starting recording with selected devices");
 
     let mode = super::recording_mode::load(&app)?;
-    let job = super::inference::claim_job_preempting_local_summary(
+    // A recording pre-empts a local summary or a cancellable batch job
+    // (retranscription, import, speaker detection, PC test). A running
+    // recording holds an unregistered permit and is never pre-empted.
+    let job = super::inference::claim_job_for_recording(
+        &app,
         "Local summary stopped because a recording started. Generate it again afterwards.",
     )
     .await?;
@@ -968,6 +994,14 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         "✅ Transcription model validation passed in {:?}",
         validation_timer.elapsed()
     );
+    // The streams have been open since `start_recording`. A fatal capture error
+    // during the model load has already emitted `recording-error` and halted
+    // the capture state; committing now would mark a session that takes no
+    // audio as recording. Discard it like a failed model load.
+    if capture_halted_during_start(manager.get_state()) {
+        manager.abort_start().await;
+        return Err(CAPTURE_HALTED_DURING_START.to_string());
+    }
     let recording_generation = live_startup.recording_generation;
     let live_session_id = live_startup.commit();
     info!(
@@ -2001,4 +2035,40 @@ pub async fn get_cloud_transcription_enabled() -> Result<bool, String> {
 
 pub(crate) fn cloud_transcription_enabled() -> bool {
     CLOUD_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod start_halt_tests {
+    use super::capture_halted_during_start;
+    use crate::audio::recording_state::{AudioError, RecordingState};
+
+    #[test]
+    fn a_healthy_start_is_committed() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        assert!(!capture_halted_during_start(&state));
+        // Recoverable glitches alone do not discard a start.
+        state.report_error(AudioError::BufferOverflow);
+        assert!(!capture_halted_during_start(&state));
+    }
+
+    #[test]
+    fn a_fatal_capture_error_during_the_model_load_discards_the_start() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        state.report_error(AudioError::PermissionDenied);
+        assert!(capture_halted_during_start(&state));
+    }
+
+    #[test]
+    fn a_burst_of_recoverable_errors_that_halts_capture_discards_the_start() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        for _ in 0..10 {
+            state.report_error(AudioError::StreamFailed);
+        }
+        // The last error is recoverable, but capture has stopped itself.
+        assert!(!state.has_fatal_error());
+        assert!(capture_halted_during_start(&state));
+    }
 }

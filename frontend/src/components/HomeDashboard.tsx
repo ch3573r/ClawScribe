@@ -35,7 +35,6 @@ interface HomeDashboardProps {
   isRecording: boolean;
   isProcessingStop: boolean;
   isRecordingDisabled: boolean;
-  barHeights: string[];
   meetingName?: string;
   onRecordingStart: () => void;
   onRecordingStop: (callApi?: boolean) => void;
@@ -84,7 +83,6 @@ export function HomeDashboard({
   isRecording,
   isProcessingStop,
   isRecordingDisabled,
-  barHeights,
   meetingName,
   onRecordingStart,
   onRecordingStop,
@@ -238,7 +236,6 @@ export function HomeDashboard({
                       onRecordingStart={onRecordingStart}
                       onTranscriptReceived={() => {}}
                       onStopInitiated={onStopInitiated}
-                      barHeights={barHeights}
                       onTranscriptionError={onTranscriptionError}
                       isRecordingDisabled={isRecordingDisabled || recordingState.isSavingMode || recordingState.recordingMode === null}
                       isParentProcessing={isProcessingStop}

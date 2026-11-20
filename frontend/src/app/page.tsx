@@ -1,9 +1,6 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { appDataDir } from '@tauri-apps/api/path';
-import { listen } from '@tauri-apps/api/event';
 import { motion } from 'framer-motion';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
@@ -29,7 +26,6 @@ import { useRouter } from 'next/navigation';
 export default function Home() {
   // Local page state (not moved to contexts)
   const [isRecording, setIsRecordingState] = useState(false);
-  const [barHeights, setBarHeights] = useState(['58%', '76%', '58%']);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
 
   // Use contexts for state management
@@ -125,7 +121,7 @@ export default function Home() {
                 ? 'Transcripts saved. Audio recovery needs a retry; original recording files were kept.'
                 : 'Transcripts recovered (no audio available)',
           action: result.meetingId ? {
-            label: 'View Meeting',
+            label: 'View meeting',
             onClick: () => {
               router.push(`/meeting-details?id=${result.meetingId}`);
             }
@@ -165,44 +161,6 @@ export default function Home() {
       sessionStorage.removeItem('recovery_dialog_shown');
     }
   };
-
-  useEffect(() => {
-    if (recordingState.isRecording) {
-      const interval = setInterval(() => {
-        setBarHeights(prev => {
-          const newHeights = [...prev];
-          newHeights[0] = Math.random() * 20 + 10 + 'px';
-          newHeights[1] = Math.random() * 20 + 10 + 'px';
-          newHeights[2] = Math.random() * 20 + 10 + 'px';
-          return newHeights;
-        });
-      }, 300);
-
-      return () => clearInterval(interval);
-    }
-  }, [recordingState.isRecording]);
-
-  // Stop the recording when the sidebar "Recording…" indicator is clicked.
-  // Mirrors RecordingControls.stopRecordingAction so the stop flow is identical
-  // regardless of which control triggered it.
-  useEffect(() => {
-    const onStopFromSidebar = async () => {
-      if (!recordingState.isRecording || isStopping) return;
-      setIsStopping(true);
-      try {
-        const dataDir = await appDataDir();
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const savePath = `${dataDir}/recording-${timestamp}.wav`;
-        await invoke('stop_recording', { args: { save_path: savePath } });
-        await handleRecordingStop(true);
-      } catch (error) {
-        console.error('Failed to stop recording from sidebar:', error);
-        await handleRecordingStop(false);
-      }
-    };
-    window.addEventListener('stop-recording-from-sidebar', onStopFromSidebar);
-    return () => window.removeEventListener('stop-recording-from-sidebar', onStopFromSidebar);
-  }, [recordingState.isRecording, isStopping, handleRecordingStop, setIsStopping]);
 
   // Computed values using global status
   const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS || isProcessing;
@@ -259,7 +217,6 @@ export default function Home() {
                         onRecordingStart={handleRecordingStart}
                         onTranscriptReceived={() => {}}
                         onStopInitiated={() => setIsStopping(true)}
-                        barHeights={barHeights}
                         onTranscriptionError={(message) => showModal('errorAlert', message)}
                         isRecordingDisabled={isRecordingDisabled}
                         isParentProcessing={isProcessingStop}
@@ -282,7 +239,6 @@ export default function Home() {
             isRecording={recordingState.isRecording}
             isProcessingStop={isProcessingStop}
             isRecordingDisabled={isRecordingDisabled}
-            barHeights={barHeights}
             meetingName={meetingTitle}
             onRecordingStart={handleRecordingStart}
             onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}

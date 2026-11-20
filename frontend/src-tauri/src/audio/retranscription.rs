@@ -22,6 +22,42 @@ static RETRANSCRIPTION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 /// Global flag to signal cancellation
 static RETRANSCRIPTION_CANCELLED: AtomicBool = AtomicBool::new(false);
 
+/// True once the transcript save has begun. From then on a cancel cannot take
+/// effect. The lock makes "cancel accepted" and "save begins" mutually
+/// exclusive, so a cancel reported as accepted always stops the save.
+static RETRANSCRIPTION_SAVING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+fn set_retranscription_saving(saving: bool) {
+    *RETRANSCRIPTION_SAVING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = saving;
+}
+
+/// Cancels for a starting recording. Returns false when the job is already
+/// saving and will finish instead.
+fn cancel_retranscription_if_possible() -> bool {
+    let saving = RETRANSCRIPTION_SAVING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if *saving {
+        return false;
+    }
+    RETRANSCRIPTION_CANCELLED.store(true, Ordering::SeqCst);
+    true
+}
+
+/// The last cancel check: after this the save runs to completion.
+fn begin_retranscription_save() -> Result<()> {
+    let mut saving = RETRANSCRIPTION_SAVING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
+        return Err(anyhow!("Retranscription cancelled"));
+    }
+    *saving = true;
+    Ok(())
+}
+
 /// RAII guard for RETRANSCRIPTION_IN_PROGRESS flag
 /// Ensures flag is cleared even if retranscription panics or returns early
 struct RetranscriptionGuard;
@@ -35,12 +71,14 @@ impl RetranscriptionGuard {
         {
             return Err("Retranscription already in progress".to_string());
         }
+        set_retranscription_saving(false);
         Ok(RetranscriptionGuard)
     }
 }
 
 impl Drop for RetranscriptionGuard {
     fn drop(&mut self) {
+        set_retranscription_saving(false);
         RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
 }
@@ -95,7 +133,13 @@ pub async fn start_retranscription<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<RetranscriptionResult> {
-    let _job = super::inference::claim_job_preempting_local_summary(
+    // Registered so a starting recording can cancel this job. A cancel before
+    // the transcript is saved leaves the meeting's transcript untouched: the
+    // delete and insert happen in one transaction after the last cancel check.
+    let cancel: super::inference::CancelBatchJob = Arc::new(cancel_retranscription_if_possible);
+    let _job = super::inference::claim_batch_job(
+        super::inference::BatchJob::Retranscription,
+        cancel,
         "Local summary stopped because retranscription started. Generate it again afterwards.",
     )
     .await
@@ -225,6 +269,7 @@ async fn run_retranscription<R: Runtime>(
                     };
                     let source_language =
                         super::common::transcription_source_language_hint(language.as_deref());
+                    begin_retranscription_save()?;
                     return save_retranscription_transcripts(
                         &app,
                         &meeting_id,
@@ -520,10 +565,8 @@ async fn run_retranscription<R: Runtime>(
         transcribed_count, processable_count, avg_confidence
     );
 
-    // Check for cancellation
-    if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
-        return Err(anyhow!("Retranscription cancelled"));
-    }
+    // Last cancel check; the save below cannot be cancelled.
+    begin_retranscription_save()?;
 
     let used_provider = if use_nemotron {
         "nemotron"

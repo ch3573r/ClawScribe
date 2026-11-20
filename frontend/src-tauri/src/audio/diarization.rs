@@ -2015,19 +2015,25 @@ pub fn active_speaker_diarization_command() -> Option<String> {
         .map(|job| job.meeting_id.clone())
 }
 
-#[tauri::command]
-pub fn cancel_speaker_diarization_command(meeting_id: String) -> std::result::Result<(), String> {
+/// Ok(true): the running job was told to stop. Ok(false): no such job is
+/// running (yet). Err: the job is already saving and cannot be cancelled.
+fn request_diarization_cancel(meeting_id: &str) -> std::result::Result<bool, String> {
     let active = DIARIZATION_MEETING
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let Some(job) = active.as_ref().filter(|job| job.meeting_id == meeting_id) else {
-        return Ok(());
+        return Ok(false);
     };
     if job.saving {
         return Err("Speaker labels are already being saved. Wait for completion.".into());
     }
     job.cancelled.store(true, Ordering::Release);
-    Ok(())
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn cancel_speaker_diarization_command(meeting_id: String) -> std::result::Result<(), String> {
+    request_diarization_cancel(&meeting_id).map(|_| ())
 }
 
 fn diarization_cancel_flag() -> Arc<AtomicBool> {
@@ -2077,7 +2083,17 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     num_speakers: Option<i32>,
     preserve_existing_labels: Option<bool>,
 ) -> std::result::Result<SpeakerDiarizationComplete, String> {
-    let _job = super::inference::claim_job_preempting_local_summary(
+    // Registered so a starting recording can cancel this job. Labels are saved
+    // in one transaction that refuses a cancelled run, and a run that is
+    // already saving reports "cannot cancel" and is simply waited for.
+    let cancel_meeting = meeting_id.clone();
+    // Reports false before the run has started and once it is saving; the
+    // recording start re-issues it, so only an effective cancel is announced.
+    let cancel: super::inference::CancelBatchJob =
+        Arc::new(move || matches!(request_diarization_cancel(&cancel_meeting), Ok(true)));
+    let _job = super::inference::claim_batch_job(
+        super::inference::BatchJob::SpeakerDetection,
+        cancel,
         "Local summary stopped because speaker detection started. Generate it again afterwards.",
     )
     .await?;

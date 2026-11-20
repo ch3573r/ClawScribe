@@ -29,6 +29,42 @@ static IMPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 /// Global flag to signal cancellation
 static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 
+/// True once the import has begun saving its meeting. From then on a cancel
+/// cannot take effect; the lock makes "cancel accepted" and "save begins"
+/// mutually exclusive.
+static IMPORT_SAVING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+fn set_import_saving(saving: bool) {
+    *IMPORT_SAVING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = saving;
+}
+
+/// Cancels for a starting recording. Returns false when the import is already
+/// saving and will finish instead.
+fn cancel_import_if_possible() -> bool {
+    let saving = IMPORT_SAVING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if *saving {
+        return false;
+    }
+    IMPORT_CANCELLED.store(true, Ordering::SeqCst);
+    true
+}
+
+/// The last cancel check: after this the meeting is created.
+fn begin_import_save() -> Result<()> {
+    let mut saving = IMPORT_SAVING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+        return Err(anyhow!("Import cancelled"));
+    }
+    *saving = true;
+    Ok(())
+}
+
 /// RAII guard for IMPORT_IN_PROGRESS flag
 /// Ensures flag is cleared even if import panics or returns early
 struct ImportGuard;
@@ -42,12 +78,14 @@ impl ImportGuard {
         {
             return Err("Import already in progress".to_string());
         }
+        set_import_saving(false);
         Ok(ImportGuard)
     }
 }
 
 impl Drop for ImportGuard {
     fn drop(&mut self) {
+        set_import_saving(false);
         IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
 }
@@ -286,7 +324,13 @@ pub async fn start_import<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<ImportResult> {
-    let _job = super::inference::claim_job_preempting_local_summary(
+    // Registered so a starting recording can cancel this job. A cancel before
+    // the database commit removes the half-built meeting folder (see
+    // `ImportFolderGuard`); the source file is never touched.
+    let cancel: super::inference::CancelBatchJob = std::sync::Arc::new(cancel_import_if_possible);
+    let _job = super::inference::claim_batch_job(
+        super::inference::BatchJob::Import,
+        cancel,
         "Local summary stopped because import started. Generate it again afterwards.",
     )
     .await
@@ -841,9 +885,7 @@ async fn save_import_transcripts<R: Runtime>(
     transcription_source_language: Option<&str>,
     failed_segments: usize,
 ) -> Result<ImportResult> {
-    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        return Err(anyhow!("Import cancelled"));
-    }
+    begin_import_save()?;
     let meeting_folder = folder_guard.path.as_path();
     emit_progress(app, "saving", 85, "Creating meeting...");
 

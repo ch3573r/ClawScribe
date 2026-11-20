@@ -47,6 +47,7 @@ pub mod console_utils;
 pub(crate) mod credentials;
 pub mod database;
 pub mod diagnostics;
+pub mod exit_guard;
 pub mod exports;
 mod external_url;
 pub mod groq;
@@ -929,6 +930,7 @@ pub fn run() {
             summary::commands::api_restore_previous_summary,
             summary::edit_exit::api_set_summary_edits_pending,
             summary::edit_exit::api_finish_summary_edit_exit,
+            exit_guard::recording_exit_save_finished,
             summary::edit_exit::api_summary_edit_exit_failed,
             summary::commands::api_get_meeting_summary_language,
             summary::commands::api_save_meeting_summary_language,
@@ -1119,11 +1121,17 @@ pub fn run() {
                     tray::focus_main_window(_app_handle);
                 }
                 tauri::RunEvent::ExitRequested { code, api, .. } => {
+                    // Unsaved summary edits come first: the user confirms (or
+                    // keeps the app open) before an active recording is
+                    // stopped. Once that exit is allowed, a recording is
+                    // stopped and saved before the exit proceeds.
                     if summary::edit_exit::request_exit(_app_handle, code.unwrap_or(0), || {
                         api.prevent_exit()
                     }) {
                         tray::focus_main_window(_app_handle);
+                        return;
                     }
+                    exit_guard::handle_exit_request(_app_handle, code, || api.prevent_exit());
                 }
                 tauri::RunEvent::Exit => {
                     log::info!("Application exiting, cleaning up resources...");

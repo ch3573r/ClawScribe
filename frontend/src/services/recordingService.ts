@@ -105,9 +105,9 @@ export class RecordingService {
     meetingName: string
   ): Promise<void> {
     return invoke('start_recording_with_devices_and_meeting', {
-      mic_device_name: micDeviceName,
-      system_device_name: systemDeviceName,
-      meeting_name: meetingName
+      micDeviceName,
+      systemDeviceName,
+      meetingName
     });
   }
 
@@ -156,8 +156,8 @@ export class RecordingService {
 
   async attemptDeviceReconnect(deviceName: string, deviceType: 'Microphone' | 'SystemAudio'): Promise<boolean> {
     return invoke<boolean>('attempt_device_reconnect', {
-      device_name: deviceName,
-      device_type: deviceType,
+      deviceName,
+      deviceType,
     });
   }
 

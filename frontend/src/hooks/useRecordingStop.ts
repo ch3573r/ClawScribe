@@ -1,11 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import type { RecordingStoppedPayload } from '@/services/recordingService';
 import { recordingOutcome, recordingRecoveryMessage } from '@/lib/recording-outcome';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
+import { useConfig } from '@/contexts/ConfigContext';
+import { startAutomaticSummary } from '@/lib/auto-summary';
+import { currentRoute } from '@/lib/current-route';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
@@ -21,6 +25,12 @@ type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'c
 // Shared by the recording page and app-wide tray handler.
 let stopInProgress = false;
 let lastSavedFolder: string | null = null;
+
+// Quitting during a recording waits for the core to hear that the save has
+// ended. It is a no-op in the core at any other time, so errors are ignored.
+async function confirmSaveFinished(): Promise<void> {
+  try { await invoke('recording_exit_save_finished'); } catch { /* only matters while quitting */ }
+}
 
 interface UseRecordingStopReturn {
   handleRecordingStop: (callApi: boolean) => Promise<void>;
@@ -72,9 +82,16 @@ export function useRecordingStop(
     setMeetings,
     meetings,
     setIsMeetingActive,
+    startSummaryPolling,
   } = useSidebar();
+  const { modelConfig, isAutoSummary } = useConfig();
 
   const router = useRouter();
+  // The page is read from the window when the stop finishes (see below), not
+  // from a hook: this instance may belong to Home, which unmounts when the user
+  // leaves it while the recording is being saved.
+  const stopContext = useRef({ modelConfig, isAutoSummary, startSummaryPolling, refetchMeetings });
+  stopContext.current = { modelConfig, isAutoSummary, startSummaryPolling, refetchMeetings };
 
   // Guard to prevent duplicate/concurrent stop calls (e.g., from UI and tray simultaneously)
 
@@ -132,20 +149,23 @@ export function useRecordingStop(
       await recordingStoppedDataRef.current;
     }
 
-    // Guard: prevent duplicate/concurrent stop calls
+    // Guard: prevent duplicate/concurrent stop calls. Another flow in progress
+    // owns the save and confirms it; this call must not.
     const stoppedFolder = sessionStorage.getItem('last_recording_folder_path');
-    if (stopInProgress || (isCallApi && stoppedFolder !== null && stoppedFolder === lastSavedFolder)) {
+    if (stopInProgress) return;
+    if (isCallApi && stoppedFolder !== null && stoppedFolder === lastSavedFolder) {
+      // Already saved and nothing else is running, so nothing else will confirm.
+      await confirmSaveFinished();
       return;
     }
     stopInProgress = true;
 
-    // Set status to STOPPING immediately
-    setStatus(RecordingStatus.STOPPING);
-    setIsRecording(false);
-    setIsRecordingDisabled(true);
-    const stopStartTime = Date.now();
-
     try {
+      // Set status to STOPPING immediately
+      setStatus(RecordingStatus.STOPPING);
+      setIsRecording(false);
+      setIsRecordingDisabled(true);
+      const stopStartTime = Date.now();
 
       // Note: stop_recording is already called by RecordingControls.stopRecordingAction
       // This function only handles post-stop processing (transcription wait, API call, navigation)
@@ -352,7 +372,7 @@ export function useRecordingStop(
           (recoveryMessage ? toast.warning : toast.success)(recoveryMessage ? 'Meeting saved with warnings' : 'Recording saved successfully!', {
             description: recoveryMessage || (audioOnly ? 'Audio saved. Open the meeting and choose Transcribe when ready.' : `${freshTranscripts.length} transcript segments saved.`),
             action: {
-              label: 'View Meeting',
+              label: 'View meeting',
               onClick: () => {
                 router.push(`/meeting-details?id=${meetingId}`);
                 Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
@@ -361,13 +381,33 @@ export function useRecordingStop(
             duration: 10000,
           });
 
-          // Auto-navigate after a short delay with source parameter
+          // Show the finished meeting only when the user is on Home. From any
+          // other page they stay where they are (the toast offers the meeting).
+          // The meeting page starts the automatic summary when it is opened with
+          // source=recording; without that visit it is started here instead.
           setTimeout(() => {
-            router.push(`/meeting-details?id=${meetingId}&source=recording`);
+            const latest = stopContext.current;
+            const route = currentRoute();
             clearTranscripts()
-            Analytics.trackPageView('meeting_details');
+            if (route.path === '/') {
+              router.push(`/meeting-details?id=${meetingId}&source=recording`);
+              Analytics.trackPageView('meeting_details');
+            } else if (route.path === '/meeting-details' && route.id === meetingId) {
+              // The user already opened this meeting (from the toast). Hand the
+              // summary to that page rather than starting a second run beside it.
+              router.replace(`/meeting-details?id=${meetingId}&source=recording`);
+            } else if (latest.isAutoSummary) {
+              void startAutomaticSummary({
+                meetingId,
+                folderPath,
+                modelConfig: latest.modelConfig,
+                startSummaryPolling: latest.startSummaryPolling,
+                refetchMeetings: latest.refetchMeetings,
+                openMeeting: id => router.push(`/meeting-details?id=${id}`),
+              });
+            }
 
-            // Reset to IDLE after navigation
+            // Back to IDLE once the transcript is cleared
             setStatus(RecordingStatus.IDLE);
           }, 2000);
           // Track meeting completion analytics
@@ -443,8 +483,10 @@ export function useRecordingStop(
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } finally {
-      // Always reset the guard flag when done
+      // Always reset the guard flag when done, then confirm the save has ended
+      // (however it ended) for a quit that is waiting on it.
       stopInProgress = false;
+      await confirmSaveFinished();
     }
   }, [
     setIsRecording,
@@ -462,23 +504,6 @@ export function useRecordingStop(
     setIsMeetingActive,
     router,
   ]);
-
-  // Expose handleRecordingStop function to window for Rust callbacks
-  const handleRecordingStopRef = useRef(handleRecordingStop);
-  useEffect(() => {
-    handleRecordingStopRef.current = handleRecordingStop;
-  });
-
-  useEffect(() => {
-    (window as any).handleRecordingStop = (callApi: boolean = true) => {
-      handleRecordingStopRef.current(callApi);
-    };
-
-    // Cleanup on unmount
-    return () => {
-      delete (window as any).handleRecordingStop;
-    };
-  }, []);
 
   // Derive summaryStatus from RecordingStatus for backward compatibility
   const summaryStatus: SummaryStatus = status === RecordingStatus.PROCESSING_TRANSCRIPTS ? 'processing' : 'idle';

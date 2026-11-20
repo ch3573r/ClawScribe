@@ -2,34 +2,15 @@
 
 import { motion } from 'framer-motion';
 import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateContext';
-import { useEffect, useState } from 'react';
 
 interface RecordingStatusBarProps {
   isPaused?: boolean;
 }
 
 export const RecordingStatusBar: React.FC<RecordingStatusBarProps> = ({ isPaused = false }) => {
-  // Get recording duration from backend-synced context (in seconds)
-  // Backend polls every 500ms, providing smooth updates
-  const { activeDuration, status } = useRecordingState();
+  // State only. The elapsed time is shown once, next to the recording controls.
+  const { status } = useRecordingState();
   const isStarting = status === RecordingStatus.STARTING;
-
-  // Display state synced from backend
-  const [displaySeconds, setDisplaySeconds] = useState(0);
-
-  // Sync with backend duration when it changes (handles refresh/navigation)
-  useEffect(() => {
-    if (activeDuration !== null) {
-      // Round to nearest second to avoid decimal issues
-      setDisplaySeconds(Math.floor(activeDuration));
-    }
-  }, [activeDuration]);
-
-  const formatDuration = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
 
   return (
     <motion.div
@@ -42,7 +23,6 @@ export const RecordingStatusBar: React.FC<RecordingStatusBarProps> = ({ isPaused
       <div className={`w-2 h-2 rounded-full ${isPaused ? 'bg-warning-foreground' : isStarting ? 'bg-primary animate-pulse' : 'bg-error-foreground animate-pulse'}`} />
       <span className={`text-sm ${isPaused ? 'text-warning-foreground' : 'text-foreground'}`}>
         {isPaused ? 'Paused' : isStarting ? 'Starting recording...' : 'Recording'}
-        {!isStarting && ` • ${formatDuration(displaySeconds)}`}
       </span>
     </motion.div>
   );

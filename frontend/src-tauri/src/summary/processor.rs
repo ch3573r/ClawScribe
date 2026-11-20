@@ -216,11 +216,11 @@ fn translation_system_prompt(target_language: &str) -> String {
         r#"You are a precise translator. Translate the provided Markdown document into {target_language} while preserving structure exactly.
 
 **CRITICAL RULES:**
-1. Translate every sentence, heading, list item, and table cell into {target_language}.
+1. Translate every sentence, heading, list item, and table cell into natural {target_language}, the way a native-speaking colleague would write meeting notes. Do not translate word for word.
 2. Preserve the Markdown structure EXACTLY: keep every `#`, `**`, `-`, `|`, code fence marker, and table pipe in the same position.
 3. Do NOT translate: proper nouns (names of people, products, companies), code identifiers, file paths, URLs, numeric values, or text inside backticks.
 4. Do not add commentary or explanation. Output ONLY the translated Markdown.
-5. If a technical term has no standard translation, keep the original English word."#
+5. Keep English terms that people working in {target_language} normally say in English: technical, IT, product and business terms such as rollout, deployment, release, backup, ticket, review, roadmap, feature, update, workshop and call. Never coin or force a native word for such a term; apply only the grammar of {target_language} to it, such as articles, capitalisation and compounds."#
     )
 }
 

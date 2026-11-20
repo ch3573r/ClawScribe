@@ -21,7 +21,6 @@ import { toast } from 'sonner';
 
 interface RecordingControlsProps {
   isRecording: boolean;
-  barHeights: string[];
   onRecordingStop: (callApi?: boolean) => void;
   onRecordingStart: () => void;
   onTranscriptReceived: (summary: SummaryResponse) => void;
@@ -39,7 +38,6 @@ interface RecordingControlsProps {
 
 export const RecordingControls: React.FC<RecordingControlsProps> = ({
   isRecording,
-  barHeights,
   onRecordingStop,
   onRecordingStart,
   onTranscriptReceived,
@@ -82,19 +80,9 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const isPlaying = false;
   const progress = 0;
 
-  // Live elapsed clock: ticks every second while recording and not paused,
-  // resets on stop. Display-only — the saved meeting's real duration comes from
-  // the backend.
-  const [elapsed, setElapsed] = useState(0);
-  useEffect(() => {
-    if (!isRecording) {
-      setElapsed(0);
-      return;
-    }
-    if (isPaused) return;
-    const id = setInterval(() => setElapsed((e) => e + 1), 1000);
-    return () => clearInterval(id);
-  }, [isRecording, isPaused]);
+  // The only elapsed clock on screen. It shows the backend's active recording
+  // time (pauses excluded), so it stays correct after leaving and reopening Home.
+  const elapsed = Math.floor(recordingState.activeDuration ?? 0);
 
   const formatTime = (time: number) => {
     const h = Math.floor(time / 3600);
@@ -585,17 +573,19 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                     </span>
                   )}
 
-                  <div className={waveformClassName}>
-                    {barHeights.map((height, index) => (
+                  {/* A recording mark, not a level meter: the core does not report
+                      the level of a running recording, so the bars stay still. */}
+                  <div className={waveformClassName} aria-hidden="true">
+                    {(isDashboard ? [4, 7, 4] : [3, 5, 3]).map((size, index) => (
                       <div
                         key={index}
-                        className={`${isDashboard ? 'w-1.5' : 'w-1'} rounded-full transition-all duration-200 ${
+                        className={`${isDashboard ? 'w-1.5' : 'w-1'} rounded-full ${
                           isPaused ? 'bg-warning-foreground' : 'bg-brand-gradient-v'
                         }`}
                         style={{
                           height:
-                            isRecording && !isPaused
-                              ? height
+                            isRecording
+                              ? `${size * 4}px`
                               : isDashboard
                                 ? '8px'
                                 : '4px',

@@ -499,9 +499,12 @@
 
 }
 
-/* Sonner ships fixed rich-color palettes. Keep every toast variant bound to
-   the active ClawScribe theme so light/dark and accent changes stay coherent. */
-[data-sonner-toaster] {
+/* Sonner ships fixed palettes on [data-sonner-toaster][data-sonner-theme='light'
+   | 'dark'] and its stylesheet is added to <head> after ours. The :root prefix
+   outranks those selectors whatever the stylesheet order, so every toast variant
+   stays bound to the active ClawScribe theme and accent. Its rich-color rules
+   read these variables, so overriding them is enough. */
+:root [data-sonner-toaster][data-sonner-theme] {
   --normal-bg: hsl(var(--popover));
   --normal-border: hsl(var(--border));
   --normal-text: hsl(var(--popover-foreground));
@@ -525,8 +528,8 @@
   --error-text: hsl(var(--theme-error-fg));
 }
 
-[data-rich-colors='true'][data-sonner-toast][data-type='loading'],
-[data-rich-colors='true'][data-sonner-toast][data-type='default'] {
+:root [data-rich-colors='true'][data-sonner-toast][data-type='loading'],
+:root [data-rich-colors='true'][data-sonner-toast][data-type='default'] {
   background: var(--normal-bg);
   border-color: var(--normal-border);
   color: var(--normal-text);
