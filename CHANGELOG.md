@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.62.0
+
+- A manually started recording now uses the title and the microphone and system-audio devices you chose. Before, they were dropped and the defaults were used.
+- Starting a recording stops a running retranscription, import, speaker detection or PC test instead of failing. The previous transcript and speaker labels are kept. Speaker detection on long audio may need a second attempt.
+- Stop in the sidebar works from every page. After a stop the app opens the new meeting only if Home is open; the automatic summary starts either way.
+- Quit in the tray menu during a recording stops it and saves the meeting first, waiting up to two minutes. A capture failure is shown in a notice, and a capture failure while the speech model loads cancels the start.
+- The random bars on Home during a recording are replaced by a still recording mark, and one elapsed-time clock is shown instead of two.
+- Notices follow the light or dark theme and appear at the bottom right.
+- Settings → Transcription has a language setting for Whisper and Nemotron. Parakeet and hosted transcription detect the language themselves.
+- Translated summaries keep English working terms such as rollout or review. Not measured on real meetings.
+- Settings → Appearance adds Inter, Geist and Source Serif 4, a separate transcript and summary font, any installed font by name, and a text size setting.
+- The Windows GPU installers and updater use version 0.62.0. Enable Include prereleases for this preview. Stable remains 0.5.58.
+- Checked with automated tests and page renders, not in an installed build with a real recording.
+
 ## 0.61.1
 
 - With live transcription, audio capture starts while the speech model loads. Loading took 2 to 5 seconds on a test PC, and speech during that time was neither recorded nor transcribed. If the model cannot be loaded, the start is cancelled and the seconds captured so far are deleted.

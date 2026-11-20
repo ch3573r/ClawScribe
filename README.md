@@ -7,10 +7,10 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-**0.61.1** is a Windows GPU preview. It keeps the first seconds of a live
-recording and no longer drops quiet speech, on top of the reorganised settings
-and the Privacy page from 0.61.0. See the
-[0.61.1 preview notes](docs/releases/0.61.1.md) and the
+**0.62.0** is a Windows GPU preview. It fixes defects in starting, stopping and
+quitting a recording, and adds fonts, a text size setting and a transcription
+language setting. See the
+[0.62.0 preview notes](docs/releases/0.62.0.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
 **Include prereleases** to discover later previews; drafts are excluded from
@@ -330,6 +330,22 @@ checks. You still choose when to install; checking at launch is a separate optio
 Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
+
+## What changed in the 0.62.0 preview
+
+- A manually started recording uses the title and the devices you chose.
+- Starting a recording stops a running retranscription, import, speaker
+  detection or PC test instead of failing.
+- Stop in the sidebar works from every page, and a stop no longer pulls you to
+  the new meeting unless Home is open.
+- Quit during a recording saves the meeting first. A capture failure is shown.
+- Notices follow the theme and appear at the bottom right.
+- Settings → Transcription has a language setting. Settings → Appearance has
+  more fonts, a separate transcript and summary font, and a text size setting.
+- Translated summaries keep English working terms.
+
+See the [preview notes](docs/releases/0.62.0.md) for limits and pending
+real-device checks.
 
 ## What changed in the 0.61.1 preview
 
