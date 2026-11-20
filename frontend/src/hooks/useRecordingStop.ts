@@ -7,8 +7,6 @@ import type { RecordingStoppedPayload } from '@/services/recordingService';
 import { recordingOutcome, recordingRecoveryMessage } from '@/lib/recording-outcome';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
-import { useConfig } from '@/contexts/ConfigContext';
-import { startAutomaticSummary } from '@/lib/auto-summary';
 import { currentRoute } from '@/lib/current-route';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { storageService } from '@/services/storageService';
@@ -88,16 +86,12 @@ export function useRecordingStop(
     setMeetings,
     meetings,
     setIsMeetingActive,
-    startSummaryPolling,
   } = useSidebar();
-  const { modelConfig, isAutoSummary } = useConfig();
 
   const router = useRouter();
   // The page is read from the window when the stop finishes (see below), not
   // from a hook: this instance may belong to Home, which unmounts when the user
   // leaves it while the recording is being saved.
-  const stopContext = useRef({ modelConfig, isAutoSummary, startSummaryPolling, refetchMeetings });
-  stopContext.current = { modelConfig, isAutoSummary, startSummaryPolling, refetchMeetings };
 
   // Guard to prevent duplicate/concurrent stop calls (e.g., from UI and tray simultaneously)
 
@@ -339,6 +333,11 @@ export function useRecordingStop(
           }
 
 
+          // Submit only the saved ID after meeting context and language have been applied.
+          await invoke('start_recording_summary', { meetingId }).catch(error => {
+            toast.error('Could not start automatic notes', { description: errorText(error) });
+          });
+
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();
 
@@ -381,35 +380,13 @@ export function useRecordingStop(
             duration: 10000,
           });
 
-          // Show the finished meeting only when the user is on Home. From any
-          // other page they stay where they are (the toast offers the meeting).
-          // The meeting page starts the automatic summary when it is opened with
-          // source=recording; without that visit it is started here instead.
-          setTimeout(() => {
-            const latest = stopContext.current;
-            const route = currentRoute();
-            clearTranscripts()
-            if (route.path === '/') {
-              router.push(`/meeting-details?id=${meetingId}&source=recording`);
-              Analytics.trackPageView('meeting_details');
-            } else if (route.path === '/meeting-details' && route.id === meetingId) {
-              // The user already opened this meeting (from the toast). Hand the
-              // summary to that page rather than starting a second run beside it.
-              router.replace(`/meeting-details?id=${meetingId}&source=recording`);
-            } else if (latest.isAutoSummary) {
-              void startAutomaticSummary({
-                meetingId,
-                folderPath,
-                modelConfig: latest.modelConfig,
-                startSummaryPolling: latest.startSummaryPolling,
-                refetchMeetings: latest.refetchMeetings,
-                openMeeting: id => router.push(`/meeting-details?id=${id}`),
-              });
-            }
-
-            // Back to IDLE once the transcript is cleared
-            setStatus(RecordingStatus.IDLE);
-          }, 2000);
+          // Only Home follows the recording into its saved meeting.
+          clearTranscripts();
+          if (currentRoute().path === '/') {
+            router.push('/meeting-details?id=' + meetingId);
+            Analytics.trackPageView('meeting_details');
+          }
+          setStatus(RecordingStatus.IDLE);
           // Track meeting completion analytics
           try {
             // Calculate meeting duration from transcript timestamps

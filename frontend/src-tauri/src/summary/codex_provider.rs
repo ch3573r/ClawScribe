@@ -1453,6 +1453,20 @@ impl CodexAppServerProvider {
         &self,
         request: CodexMeetingProcessRequest,
     ) -> Result<CodexProcessingResult, String> {
+        self.process_meeting_with_progress(
+            request,
+            None,
+            &super::context_budget::Reduction::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn process_meeting_with_progress(
+        &self,
+        request: CodexMeetingProcessRequest,
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
+        reduction: &super::context_budget::Reduction,
+    ) -> Result<CodexProcessingResult, String> {
         let overhead = build_meeting_prompt().len()
             + output_schema_json().len()
             + request.custom_prompt.as_ref().map_or(0, String::len)
@@ -1477,6 +1491,8 @@ impl CodexAppServerProvider {
             &request.transcript,
             budget,
             piece_budget,
+            reduction,
+            cancellation,
             |chunk| async move {
                 self.run_text_prompt(&format!(
                     "{}\n\n<excerpt>{chunk}</excerpt>",

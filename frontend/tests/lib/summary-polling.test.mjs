@@ -77,20 +77,19 @@ test('overlapping ticks coalesce and stopped requests cannot overwrite replaceme
   assert.ok(timers.has(2));
 });
 
-test('a hung status request reaches the polling limit and ignores its late result', async t => {
-  const pending = deferred();
-  const { render, timers } = setup(t, () => pending.promise);
+test('a long native run stays attached through completion beyond 200 polls', async t => {
+  let result = { status: 'processing', progress: { completed: 3, total: 4 } };
+  const { render, timers } = setup(t, async () => result);
   const updates = [];
-  render().startSummaryPolling('a', 'a', result => updates.push(result));
+  render().startSummaryPolling('a', 'a', value => updates.push(value));
   const tick = timers.get(1);
-  const request = tick();
-  for (let i = 1; i < 200; i++) await tick();
+  for (let i = 0; i < 250; i++) await tick();
+  assert.equal(timers.size, 1);
+  assert.equal(updates.at(-1).progress.completed, 3);
+  result = { status: 'completed', data: { markdown: 'Late summary' } };
+  await tick();
+  assert.equal(updates.at(-1).data.markdown, 'Late summary');
   assert.equal(timers.size, 0);
-  assert.equal(updates.length, 1);
-  assert.match(updates[0].error, /16 minutes 40 seconds/);
-  pending.resolve({ status: 'completed', data: {} });
-  await request;
-  assert.equal(updates.length, 1);
 });
 
 test('unmount removes every timer and ignores requests still arriving', async t => {
@@ -107,13 +106,21 @@ test('unmount removes every timer and ignores requests still arriving', async t 
   assert.equal(updates.length, 0);
 });
 
-test('Tauri string failures are reported and stop polling', async t => {
-  const { render, timers } = setup(t, async () => { throw 'Synthetic database failure'; });
+test('a temporary status error is visible and the next poll reattaches', async t => {
+  let failed = true;
+  const { render, timers } = setup(t, async () => {
+    if (failed) throw 'Synthetic database failure';
+    return { status: 'processing' };
+  });
   const updates = [];
   render().startSummaryPolling('a', 'a', result => updates.push(result));
   await timers.get(1)();
   assert.equal(updates[0].error, 'Synthetic database failure');
-  assert.equal(timers.size, 0);
+  assert.equal(updates[0].status, 'unavailable');
+  assert.equal(timers.size, 1);
+  failed = false;
+  await timers.get(1)();
+  assert.equal(updates.at(-1).status, 'processing');
 });
 
 test('leaving the meeting page stops its own poll but not a background one', async t => {

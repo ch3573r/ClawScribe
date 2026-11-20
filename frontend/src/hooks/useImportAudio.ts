@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import Analytics from '@/lib/analytics';
-import { applyPinnedSummaryLanguageToMeeting } from '@/lib/summary-language-preferences';
+import { readPinnedSummaryLanguageDefault } from '@/lib/summary-language-preferences';
 import { toast } from 'sonner';
 
 export interface AudioFileInfo {
@@ -11,6 +11,7 @@ export interface AudioFileInfo {
   duration_seconds: number;
   size_bytes: number;
   format: string;
+  modified_at?: string | null;
 }
 
 export interface ImportProgress {
@@ -46,14 +47,16 @@ export interface UseImportAudioReturn {
   isProcessing: boolean;
   isCancelling: boolean;
   isBusy: boolean;
-  selectFile: () => Promise<AudioFileInfo | null>;
+  selectFiles: () => Promise<AudioFileInfo[]>;
+  chooseFile: (file: AudioFileInfo) => void;
   validateFile: (path: string) => Promise<AudioFileInfo | null>;
   startImport: (
     sourcePath: string,
     title: string,
     language?: string | null,
     model?: string | null,
-    provider?: string | null
+    provider?: string | null,
+    options?: { meetingAt: string | null; useFileDate: boolean; summarize: boolean }
   ) => Promise<void>;
   cancelImport: () => Promise<void>;
   reset: () => void;
@@ -115,14 +118,6 @@ export function useImportAudio({
 
           setStatus('complete');
           setProgress(null);
-          try {
-            await applyPinnedSummaryLanguageToMeeting(event.payload.meeting_id);
-          } catch (error) {
-            console.warn('Failed to apply pinned summary language to imported meeting:', error);
-            toast.warning('Could not apply default summary language', {
-              description: 'The imported meeting was saved, but the default summary language was not applied.',
-            });
-          }
           onCompleteRef.current?.(event.payload);
         }
       );
@@ -175,30 +170,29 @@ export function useImportAudio({
     };
   }, []);
 
-  // Select file using native file dialog
-  const selectFile = useCallback(async (): Promise<AudioFileInfo | null> => {
+  const chooseFile = useCallback((file: AudioFileInfo) => {
+    setFileInfo(file);
+    setStatus('idle');
+    setError(null);
+    setProgress(null);
+  }, []);
+
+  const selectFiles = useCallback(async (): Promise<AudioFileInfo[]> => {
     setStatus('validating');
     setError(null);
-
     try {
-      const result = await invoke<AudioFileInfo | null>('select_and_validate_audio_command');
-      if (result) {
-        setFileInfo(result);
-        setStatus('idle');
-        return result;
-      } else {
-        // User cancelled
-        setStatus('idle');
-        return null;
-      }
-    } catch (err: any) {
+      const files = await invoke<AudioFileInfo[]>('select_audio_files_command');
+      if (files.length > 0) chooseFile(files[0]);
+      else setStatus('idle');
+      return files;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       setStatus('error');
-      const errorMsg = typeof err === 'string' ? err : (err?.message || String(err) || 'Failed to validate file');
-      setError(errorMsg);
-      onErrorRef.current?.(errorMsg);
-      return null;
+      setError(message);
+      onErrorRef.current?.(message);
+      return [];
     }
-  }, []);
+  }, [chooseFile]);
 
   // Validate a file from a given path (for drag-drop)
   const validateFile = useCallback(async (path: string): Promise<AudioFileInfo | null> => {
@@ -226,7 +220,8 @@ export function useImportAudio({
       title: string,
       language?: string | null,
       model?: string | null,
-      provider?: string | null
+      provider?: string | null,
+    options?: { meetingAt: string | null; useFileDate: boolean; summarize: boolean }
     ) => {
       isCancelledRef.current = false;
       setStatus('processing');
@@ -250,6 +245,10 @@ export function useImportAudio({
           language: language || null,
           model: model || null,
           provider: provider || null,
+          meetingAt: options?.meetingAt ?? null,
+          useFileDate: options?.useFileDate ?? false,
+          summarize: options?.summarize ?? false,
+          summaryLanguage: readPinnedSummaryLanguageDefault(),
         });
       } catch (err: any) {
         setStatus('error');
@@ -277,12 +276,11 @@ export function useImportAudio({
     try {
       await invoke('cancel_import_command');
     } catch (err: any) {
+      // The core may already be committing the meeting. Wait for its outcome.
+      if (!isCancelledRef.current) return;
       isCancelledRef.current = false;
-      setStatus('error');
-      setProgress(null);
-      const errorMsg = typeof err === 'string' ? err : (err?.message || String(err) || 'Failed to cancel import');
-      setError(errorMsg);
-      console.error('Failed to cancel import:', err);
+      setStatus('processing');
+      toast.info(typeof err === 'string' ? err : 'Could not stop the import. Waiting for it to finish.');
     }
   }, []);
 
@@ -303,7 +301,8 @@ export function useImportAudio({
     isProcessing: status === 'processing',
     isCancelling: status === 'cancelling',
     isBusy: status === 'processing' || status === 'validating' || status === 'cancelling',
-    selectFile,
+    selectFiles,
+    chooseFile,
     validateFile,
     startImport,
     cancelImport,

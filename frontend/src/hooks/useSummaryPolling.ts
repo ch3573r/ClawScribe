@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { isTerminalSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
 
 const POLL_INTERVAL_MS = 5000;
-const MAX_POLLS = 200;
 
 export function useSummaryPolling() {
   type Listener = (result: any) => void | Promise<void>;
@@ -45,28 +45,17 @@ export function useSummaryPolling() {
         try { await listener(result); } catch (error) { console.error('Summary update handler failed:', error); }
       }
     };
-    let pollCount = 0;
     let inFlight = false;
-    const timer = setInterval(async () => {
+    const refresh = async () => {
       const isCurrent = () => polls.current.get(meetingId) === timer;
       if (!isCurrent()) return;
-      pollCount++;
-      if (pollCount >= MAX_POLLS) {
-        const targets = [...heard];
-        stopSummaryPolling(meetingId);
-        await notify({
-          status: 'error',
-          error: 'Summary status could not be confirmed after 16 minutes 40 seconds. Reopen the meeting to check for saved notes, or stop generation before retrying.',
-        }, targets);
-        return;
-      }
       if (inFlight) return;
       inFlight = true;
       let result: any;
       try {
-        result = await invoke('api_get_summary', { meetingId });
+        result = await invoke<SummaryJobSnapshot>('api_get_summary', { meetingId });
       } catch (error) {
-        result = { status: 'error', error: typeof error === 'string' ? error : error instanceof Error ? error.message : 'Could not check summary status.' };
+        result = { status: 'unavailable', error: typeof error === 'string' ? error : error instanceof Error ? error.message : 'Could not check summary status.' };
       } finally {
         inFlight = false;
       }
@@ -78,11 +67,12 @@ export function useSummaryPolling() {
         result = { status: 'error', error: 'Summary generation completed without saved content. Please try again.' };
       }
       const targets = [...heard];
-      if (['completed', 'error', 'failed', 'cancelled'].includes(result.status)) {
+      if (isTerminalSummary(result.status)) {
         stopSummaryPolling(meetingId);
       }
       await notify(result, targets);
-    }, POLL_INTERVAL_MS);
+    };
+    const timer = setInterval(refresh, POLL_INTERVAL_MS);
     polls.current.set(meetingId, timer);
     setActiveSummaryPolls(new Map(polls.current));
   }, [stopSummaryPolling]);

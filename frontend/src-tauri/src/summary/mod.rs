@@ -8,6 +8,8 @@
 /// - Tauri commands for frontend integration
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod automatic;
+
 /// Custom OpenAI-compatible endpoint configuration
 /// Stored as JSON in the database and used for connecting to any OpenAI-compatible API server
 #[derive(Clone, Serialize, Deserialize)]
@@ -107,8 +109,7 @@ pub use template_commands::{
 // Re-export commonly used items
 pub use llm_client::LLMProvider;
 pub use processor::{
-    chunk_text, clean_llm_markdown_output, extract_meeting_name_from_markdown,
-    generate_meeting_summary, rough_token_count,
+    chunk_text, clean_llm_markdown_output, extract_meeting_name_from_markdown, rough_token_count,
 };
 pub use service::SummaryService;
 

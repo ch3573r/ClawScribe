@@ -48,7 +48,7 @@ fn source_label(timestamp: Option<f64>) -> String {
         .unwrap_or_else(|| "Source".into())
 }
 
-fn annotate(rows: Vec<Transcript>) -> (String, Vec<SummarySource>) {
+fn annotate(rows: Vec<Transcript>, include_speaker_labels: bool) -> (String, Vec<SummarySource>) {
     let mut groups: Vec<Vec<Transcript>> = Vec::new();
     let mut size = 0;
     for row in rows.into_iter().filter(|r| !r.transcript.trim().is_empty()) {
@@ -81,7 +81,7 @@ fn annotate(rows: Vec<Transcript>) -> (String, Vec<SummarySource>) {
         ));
         let mut last_speaker = None;
         for row in &rows {
-            if row.speaker.as_ref() != last_speaker {
+            if include_speaker_labels && row.speaker.as_ref() != last_speaker {
                 if let Some(speaker) = &row.speaker {
                     text.push_str(speaker);
                     text.push_str(": ");
@@ -171,24 +171,71 @@ pub(crate) fn expand_output(
     serde_json::from_value(value).map_err(|_| "Could not format summary references".into())
 }
 
-pub async fn prepare(
+pub(crate) struct PreparedTranscript {
+    pub text: String,
+    pub sources: Vec<SummarySource>,
+    pub revision: Option<i64>,
+    pub detected_language: Option<String>,
+}
+
+pub(crate) async fn prepare_snapshot(
     pool: &SqlitePool,
     meeting: &str,
     fallback: String,
-) -> Result<(String, Vec<SummarySource>), String> {
+    include_speaker_labels: bool,
+) -> Result<PreparedTranscript, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| "Could not read the saved transcript")?;
+    let revision = sqlx::query_scalar::<_, i64>(
+        "SELECT revision FROM knowledge_sources WHERE meeting_id = ? AND kind = 'meeting'",
+    )
+    .bind(meeting)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| "Could not read the saved transcript revision")?;
     let rows: Vec<Transcript> = sqlx::query_as(
         "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY COALESCE(audio_start_time, 0), id",
     )
     .bind(meeting)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|_| "Could not read summary sources")?;
-    if rows.is_empty() {
-        return Ok((fallback, Vec::new()));
-    }
-    tauri::async_runtime::spawn_blocking(move || annotate(rows))
+    tx.commit()
         .await
-        .map_err(|_| "Could not prepare summary sources".into())
+        .map_err(|_| "Could not read the saved transcript")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let texts = if rows.is_empty() {
+            vec![fallback.clone()]
+        } else {
+            rows.iter().map(|row| row.transcript.clone()).collect()
+        };
+        let detected_language = super::language_detection::detect_summary_language(&texts).language;
+        let (text, sources) = if rows.is_empty() {
+            (fallback, Vec::new())
+        } else {
+            annotate(rows, include_speaker_labels)
+        };
+        PreparedTranscript {
+            text,
+            sources,
+            revision,
+            detected_language,
+        }
+    })
+    .await
+    .map_err(|_| "Could not prepare summary sources".into())
+}
+
+#[cfg(test)]
+pub(crate) async fn prepare(
+    pool: &SqlitePool,
+    meeting: &str,
+    fallback: String,
+) -> Result<(String, Vec<SummarySource>), String> {
+    let snapshot = prepare_snapshot(pool, meeting, fallback, true).await?;
+    Ok((snapshot.text, snapshot.sources))
 }
 
 pub fn attach(result: &mut serde_json::Value, sources: &[SummarySource]) {
@@ -347,7 +394,7 @@ mod tests {
             row
         }).collect();
         let raw: usize = rows.iter().map(|r| r.transcript.len()).sum();
-        let (text, sources) = annotate(rows);
+        let (text, sources) = annotate(rows, true);
         assert!(text.len() * 10 <= raw * 12);
         assert!(sources.len() <= 300);
         assert!(sources.iter().all(|s| s.transcript_ids.len() > 1));
@@ -384,7 +431,7 @@ mod tests {
                 row
             })
             .collect();
-        let (text, sources) = annotate(rows);
+        let (text, sources) = annotate(rows, true);
         for (n, start) in starts.iter().enumerate() {
             let id = format!("row-{n}");
             let source = sources

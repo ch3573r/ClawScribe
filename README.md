@@ -83,6 +83,9 @@ start a recording.
   toolbar. Cancellation waits for the current native step before another recording
   can start.
 - Import support for MP4, M4A, WAV, MP3, FLAC, OGG, AAC, MKV, WebM, and WMA.
+- Select several files and review them one at a time. For each file, choose the
+  meeting date, use the file's modified time, or keep the import time. You can
+  also ask Built-in AI to generate notes after transcription.
 - HE-AAC imports use the decoder's actual sample rate to preserve timing.
 - Interrupted Whisper and Parakeet downloads retain partial files for retry;
   cancellation finishes the active transfer before another attempt can start.
@@ -229,6 +232,12 @@ context is saved in the local library and included in backups. Configurable
 providers include Built-in AI, Ollama, OpenAI, OpenAI-compatible endpoints,
 OpenRouter, Anthropic/Claude, Groq, OpenClaw managed processing, and the advanced
 bundled Codex app-server path, plus **Claude Code** using your own installation.
+
+Enable **Summarize automatically** in Summary settings to generate local notes
+with Built-in AI after saving a recording. Reopen the meeting to check progress,
+see why notes were skipped, or retry. Long summaries keep recovered excerpt
+notes available when an attempt fails. Windows notifications can tell you when
+automatic notes are ready.
 
 **Claude Code**: Uses the Claude Code you installed and signed in to. Your Claude
 plan's limits apply. Install it yourself, run `claude auth login` in a terminal,

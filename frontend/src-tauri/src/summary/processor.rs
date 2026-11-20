@@ -333,7 +333,7 @@ pub fn extract_meeting_name_from_markdown(markdown: &str) -> Option<String> {
 /// Tuple of (final_summary_markdown, english_summary_markdown, number_of_chunks_processed)
 /// where english_summary_markdown is the canonical AI-generated English summary
 /// (equals final_summary_markdown when target language is English)
-pub async fn generate_meeting_summary(
+pub(crate) async fn generate_meeting_summary(
     client: &Client,
     provider: &LLMProvider,
     model_name: &str,
@@ -354,6 +354,7 @@ pub async fn generate_meeting_summary(
     summary_language: Option<&str>,
     detected_transcript_language: Option<&str>,
     cached_english: Option<&str>,
+    reduction: &super::context_budget::Reduction,
 ) -> Result<(String, String, i64), String> {
     if let Some(token) = cancellation_token {
         if token.is_cancelled() {
@@ -401,8 +402,13 @@ pub async fn generate_meeting_summary(
                 model_name,
                 super::context_budget::EXTRACT_FACTS.len() + 256,
             )?;
-            let (content_to_summarize, successful_chunk_count) =
-                super::context_budget::reduce(text, budget, piece_budget, |chunk| async move {
+            let (content_to_summarize, successful_chunk_count) = super::context_budget::reduce(
+                text,
+                budget,
+                piece_budget,
+                reduction,
+                cancellation_token,
+                |chunk| async move {
                     generate_summary(
                         client,
                         provider,
@@ -702,6 +708,7 @@ mod tests {
             Some("en"),
             Some("en"),
             None,
+            &crate::summary::context_budget::Reduction::default(),
         )
         .await;
         assert!(result

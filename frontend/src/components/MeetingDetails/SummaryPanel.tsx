@@ -1,3 +1,4 @@
+import type { SummaryJobSnapshot } from '@/lib/summary-job-status';
 "use client";
 
 import { Input } from '@/components/ui/input';
@@ -65,6 +66,7 @@ interface SummaryPanelProps {
   onSummaryChange: (summary: Summary) => void;
   onDirtyChange: (isDirty: boolean) => void;
   summaryError: string | null;
+  jobSnapshot: SummaryJobSnapshot | null;
   onRegenerateSummary: (customPrompt?: string) => Promise<void>;
   getSummaryStatusMessage: (status: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error') => string;
   availableTemplates: Array<{ id: string, name: string, description: string }>;
@@ -105,6 +107,7 @@ export function SummaryPanel({
   onSummaryChange,
   onDirtyChange,
   summaryError,
+  jobSnapshot,
   onRegenerateSummary,
   getSummaryStatusMessage,
   availableTemplates,
@@ -264,6 +267,12 @@ export function SummaryPanel({
   };
 
   const isSummaryLoading = summaryStatus === 'processing' || summaryStatus === 'summarizing' || summaryStatus === 'regenerating';
+  const progress = jobSnapshot?.progress;
+  const jobState = jobSnapshot?.status;
+  const jobNotice = jobState && ['skipped', 'failed', 'cancelled', 'unavailable'].includes(jobState)
+    ? jobState === 'unavailable' ? 'Could not check summary progress. Trying again…' : jobSnapshot?.error
+    : null;
+
   const collectSummaryMatches = (query: string): SummaryTextMatch[] => {
     const root = summarySearchRootRef.current;
     const normalizedQuery = query.trim().toLowerCase();
@@ -463,7 +472,7 @@ export function SummaryPanel({
               <p className="max-w-sm text-sm text-muted-foreground">{transcripts.length ? 'Notes use the template and AI model chosen in the toolbar.' : 'Transcribe the recording first, then generate a summary.'}</p>
               {transcripts.length > 0 && (
                 <Button className="mt-2" disabled={checkingModels || isModelConfigLoading} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details_empty'); generateRef.current?.(); }}>
-                  <Sparkles className="h-4 w-4" />Generate summary
+                  <Sparkles className="h-4 w-4" />{jobState === 'failed' || jobState === 'cancelled' ? 'Retry summary' : 'Generate summary'}
                 </Button>
               )}
             </div>
@@ -475,7 +484,23 @@ export function SummaryPanel({
                   meeting={{ id: meeting.id, title: meetingTitle, created_at: meeting.created_at }} /></SummarySurface>
               </SummarySources>
             </div>}
-          {summaryStatus === 'error' && <p role="alert" className="m-4 rounded border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{summaryError || getSummaryStatusMessage(summaryStatus)}</p>}
+          {isSummaryLoading && progress && progress.total > 0 && (
+            <p role="status" className="px-4 py-2 text-sm text-muted-foreground">
+              Excerpts processed {progress.completed} of {progress.total} (pass {progress.level})
+            </p>
+          )}
+          {(jobNotice || summaryStatus === 'error') && (
+            <p role={jobState === 'failed' || summaryStatus === 'error' ? 'alert' : 'status'} className="mx-4 mb-3 text-sm text-muted-foreground">
+              {jobNotice || summaryError || getSummaryStatusMessage(summaryStatus)}
+            </p>
+          )}
+          {jobState === 'failed' && jobSnapshot?.partial_notes && (
+            <section className="mx-4 mb-4 rounded-md border p-3">
+              <h3 className="text-sm font-semibold">Recovered excerpt notes</h3>
+              <p className="my-2 text-xs text-muted-foreground">These notes cover the excerpts that finished.</p>
+              <p className="whitespace-pre-wrap break-words text-sm">{jobSnapshot.partial_notes}</p>
+            </section>
+          )}
         </div>
         <div ref={setDockTarget} role="complementary" aria-label="Meeting chat panel" className={chatDocked ? 'flex w-[25rem] shrink-0 flex-col border-l border-border' : 'hidden'} />
       </div>

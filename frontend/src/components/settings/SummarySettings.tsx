@@ -15,13 +15,13 @@ import { useConfig } from "@/contexts/ConfigContext";
  * button; each control saves as it changes.
  */
 export function SummarySettings() {
-  const { modelConfig, isAutoSummary, toggleIsAutoSummary } = useConfig();
+  const { modelConfig, isAutoSummary, automaticSummaryBusy, toggleIsAutoSummary } = useConfig();
   return (
     <SettingsColumns aside={<ProviderDataAside provider={modelConfig.provider} ollamaEndpoint={modelConfig.ollamaEndpoint} customEndpoint={modelConfig.customOpenAIEndpoint} />}>
       <SummaryModelSettings />
       <SettingsCard>
-        <SettingsRow title="Summarize automatically" htmlFor="summary-auto" description="Generates a summary when a meeting ends">
-          <Switch id="summary-auto" checked={isAutoSummary} onCheckedChange={toggleIsAutoSummary} />
+        <SettingsRow title="Summarize automatically" htmlFor="summary-auto" description="Uses Built-in AI to generate local notes after a recording is saved">
+          <Switch id="summary-auto" checked={isAutoSummary} disabled={automaticSummaryBusy} onCheckedChange={toggleIsAutoSummary} />
         </SettingsRow>
         <SummaryLanguageSettings />
         <SummaryTemplateSettings />

@@ -29,15 +29,14 @@ import { useSpeakerLabelVisibility } from '@/hooks/useSpeakerLabelVisibility';
 import { Button } from '@/components/ui/button';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
+import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
 
 export default function PageContent({
   meeting,
   evidenceToken,
   fromArchive,
   summaryData,
-  summaryRunning = false,
-  shouldAutoGenerate = false,
-  onAutoGenerateComplete,
+  summaryJob,
   onMeetingUpdated,
   onRefetchTranscripts,
   onRevealTranscript,
@@ -56,9 +55,7 @@ export default function PageContent({
   evidenceToken?: string | null;
   fromArchive?: boolean;
   summaryData: Summary | null;
-  summaryRunning?: boolean;
-  shouldAutoGenerate?: boolean;
-  onAutoGenerateComplete?: () => void;
+  summaryJob: SummaryJobSnapshot | null;
   onMeetingUpdated?: () => Promise<void>;
   onRevealTranscript?: (id: string, index: number) => Promise<void>;
   onRefetchTranscripts?: () => Promise<void>;
@@ -192,7 +189,6 @@ export default function PageContent({
   const summaryGeneration = useSummaryGeneration({
     beforeGeneration: meetingData.flushPendingChanges,
     meeting,
-    transcripts: meetingData.transcripts,
     modelConfig: modelConfig,
     isModelConfigLoading: false, // ConfigContext loads on mount
     selectedTemplate: templates.requestedTemplate,
@@ -206,8 +202,13 @@ export default function PageContent({
 
   // A summary is already running for this meeting: show it as generating and
   // take its result, instead of offering Generate.
+  const summaryRunning = isActiveSummary(summaryJob?.status);
+  const attachSummary = summaryGeneration.attachToRunningSummary;
   useEffect(() => {
-    if (summaryRunning) summaryGeneration.attachToRunningSummary(Boolean(summaryData));
+    if (summaryRunning && !isActiveSummary(summaryGeneration.summaryStatus)) {
+      attachSummary(Boolean(summaryData));
+    }
+    // A listener owns progress through the terminal status.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [summaryRunning, meeting.id]);
 
@@ -285,30 +286,6 @@ export default function PageContent({
     window.addEventListener('shortcut:generate-summary', onGenerate);
     return () => window.removeEventListener('shortcut:generate-summary', onGenerate);
   }, [meetingData.transcripts.length, summaryGeneration]);
-
-  // Auto-generate summary when flag is set
-  useEffect(() => {
-    let cancelled = false;
-
-    const autoGenerate = async () => {
-      if (shouldAutoGenerate && meetingData.transcripts.length > 0 && !cancelled) {
-        console.log(`🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`);
-        await summaryGeneration.handleGenerateSummary('');
-
-        // Notify parent that auto-generation is complete (only if not cancelled)
-        if (onAutoGenerateComplete && !cancelled) {
-          onAutoGenerateComplete();
-        }
-      }
-    };
-
-    autoGenerate();
-
-    // Cleanup: cancel if component unmounts or meeting changes
-    return () => {
-      cancelled = true;
-    };
-  }, [shouldAutoGenerate, meeting.id]); // Re-run if meeting changes
 
   return (
     <motion.div
@@ -407,6 +384,7 @@ export default function PageContent({
           summaryRevision={meetingData.summaryRevision}
           onRestorePrevious={meetingData.restorePreviousSummary}
           summaryError={summaryGeneration.summaryError}
+          jobSnapshot={summaryGeneration.jobUpdate ?? summaryJob}
           onRegenerateSummary={summaryGeneration.handleRegenerateSummary}
           getSummaryStatusMessage={summaryGeneration.getSummaryStatusMessage}
           availableTemplates={templates.availableTemplates}

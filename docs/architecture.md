@@ -313,9 +313,16 @@ and uses the editor's normal undo and save flow.
 
 Meeting saves write only dirty content, preserve later edits while a write is in
 flight, and report title failures without claiming success. Summary loads are
-scoped to the current meeting. Automatic generation waits for the saved summary
-lookup and requires a configured provider; it never installs a default cloud
-configuration. API summary response readers enforce an 8 MiB limit, reject
+scoped to the current meeting. Both the meeting view and the automatic worker
+submit a saved meeting ID. The core reads the canonical transcript and its
+revision in one snapshot, then checks that revision again when saving notes. The
+legacy raw-text command still accepts its original request shape. Automatic
+recording summaries require a core-owned opt-in and a configured Built-in AI
+model. The import form can explicitly request the same local summary after
+releasing the transcription slot. The worker uses saved per-meeting context and
+language and emits a notes-ready notification after the result commits, subject
+to notification preferences. It records a skip reason when disabled or when
+the saved transcript or model needs review. API summary response readers enforce an 8 MiB limit, reject
 reported output truncation, and keep cancellation active while reading the body.
 Chat and reviewed task polishing share provider configuration resolution.
 
@@ -417,8 +424,16 @@ the schema once, with an inline schema only for strict-JSON fallback.
 Summary status polling has one shared timer owner across meetings. Starting or
 finishing one poll keeps other meetings' polls alive; stopped or replaced requests
 cannot publish late responses. Missing jobs and completed jobs without saved
-content surface retry errors. Status checks do not overlap, and the polling limit
-reports an unconfirmed status without claiming that provider work was cancelled.
+content surface retry errors. Status checks do not overlap or expire after a fixed
+number of polls. Native status events refresh the open meeting, and a reopened
+meeting attaches to the persisted job. The local path retries a failed excerpt
+once and keeps successful excerpts in local recovery metadata if the run fails.
+An incomplete excerpt set never replaces a complete summary or reaches exports.
+
+Import records the selected, file-modified, or import timestamp as the meeting
+date and preserves the import time and chosen date source in meeting metadata.
+Multiple selected files are reviewed and submitted individually through the
+existing single-job transcription slot.
 
 ## Microsoft Export Persistence
 

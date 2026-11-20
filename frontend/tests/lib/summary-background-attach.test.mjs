@@ -42,23 +42,6 @@ function setup(t) {
   const polling = () => pollHooks.render(useSummaryPolling);
   polling();
 
-  const { startAutomaticSummary } = loadTsModule('src/lib/auto-summary.ts', {
-    '@tauri-apps/api/core': { invoke },
-    sonner,
-    '@/lib/recording-outcome': loadTsModule('src/lib/recording-outcome.ts'),
-    '@/lib/meetingTranscripts': { fetchAllMeetingTranscripts: async () => [{ id: 'one', text: 'Synthetic line.' }] },
-    '@/lib/transcriptFormatting': { formatTranscriptLine: line => line.text },
-    '@/lib/meetingContext': { getMeetingContext: async () => '' },
-    '@/lib/meetingCalendar': { getMeetingCalendar: () => null, attendeeChecklist: () => [] },
-    '@/lib/sourceAttribution': { getSourceAttribution: () => false },
-    '@/lib/speaker-attribution': { shouldShowSpeakerAttribution: () => false },
-    '@/lib/summary-language-preferences': {
-      readMeetingSummaryLanguage: async () => ({ language: 'en' }),
-      readCachedDetectedSummaryLanguage: async () => null,
-      detectAndCacheSummaryLanguage: async () => ({ language: 'en' }),
-    },
-  });
-
   const pageHooks = createHookHarness();
   const mocks = {
     react: pageHooks.react,
@@ -93,69 +76,37 @@ function setup(t) {
   }));
   t.after(() => { pollHooks.unmount(); pageHooks.unmount(); });
 
-  const startBackground = () => startAutomaticSummary({
-    meetingId: 'saved-meeting',
-    modelConfig: { provider: 'synthetic', model: 'synthetic-model' },
-    startSummaryPolling: (...args) => polling().startSummaryPolling(...args),
-    refetchMeetings: async () => { refreshed.push('refetched'); },
-    openMeeting: noop,
-  });
-  const completed = { status: 'completed', data: { markdown: 'Notes' } };
-  const finish = async () => { summaryReply.current = completed; await timers.get([...timers.keys()].at(-1))(); };
-  const fail = async () => { summaryReply.current = { status: 'failed', error: 'Synthetic failure' }; await timers.get([...timers.keys()].at(-1))(); };
-  return { timers, toasts, errors, refreshed, aiSummary, polling, page, pageHooks, startBackground, finish, fail };
+  const updateNativeStatus = status => { summaryReply.current = status; };
+  const tick = async () => { await timers.values().next().value?.(); };
+  return { timers, toasts, errors, aiSummary, page, pageHooks, updateNativeStatus, tick };
 }
 
-test('a background summary survives the meeting page attaching and leaving, and still finishes', async t => {
+test('a native summary stays active when the page leaves and is reattached on return', async t => {
   const app = setup(t);
-  assert.equal(await app.startBackground(), true);
-  assert.equal(app.timers.size, 1, 'the background poll runs');
-
   app.page().attachToRunningSummary(false);
-  assert.equal(app.page().summaryStatus, 'processing', 'the page shows it as generating');
-  assert.equal(app.timers.size, 1, 'attaching joined the poll instead of replacing it');
-
-  // The page lets go: its own cleanup, then the page route's cleanup.
+  assert.equal(app.page().summaryStatus, 'processing');
+  assert.equal(app.timers.size, 1);
   app.pageHooks.unmount();
-  app.polling().stopSummaryPolling('saved-meeting', { keepBackground: true });
-  assert.equal(app.timers.size, 1, 'the poll carries on');
-
-  await app.finish();
-  assert.deepEqual(app.toasts.map(toast => toast.title), ['Summary ready'], 'the starter still announces it');
-  assert.deepEqual(app.refreshed, ['refetched'], 'and refreshes the meeting list');
-  assert.deepEqual(app.aiSummary, [], 'a page that has gone is not updated');
-  assert.equal(app.timers.size, 0, 'the finished poll is gone');
-});
-
-test('while the page stays open both hear the result, and the toast is shared, not doubled', async t => {
-  const app = setup(t);
-  await app.startBackground();
-  app.page().attachToRunningSummary(false);
-  await app.finish();
-  assert.deepEqual(JSON.parse(JSON.stringify(app.aiSummary)), [{ markdown: 'Notes' }], 'the open page shows the notes');
-  assert.equal(app.page().summaryStatus, 'completed');
-  assert.deepEqual(app.refreshed, ['refetched']);
-  assert.ok(app.toasts.length >= 1);
-  assert.equal(new Set(app.toasts.map(toast => toast.id)).size, 1, 'every "Summary ready" uses one toast id, so it appears once');
-  assert.equal(app.toasts[0].id, 'summary-ready:saved-meeting');
-});
-
-test('a poll the page attached to on its own stops when the page leaves', async t => {
-  const app = setup(t);
-  app.page().attachToRunningSummary(false);
-  assert.equal(app.timers.size, 1, 'no background poll existed, so the page started one');
-  app.pageHooks.unmount();
-  assert.equal(app.timers.size, 0, 'nobody listens, so it stops');
-});
-
-test('a failed background run is reported by its starter even after the page left', async t => {
-  const app = setup(t);
-  await app.startBackground();
-  app.page().attachToRunningSummary(false);
-  app.pageHooks.unmount();
-  app.polling().stopSummaryPolling('saved-meeting', { keepBackground: true });
-  await app.fail();
-  assert.deepEqual(app.errors, ['Could not generate the summary']);
+  assert.equal(app.timers.size, 0);
   assert.deepEqual(app.aiSummary, []);
+
+  app.updateNativeStatus({ status: 'processing', progress: { completed: 2, total: 3, level: 1 } });
+  app.page().attachToRunningSummary(false);
+  await app.tick();
+  assert.equal(app.page().jobUpdate.progress.completed, 2);
+  app.updateNativeStatus({ status: 'completed', data: { markdown: 'Notes' } });
+  await app.tick();
+  assert.equal(app.page().summaryStatus, 'completed');
+  assert.equal(app.aiSummary.at(-1).markdown, 'Notes');
+  assert.equal(app.timers.size, 0);
+});
+
+test('a failed native run shows the excerpts that survived', async t => {
+  const app = setup(t);
+  app.page().attachToRunningSummary(false);
+  app.updateNativeStatus({ status: 'failed', error: 'Synthetic failure', partial_notes: 'Excerpt one completed.' });
+  await app.tick();
+  assert.equal(app.page().summaryStatus, 'error');
+  assert.equal(app.page().jobUpdate.partial_notes, 'Excerpt one completed.');
   assert.equal(app.timers.size, 0);
 });

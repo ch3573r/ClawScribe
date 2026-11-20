@@ -168,6 +168,7 @@ pub struct AudioFileInfo {
     pub duration_seconds: f64,
     pub size_bytes: u64,
     pub format: String,
+    pub modified_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Progress update emitted during import
@@ -212,6 +213,7 @@ pub fn is_import_in_progress() -> bool {
 }
 
 /// Cancel ongoing import
+#[cfg(test)]
 pub fn cancel_import() {
     IMPORT_CANCELLED.store(true, Ordering::SeqCst);
 }
@@ -242,6 +244,10 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
     // Get file size
     let metadata = std::fs::metadata(path).map_err(|e| anyhow!("Cannot read file: {}", e))?;
     let size_bytes = metadata.len();
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from);
 
     // Check file size limit
     if size_bytes > MAX_FILE_SIZE_BYTES {
@@ -277,6 +283,7 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
         duration_seconds,
         size_bytes,
         format: extension.to_uppercase(),
+        modified_at,
     })
 }
 
@@ -341,14 +348,55 @@ fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
     Ok(duration_seconds)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ImportDate {
+    meeting_at: Option<chrono::DateTime<chrono::Utc>>,
+    imported_at: chrono::DateTime<chrono::Utc>,
+    from_file: bool,
+}
+
+impl ImportDate {
+    fn meeting_date(self) -> chrono::DateTime<chrono::Utc> {
+        self.meeting_at.unwrap_or(self.imported_at)
+    }
+
+    fn provenance(self) -> &'static str {
+        if self.from_file {
+            "file_modified_time"
+        } else if self.meeting_at.is_some() {
+            "user_selected"
+        } else {
+            "import_time"
+        }
+    }
+}
+
+impl Default for ImportDate {
+    fn default() -> Self {
+        Self {
+            meeting_at: None,
+            imported_at: chrono::Utc::now(),
+            from_file: false,
+        }
+    }
+}
+
+struct ImportOptions {
+    date: ImportDate,
+    summarize: bool,
+    summary_language: Option<String>,
+}
+
 /// Start import of an audio file
-pub async fn start_import<R: Runtime>(
+async fn start_import<R: Runtime>(
     app: AppHandle<R>,
     source_path: String,
     title: String,
     language: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    options: ImportOptions,
+    guard: ImportGuard,
 ) -> Result<ImportResult> {
     // Registered so a starting recording can cancel this job. A cancel before
     // the database commit removes the half-built meeting folder (see
@@ -364,45 +412,54 @@ pub async fn start_import<R: Runtime>(
     // Dropped before `_job`, so a cancel is refused once the import is over.
     let _phase = PhaseGuard::open();
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
-    // Acquire guard - ensures flag is cleared even on panic/early return
-    let _guard = ImportGuard::acquire().map_err(|e| anyhow!(e))?;
-
-    // Reset cancellation flag
-    IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
     let use_parakeet = provider.as_deref() == Some("parakeet")
         || super::transcription::cloud::is_cloud_provider(provider.as_deref());
     let use_nemotron = provider.as_deref() == Some("nemotron");
-    let result = run_import(app.clone(), source_path, title, language, model, provider)
-        .await
-        .map_err(|error| import_error(error, IMPORT_CANCELLED.load(Ordering::SeqCst)));
+    let result = run_import(
+        app.clone(),
+        source_path,
+        title,
+        language,
+        model,
+        provider,
+        &options,
+    )
+    .await
+    .map_err(|error| import_error(error, IMPORT_CANCELLED.load(Ordering::SeqCst)));
 
     // Unload the engine after the batch job (success, failure, or cancellation)
     super::common::unload_engine_after_batch_for(use_parakeet, use_nemotron).await;
 
-    // Guard will automatically clear flag on drop
-    // No need for manual: IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
-
-    match &result {
-        Ok(res) => {
-            let _ = app.emit(
-                "import-complete",
-                serde_json::json!({
-                    "meeting_id": res.meeting_id,
-                    "title": res.title,
-                    "segments_count": res.segments_count,
-                    "duration_seconds": res.duration_seconds
-                }),
-            );
+    // Release the transcription slot before starting a local summary or
+    // telling the UI that another import can begin.
+    drop(_phase);
+    drop(_job);
+    if let Ok(res) = &result {
+        if options.summarize {
+            if let Some(state) = app.try_state::<AppState>() {
+                if crate::summary::automatic::start(
+                    app.clone(),
+                    state.db_manager.pool().clone(),
+                    res.meeting_id.clone(),
+                    Ok(true),
+                )
+                .await
+                .is_err()
+                {
+                    warn!("Could not start notes for imported meeting");
+                    let _ = app.emit(
+                        "import-warning",
+                        ImportWarning {
+                            warning: "Could not start notes for this import.".into(),
+                            details: Some("Open the saved meeting to generate a summary.".into()),
+                        },
+                    );
+                }
+            }
         }
-        Err(e) => {
-            let _ = app.emit(
-                "import-error",
-                ImportError {
-                    error: e.to_string(),
-                },
-            );
-        }
+        drop(guard);
+        let _ = app.emit("import-complete", res);
     }
 
     result
@@ -416,6 +473,7 @@ async fn run_import<R: Runtime>(
     language: Option<String>,
     mut model: Option<String>,
     mut provider: Option<String>,
+    options: &ImportOptions,
 ) -> Result<ImportResult> {
     let source = PathBuf::from(&source_path);
 
@@ -525,6 +583,7 @@ async fn run_import<R: Runtime>(
                         &outcome.model,
                         source_language.as_deref(),
                         0,
+                        options,
                     )
                     .await;
                 }
@@ -859,6 +918,7 @@ async fn run_import<R: Runtime>(
         &used_model,
         source_language.as_deref(),
         failed_segments,
+        options,
     )
     .await
 }
@@ -910,6 +970,7 @@ async fn save_import_transcripts<R: Runtime>(
     used_model: &str,
     transcription_source_language: Option<&str>,
     failed_segments: usize,
+    options: &ImportOptions,
 ) -> Result<ImportResult> {
     begin_import_save()?;
     let meeting_folder = folder_guard.path.as_path();
@@ -932,6 +993,7 @@ async fn save_import_transcripts<R: Runtime>(
         &segments,
         meeting_folder.to_string_lossy().to_string(),
         failed_segments > 0,
+        options.date,
     )
     .await?;
     folder_guard.committed = true;
@@ -966,8 +1028,17 @@ async fn save_import_transcripts<R: Runtime>(
         used_provider,
         used_model,
         transcription_source_language,
+        options.date,
+        options.summary_language.as_deref(),
     ) {
         warn!("Failed to write metadata.json");
+        let _ = app.emit(
+            "import-warning",
+            ImportWarning {
+                warning: "The meeting was saved but its metadata file could not be written.".into(),
+                details: None,
+            },
+        );
     }
 
     emit_progress(app, "complete", 100, "Import complete");
@@ -999,9 +1070,9 @@ pub(crate) async fn create_meeting_with_transcripts(
     segments: &[TranscriptSegment],
     folder_path: String,
     transcription_incomplete: bool,
+    date: ImportDate,
 ) -> Result<String> {
     let meeting_id = format!("meeting-{}", Uuid::new_v4());
-    let now = chrono::Utc::now();
 
     // Start transaction
     let mut conn = pool
@@ -1019,8 +1090,8 @@ pub(crate) async fn create_meeting_with_transcripts(
     )
     .bind(&meeting_id)
     .bind(title)
-    .bind(now)
-    .bind(now)
+    .bind(date.meeting_date())
+    .bind(date.imported_at)
     .bind(&folder_path)
     .execute(&mut *tx)
     .await
@@ -1247,17 +1318,19 @@ fn write_import_metadata(
     transcription_provider: &str,
     transcription_model: &str,
     transcription_source_language: Option<&str>,
+    date: ImportDate,
+    summary_language: Option<&str>,
 ) -> Result<()> {
     let metadata_path = folder.join("metadata.json");
     let temp_path = folder.join(".metadata.json.tmp");
-    let now = chrono::Utc::now().to_rfc3339();
-
     let mut json = serde_json::json!({
         "version": "1.0",
         "meeting_id": meeting_id,
         "meeting_name": title,
-        "created_at": now,
-        "completed_at": now,
+        "created_at": date.meeting_date().to_rfc3339(),
+        "completed_at": chrono::Utc::now().to_rfc3339(),
+        "imported_at": date.imported_at.to_rfc3339(),
+        "meeting_date_source": date.provenance(),
         "duration_seconds": duration_seconds,
         "audio_file": audio_filename,
         "transcript_file": "transcripts.json",
@@ -1271,6 +1344,9 @@ fn write_import_metadata(
         json["transcription_source_language"] = serde_json::json!(language);
     }
 
+    if let Some(language) = summary_language {
+        json["summary_language"] = serde_json::json!(language);
+    }
     let json_string = serde_json::to_string_pretty(&json)?;
     std::fs::write(&temp_path, &json_string)?;
     std::fs::rename(&temp_path, &metadata_path)?;
@@ -1328,6 +1404,43 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
     }
 }
 
+/// Choose and validate a small set in the core. Each selected file retains
+/// its own one-use grant and is reviewed and imported separately.
+#[tauri::command]
+pub async fn select_audio_files_command<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<AudioFileInfo>, String> {
+    tokio::task::spawn_blocking(move || {
+        const MAX_SELECTION: usize = 12;
+        let paths = app
+            .dialog()
+            .file()
+            .add_filter("Audio Files", AUDIO_EXTENSIONS)
+            .blocking_pick_files()
+            .unwrap_or_default();
+        if paths.len() > MAX_SELECTION {
+            return Err(format!(
+                "Choose up to {MAX_SELECTION} audio files at a time."
+            ));
+        }
+        let files: Vec<AudioFileInfo> = paths
+            .iter()
+            .map(|path| {
+                validate_audio_file(Path::new(&path.to_string())).map_err(|error| error.to_string())
+            })
+            .collect::<Result<_, String>>()?;
+        for file in &files {
+            crate::file_grants::grant(
+                crate::file_grants::Purpose::AudioImport,
+                Path::new(&file.path),
+            )?;
+        }
+        Ok(files)
+    })
+    .await
+    .map_err(|_| "Could not select audio files".to_string())?
+}
+
 /// Validate an audio file from a given path (for drag-drop)
 #[tauri::command]
 pub async fn validate_audio_file_command(path: String) -> Result<AudioFileInfo, String> {
@@ -1346,23 +1459,64 @@ pub async fn start_import_audio_command<R: Runtime>(
     language: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    meeting_at: Option<chrono::DateTime<chrono::Utc>>,
+    use_file_date: Option<bool>,
+    summarize: Option<bool>,
+    summary_language: Option<String>,
 ) -> Result<ImportStarted, String> {
-    // Check if import is already in progress (guard will be acquired in start_import)
-    if IMPORT_IN_PROGRESS.load(Ordering::SeqCst) {
-        return Err("Import already in progress".to_string());
-    }
-    // Only a file the user chose (or dropped on the window) and the core saw, once.
+    let guard = ImportGuard::acquire()?;
+    let summary_language = summary_language
+        .map(|value| crate::summary::metadata::normalise_supported_summary_language(&value))
+        .transpose()
+        .map_err(|_| "Unsupported summary language")?;
+    let from_file = use_file_date.unwrap_or(false);
+    let meeting_at = if from_file {
+        let source =
+            crate::file_grants::peek(crate::file_grants::Purpose::AudioImport, &source_path)?;
+        Some(
+            tauri::async_runtime::spawn_blocking(move || std::fs::metadata(source)?.modified())
+                .await
+                .map_err(|_| "Could not read the file's modified time")?
+                .map(chrono::DateTime::<chrono::Utc>::from)
+                .map_err(|_| "Could not read the file's modified time")?,
+        )
+    } else {
+        meeting_at
+    };
+    let options = ImportOptions {
+        date: ImportDate {
+            meeting_at,
+            from_file,
+            ..ImportDate::default()
+        },
+        summarize: summarize.unwrap_or(false),
+        summary_language,
+    };
     let taken = crate::file_grants::take(crate::file_grants::Purpose::AudioImport, &source_path)?;
     let source_path = taken.path.to_string_lossy().into_owned();
+    IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
-    // Spawn import in background
     tauri::async_runtime::spawn(async move {
-        let result = start_import(app, source_path, title, language, model, provider).await;
-
-        if let Err(_e) = result {
-            error!("Import failed");
-            // A retry needs no new choice.
+        let result = start_import(
+            app.clone(),
+            source_path,
+            title,
+            language,
+            model,
+            provider,
+            options,
+            guard,
+        )
+        .await;
+        if let Err(e) = result {
+            // Return the original grant before notifying the UI that retry is available.
             crate::file_grants::give_back(crate::file_grants::Purpose::AudioImport, &taken);
+            let _ = app.emit(
+                "import-error",
+                ImportError {
+                    error: e.to_string(),
+                },
+            );
         }
     });
 
@@ -1377,7 +1531,11 @@ pub async fn cancel_import_command() -> Result<(), String> {
     if !is_import_in_progress() {
         return Err("No import in progress".to_string());
     }
-    cancel_import();
+    if !cancel_import_if_possible() {
+        return Err(
+            "The import cannot be stopped during setup or save. Wait for it to finish.".into(),
+        );
+    }
     Ok(())
 }
 
@@ -1521,6 +1679,7 @@ mod tests {
             &create_transcript_segments(&kept),
             folder.path().to_string_lossy().into(),
             failed > 0,
+            ImportDate::default(),
         )
         .await
         .unwrap();
@@ -1844,6 +2003,7 @@ mod tests {
             &segments,
             "C:\\recordings\\speaker-persistence".to_string(),
             false,
+            ImportDate::default(),
         )
         .await
         .unwrap();
@@ -1873,6 +2033,12 @@ mod tests {
             "parakeet",
             "parakeet-tdt-0.6b-v3-int8",
             Some("en"),
+            ImportDate {
+                meeting_at: Some("2025-09-15T13:05:00Z".parse().unwrap()),
+                imported_at: "2025-11-22T10:00:00Z".parse().unwrap(),
+                from_file: true,
+            },
+            None,
         );
         assert!(result.is_ok(), "write_import_metadata failed: {:?}", result);
 
@@ -1888,6 +2054,9 @@ mod tests {
         assert_eq!(parsed["audio_file"], "audio.mp4");
         assert_eq!(parsed["status"], "completed");
         assert_eq!(parsed["source"], "import");
+        assert_eq!(parsed["created_at"], "2025-09-15T13:05:00+00:00");
+        assert_eq!(parsed["imported_at"], "2025-11-22T10:00:00+00:00");
+        assert_eq!(parsed["meeting_date_source"], "file_modified_time");
         assert_eq!(parsed["transcription_provider"], "parakeet");
         assert_eq!(parsed["transcription_model"], "parakeet-tdt-0.6b-v3-int8");
         assert_eq!(parsed["transcription_source_language"], "en");

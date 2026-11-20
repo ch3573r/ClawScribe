@@ -944,6 +944,10 @@ pub fn run() {
             api::api_test_custom_openai_processing,
             // Summary commands
             summary::commands::api_process_transcript,
+            summary::commands::api_generate_meeting_summary,
+            summary::automatic::get_automatic_summary_preference,
+            summary::automatic::set_automatic_summary_preference,
+            summary::automatic::start_recording_summary,
             summary::commands::polish_planner_tasks,
             // Meeting chat (transcript-grounded)
             summary::commands::api_get_summary,
@@ -1062,6 +1066,7 @@ pub fn run() {
             audio::diarization::cancel_speaker_diarization_command,
             // Import audio commands
             audio::import::select_and_validate_audio_command,
+            audio::import::select_audio_files_command,
             audio::import::validate_audio_file_command,
             audio::import::start_import_audio_command,
             audio::import::cancel_import_command,

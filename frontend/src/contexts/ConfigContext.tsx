@@ -73,6 +73,7 @@ interface ConfigContextType {
 
   // Summary configuration
   isAutoSummary: boolean;
+  automaticSummaryBusy: boolean;
   toggleIsAutoSummary: (checked: boolean) => void;
 
   // Which providers have a stored API key. The keys themselves stay in the core.
@@ -132,13 +133,16 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [selectedLanguage, setSelectedLanguage] = useState<string>('auto');
 
   // Summary configs
-  const [isAutoSummary, setisAutoSummary] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('isAutoSummary');
-      return saved !== null ? saved === 'true' : false
-    }
-    return false;
-  });
+  const [isAutoSummary, setIsAutoSummary] = useState(false);
+  const [automaticSummaryBusy, setAutomaticSummaryBusy] = useState(true);
+  useEffect(() => {
+    let active = true;
+    void invoke<boolean>('get_automatic_summary_preference')
+      .then(enabled => { if (active) setIsAutoSummary(enabled); })
+      .catch(() => { if (active) toast.error('Could not read automatic summary settings'); })
+      .finally(() => { if (active) setAutomaticSummaryBusy(false); });
+    return () => { active = false; };
+  }, []);
 
   // Preference settings state (lazy loaded)
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
@@ -348,12 +352,17 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     'claude-code': ['sonnet', 'opus', 'haiku'],
   };
 
-  const toggleIsAutoSummary = useCallback((checked: boolean) => {
-    setisAutoSummary(checked);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('isAutoSummary', checked.toString());
+  const toggleIsAutoSummary = useCallback(async (enabled: boolean) => {
+    setAutomaticSummaryBusy(true);
+    try {
+      await invoke('set_automatic_summary_preference', { enabled });
+      setIsAutoSummary(enabled);
+    } catch {
+      toast.error('Could not save the automatic summary setting');
+    } finally {
+      setAutomaticSummaryBusy(false);
     }
-  }, [])
+  }, []);
 
   // Ask the core again whether a provider has a stored key (after a save or a removal)
   // The shared model configuration carries the status too, so a removal shows
@@ -455,6 +464,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     modelConfig,
     setModelConfig,
     isAutoSummary,
+    automaticSummaryBusy,
     toggleIsAutoSummary,
     providerKeyStatus,
     refreshProviderKeyStatus,
@@ -475,6 +485,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   }), [
     modelConfig,
     isAutoSummary,
+    automaticSummaryBusy,
     toggleIsAutoSummary,
     providerKeyStatus,
     refreshProviderKeyStatus,

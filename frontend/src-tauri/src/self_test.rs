@@ -924,6 +924,7 @@ async fn import_fixture(
         &segments,
         folder.to_string_lossy().into_owned(),
         false,
+        import::ImportDate::default(),
     )
     .await
     .map_err(failed("save the imported meeting"))?;
@@ -1098,6 +1099,7 @@ async fn summary_against(
         Some("en"),
         Some("en"),
         None,
+        &crate::summary::context_budget::Reduction::default(),
     )
     .await
     .map_err(failed("generate the summary"))?;

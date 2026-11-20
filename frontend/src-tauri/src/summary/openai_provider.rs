@@ -217,6 +217,20 @@ impl OpenAICompatibleProcessingProvider {
         request: OpenAICompatibleMeetingProcessRequest,
         cancellation_token: Option<&CancellationToken>,
     ) -> Result<OpenAICompatibleProcessingResult, String> {
+        self.process_meeting_with_progress(
+            request,
+            cancellation_token,
+            &super::context_budget::Reduction::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn process_meeting_with_progress(
+        &self,
+        request: OpenAICompatibleMeetingProcessRequest,
+        cancellation_token: Option<&CancellationToken>,
+        reduction: &super::context_budget::Reduction,
+    ) -> Result<OpenAICompatibleProcessingResult, String> {
         if let Some(token) = cancellation_token {
             if token.is_cancelled() {
                 return Err("Summary generation was cancelled".to_string());
@@ -258,8 +272,13 @@ impl OpenAICompatibleProcessingProvider {
         let mut extraction = self.clone();
         extraction.config.max_tokens = Some(limits.extraction().output_tokens as u32);
         let extraction = &extraction;
-        let (transcript, _) =
-            super::context_budget::reduce(&transcript, budget, piece_budget, |chunk| async move {
+        let (transcript, _) = super::context_budget::reduce(
+            &transcript,
+            budget,
+            piece_budget,
+            reduction,
+            cancellation_token,
+            |chunk| async move {
                 extraction
                     .send_chat(
                         super::context_budget::EXTRACT_FACTS,

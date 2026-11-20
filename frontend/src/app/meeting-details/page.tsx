@@ -1,6 +1,6 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
-import { useState, useEffect, useCallback, useRef, Suspense } from "react";
+import { useState, useEffect, useCallback, Suspense } from "react";
 import { Transcript, Summary } from "@/types";
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -8,10 +8,10 @@ import Analytics from "@/lib/analytics";
 import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { listen } from '@tauri-apps/api/event';
-import { RecordingOutcome, recordingRecoveryMessage, recordingBlocksAutoSummary } from '@/lib/recording-outcome';
+import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
+import { RecordingOutcome, recordingRecoveryMessage } from '@/lib/recording-outcome';
 
 interface MeetingDetailsResponse {
   id: string;
@@ -22,29 +22,17 @@ interface MeetingDetailsResponse {
   folder_path?: string;
 }
 
-// Summary states the core reports while a run is in progress.
-const RUNNING_SUMMARY = ['pending', 'processing', 'summarizing', 'regenerating'];
-
 function MeetingDetailsContent() {
   const searchParams = useSearchParams();
   const meetingId = searchParams.get('id');
-  const source = searchParams.get('source'); // Check if navigated from recording
   const evidenceToken = searchParams.get('evidence');
   const fromArchive = searchParams.get('from') === 'archive';
   const { setCurrentMeeting, refetchMeetings, stopSummaryPolling } = useSidebar();
-  const { isAutoSummary } = useConfig(); // Get auto-summary toggle state
   const router = useRouter();
   const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsResponse | null>(null);
   const [meetingSummary, setMeetingSummary] = useState<Summary | null>(null);
-  const [isSummaryLoading, setIsSummaryLoading] = useState(true);
-  // The core is generating a summary for this meeting right now (started by the
-  // automatic summary after a recording, or here before the user left and came back).
-  const [summaryRunning, setSummaryRunning] = useState(false);
-  const autoGenRequest = useRef(0);
-  const autoGenPending = useRef(false);
+  const [summaryJob, setSummaryJob] = useState<SummaryJobSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [shouldAutoGenerate, setShouldAutoGenerate] = useState<boolean>(false);
-  const [hasCheckedAutoGen, setHasCheckedAutoGen] = useState<boolean>(false);
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
 
   useEffect(() => {
@@ -90,28 +78,6 @@ function MeetingDetailsContent() {
     error: transcriptError,
   } = usePaginatedTranscripts({ meetingId: meetingId || '' });
 
-  // Automatic generation uses only the provider the user has already configured.
-  const setupAutoGeneration = useCallback(async () => {
-    if (hasCheckedAutoGen || autoGenPending.current) return;
-    const request = autoGenRequest.current;
-    autoGenPending.current = true;
-    try {
-      if (source !== 'recording' || !isAutoSummary || summaryRunning) return;
-      const outcome = await invoke<RecordingOutcome | null>('get_recording_outcome', { meetingId });
-      if (request !== autoGenRequest.current || recordingBlocksAutoSummary(outcome)) return;
-      const config = await invoke<{ model?: string }>('api_get_model_config');
-      if (request === autoGenRequest.current && config?.model) setShouldAutoGenerate(true);
-    } catch {
-      // A failed readiness check must never start generation or change providers.
-      console.error('Could not check automatic summary readiness.');
-    } finally {
-      if (request === autoGenRequest.current) {
-        autoGenPending.current = false;
-        setHasCheckedAutoGen(true);
-      }
-    }
-  }, [hasCheckedAutoGen, source, isAutoSummary, meetingId, summaryRunning]);
-
   // Sync meeting metadata from pagination hook to meeting details state
   useEffect(() => {
     if (metadata && (metadata.id !== meetingId || meetingId === 'intro-call')) {
@@ -156,15 +122,9 @@ function MeetingDetailsContent() {
 
   // Reset states when meetingId changes (prevent race conditions)
   useEffect(() => {
-    autoGenRequest.current++;
-    autoGenPending.current = false;
     setMeetingDetails(null);
     setMeetingSummary(null);
     setError(null);
-    // Reset auto-generation state to allow new meeting to be checked
-    setHasCheckedAutoGen(false);
-    setShouldAutoGenerate(false);
-    return () => { autoGenRequest.current++; };
   }, [meetingId]);
 
   // Cleanup: Stop polling when navigating away from a meeting
@@ -178,12 +138,6 @@ function MeetingDetailsContent() {
     };
   }, [meetingId, stopSummaryPolling]);
 
-  // The recording flow can hand an already open meeting over to this page by
-  // adding source=recording. Check again then; the first check ran without it.
-  useEffect(() => {
-    if (source === 'recording') setHasCheckedAutoGen(false);
-  }, [source]);
-
   useEffect(() => {
 
     if (!meetingId || meetingId === 'intro-call') {
@@ -196,20 +150,21 @@ function MeetingDetailsContent() {
 
     setMeetingDetails(null);
     setMeetingSummary(null);
-    setIsSummaryLoading(true);
-    setSummaryRunning(false);
+    setSummaryJob(null);
     setError(null);
     let active = true;
+    let latestRequest = 0;
 
     const fetchMeetingSummary = async () => {
+      const request = ++latestRequest;
       try {
         const summary = await invoke('api_get_summary', {
           meetingId: meetingId,
-        }) as any;
-        if (!active) return;
+        }) as SummaryJobSnapshot;
+        if (!active || request !== latestRequest) return;
 
-        const running = RUNNING_SUMMARY.includes(String(summary.status));
-        setSummaryRunning(running);
+        setSummaryJob(summary);
+        const running = isActiveSummary(summary.status);
         // Nothing to show yet; the run's own progress is shown by the summary panel.
         if (running && !summary.data) {
           setMeetingSummary(null);
@@ -218,7 +173,7 @@ function MeetingDetailsContent() {
 
         // Check if the summary request failed with 404 or error status, or if no summary exists yet (idle)
         // Note: 'cancelled' and 'failed' statuses can still have data if backup was restored
-        if (summary.status === 'idle' || (!summary.data && summary.status === 'error')) {
+        if (!summary.data) {
           console.warn("Meeting summary not found or no summary generated yet:");
           setMeetingSummary(null);
           return;
@@ -227,7 +182,7 @@ function MeetingDetailsContent() {
         const summaryData = summary.data || {};
 
         // Parse if it's a JSON string (backend may return double-encoded JSON)
-        let parsedData = summaryData;
+        let parsedData: Record<string, any> = typeof summaryData === "string" ? {} : summaryData;
         if (typeof summaryData === 'string') {
           try {
             parsedData = JSON.parse(summaryData);
@@ -299,43 +254,22 @@ function MeetingDetailsContent() {
         }
 
         setMeetingSummary(formattedSummary);
-      } catch (error) {
-        if (!active) return;
-        setHasCheckedAutoGen(true);
-        console.error("FETCH SUMMARY: Error fetching meeting summary:");
-        // Don't set error state for summary fetch failure, set to null to show generate button
-        setMeetingSummary(null);
-      } finally {
-        if (active) setIsSummaryLoading(false);
+      } catch {
+        if (active && request === latestRequest) console.error('Could not read the saved summary');
       }
     };
 
-    void fetchMeetingSummary();
-    return () => { active = false; };
+    const subscription = listen<string>('summary-job-changed', event => {
+      if (event.payload === meetingId && active) void fetchMeetingSummary();
+    });
+    void subscription.then(() => {
+      if (active) void fetchMeetingSummary();
+    }, () => { if (active) void fetchMeetingSummary(); });
+    return () => {
+      active = false;
+      void subscription.then(unlisten => unlisten()).catch(() => {});
+    };
   }, [meetingId]);
-
-  // Auto-generation check: runs when meeting is loaded with no summary
-  useEffect(() => {
-    const checkAutoGen = async () => {
-      // Only auto-generate if:
-      // 1. We have meeting details
-      // 2. No summary exists
-      // 3. Meeting has transcripts
-      // 4. Haven't checked yet
-      if (
-        meetingDetails?.id === meetingId &&
-        !isSummaryLoading &&
-        meetingSummary === null &&
-        meetingDetails.transcripts &&
-        meetingDetails.transcripts.length > 0 &&
-        !hasCheckedAutoGen
-      ) {
-        await setupAutoGeneration();
-      }
-    };
-
-    checkAutoGen();
-  }, [meetingDetails, meetingId, meetingSummary, isSummaryLoading, hasCheckedAutoGen, setupAutoGeneration]);
 
   if (error) {
     return (
@@ -373,9 +307,7 @@ function MeetingDetailsContent() {
     evidenceToken={evidenceToken}
     fromArchive={fromArchive}
     summaryData={meetingSummary}
-    summaryRunning={summaryRunning}
-    shouldAutoGenerate={shouldAutoGenerate}
-    onAutoGenerateComplete={() => setShouldAutoGenerate(false)}
+    summaryJob={summaryJob}
     onMeetingUpdated={async () => {
       // Refetch meeting details to get updated title from backend
       await fetchMeetingDetails();

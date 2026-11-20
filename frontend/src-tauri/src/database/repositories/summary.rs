@@ -226,11 +226,30 @@ impl SummaryProcessesRepository {
         meeting_id: &str,
     ) -> Result<Option<SummaryProcess>, sqlx::Error> {
         sqlx::query_as::<_, SummaryProcess>(
-            "SELECT p.* FROM summary_processes p JOIN transcript_chunks t ON p.meeting_id = t.meeting_id WHERE p.meeting_id = ?",
+            "SELECT p.* FROM summary_processes p WHERE p.meeting_id = ? AND (EXISTS (SELECT 1 FROM meetings m WHERE m.id = p.meeting_id) OR EXISTS (SELECT 1 FROM transcript_chunks t WHERE t.meeting_id = p.meeting_id))",
         )
         .bind(meeting_id)
         .fetch_optional(pool)
         .await
+    }
+
+    pub(crate) async fn create_automatic_process(
+        pool: &SqlitePool,
+        meeting: &str,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(sqlx::query("INSERT INTO summary_processes (meeting_id, status, created_at, updated_at, start_time) SELECT id, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM meetings WHERE id = ? ON CONFLICT(meeting_id) DO NOTHING")
+            .bind(meeting).execute(pool).await?.rows_affected() == 1)
+    }
+
+    pub(crate) async fn record_automatic_outcome(
+        pool: &SqlitePool,
+        meeting: &str,
+        status: &str,
+        reason: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT INTO summary_processes (meeting_id, status, error, created_at, updated_at, end_time) SELECT id, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM meetings WHERE id = ? ON CONFLICT(meeting_id) DO NOTHING")
+            .bind(status).bind(reason).bind(meeting).execute(pool).await?;
+        Ok(())
     }
 
     pub async fn create_or_reset_process(
@@ -250,6 +269,9 @@ impl SummaryProcessesRepository {
                 status = 'PENDING',
                 updated_at = excluded.updated_at,
                 start_time = excluded.start_time,
+                end_time = NULL,
+                chunk_count = 0,
+                metadata = NULL,
                 result_backup = result,
                 result_backup_timestamp = excluded.updated_at,
                 result = result,
@@ -272,10 +294,23 @@ impl SummaryProcessesRepository {
     pub async fn update_process_completed(
         pool: &SqlitePool,
         meeting_id: &str,
-        mut result: Value, // Keep this as Value to handle both old and new formats if needed
+        result: Value,
         chunk_count: i64,
         processing_time: f64,
     ) -> Result<(), sqlx::Error> {
+        Self::complete_for_revision(pool, meeting_id, result, chunk_count, processing_time, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn complete_for_revision(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        mut result: Value,
+        chunk_count: i64,
+        processing_time: f64,
+        revision: Option<i64>,
+    ) -> Result<bool, sqlx::Error> {
         let now = Utc::now();
         if let Some(object) = result.as_object_mut() {
             object.remove("user_edited_at");
@@ -283,13 +318,13 @@ impl SummaryProcessesRepository {
         let result_str = serde_json::to_string(&result)
             .map_err(|e| sqlx::Error::Protocol(format!("Failed to serialize result: {}", e)))?;
 
-        sqlx::query(
+        let updated = sqlx::query(
             r#"
             UPDATE summary_processes
             SET previous_result = CASE WHEN result IS NOT NULL AND TRIM(result) NOT IN ('', 'null', '{}') THEN result ELSE previous_result END,
                 previous_result_at = CASE WHEN result IS NOT NULL AND TRIM(result) NOT IN ('', 'null', '{}') THEN CURRENT_TIMESTAMP ELSE previous_result_at END,
-                status = 'completed', result = ?, updated_at = ?, end_time = ?, chunk_count = ?, processing_time = ?, error = NULL, result_backup = NULL, result_backup_timestamp = NULL
-            WHERE meeting_id = ?
+                status = 'completed', result = ?, updated_at = ?, end_time = ?, chunk_count = ?, processing_time = ?, error = NULL, metadata = NULL, result_backup = NULL, result_backup_timestamp = NULL
+            WHERE meeting_id = ? AND (? IS NULL OR EXISTS (SELECT 1 FROM knowledge_sources s WHERE s.meeting_id = summary_processes.meeting_id AND s.kind = 'meeting' AND s.revision = ?))
             "#
         )
         .bind(result_str)
@@ -298,13 +333,15 @@ impl SummaryProcessesRepository {
         .bind(chunk_count)
         .bind(processing_time)
         .bind(meeting_id)
+        .bind(revision)
+        .bind(revision)
         .execute(pool)
         .await?;
         log_info!(
             "Summary completed and backup cleared for meeting_id: {}",
             meeting_id
         );
-        Ok(())
+        Ok(updated.rows_affected() == 1)
     }
 
     pub async fn restore_previous_summary(

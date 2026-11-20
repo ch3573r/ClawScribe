@@ -1,8 +1,9 @@
+import type { SummaryJobSnapshot } from '@/lib/summary-job-status';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { confirmSummaryRegeneration } from '@/lib/meetingDrafts';
 import { openExternal } from '@/lib/openExternal';
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Transcript, Summary } from '@/types';
+import { Summary } from '@/types';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
@@ -11,55 +12,13 @@ import Analytics from '@/lib/analytics';
 import { isOllamaNotInstalledError } from '@/lib/utils';
 import { BuiltInModelInfo } from '@/lib/builtin-ai';
 import { getMeetingContext } from '@/lib/meetingContext';
-import { formatTranscriptLine } from '@/lib/transcriptFormatting';
-import { fetchAllMeetingTranscripts } from '@/lib/meetingTranscripts';
-import {
-  detectAndCacheSummaryLanguage,
-  readMeetingSummaryLanguage,
-  readCachedDetectedSummaryLanguage,
-} from '@/lib/summary-language-preferences';
-
-async function resolveSummaryLanguage(
-  meetingId: string,
-  transcriptTexts: string[]
-): Promise<string | null> {
-  try {
-    const perMeeting = await readMeetingSummaryLanguage(meetingId);
-    if (perMeeting.language) return perMeeting.language;
-  } catch (err) {
-    console.warn('Failed to load meeting summary language:', err);
-    toast.warning('Could not load saved summary language', {
-      description: 'Using Auto for this generation.',
-    });
-  }
-
-  try {
-    const cachedDetected = await readCachedDetectedSummaryLanguage(meetingId);
-    if (cachedDetected) return cachedDetected;
-  } catch (err) {
-    console.warn('Failed to load cached detected summary language:', err);
-  }
-
-  try {
-    const detection = await detectAndCacheSummaryLanguage(meetingId, transcriptTexts);
-    if (detection.reason === 'tie') {
-      toast.warning('Bilingual transcript detected', {
-        description: 'Pick a summary language manually if Auto chooses the wrong fallback.',
-      });
-    }
-    return detection.language;
-  } catch (err) {
-    console.warn('Failed to detect transcript summary language:', err);
-    return null;
-  }
-}
+import { readMeetingSummaryLanguage } from '@/lib/summary-language-preferences';
 
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
 interface UseSummaryGenerationProps {
   beforeGeneration?: () => Promise<void>;
   meeting: any;
-  transcripts: Transcript[];
   modelConfig: ModelConfig;
   isModelConfigLoading: boolean;
   selectedTemplate: string;
@@ -73,7 +32,6 @@ interface UseSummaryGenerationProps {
 export function useSummaryGeneration({
   beforeGeneration,
   meeting,
-  transcripts,
   modelConfig,
   isModelConfigLoading,
   selectedTemplate,
@@ -86,7 +44,8 @@ export function useSummaryGeneration({
   const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>('idle');
   const [summaryError, setSummaryError] = useState<string | null>(null);
 
-  const { startSummaryPolling, stopSummaryPolling, attachSummaryPolling } = useSidebar();
+  const { startSummaryPolling, attachSummaryPolling } = useSidebar();
+  const [jobUpdate, setJobUpdate] = useState<SummaryJobSnapshot | null>(null);
   // Lets go of a run this page attached to when the page goes away. A background
   // poll (the automatic summary) then carries on and finishes on its own.
   const detachSummary = useRef<(() => void) | null>(null);
@@ -113,7 +72,7 @@ export function useSummaryGeneration({
   // What to do with each poll result: restore, error or completion. Shared by a
   // run this page started and a run it attached to.
   const handleSummaryUpdate = useCallback(async (pollingResult: any, isRegeneration: boolean) => {
-    console.log('Summary status:', pollingResult.status);
+    setJobUpdate(pollingResult);
 
     // Handle cancellation
     if (pollingResult.status === 'cancelled') {
@@ -321,13 +280,9 @@ export function useSummaryGeneration({
 
   // Unified summary processing logic
   const processSummary = useCallback(async ({
-    transcriptText,
-    transcriptTexts,
     customPrompt = '',
     isRegeneration = false,
   }: {
-    transcriptText: string;
-    transcriptTexts?: string[];
     customPrompt?: string;
     isRegeneration?: boolean;
   }) => {
@@ -344,12 +299,9 @@ export function useSummaryGeneration({
     }
     setSummaryStatus(isRegeneration ? 'regenerating' : 'processing');
     setSummaryError(null);
+    setJobUpdate(null);
 
     try {
-      if (!transcriptText.trim()) {
-        throw new Error('No transcript text available. Please add some text first.');
-      }
-
       console.log('Processing transcript with template:', selectedTemplate);
 
       // Calculate time since recording
@@ -359,7 +311,7 @@ export function useSummaryGeneration({
       await Analytics.trackSummaryGenerationStarted(
         modelConfig.provider,
         modelConfig.model,
-        transcriptText.length,
+        undefined,
         timeSinceRecording
       );
 
@@ -374,23 +326,18 @@ export function useSummaryGeneration({
         duration: 3000,
       });
 
-      // Resolve explicit metadata override first; Auto detects the transcript language.
-      const summaryLanguage = await resolveSummaryLanguage(
-        meeting.id,
-        transcriptTexts?.length ? transcriptTexts : [transcriptText]
-      );
+      const summaryLanguage = await readMeetingSummaryLanguage(meeting.id)
+        .then(preference => preference.language)
+        .catch(() => null);
 
-      // Process transcript and get process_id
-      const result = await invokeTauri('api_process_transcript', {
-        text: transcriptText,
+      const result = await invokeTauri('api_generate_meeting_summary', {
         model: modelConfig.provider,
         modelName: modelConfig.model,
         meetingId: meeting.id,
-        chunkSize: 40000,
-        overlap: 1000,
         customPrompt: customPrompt,
         templateId: selectedTemplate || null,
         summaryLanguage,
+        includeSpeakerLabels,
       }) as any;
 
       const process_id = result.process_id;
@@ -402,7 +349,7 @@ export function useSummaryGeneration({
       startSummaryPolling(meeting.id, process_id, pollingResult => handleSummaryUpdate(pollingResult, isRegeneration));
     } catch (error) {
       console.error(`Failed to ${isRegeneration ? 'regenerate' : 'generate'} summary:`, error);
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const errorMessage = typeof error === 'string' ? error : error instanceof Error ? error.message : 'Could not start summary generation';
       setSummaryError(errorMessage);
       setSummaryStatus('error');
       // Note: We don't clear the summary here because the backend has already restored from backup
@@ -425,30 +372,11 @@ export function useSummaryGeneration({
     meeting.created_at,
     modelConfig,
     selectedTemplate,
+    includeSpeakerLabels,
     startSummaryPolling,
     handleSummaryUpdate,
   ]);
 
-  // Helper function to fetch ALL transcripts for summary generation
-  const fetchAllTranscripts = useCallback(async (meetingId: string): Promise<Transcript[] | null> => {
-    try {
-      return await fetchAllMeetingTranscripts(invokeTauri, meetingId);
-    } catch {
-      toast.error('Failed to fetch transcripts for summary generation');
-      return null;
-    }
-  }, []);
-
-  const buildSummaryTranscriptPayload = useCallback((allTranscripts: Transcript[]) => {
-    return {
-      // Include corrected speaker labels when known, so the summary model gets
-      // who-said-what, not just a flat transcript.
-      transcriptText: allTranscripts
-        .map(t => formatTranscriptLine(t, { includeSpeaker: includeSpeakerLabels }))
-        .join('\n'),
-      transcriptTexts: allTranscripts.map(t => t.text),
-    };
-  }, [includeSpeakerLabels]);
 
   // Public API: Generate summary from transcripts
   const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
@@ -466,26 +394,6 @@ export function useSummaryGeneration({
       toast.info('Loading model configuration, please wait...');
       return;
     }
-
-    // CHANGE: Fetch ALL transcripts from database, not from pagination state
-    console.log('📊 Fetching all transcripts for summary generation...');
-    const allTranscripts = await fetchAllTranscripts(meeting.id);
-    if (allTranscripts === null) return;
-
-    if (!allTranscripts.length) {
-      const error_msg = 'No transcripts available for summary';
-      console.log(error_msg);
-      toast.error(error_msg);
-      return;
-    }
-
-    console.log(`✅ Proceeding with ${allTranscripts.length} transcripts`);
-
-    console.log('🚀 Starting summary generation with config:', {
-      provider: modelConfig.provider,
-      model: modelConfig.model,
-      template: selectedTemplate
-    });
 
     // Check if Ollama provider has models available
     if (modelConfig.provider === 'ollama') {
@@ -615,13 +523,8 @@ export function useSummaryGeneration({
       }
     }
 
-    const summaryPayload = buildSummaryTranscriptPayload(allTranscripts);
-
-    await processSummary({
-      ...summaryPayload,
-      customPrompt,
-    });
-  }, [beforeGeneration, meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary, modelConfig, isModelConfigLoading, selectedTemplate]);
+    await processSummary({ customPrompt });
+  }, [meeting.id, processSummary, modelConfig, isModelConfigLoading, onOpenModelSettings]);
 
   // Public API: Regenerate summary from the current saved transcript
   const handleRegenerateSummary = useCallback(async (customPrompt: string = '') => {
@@ -633,21 +536,8 @@ export function useSummaryGeneration({
       toast.error('Could not load meeting context. Try generating again.');
       return;
     }
-    const allTranscripts = await fetchAllTranscripts(meeting.id);
-    if (allTranscripts === null) return;
-
-    if (!allTranscripts.length) {
-      console.error('No transcripts available for regeneration');
-      toast.error('No transcripts available for summary regeneration');
-      return;
-    }
-
-    await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
-      customPrompt,
-      isRegeneration: true
-    });
-  }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary]);
+    await processSummary({ customPrompt, isRegeneration: true });
+  }, [meeting.id, processSummary]);
 
   // A summary for this meeting is already running in the core (started by the
   // automatic summary after a recording, or by this page before the user left and
@@ -656,42 +546,23 @@ export function useSummaryGeneration({
     const isRegeneration = hasExistingSummary;
     setSummaryStatus(isRegeneration ? 'regenerating' : 'processing');
     setSummaryError(null);
+    setJobUpdate(null);
     detachSummary.current?.();
     detachSummary.current = attachSummaryPolling(meeting.id, pollingResult => handleSummaryUpdate(pollingResult, isRegeneration));
   }, [meeting.id, attachSummaryPolling, handleSummaryUpdate]);
 
-  // Public API: Stop ongoing summary generation
   const handleStopGeneration = useCallback(async () => {
-    console.log('Stopping summary generation for meeting:', meeting.id);
-
     try {
-      // Call backend to cancel the summary generation
-      await invokeTauri('api_cancel_summary', {
-        meetingId: meeting.id
-      });
-      console.log('✓ Backend cancellation request sent for meeting:', meeting.id);
-    } catch (error) {
-      console.error('Failed to cancel summary generation:', error);
-      // Continue with frontend cleanup even if backend call fails
+      await invokeTauri('api_cancel_summary', { meetingId: meeting.id });
+    } catch {
+      toast.error('Could not stop summary generation');
     }
-
-    // Stop polling
-    stopSummaryPolling(meeting.id);
-
-    // Reset status to idle
-    setSummaryStatus('idle');
-    setSummaryError(null);
-
-    // Show toast notification
-    toast.info('Summary generation stopped', {
-      description: 'You can generate a new summary anytime',
-      duration: 3000,
-    });
-  }, [meeting.id, stopSummaryPolling]);
+  }, [meeting.id]);
 
   return {
     summaryStatus,
     summaryError,
+    jobUpdate,
     handleGenerateSummary,
     handleRegenerateSummary,
     handleStopGeneration,
