@@ -78,7 +78,10 @@ window titles are returned only when the settings diagnostics panel requests the
   Services key or Azure Speech credential. Microsoft Graph sign-in/export
   scopes are not reused for Azure Speech.
 - MAI-Transcribe streams WAV, MP3, and FLAC from disk. Other supported media
-  are converted to temporary 16 kHz mono PCM16 WAV. The 300 MB cap applies to
+  are converted to 16 kHz mono PCM16 WAV in an unnamed temporary file. The
+  operating system removes it when its handle closes, including after a crash or
+  kill, so no staging file persists and none is swept. Each upload attempt
+  replays it from the start in 64 KiB positional reads. The 300 MB cap applies to
   the audio submitted to Azure. Cancelling stops local conversion or the
   multipart request and leaves the source audio intact.
 - MAI sentence-level timing is never promoted to word timestamps. If Azure
@@ -275,6 +278,16 @@ transcript swaps the current rows with the latest archived revision, preserving
 every original ID and field. It archives the replaced version, retires old edit
 batches, and queues the file mirror in one transaction. Active summaries block
 restoration; regenerated notes are needed to refresh source links.
+
+Each archived revision stores the provider, model, language and time that
+produced its text, taken from the unpublished retry payload or the recording
+folder's `metadata.json`. Restore rewrites `metadata.json` with the restored
+text's own provenance. Revisions that never recorded one, including those
+archived before this was stored, are marked `transcription_provenance: unknown`
+and lose the provider, model, language and time fields instead of keeping the
+newer revision's. The pending payload for the replaced text is superseded. Capture
+gaps are never cleared, and the file-retry flag clears only after publication.
+A meeting with no recording folder keeps no retry marker.
 
 `summary/sources.rs` prepares summaries from the complete saved transcript and
 annotates passages with stable content-derived source links. Reduction prompts
@@ -534,6 +547,12 @@ attached bookmarks are retained, and cleanup skips active recordings.
 Restored recording outcomes retain whether recovery files were excluded from the
 archive. Those meetings direct recovery to the original computer; they do not
 recommend retranscribing unavailable audio. Older archives default this flag to false.
+
+A meeting restored without its recording files has no folder to publish to. Its
+archived pending file-sync rows are not imported and its file-retry flag is
+cleared, because the retry could never finish. Capture gaps and other recorded
+outcomes are restored as archived. The restore report lists the meeting as
+having unavailable saved audio, independent of those flags.
 
 ## Local Knowledge Embedding Foundation
 

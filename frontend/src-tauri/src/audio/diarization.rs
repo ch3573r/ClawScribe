@@ -2456,6 +2456,10 @@ async fn save_diarization_labels(
     roots: &[PathBuf],
 ) -> Result<(usize, bool)> {
     begin_diarization_save(meeting_id)?;
+    // Speaker labels do not change what produced the text; keep its provenance
+    // with the archived revision so a later restore does not turn it "unknown".
+    let files_provenance =
+        crate::database::transcript_edits::file_provenance(pool, meeting_id, roots).await;
     let mut tx = pool.begin().await?;
     let current: Vec<StoredTranscriptSegment> = sqlx::query_as(
         "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY COALESCE(audio_start_time, 999999999.0), timestamp, id"
@@ -2472,9 +2476,16 @@ async fn save_diarization_labels(
                 .bind(meeting_id)
                 .fetch_all(&mut *tx)
                 .await?;
-        sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json) VALUES (?, ?, ?, ?)")
+        let provenance = crate::database::transcript_edits::revision_provenance(
+            &mut tx,
+            meeting_id,
+            files_provenance,
+        )
+        .await
+        .map_err(|e| anyhow!(e))?;
+        sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json, provenance_json) VALUES (?, ?, ?, ?, ?)")
             .bind(Uuid::new_v4().to_string()).bind(meeting_id).bind(Utc::now().to_rfc3339())
-            .bind(serde_json::to_string(&previous)?).execute(&mut *tx).await?;
+            .bind(serde_json::to_string(&previous)?).bind(provenance).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
             .bind(&meeting_id)
             .execute(&mut *tx)
@@ -4489,7 +4500,7 @@ mod tests {
             .fetch_one(&pool).await.unwrap();
         assert!(has_edits);
         assert_eq!(
-            crate::database::transcript_edits::restore_previous(&pool, "review-test")
+            crate::database::transcript_edits::restore_previous(&pool, "review-test", &[])
                 .await
                 .unwrap(),
             2

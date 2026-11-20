@@ -203,13 +203,18 @@ async fn undo(pool: &SqlitePool, meeting: &str) -> Result<usize, String> {
     Ok(changes.len())
 }
 
-pub(crate) async fn restore_previous(pool: &SqlitePool, meeting: &str) -> Result<usize, String> {
+pub(crate) async fn restore_previous(
+    pool: &SqlitePool,
+    meeting: &str,
+    roots: &[PathBuf],
+) -> Result<usize, String> {
+    let files = file_provenance(pool, meeting, roots).await;
     let mut tx = pool.begin().await.map_err(error)?;
     assert_editable(&mut tx, meeting).await?;
-    let json: Option<String> = sqlx::query_scalar("SELECT transcripts_json FROM transcript_revisions WHERE meeting_id = ? ORDER BY rowid DESC LIMIT 1")
+    let revision: Option<(String, Option<String>)> = sqlx::query_as("SELECT transcripts_json, provenance_json FROM transcript_revisions WHERE meeting_id = ? ORDER BY rowid DESC LIMIT 1")
         .bind(meeting).fetch_optional(&mut *tx).await.map_err(error)?;
-    let previous: Vec<Transcript> =
-        serde_json::from_str(&json.ok_or("No previous transcript is available")?).map_err(error)?;
+    let (json, restored) = revision.ok_or("No previous transcript is available")?;
+    let previous: Vec<Transcript> = serde_json::from_str(&json).map_err(error)?;
     if previous.iter().any(|row| row.meeting_id != meeting) {
         return Err("The archived transcript does not belong to this meeting".into());
     }
@@ -219,9 +224,11 @@ pub(crate) async fn restore_previous(pool: &SqlitePool, meeting: &str) -> Result
             .fetch_all(&mut *tx)
             .await
             .map_err(error)?;
-    sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json) VALUES (?, ?, ?, ?)")
+    // The replaced text keeps its own provenance so a second restore can undo this one.
+    let archived = revision_provenance(&mut tx, meeting, files).await?;
+    sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json, provenance_json) VALUES (?, ?, ?, ?, ?)")
         .bind(uuid::Uuid::new_v4().to_string()).bind(meeting).bind(chrono::Utc::now().to_rfc3339())
-        .bind(serde_json::to_string(&current).map_err(error)?).execute(&mut *tx).await.map_err(error)?;
+        .bind(serde_json::to_string(&current).map_err(error)?).bind(archived).execute(&mut *tx).await.map_err(error)?;
     sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
         .bind(meeting)
         .execute(&mut *tx)
@@ -240,11 +247,47 @@ pub(crate) async fn restore_previous(pool: &SqlitePool, meeting: &str) -> Result
         .execute(&mut *tx)
         .await
         .map_err(error)?;
-    sqlx::query("INSERT OR IGNORE INTO transcript_file_sync (meeting_id) VALUES (?)")
+    // Any unpublished retranscription payload described the text just replaced.
+    // Replace it with the restored text's own provenance, or "unknown" when it
+    // was never recorded. It is never reassigned from the replaced revision.
+    let has_folder =
+        sqlx::query_scalar::<_, Option<String>>("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(error)?
+            .is_some_and(|folder| !folder.trim().is_empty());
+    let publication = has_folder
+        .then(|| {
+            let restored_provenance = restored
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<Provenance>(json).ok())
+                .map_or(RestoredProvenance::Unknown, RestoredProvenance::Known);
+            serde_json::to_string(&FilePublication::Restored(RestoredFileUpdate {
+                restored_provenance,
+            }))
+        })
+        .transpose()
+        .map_err(error)?;
+    sqlx::query("INSERT INTO transcript_file_sync (meeting_id, retranscription_json) VALUES (?, ?)
+                 ON CONFLICT(meeting_id) DO UPDATE SET retranscription_json = excluded.retranscription_json")
+        .bind(meeting)
+        .bind(publication)
+        .execute(&mut *tx)
+        .await
+        .map_err(error)?;
+    if has_folder {
+        // Files stay flagged until the restored metadata is published. Capture
+        // gaps and the other recorded outcomes are left exactly as they were.
+        sqlx::query(
+            "INSERT INTO recording_outcomes (meeting_id, recording_files_incomplete) VALUES (?, 1)
+             ON CONFLICT(meeting_id) DO UPDATE SET recording_files_incomplete = 1",
+        )
         .bind(meeting)
         .execute(&mut *tx)
         .await
         .map_err(error)?;
+    }
     sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
         .bind(chrono::Utc::now())
         .bind(meeting)
@@ -253,6 +296,196 @@ pub(crate) async fn restore_previous(pool: &SqlitePool, meeting: &str) -> Result
         .map_err(error)?;
     tx.commit().await.map_err(error)?;
     Ok(previous.len())
+}
+
+/// Transcription settings that produced stored transcript text. A transcript
+/// without a recorded provenance is "unknown", never the current provider.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Provenance {
+    pub provider: String,
+    pub model: String,
+    pub source_language: Option<String>,
+    pub retranscribed_at: Option<String>,
+}
+
+impl From<&RetranscriptionFileUpdate> for Provenance {
+    fn from(update: &RetranscriptionFileUpdate) -> Self {
+        Self {
+            provider: update.provider.clone(),
+            model: update.model.clone(),
+            source_language: update.source_language.clone(),
+            retranscribed_at: Some(update.retranscribed_at.clone()),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+enum RestoredProvenance {
+    Known(Provenance),
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RestoredFileUpdate {
+    restored_provenance: RestoredProvenance,
+}
+
+/// The pending file publication stored with the retry marker. Payloads written
+/// before restores existed are plain retranscription updates and still parse.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum FilePublication {
+    Restored(RestoredFileUpdate),
+    Retranscription(RetranscriptionFileUpdate),
+}
+
+impl FilePublication {
+    fn provenance(&self) -> Option<Provenance> {
+        match self {
+            Self::Retranscription(update) => Some(update.into()),
+            Self::Restored(RestoredFileUpdate {
+                restored_provenance: RestoredProvenance::Known(provenance),
+            }) => Some(provenance.clone()),
+            Self::Restored(_) => None,
+        }
+    }
+}
+
+impl RestoredFileUpdate {
+    fn write_metadata(&self, folder: &Path) -> Result<(), String> {
+        let path = folder.join("metadata.json");
+        let mut metadata: serde_json::Value = match std::fs::symlink_metadata(&path) {
+            Ok(stat) if stat.is_file() => {
+                serde_json::from_slice(&std::fs::read(&path).map_err(error)?).map_err(error)?
+            }
+            // Nothing on disk names a provider, so there is nothing to correct.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            _ => return Err("Could not read recording metadata".into()),
+        };
+        let fields = metadata
+            .as_object_mut()
+            .ok_or("Invalid recording metadata")?;
+        match &self.restored_provenance {
+            RestoredProvenance::Known(provenance) => {
+                fields.insert(
+                    "transcription_provider".into(),
+                    serde_json::json!(provenance.provider),
+                );
+                fields.insert(
+                    "transcription_model".into(),
+                    serde_json::json!(provenance.model),
+                );
+                for (key, value) in [
+                    (
+                        "transcription_source_language",
+                        provenance.source_language.as_deref(),
+                    ),
+                    ("retranscribed_at", provenance.retranscribed_at.as_deref()),
+                ] {
+                    match value {
+                        Some(value) => {
+                            fields.insert(key.into(), serde_json::json!(value));
+                        }
+                        None => {
+                            fields.remove(key);
+                        }
+                    }
+                }
+                fields.remove("transcription_provenance");
+            }
+            RestoredProvenance::Unknown => {
+                for key in [
+                    "transcription_provider",
+                    "transcription_model",
+                    "transcription_source_language",
+                    "retranscribed_at",
+                ] {
+                    fields.remove(key);
+                }
+                fields.insert(
+                    "transcription_provenance".into(),
+                    serde_json::json!("unknown"),
+                );
+            }
+        }
+        publish_json(&path, &metadata)
+    }
+}
+
+/// Provenance recorded in the recording folder's metadata, if any. Absent,
+/// unreadable or marked-unknown metadata yields `None`.
+pub(crate) async fn file_provenance(
+    pool: &SqlitePool,
+    meeting: &str,
+    roots: &[PathBuf],
+) -> Option<Provenance> {
+    let folder =
+        sqlx::query_scalar::<_, Option<String>>("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .flatten()
+            .filter(|value| !value.trim().is_empty())?;
+    let roots = roots.to_vec();
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder = crate::trusted_roots::resolve_allowed(&folder, &roots).ok()?;
+        read_file_provenance(&crate::database::meeting_files::plain_path(&folder))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn read_file_provenance(folder: &Path) -> Option<Provenance> {
+    let path = folder.join("metadata.json");
+    if !std::fs::symlink_metadata(&path).ok()?.is_file() {
+        return None;
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let text = |key: &str| {
+        metadata
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    Some(Provenance {
+        provider: text("transcription_provider")?,
+        model: text("transcription_model")?,
+        source_language: text("transcription_source_language"),
+        retranscribed_at: text("retranscribed_at"),
+    })
+}
+
+/// The provenance to store with a revision that archives the current text: an
+/// unpublished payload describes the current rows; otherwise the recording
+/// folder's metadata does. `None` means unknown.
+pub(crate) async fn revision_provenance(
+    conn: &mut SqliteConnection,
+    meeting: &str,
+    files: Option<Provenance>,
+) -> Result<Option<String>, String> {
+    let payload = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT retranscription_json FROM transcript_file_sync WHERE meeting_id = ?",
+    )
+    .bind(meeting)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(error)?
+    .flatten();
+    let provenance = match payload {
+        Some(json) => serde_json::from_str::<FilePublication>(&json)
+            .map_err(error)?
+            .provenance(),
+        None => files,
+    };
+    provenance
+        .map(|value| serde_json::to_string(&value))
+        .transpose()
+        .map_err(error)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -311,6 +544,7 @@ impl RetranscriptionFileUpdate {
         ]);
         fields.extend(changes);
         fields.remove("detected_summary_language");
+        fields.remove("transcription_provenance");
         if let Some(language) = &self.source_language {
             fields.insert(
                 "transcription_source_language".into(),
@@ -352,7 +586,7 @@ pub(crate) async fn sync_file(
     else {
         return Ok(());
     };
-    let publication: Option<RetranscriptionFileUpdate> = payload
+    let publication: Option<FilePublication> = payload
         .as_deref()
         .map(serde_json::from_str)
         .transpose()
@@ -364,14 +598,24 @@ pub(crate) async fn sync_file(
             .await
             .map_err(error)?;
     let Some(folder) = folder.filter(|value| !value.trim().is_empty()) else {
-        if publication.is_some() {
-            return Err("This meeting has no recording folder".into());
-        }
+        // Without a recording folder (for example a library restored without
+        // its files) no file can ever be written. Retrying would fail forever,
+        // so the file work is dropped. The missing audio is reported by the
+        // meeting having no recording folder, not by a retry that cannot finish.
+        let mut tx = pool.begin().await.map_err(error)?;
+        sqlx::query(
+            "UPDATE recording_outcomes SET recording_files_incomplete = 0 WHERE meeting_id = ?",
+        )
+        .bind(meeting)
+        .execute(&mut *tx)
+        .await
+        .map_err(error)?;
         sqlx::query("DELETE FROM transcript_file_sync WHERE meeting_id = ?")
             .bind(meeting)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(error)?;
+        tx.commit().await.map_err(error)?;
         return Ok(());
     };
     let mut outcome: Option<RecordingOutcome> = None;
@@ -413,12 +657,20 @@ pub(crate) async fn sync_file(
             )?;
             let mut recovered_audio = false;
             if let Some((publication, outcome)) = publication.zip(outcome) {
-                publication.write_metadata(&folder, &meeting_id)?;
-                outcome.write(&folder)?;
-                recovered_audio = matches!(
-                    publication.audio_filename.as_str(),
-                    "audio-recovered.mp4" | "audio-recovered.wav"
-                );
+                match publication {
+                    FilePublication::Retranscription(update) => {
+                        update.write_metadata(&folder, &meeting_id)?;
+                        outcome.write(&folder)?;
+                        recovered_audio = matches!(
+                            update.audio_filename.as_str(),
+                            "audio-recovered.mp4" | "audio-recovered.wav"
+                        );
+                    }
+                    FilePublication::Restored(update) => {
+                        update.write_metadata(&folder)?;
+                        outcome.write(&folder)?;
+                    }
+                }
             }
             Ok((folder, recovered_audio))
         })
@@ -617,7 +869,8 @@ pub async fn api_restore_previous_transcript<R: Runtime>(
 ) -> Result<EditResult, String> {
     let _job = crate::audio::inference::claim_job()?;
     let pool = state.db_manager.pool();
-    let count = restore_previous(pool, &meeting_id).await?;
+    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    let count = restore_previous(pool, &meeting_id, &roots).await?;
     Ok(complete(&app, pool, &meeting_id, count).await)
 }
 
@@ -683,7 +936,7 @@ pub(crate) mod tests {
             .await
             .unwrap_err()
             .contains("speaker detection"));
-        assert!(restore_previous(&pool, meeting)
+        assert!(restore_previous(&pool, meeting, &[])
             .await
             .unwrap_err()
             .contains("speaker detection"));
@@ -788,13 +1041,19 @@ pub(crate) mod tests {
             .bind(original.to_string()).execute(&pool).await.unwrap();
         sqlx::query("UPDATE transcripts SET id = id || '-new', transcript = 'replacement', original_transcript = NULL").execute(&pool).await.unwrap();
         let replacement = serde_json::to_value(rows(&pool, "review-test").await.unwrap()).unwrap();
-        assert_eq!(restore_previous(&pool, "review-test").await.unwrap(), 2);
+        assert_eq!(
+            restore_previous(&pool, "review-test", &[]).await.unwrap(),
+            2
+        );
         assert_eq!(
             serde_json::to_value(rows(&pool, "review-test").await.unwrap()).unwrap(),
             original
         );
         assert!(undo(&pool, "review-test").await.is_err());
-        assert_eq!(restore_previous(&pool, "review-test").await.unwrap(), 2);
+        assert_eq!(
+            restore_previous(&pool, "review-test", &[]).await.unwrap(),
+            2
+        );
         assert_eq!(
             serde_json::to_value(rows(&pool, "review-test").await.unwrap()).unwrap(),
             replacement
@@ -807,7 +1066,7 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(pending, 1);
         sqlx::query("INSERT INTO summary_processes (meeting_id, status, created_at, updated_at) VALUES ('review-test', 'processing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").execute(&pool).await.unwrap();
-        assert!(restore_previous(&pool, "review-test")
+        assert!(restore_previous(&pool, "review-test", &[])
             .await
             .unwrap_err()
             .contains("summary generation"));
@@ -815,6 +1074,54 @@ pub(crate) mod tests {
             serde_json::to_value(rows(&pool, "review-test").await.unwrap()).unwrap(),
             replacement
         );
+    }
+
+    #[tokio::test]
+    async fn folderless_meeting_never_keeps_an_unfinishable_file_retry() {
+        let pool = fixture().await;
+        sqlx::query("INSERT INTO recording_outcomes (meeting_id, capture_incomplete, recording_files_incomplete) VALUES ('review-test', 1, 1)")
+            .execute(&pool).await.unwrap();
+        let payload = serde_json::json!({
+            "retranscribed_at": "2026-01-01T00:00:00Z", "duration_seconds": 2.0,
+            "audio_filename": "audio.wav", "provider": "localWhisper", "model": "tiny",
+            "source_language": "de",
+        })
+        .to_string();
+        sqlx::query("INSERT INTO transcript_file_sync (meeting_id, retranscription_json) VALUES ('review-test', ?)")
+            .bind(payload).execute(&pool).await.unwrap();
+        // A library restored without its files must not retry forever.
+        sync_file(&pool, "review-test", &[]).await.unwrap();
+        async fn state(pool: &SqlitePool) -> (i64, (bool, bool)) {
+            let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcript_file_sync")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            let flags: (bool, bool) = sqlx::query_as(
+                "SELECT recording_files_incomplete, capture_incomplete FROM recording_outcomes",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            (rows, flags)
+        }
+        assert_eq!(state(&pool).await, (0, (false, true)));
+
+        // Restoring a revision of a folderless meeting stores no file work either.
+        let archived = serde_json::to_value(rows(&pool, "review-test").await.unwrap())
+            .unwrap()
+            .to_string();
+        sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json) VALUES ('revision', 'review-test', CURRENT_TIMESTAMP, ?)")
+            .bind(archived).execute(&pool).await.unwrap();
+        restore_previous(&pool, "review-test", &[]).await.unwrap();
+        let payload: Option<String> =
+            sqlx::query_scalar("SELECT retranscription_json FROM transcript_file_sync")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(payload.is_none());
+        assert_eq!(state(&pool).await, (1, (false, true)));
+        sync_file(&pool, "review-test", &[]).await.unwrap();
+        assert_eq!(state(&pool).await, (0, (false, true)));
     }
 
     #[tokio::test]

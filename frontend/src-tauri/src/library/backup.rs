@@ -3,7 +3,7 @@ use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::{Row, SqlitePool};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -1168,7 +1168,7 @@ async fn import_manifest(
 
 async fn import_manifest_impl(
     pool: &SqlitePool,
-    manifest: Manifest,
+    mut manifest: Manifest,
     stage: tempfile::TempDir,
     reference_root: Option<&Path>,
     app_data: Option<&Path>,
@@ -1198,6 +1198,19 @@ async fn import_manifest_impl(
             selected.insert(id.to_string());
         }
     }
+    // Meetings restored without a recording folder (the archive carried no
+    // files for them). No transcript or metadata file can ever be written for
+    // these, so pending file work from the source computer is inapplicable.
+    let folderless: HashMap<String, usize> = manifest.tables["meetings"]
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !manifest.files.contains_key(index))
+        .filter_map(|(index, row)| {
+            let id = row.get("id")?.as_str()?;
+            selected.contains(id).then(|| (id.to_string(), index))
+        })
+        .collect();
+    let mut dropped_file_work = HashSet::new();
     for table in TABLES {
         if table.starts_with("knowledge_") {
             continue;
@@ -1235,7 +1248,27 @@ async fn import_manifest_impl(
             if !selected.contains(parent) {
                 continue;
             }
+            let folderless_meeting = folderless.get(parent).copied();
+            if let Some(meeting_index) = folderless_meeting {
+                if *table == "transcript_file_sync" {
+                    // A retry marker here could never finish and would fail forever.
+                    dropped_file_work.insert(meeting_index);
+                    continue;
+                }
+            }
             let mut row = source.clone();
+            if let Some(meeting_index) = folderless_meeting {
+                if *table == "recording_outcomes"
+                    && row.get("recording_files_incomplete").is_some_and(|value| {
+                        value.as_i64() == Some(1) || value.as_bool() == Some(true)
+                    })
+                {
+                    // Only the file-retry flag is inapplicable. Capture gaps and the
+                    // other recorded outcomes are restored exactly as archived.
+                    row.insert("recording_files_incomplete".into(), Value::from(0));
+                    dropped_file_work.insert(meeting_index);
+                }
+            }
             if *table == "meetings" {
                 if manifest.files.contains_key(&index)
                     && !stage.path().join(index.to_string()).is_dir()
@@ -1339,6 +1372,15 @@ async fn import_manifest_impl(
                          ON CONFLICT(meeting_id) DO UPDATE SET recovery_files_elsewhere = 1")
                 .bind(meeting_id).execute(&mut *tx).await.map_err(failure)?;
         }
+    }
+    // Missing audio is reported from what the archive lacked, independently of
+    // the retry flag that was dropped above.
+    for index in dropped_file_work {
+        manifest
+            .incomplete_audio
+            .entry(index)
+            .or_default()
+            .audio_unavailable = true;
     }
     // Delete skipped meetings' extracted files before committing any rows or
     // keeping the stage. Cleanup failure rolls back the complete import.
@@ -2574,6 +2616,83 @@ mod tests {
             std::fs::read(Path::new(&audio_folder).join("audio.wav")).unwrap(),
             b"synthetic audio"
         );
+    }
+
+    #[tokio::test]
+    async fn restore_without_files_drops_the_inapplicable_retry_but_reports_missing_audio() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let available = root.path().join("available");
+        std::fs::create_dir(&available).unwrap();
+        std::fs::write(available.join("audio.wav"), b"synthetic audio").unwrap();
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES ('available', 'Available audio', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
+            .bind(available.to_string_lossy().as_ref()).execute(&pool).await.unwrap();
+        let payload = serde_json::json!({
+            "retranscribed_at": "2026-01-01T00:00:00Z", "duration_seconds": 2.0,
+            "audio_filename": "audio.wav", "provider": "localWhisper", "model": "tiny",
+            "source_language": "de",
+        })
+        .to_string();
+        // Both meetings have a committed retranscription whose files are unpublished.
+        for meeting in ["review-test", "available"] {
+            sqlx::query(
+                "INSERT INTO transcript_file_sync (meeting_id, retranscription_json) VALUES (?, ?)",
+            )
+            .bind(meeting)
+            .bind(&payload)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO recording_outcomes (meeting_id, capture_incomplete, recording_files_incomplete) VALUES (?, 1, 1)")
+                .bind(meeting).execute(&pool).await.unwrap();
+        }
+        // 'review-test' has no recording folder, so the archive carries no files for it.
+        let (manifest, folders) = snapshot(&pool).await.unwrap();
+        let archive = root.path().join("backup.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let (manifest, stage) = unpack(&archive, target.path(), &HashSet::new()).unwrap();
+        sqlx::query("DELETE FROM meetings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let restored = import_manifest(&pool, manifest, stage).await.unwrap();
+        assert_eq!(restored.meetings, 2);
+
+        let state = |meeting: &'static str| {
+            let pool = pool.clone();
+            async move {
+                let rows: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM transcript_file_sync WHERE meeting_id = ?",
+                )
+                .bind(meeting)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                let flags: (bool, bool) = sqlx::query_as("SELECT recording_files_incomplete, capture_incomplete FROM recording_outcomes WHERE meeting_id = ?")
+                    .bind(meeting).fetch_one(&pool).await.unwrap();
+                (rows, flags)
+            }
+        };
+        // No folder: nothing to retry. The capture gap is preserved as archived.
+        assert_eq!(state("review-test").await, (0, (false, true)));
+        crate::database::transcript_edits::sync_file(&pool, "review-test", &[])
+            .await
+            .unwrap();
+        // With files the retry stays pending until it succeeds.
+        assert_eq!(state("available").await, (1, (true, true)));
+        // Missing audio is reported from what the archive lacked, not from the flag.
+        assert_eq!(restored.incomplete_meetings.len(), 1);
+        let warning = &restored.incomplete_meetings[0];
+        assert_eq!(warning.meeting_id, "review-test");
+        assert!(warning.audio.audio_unavailable && !warning.audio.recovery_files_excluded);
+        let folder: Option<String> =
+            sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = 'review-test'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(folder, None);
     }
 
     #[tokio::test]

@@ -706,10 +706,21 @@ async fn save_retranscription_transcripts<R: Runtime>(
         model: used_model.to_string(),
         source_language: source_language.map(str::to_string),
     };
-    commit_retranscription(pool, meeting_id, &segments, &publication, capture_gaps).await?;
+    let roots = super::recording_preferences::recording_roots(app).await;
+    // What the recording folder says produced the text about to be archived.
+    let previous_provenance =
+        crate::database::transcript_edits::file_provenance(pool, meeting_id, &roots).await;
+    commit_retranscription(
+        pool,
+        meeting_id,
+        &segments,
+        &publication,
+        capture_gaps,
+        previous_provenance,
+    )
+    .await?;
 
     emit_progress(app, meeting_id, "saving", 90, "Updating recording files...");
-    let roots = super::recording_preferences::recording_roots(app).await;
     let file_warning = crate::database::transcript_edits::sync_file(pool, meeting_id, &roots)
         .await
         .is_err();
@@ -733,6 +744,7 @@ async fn commit_retranscription(
     segments: &[crate::api::TranscriptSegment],
     publication: &RetranscriptionFileUpdate,
     capture_gaps: bool,
+    previous_provenance: Option<crate::database::transcript_edits::Provenance>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
 
@@ -743,9 +755,19 @@ async fn commit_retranscription(
     .fetch_all(&mut *tx)
     .await?;
     if !previous.is_empty() {
-        sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json) VALUES (?, ?, ?, ?)")
+        // The archived text keeps the settings that produced it, so restoring it
+        // later never labels it with this retranscription's provider or model.
+        let provenance = crate::database::transcript_edits::revision_provenance(
+            &mut tx,
+            meeting_id,
+            previous_provenance,
+        )
+        .await
+        .map_err(|e| anyhow!(e))?;
+        sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, created_at, transcripts_json, provenance_json) VALUES (?, ?, ?, ?, ?)")
             .bind(uuid::Uuid::new_v4().to_string()).bind(meeting_id)
             .bind(chrono::Utc::now().to_rfc3339()).bind(serde_json::to_string(&previous)?)
+            .bind(provenance)
             .execute(&mut *tx).await?;
     }
 
@@ -1173,11 +1195,16 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert!(
-            commit_retranscription(&pool, "review-test", &segment, &publication(), false)
-                .await
-                .is_err()
-        );
+        assert!(commit_retranscription(
+            &pool,
+            "review-test",
+            &segment,
+            &publication(),
+            false,
+            None
+        )
+        .await
+        .is_err());
         let text: String = sqlx::query_scalar("SELECT transcript FROM transcripts WHERE id = 'a'")
             .fetch_one(&pool)
             .await
@@ -1218,7 +1245,7 @@ mod tests {
                 std::fs::remove_file(&blocked_path).unwrap();
             }
             std::fs::create_dir(&blocked_path).unwrap();
-            commit_retranscription(&pool, "review-test", &segments, &publication(), true)
+            commit_retranscription(&pool, "review-test", &segments, &publication(), true, None)
                 .await
                 .unwrap();
             let text: String = sqlx::query_scalar("SELECT transcript FROM transcripts")
@@ -1274,6 +1301,153 @@ mod tests {
             assert_eq!(pending, 0);
             pool.close().await;
         }
+    }
+
+    fn recorded_metadata(folder: &Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(folder.join("metadata.json")).unwrap()).unwrap()
+    }
+
+    async fn pending_files(pool: &sqlx::SqlitePool) -> (i64, bool, bool) {
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcript_file_sync")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let (files, capture): (bool, bool) = sqlx::query_as(
+            "SELECT recording_files_incomplete, capture_incomplete FROM recording_outcomes",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (rows, files, capture)
+    }
+
+    #[tokio::test]
+    async fn restore_after_a_completed_publication_returns_the_previous_provenance() {
+        let (pool, folder) = publication_fixture().await;
+        std::fs::write(
+            folder.path().join("metadata.json"),
+            serde_json::json!({
+                "meeting_name": "Synthetic review",
+                "transcription_provider": "parakeet",
+                "transcription_model": "old-model",
+                "transcription_source_language": "en",
+                "retranscribed_at": "2025-12-31T00:00:00Z",
+                "detected_summary_language": "en",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let roots = [folder.path().to_path_buf()];
+        let sync = crate::database::transcript_edits::sync_file;
+        let restore = crate::database::transcript_edits::restore_previous;
+        let previous =
+            crate::database::transcript_edits::file_provenance(&pool, "review-test", &roots).await;
+        assert_eq!(
+            previous.as_ref().map(|p| p.model.as_str()),
+            Some("old-model")
+        );
+        let segments = create_transcript_segments(&[("new transcript".into(), 0.0, 2000.0)]);
+        commit_retranscription(
+            &pool,
+            "review-test",
+            &segments,
+            &publication(),
+            true,
+            previous,
+        )
+        .await
+        .unwrap();
+        sync(&pool, "review-test", &roots).await.unwrap();
+        assert_eq!(
+            recorded_metadata(folder.path())["transcription_model"],
+            "tiny"
+        );
+        assert_eq!(pending_files(&pool).await, (0, false, true));
+
+        // Restoring after the publication finished rewrites the metadata too.
+        restore(&pool, "review-test", &roots).await.unwrap();
+        assert_eq!(pending_files(&pool).await, (1, true, true));
+        sync(&pool, "review-test", &roots).await.unwrap();
+        let metadata = recorded_metadata(folder.path());
+        assert_eq!(metadata["transcription_provider"], "parakeet");
+        assert_eq!(metadata["transcription_model"], "old-model");
+        assert_eq!(metadata["transcription_source_language"], "en");
+        assert_eq!(metadata["retranscribed_at"], "2025-12-31T00:00:00Z");
+        assert!(metadata.get("transcription_provenance").is_none());
+        // Capture gaps survive, and the retry flag clears only after publication.
+        assert_eq!(pending_files(&pool).await, (0, false, true));
+        let outcome = super::super::outcome::RecordingOutcome::read(folder.path())
+            .unwrap()
+            .unwrap();
+        assert!(outcome.capture_incomplete && !outcome.recording_files_incomplete);
+        let text: String = sqlx::query_scalar("SELECT transcript FROM transcripts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(text, "Äpfel project");
+
+        // Restoring again returns to the newer settings, not to a guess.
+        restore(&pool, "review-test", &roots).await.unwrap();
+        sync(&pool, "review-test", &roots).await.unwrap();
+        let metadata = recorded_metadata(folder.path());
+        assert_eq!(metadata["transcription_provider"], "localWhisper");
+        assert_eq!(metadata["transcription_model"], "tiny");
+        assert_eq!(metadata["transcription_source_language"], "de");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn restore_of_unrecorded_text_marks_provenance_unknown_and_replaces_pending_metadata() {
+        let (pool, folder) = publication_fixture().await;
+        let roots = [folder.path().to_path_buf()];
+        let sync = crate::database::transcript_edits::sync_file;
+        let restore = crate::database::transcript_edits::restore_previous;
+        // The replaced text never recorded a provider (for example a live transcript).
+        let previous =
+            crate::database::transcript_edits::file_provenance(&pool, "review-test", &roots).await;
+        assert!(previous.is_none());
+        let segments = create_transcript_segments(&[("new transcript".into(), 0.0, 2000.0)]);
+        commit_retranscription(
+            &pool,
+            "review-test",
+            &segments,
+            &publication(),
+            true,
+            previous,
+        )
+        .await
+        .unwrap();
+
+        // Restore before the retranscription's files were published.
+        restore(&pool, "review-test", &roots).await.unwrap();
+        let payload: String =
+            sqlx::query_scalar("SELECT retranscription_json FROM transcript_file_sync")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(payload.contains("Unknown") && !payload.contains("tiny"));
+        assert_eq!(pending_files(&pool).await, (1, true, true));
+        sync(&pool, "review-test", &roots).await.unwrap();
+        let metadata = recorded_metadata(folder.path());
+        for key in [
+            "transcription_provider",
+            "transcription_model",
+            "transcription_source_language",
+            "retranscribed_at",
+        ] {
+            assert!(metadata.get(key).is_none(), "{key}");
+        }
+        assert_eq!(metadata["transcription_provenance"], "unknown");
+        assert_eq!(pending_files(&pool).await, (0, false, true));
+
+        // Restoring back to the newer text recovers its recorded settings.
+        restore(&pool, "review-test", &roots).await.unwrap();
+        sync(&pool, "review-test", &roots).await.unwrap();
+        let metadata = recorded_metadata(folder.path());
+        assert_eq!(metadata["transcription_model"], "tiny");
+        assert_eq!(metadata["transcription_source_language"], "de");
+        assert!(metadata.get("transcription_provenance").is_none());
+        pool.close().await;
     }
 
     fn publication() -> RetranscriptionFileUpdate {

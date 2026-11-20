@@ -226,6 +226,14 @@ of temporary disk space. These are buffer and file-size bounds. FFmpeg, HTTP
 transport, and transcript responses have their own memory needs. Cancellation
 stops conversion and can drop an in-flight upload or retry delay.
 
+The temporary WAV is an unnamed file the operating system deletes when the
+process closes it or dies. A manual, ignored test on the designated runner
+measures the conversion and upload stream with synthetic audio only
+(`CLAWSCRIBE_MAI_PERF_SECONDS`, 10 to 3600, default 600): it prints elapsed time,
+peak memory delta of the app process (FFmpeg is separate), source seconds,
+output bytes and cancellation latency for the current path, the earlier
+named-file path and the in-memory decode baseline.
+
 For an i5-1235U / 8 GB notebook, choose models based on a measured session with
 Teams/Webex and the normal concurrent workload. Compare sustained backlog,
 recognition quality, responsiveness, memory pressure, and finalization time.

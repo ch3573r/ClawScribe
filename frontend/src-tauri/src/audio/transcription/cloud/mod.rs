@@ -362,23 +362,40 @@ pub(crate) async fn transcribe_mai_file(
         .ok_or_else(cloud_cancelled)?;
     }
 
-    info!("Preparing a temporary WAV for MAI-Transcribe");
-    let wav = tempfile::Builder::new()
-        .prefix("clawscribe-mai-")
-        .suffix(".wav")
-        .tempfile()
-        .map_err(|_| {
-            CloudTranscriptionError::transient(
-                "Could not create temporary audio for MAI-Transcribe",
-            )
-        })?;
-    transcode_to_mai_wav(audio_path, wav.path(), cancelled).await?;
+    info!("Preparing temporary audio for MAI-Transcribe");
+    let scratch = convert_to_mai_scratch(audio_path, cancelled).await?;
     unless_cancelled(
-        client.transcribe_path(wav.path(), "audio.wav", "audio/wav", language),
+        client.transcribe_source(
+            mai_transcribe::UploadSource::Scratch(&scratch),
+            "audio.wav",
+            "audio/wav",
+            language,
+        ),
         cancelled,
     )
     .await
     .ok_or_else(cloud_cancelled)?
+}
+
+/// Converts into an unnamed temporary file. It has no path to leave behind: the
+/// operating system deletes it when the last handle closes, even if the process
+/// is killed mid-conversion or mid-upload.
+async fn convert_to_mai_scratch(
+    audio_path: &Path,
+    cancelled: &AtomicBool,
+) -> Result<mai_transcribe::ScratchAudio, CloudTranscriptionError> {
+    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(cloud_cancelled());
+    }
+    let file = tempfile::tempfile().map_err(|_| {
+        CloudTranscriptionError::transient("Could not create temporary audio for MAI-Transcribe")
+    })?;
+    let mut wav = tokio::fs::File::from_std(file);
+    let length = transcode_to_mai_wav(audio_path, &mut wav, cancelled).await?;
+    Ok(mai_transcribe::ScratchAudio::new(
+        wav.into_std().await,
+        length,
+    ))
 }
 
 pub fn emit_fallback_event<R: Runtime>(
@@ -547,17 +564,15 @@ fn mai_supports_container(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Streams the decoder's PCM into `wav` and returns the finished WAV length.
 async fn transcode_to_mai_wav(
     audio_path: &Path,
-    wav_path: &Path,
+    wav: &mut tokio::fs::File,
     cancelled: &AtomicBool,
-) -> Result<(), CloudTranscriptionError> {
+) -> Result<u64, CloudTranscriptionError> {
     if cancelled.load(std::sync::atomic::Ordering::Acquire) {
         return Err(cloud_cancelled());
     }
-    let mut wav = tokio::fs::File::create(wav_path)
-        .await
-        .map_err(mai_wav_io_error)?;
     let mut command = audio_decoder_command(audio_path)
         .map_err(|error| CloudTranscriptionError::unsupported_media(error.to_string()))?;
     let mut child = command
@@ -567,14 +582,14 @@ async fn transcode_to_mai_wav(
         .map_err(mai_wav_io_error)?;
     let stdout = child.stdout.take().expect("decoder stdout was piped");
     let work = async {
-        write_mai_wav(stdout, &mut wav, MAI_TRANSCRIBE_MAX_UPLOAD_BYTES).await?;
+        let length = write_mai_wav(stdout, &mut *wav, MAI_TRANSCRIBE_MAX_UPLOAD_BYTES).await?;
         let status = child.wait().await.map_err(mai_wav_io_error)?;
         if !status.success() {
             return Err(CloudTranscriptionError::unsupported_media(
                 "Could not decode audio for MAI-Transcribe",
             ));
         }
-        Ok(())
+        Ok(length)
     };
     let result = match unless_cancelled(
         tokio::time::timeout(Duration::from_secs(30 * 60), work),
@@ -591,7 +606,7 @@ async fn transcode_to_mai_wav(
     if result.is_err() {
         let _ = child.kill().await;
         let _ = child.wait().await;
-        // Finish any outstanding local file write before the temporary file is removed.
+        // Finish any outstanding local file write before the caller drops the handle.
         let _ = wav.flush().await;
     }
     result
@@ -605,7 +620,7 @@ async fn write_mai_wav(
     pcm: impl AsyncRead + Unpin,
     wav: &mut tokio::fs::File,
     max_bytes: u64,
-) -> Result<(), CloudTranscriptionError> {
+) -> Result<u64, CloudTranscriptionError> {
     let max_pcm_bytes = max_bytes - WAV_HEADER_BYTES;
     wav.write_all(&[0; WAV_HEADER_BYTES as usize])
         .await
@@ -632,7 +647,7 @@ async fn write_mai_wav(
         .await
         .map_err(mai_wav_io_error)?;
     wav.flush().await.map_err(mai_wav_io_error)?;
-    Ok(())
+    Ok(WAV_HEADER_BYTES + pcm_bytes)
 }
 
 fn pcm16_wav_header(data_len: u32) -> Vec<u8> {
@@ -785,9 +800,10 @@ mod tests {
         let limit = 44 + 8;
         let decoded = [1, 0, 2, 0, 3, 0, 4, 0];
         let mut output = tokio::fs::File::create(&wav).await.unwrap();
-        write_mai_wav(&decoded[..], &mut output, limit)
+        let written = write_mai_wav(&decoded[..], &mut output, limit)
             .await
             .unwrap();
+        assert_eq!(written, 52);
         drop(output);
         let data = tokio::fs::read(&wav).await.unwrap();
         assert_eq!(data.len(), 52);
@@ -810,23 +826,328 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mai_conversion_writes_pcm_and_preserves_the_input() {
+    async fn mai_conversion_writes_pcm_to_an_unnamed_handle_and_preserves_the_input() {
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("source.wav");
-        let output = directory.path().join("upload.wav");
         let cancelled = AtomicBool::new(true);
         let audio = encode_wav_pcm16_mono_16k(&[0.25; 16_000]);
         tokio::fs::write(&input, &audio).await.unwrap();
-        assert!(transcode_to_mai_wav(&input, &output, &cancelled)
-            .await
-            .is_err());
-        assert!(!output.exists());
+        assert!(convert_to_mai_scratch(&input, &cancelled).await.is_err());
         cancelled.store(false, std::sync::atomic::Ordering::Release);
-        transcode_to_mai_wav(&input, &output, &cancelled)
+        let scratch = convert_to_mai_scratch(&input, &cancelled).await.unwrap();
+        assert_eq!(scratch.length(), audio.len() as u64);
+        assert_eq!(scratch.read_all().await, audio);
+        assert_eq!(tokio::fs::read(&input).await.unwrap(), audio);
+    }
+
+    fn named_mai_staging_files() -> usize {
+        std::fs::read_dir(std::env::temp_dir())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("clawscribe-mai-")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn failed_mai_conversions_never_create_a_named_staging_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let broken = directory.path().join("not-audio.ogg");
+        tokio::fs::write(&broken, b"synthetic bytes that are not audio")
             .await
             .unwrap();
-        assert_eq!(tokio::fs::read(&output).await.unwrap(), audio);
-        assert_eq!(tokio::fs::read(&input).await.unwrap(), audio);
+        let before = named_mai_staging_files();
+        // Decoder failure: the container is unreadable.
+        let error = convert_to_mai_scratch(&broken, &AtomicBool::new(false))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.category(),
+            CloudFallbackReasonCategory::UnsupportedMedia
+        );
+        // Cancellation before any decoder starts.
+        let error = convert_to_mai_scratch(&broken, &AtomicBool::new(true))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(named_mai_staging_files(), before);
+        assert_eq!(
+            tokio::fs::read(&broken).await.unwrap(),
+            b"synthetic bytes that are not audio"
+        );
+    }
+
+    #[tokio::test]
+    async fn mai_wav_writer_rejects_empty_and_partial_pcm_without_a_header() {
+        for decoded in [&[][..], &[1_u8, 2, 3][..]] {
+            let mut output = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
+            let error = write_mai_wav(decoded, &mut output, MAI_TRANSCRIBE_MAX_UPLOAD_BYTES)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.category(),
+                CloudFallbackReasonCategory::UnsupportedMedia
+            );
+            // The reserved header was never replaced by one describing partial audio.
+            let mut std_file = output.into_std().await;
+            std::io::Seek::seek(&mut std_file, std::io::SeekFrom::Start(0)).unwrap();
+            let mut header = [1_u8; 44];
+            std::io::Read::read_exact(&mut std_file, &mut header).unwrap();
+            assert_eq!(header, [0_u8; 44]);
+        }
+    }
+
+    struct DiesAfterSomePcm(bool);
+
+    impl AsyncRead for DiesAfterSomePcm {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.0 {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "synthetic decoder death",
+                )));
+            }
+            self.0 = true;
+            buffer.put_slice(&[1, 0, 2, 0]);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn decoder_death_mid_stream_is_a_retryable_error_not_a_short_upload() {
+        let mut output = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
+        let error = write_mai_wav(
+            DiesAfterSomePcm(false),
+            &mut output,
+            MAI_TRANSCRIBE_MAX_UPLOAD_BYTES,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.category(), CloudFallbackReasonCategory::Transient);
+    }
+
+    /// Writes a deterministic synthetic 48 kHz stereo 16-bit tone, streamed one
+    /// second at a time. Contains no speech and no real recording.
+    fn write_synthetic_wav(path: &Path, seconds: u64) {
+        let block: Vec<u8> = (0..48_000_u32)
+            .flat_map(|index| {
+                let time = f64::from(index) / 48_000.0;
+                let left = ((time * 440.0 * std::f64::consts::TAU).sin() * 9_000.0) as i16;
+                let right = ((time * 1_000.0 * std::f64::consts::TAU).sin() * 6_000.0) as i16;
+                left.to_le_bytes().into_iter().chain(right.to_le_bytes())
+            })
+            .collect();
+        let data_bytes = u32::try_from(seconds * block.len() as u64).unwrap();
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        let write = |writer: &mut std::io::BufWriter<std::fs::File>, bytes: &[u8]| {
+            std::io::Write::write_all(writer, bytes).unwrap();
+        };
+        write(&mut writer, b"RIFF");
+        write(&mut writer, &(data_bytes + 36).to_le_bytes());
+        write(&mut writer, b"WAVEfmt ");
+        write(&mut writer, &16_u32.to_le_bytes());
+        write(&mut writer, &1_u16.to_le_bytes());
+        write(&mut writer, &2_u16.to_le_bytes());
+        write(&mut writer, &48_000_u32.to_le_bytes());
+        write(&mut writer, &192_000_u32.to_le_bytes());
+        write(&mut writer, &4_u16.to_le_bytes());
+        write(&mut writer, &16_u16.to_le_bytes());
+        write(&mut writer, b"data");
+        write(&mut writer, &data_bytes.to_le_bytes());
+        for _ in 0..seconds {
+            write(&mut writer, &block);
+        }
+        std::io::Write::flush(&mut writer).unwrap();
+    }
+
+    /// Runs `work` while sampling this process's memory: (value, elapsed, peak
+    /// resident delta, peak private delta). The ffmpeg child process is not included.
+    async fn measured<T>(
+        work: impl std::future::Future<Output = T>,
+    ) -> (T, Duration, usize, usize) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let baseline = memory_stats::memory_stats().unwrap();
+        let resident = std::sync::Arc::new(AtomicUsize::new(baseline.physical_mem));
+        let private = std::sync::Arc::new(AtomicUsize::new(baseline.virtual_mem));
+        let running = std::sync::Arc::new(AtomicBool::new(true));
+        let monitor = {
+            let (resident, private, running) = (resident.clone(), private.clone(), running.clone());
+            std::thread::spawn(move || {
+                while running.load(Ordering::Acquire) {
+                    if let Some(memory) = memory_stats::memory_stats() {
+                        resident.fetch_max(memory.physical_mem, Ordering::AcqRel);
+                        private.fetch_max(memory.virtual_mem, Ordering::AcqRel);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        let started = std::time::Instant::now();
+        let value = work.await;
+        let elapsed = started.elapsed();
+        running.store(false, Ordering::Release);
+        monitor.join().unwrap();
+        (
+            value,
+            elapsed,
+            resident
+                .load(Ordering::Acquire)
+                .saturating_sub(baseline.physical_mem),
+            private
+                .load(Ordering::Acquire)
+                .saturating_sub(baseline.virtual_mem),
+        )
+    }
+
+    /// Manual trusted-runner measurement with synthetic audio only; it needs the
+    /// packaged FFmpeg and no credentials or network. Run with:
+    /// `CLAWSCRIBE_MAI_PERF_SECONDS=600 cargo test --lib mai_conversion_and_upload_stream_measurements -- --ignored --nocapture`
+    /// and read the `MAI_AUDIO_PERF` lines. The source length is capped at 3600 s.
+    #[tokio::test]
+    #[ignore = "manual trusted-runner measurement with synthetic audio"]
+    async fn mai_conversion_and_upload_stream_measurements() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let seconds: u64 = std::env::var("CLAWSCRIBE_MAI_PERF_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(600)
+            .clamp(10, 3600);
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("synthetic-stereo-48k.wav");
+        write_synthetic_wav(&source, seconds);
+        let source_bytes = std::fs::metadata(&source).unwrap().len();
+        let expected = seconds * 16_000 * 2 + WAV_HEADER_BYTES;
+        let report = |stage: &str,
+                      bytes: u64,
+                      elapsed: Duration,
+                      resident: usize,
+                      private: usize| {
+            println!(
+                "MAI_AUDIO_PERF stage={stage} source_seconds={seconds} source_bytes={source_bytes} output_bytes={bytes} elapsed_ms={} peak_rss_delta_bytes={resident} peak_private_delta_bytes={private}",
+                elapsed.as_millis()
+            );
+        };
+        let near_expected = |bytes: u64| bytes.abs_diff(expected) <= expected / 1000;
+
+        // Current path: unnamed scratch handle, then bounded positional-read stream.
+        let (scratch, elapsed, resident, private) =
+            measured(convert_to_mai_scratch(&source, &AtomicBool::new(false))).await;
+        let scratch = scratch.unwrap();
+        report(
+            "convert_scratch",
+            scratch.length(),
+            elapsed,
+            resident,
+            private,
+        );
+        assert!(near_expected(scratch.length()));
+        assert!(
+            resident < 256 * 1024 * 1024,
+            "conversion memory must not scale with duration"
+        );
+        let ((streamed, largest), elapsed, resident, private) = measured(scratch.drain()).await;
+        report("stream_scratch", streamed, elapsed, resident, private);
+        println!("MAI_AUDIO_PERF stage=stream_scratch largest_chunk_bytes={largest}");
+        assert_eq!(streamed, scratch.length());
+        assert!(largest <= 64 * 1024);
+        assert!(
+            resident < 256 * 1024 * 1024,
+            "streaming memory must not scale with duration"
+        );
+
+        // Previous path: named temporary file converted in place, streamed by path.
+        let named = tempfile::Builder::new()
+            .prefix("mai-baseline-")
+            .suffix(".wav")
+            .tempfile()
+            .unwrap();
+        let (length, elapsed, resident, private) = measured(async {
+            let mut wav = tokio::fs::File::create(named.path()).await.unwrap();
+            transcode_to_mai_wav(&source, &mut wav, &AtomicBool::new(false))
+                .await
+                .unwrap()
+        })
+        .await;
+        report(
+            "baseline_named_file_convert",
+            length,
+            elapsed,
+            resident,
+            private,
+        );
+        let ((streamed, _), elapsed, resident, private) =
+            measured(mai_transcribe::drain_path(named.path())).await;
+        report(
+            "baseline_named_file_stream",
+            streamed,
+            elapsed,
+            resident,
+            private,
+        );
+        assert_eq!(streamed, length);
+
+        // Pre-streaming path: whole decode and encode in memory. Skipped for long
+        // sources because it holds every sample.
+        if seconds <= 1800 {
+            let (length, elapsed, resident, private) = measured(async {
+                let samples = crate::audio::decoder::decode_audio_file(&source)
+                    .unwrap()
+                    .to_whisper_format();
+                encode_wav_pcm16_mono_16k(&samples).len() as u64
+            })
+            .await;
+            report(
+                "baseline_in_memory_decode_encode",
+                length,
+                elapsed,
+                resident,
+                private,
+            );
+        } else {
+            println!("MAI_AUDIO_PERF stage=baseline_in_memory_decode_encode skipped=source_longer_than_1800s");
+        }
+
+        // Cancellation part-way through conversion: time from the flag to return.
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let set_at = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let trigger = {
+            let (cancelled, set_at) = (cancelled.clone(), set_at.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                *set_at.lock().unwrap() = Some(std::time::Instant::now());
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            })
+        };
+        let outcome = convert_to_mai_scratch(&source, &cancelled).await;
+        let returned = std::time::Instant::now();
+        trigger.await.unwrap();
+        match outcome {
+            Err(error) => {
+                let latency = returned.saturating_duration_since(set_at.lock().unwrap().unwrap());
+                println!(
+                    "MAI_AUDIO_PERF stage=cancel source_seconds={seconds} outcome=cancelled latency_ms={}",
+                    latency.as_millis()
+                );
+                assert!(error.to_string().contains("cancelled"));
+                assert!(latency < Duration::from_secs(5));
+            }
+            Ok(_) => println!(
+                "MAI_AUDIO_PERF stage=cancel source_seconds={seconds} outcome=finished_before_cancel"
+            ),
+        }
     }
 
     #[test]
