@@ -18,7 +18,11 @@ pub const STORE_FILE: &str = "trusted_folders.json";
 const TRUSTED: &str = "trusted";
 const TAKEOVER_DONE: &str = "takeover_done";
 const KEPT: &str = "kept_recordings";
-const MAX_TRUSTED: usize = 32;
+const REGISTERED_DONE: &str = "registered_takeover_done";
+const CODEX_DONE: &str = "codex_home_marked";
+const MAX_TRUSTED: usize = 100;
+/// The most parent folders of saved meetings taken over at once.
+pub(crate) const MAX_REGISTERED_PARENTS: usize = 50;
 const MAX_KEPT: usize = 500;
 
 /// What the core has recorded about trusted folders.
@@ -29,6 +33,10 @@ pub(crate) struct Trust {
     pub takeover_done: bool,
     /// Interrupted recordings the user asked not to be asked about again.
     pub kept: Vec<String>,
+    /// The folders that saved meetings already live in were taken over.
+    pub registered_done: bool,
+    /// The custom Codex profile folder of an earlier version was marked.
+    pub codex_done: bool,
 }
 
 fn strings(backing: &dyn Backing, key: &str) -> Vec<String> {
@@ -44,12 +52,18 @@ pub(crate) fn read(backing: &dyn Backing) -> Trust {
         trusted: strings(backing, TRUSTED).into_iter().map(PathBuf::from).collect(),
         takeover_done: backing.read(TAKEOVER_DONE).and_then(|value| value.as_bool()) == Some(true),
         kept: strings(backing, KEPT),
+        registered_done: flag(backing, REGISTERED_DONE),
+        codex_done: flag(backing, CODEX_DONE),
     }
+}
+
+fn flag(backing: &dyn Backing, key: &str) -> bool {
+    backing.read(key).and_then(|value| value.as_bool()) == Some(true)
 }
 
 /// Writes the state and saves; when the save fails the previous values are put back.
 fn write(backing: &dyn Backing, trust: &Trust) -> Result<(), String> {
-    let keys = [TRUSTED, TAKEOVER_DONE, KEPT];
+    let keys = [TRUSTED, TAKEOVER_DONE, KEPT, REGISTERED_DONE, CODEX_DONE];
     let previous: Vec<_> = keys.iter().map(|key| backing.read(key)).collect();
     backing.write(
         TRUSTED,
@@ -57,6 +71,8 @@ fn write(backing: &dyn Backing, trust: &Trust) -> Result<(), String> {
     );
     backing.write(TAKEOVER_DONE, serde_json::json!(trust.takeover_done));
     backing.write(KEPT, serde_json::json!(trust.kept));
+    backing.write(REGISTERED_DONE, serde_json::json!(trust.registered_done));
+    backing.write(CODEX_DONE, serde_json::json!(trust.codex_done));
     if let Err(error) = backing.commit() {
         for (key, previous) in keys.iter().zip(previous) {
             match previous {
@@ -174,6 +190,60 @@ pub(crate) fn take_over_once(
     trust.takeover_done = true;
     write(backing, &trust)?;
     Ok(outcome)
+}
+
+/// Meetings recorded in folders other than the one configured at the upgrade
+/// keep working: the parent folder of every folder saved for a meeting becomes
+/// a root, under the same rules, by text alone, once duplicates and parents
+/// already inside a root are dropped, up to `MAX_REGISTERED_PARENTS`. `None`
+/// means the database was not available: nothing is recorded as done, so the
+/// next start tries again. Returns how many were added and how many skipped.
+pub(crate) fn take_over_registered_parents(
+    backing: &dyn Backing,
+    saved_folders: Option<&[String]>,
+    protected: &ProtectedFolders,
+) -> Result<(usize, usize), String> {
+    let Some(saved_folders) = saved_folders else { return Ok((0, 0)) };
+    let mut trust = read(backing);
+    if trust.registered_done {
+        return Ok((0, 0));
+    }
+    let (mut added, mut skipped) = (0usize, 0usize);
+    let mut seen: Vec<String> = Vec::new();
+    for saved in saved_folders {
+        let Some(parent) = Path::new(saved).parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+            skipped += 1;
+            continue;
+        };
+        let key = crate::local_path::comparable_text(&parent.to_string_lossy());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        let covered = trust
+            .trusted
+            .iter()
+            .any(|root| crate::local_path::lexically_inside(&parent.to_string_lossy(), root));
+        if covered {
+            continue;
+        }
+        if added >= MAX_REGISTERED_PARENTS || root_problem(parent, protected, false).is_some() || trust.trusted.len() >= MAX_TRUSTED {
+            skipped += 1;
+            continue;
+        }
+        trust.trusted.push(parent.to_path_buf());
+        added += 1;
+    }
+    trust.registered_done = true;
+    write(backing, &trust)?;
+    Ok((added, skipped))
+}
+
+/// Records that the custom Codex profile folder was marked.
+pub(crate) fn mark_codex_done(backing: &dyn Backing) -> Result<(), String> {
+    let mut trust = read(backing);
+    trust.codex_done = true;
+    write(backing, &trust)
 }
 
 /// Whether `folder` is exactly one of the trusted roots or a default one.
@@ -302,6 +372,62 @@ mod tests {
         assert_eq!(again, Takeover::default());
         assert_eq!(read(&memory).trusted.len(), 2);
         assert!(is_trusted_or_default(&read(&memory), &share, &[]));
+    }
+
+    #[test]
+    fn the_parents_of_saved_meetings_are_taken_over_once_and_protected_ones_are_skipped() {
+        let base = tempfile::tempdir().unwrap();
+        let protected = protected(base.path());
+        let (a, b, share) = (base.path().join("old-a"), base.path().join("old-b"), base.path().join("share").join("rec"));
+        crate::local_path::mark_remote_for_tests(&base.path().join("share"));
+        let saved: Vec<String> = [
+            a.join("m1"), a.join("m2"), b.join("m3"), share.join("m4"),
+            base.path().join("profile").join("m5"), base.path().join("system").join("sub").join("m6"),
+        ]
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+        let memory = Memory::default();
+        let (added, skipped) = take_over_registered_parents(&memory, Some(&saved), &protected).unwrap();
+        assert_eq!((added, skipped), (3, 2), "a, b and the share; profile and system skipped");
+        let trust = read(&memory);
+        assert_eq!(trust.trusted, vec![a.clone(), b.clone(), share.clone()]);
+        assert!(trust.registered_done);
+        // Once only.
+        assert_eq!(take_over_registered_parents(&memory, Some(&saved), &protected).unwrap(), (0, 0));
+        assert_eq!(read(&memory).trusted.len(), 3);
+    }
+
+    #[test]
+    fn without_the_database_nothing_is_recorded_as_done_and_the_next_start_tries_again() {
+        let base = tempfile::tempdir().unwrap();
+        let memory = Memory::default();
+        let protected = protected(base.path());
+        assert_eq!(take_over_registered_parents(&memory, None, &protected).unwrap(), (0, 0));
+        assert!(!read(&memory).registered_done);
+        let saved = vec![base.path().join("old").join("m").to_string_lossy().into_owned()];
+        assert_eq!(take_over_registered_parents(&memory, Some(&saved), &protected).unwrap().0, 1);
+        assert!(read(&memory).registered_done);
+    }
+
+    #[test]
+    fn the_registered_parents_are_bounded_deduplicated_and_skip_what_a_root_already_covers() {
+        let base = tempfile::tempdir().unwrap();
+        let protected = protected(base.path());
+        let memory = Memory::default();
+        let root = base.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        trust_folder(&memory, &root, &ProtectedFolders::default()).unwrap();
+        let mut saved: Vec<String> = (0..80)
+            .map(|index| base.path().join(format!("old-{index:02}")).join("m").to_string_lossy().into_owned())
+            .collect();
+        saved.push(root.join("inside").join("m").to_string_lossy().into_owned());
+        saved.push(base.path().join("OLD-00").join("m2").to_string_lossy().into_owned());
+        let (added, skipped) = take_over_registered_parents(&memory, Some(&saved), &protected).unwrap();
+        assert_eq!(added, MAX_REGISTERED_PARENTS);
+        assert!(skipped >= 30, "{skipped} skipped past the cap");
+        assert_eq!(read(&memory).trusted.len(), MAX_REGISTERED_PARENTS + 1);
+        assert!(!read(&memory).trusted.contains(&root.join("inside")), "inside an existing root: not added");
     }
 
     #[test]

@@ -151,10 +151,12 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
 
       const newPreferences = { ...preferences, save_folder: selectedFolder };
       setPreferences(newPreferences);
-      await savePreferences(newPreferences, {
+      const saved = await savePreferences(newPreferences, {
         successTitle: 'Save location updated',
         successDescription: selectedFolder
       });
+      // The new folder is trusted: the notice about the earlier one no longer applies.
+      if (saved) setPreferences(current => ({ ...current, folder_notice: null }));
 
       await Analytics.track('recording_save_folder_changed');
     } catch (error) {
@@ -199,11 +201,13 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       toast.success(toastOptions?.successTitle || "Recording preferences saved", {
         description: toastOptions?.successDescription
       });
+      return true;
     } catch (error) {
       console.error('Failed to save recording preferences:', error);
       toast.error(toastOptions?.errorTitle || "Failed to save recording preferences", {
         description: errorText(error)
       });
+      return false;
     } finally {
       setSaving(false);
     }

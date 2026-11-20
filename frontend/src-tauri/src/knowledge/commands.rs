@@ -20,7 +20,22 @@ pub async fn knowledge_import_document(
 ) -> Result<super::documents::DocumentAttachment, String> {
     // Only a document the user chose in a dialog the core opened, once.
     let taken = crate::file_grants::take(crate::file_grants::Purpose::ReferenceDocument, &path)?;
-    let path = taken.path.to_string_lossy().into_owned();
+    let result = import_granted(&app, &state, &runtime, request_id, meeting_id, taken.path.clone()).await;
+    if result.is_err() {
+        // A retry needs no new choice, and the grant keeps its original time.
+        crate::file_grants::give_back(crate::file_grants::Purpose::ReferenceDocument, &taken);
+    }
+    result
+}
+
+async fn import_granted(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    runtime: &State<'_, KnowledgeState>,
+    request_id: String,
+    meeting_id: String,
+    path: std::path::PathBuf,
+) -> Result<super::documents::DocumentAttachment, String> {
     let lease = runtime
         .documents
         .begin(&request_id)
@@ -30,9 +45,9 @@ pub async fn knowledge_import_document(
     let admission = super::scheduler::claim_snapshot(preempt.clone()).map_err(|e| e.to_string())?;
     let attachment = super::documents::import::import_document(
         state.db_manager.pool().clone(),
-        document_root(&app)?,
+        document_root(app)?,
         meeting_id,
-        path.into(),
+        path,
         cancel,
         preempt,
         (admission, lease),

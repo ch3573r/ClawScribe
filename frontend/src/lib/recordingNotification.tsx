@@ -3,7 +3,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
-import { loadBehaviorSettings, refreshBehaviorSettings } from '@/lib/behaviorSettings';
+import { readNoticePreference, refreshBehaviorSettings } from '@/lib/behaviorSettings';
 
 /**
  * Shows the recording notification toast with compliance message.
@@ -16,8 +16,9 @@ import { loadBehaviorSettings, refreshBehaviorSettings } from '@/lib/behaviorSet
  */
 export async function showRecordingNotification(): Promise<void> {
   try {
-    // The core owns the preference; it is shown unless the core says it was switched off.
-    const showNotification = (await loadBehaviorSettings()).showRecordingNotification;
+    // The core owns the preference. The notice is shown unless the core says it
+    // was switched off: a failed or slow read shows it.
+    const showNotification = await readNoticePreference();
 
     if (showNotification) {
       let dontShowAgain = false;

@@ -204,6 +204,38 @@ pub(crate) fn ensure_takeover<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Part of the one-time takeover that needs the database: the parent folder of
+/// every folder saved for a meeting becomes a root, so meetings recorded in an
+/// earlier folder keep their playback, open, retranscribe, speaker detection and
+/// delete. Runs after the database is open. When it is not available nothing is
+/// recorded as done and the next start tries again.
+pub(crate) async fn take_over_registered_folders<R: Runtime>(app: &AppHandle<R>) {
+    let Some(backing) = trust_backing(app) else { return };
+    if crate::trusted_roots::read(backing.as_ref()).registered_done {
+        return;
+    }
+    let saved: Option<Vec<String>> = match tauri::Manager::try_state::<crate::state::AppState>(app) {
+        Some(state) => sqlx::query_scalar(
+            "SELECT DISTINCT folder_path FROM meetings WHERE folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
+        )
+        .fetch_all(state.db_manager.pool())
+        .await
+        .ok(),
+        None => None,
+    };
+    if saved.is_none() {
+        warn!("The folders of saved meetings could not be taken over yet; trying again at the next start");
+    }
+    let protected = protected_folders(tauri::Manager::path(app).app_data_dir().ok());
+    match crate::trusted_roots::take_over_registered_parents(backing.as_ref(), saved.as_deref(), &protected) {
+        Ok((added, skipped)) if added + skipped > 0 => {
+            info!("Took over {added} folder(s) of saved meetings; {skipped} skipped");
+        }
+        Ok(_) => {}
+        Err(_) => warn!("The folders of saved meetings could not be taken over"),
+    }
+}
+
 /// Every folder a meeting's recording files may live in. Opening, recovering
 /// and deleting outside these is refused.
 pub(crate) async fn recording_roots<R: Runtime>(app: &AppHandle<R>) -> Vec<PathBuf> {

@@ -617,9 +617,6 @@ pub fn run() {
             // Settings that change how the core behaves come from the core's own
             // storage, before anything can start a recording or an import.
             behavior_settings::load_and_apply(_app.handle());
-            // The recordings folders of an earlier version become trusted roots
-            // once, here, before any window exists.
-            tauri::async_runtime::block_on(audio::recording_preferences::recording_roots(_app.handle()));
             audio::com_anchor::ensure_device_enumerator();
             audio::transcription::queue::cleanup_abandoned_transcription_spools();
 
@@ -634,6 +631,16 @@ pub fn run() {
                 return Ok(());
             }
             log::info!("Application setup complete");
+
+            // What an earlier version already had becomes trusted, once, before
+            // any window exists and after the database is open: the recordings
+            // folders, the folders saved meetings live in, and a custom Codex
+            // profile folder.
+            tauri::async_runtime::block_on(async {
+                audio::recording_preferences::take_over_registered_folders(_app.handle()).await;
+                let _ = audio::recording_preferences::recording_roots(_app.handle()).await;
+            });
+            summary::codex_provider::mark_custom_home_once(_app.handle());
 
             // Initialize system tray
             if let Err(e) = tray::create_tray(_app.handle()) {

@@ -175,6 +175,25 @@ export function loadBehaviorSettings(): Promise<BehaviorSettings> {
   return loading;
 }
 
+/**
+ * Whether the "recording started" notice is shown. It tells participants they
+ * are being recorded, so it fails towards showing: a failed or slow read (more
+ * than `timeoutMs`) is "show". It reads the core's value directly and does not
+ * wait for, or depend on, the hand-over of the engine settings.
+ */
+export async function readNoticePreference(timeoutMs = 2_000): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const read = invoke<unknown>("get_behavior_settings").then(value => readBehaviorSettings(value).showRecordingNotification);
+    const slow = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(true), timeoutMs); });
+    return await Promise.race([read, slow]);
+  } catch {
+    return true;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** Reads the values again from the core, after a change was accepted. */
 export async function refreshBehaviorSettings(): Promise<BehaviorSettings> {
   const settings = readBehaviorSettings(await invoke<unknown>("get_behavior_settings"));

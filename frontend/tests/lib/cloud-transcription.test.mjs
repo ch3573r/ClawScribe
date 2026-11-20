@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import { createHookHarness, flush } from "./hook-harness.mjs";
 import { loadTsModule } from "./load-ts-module.mjs";
@@ -206,4 +207,43 @@ test("the settings screen hook reads the core's value and fails closed", async (
   await flush();
   assert.deepEqual(JSON.parse(JSON.stringify(hooks2.render(() => mod.useCloudTranscription()))), { enabled: false, loaded: false, failed: true });
   hooks2.unmount();
+});
+
+test("the recording notice fails towards showing: a failed or slow read shows it, an explicit no does not", async (t) => {
+  const calls = [];
+  const behaviorWith = invoke => loadTsModule("src/lib/behaviorSettings.ts", { "@tauri-apps/api/core": { invoke } });
+  const previous = globalThis.window;
+  globalThis.window = { localStorage: { getItem: () => null, setItem() {} } };
+  t.after(() => { globalThis.window = previous; });
+
+  const failing = behaviorWith(async () => { throw new Error("core unavailable"); });
+  assert.equal(await failing.readNoticePreference(), true, "a failed read shows the notice");
+
+  const slow = behaviorWith(() => new Promise(() => {}));
+  assert.equal(await slow.readNoticePreference(20), true, "a read that does not answer in time shows the notice");
+
+  const off = behaviorWith(async command => { calls.push(command); return { showRecordingNotification: false }; });
+  assert.equal(await off.readNoticePreference(), false, "the core's explicit no is respected");
+  const on = behaviorWith(async () => ({ showRecordingNotification: true }));
+  assert.equal(await on.readNoticePreference(), true);
+  const odd = behaviorWith(async () => ({ showRecordingNotification: "no" }));
+  assert.equal(await odd.readNoticePreference(), true, "an unreadable value shows it");
+  assert.deepEqual(calls, ["get_behavior_settings"], "it reads the settings only; it never waits for the engine-settings hand-over");
+});
+
+test("the notice does not depend on the engine-settings hand-over, which can be held up by a busy job", async (t) => {
+  const calls = [];
+  const previous = globalThis.window;
+  globalThis.window = { localStorage: { getItem: () => null, setItem() {} } };
+  t.after(() => { globalThis.window = previous; });
+  const behavior = loadTsModule("src/lib/behaviorSettings.ts", { "@tauri-apps/api/core": { invoke: async command => {
+    calls.push(command);
+    if (command === "get_behavior_settings") return { legacyMigrated: false, showRecordingNotification: true };
+    throw "PARAKEET_WORKER_BUSY: a job is active";
+  } } });
+  assert.equal(await behavior.readNoticePreference(), true);
+  assert.equal(calls.includes("migrate_legacy_behavior_settings"), false);
+  const source = fs.readFileSync(new URL("../../src/lib/recordingNotification.tsx", import.meta.url), "utf8");
+  assert.match(source, /readNoticePreference\(\)/);
+  assert.doesNotMatch(source, /loadBehaviorSettings/);
 });

@@ -2119,6 +2119,44 @@ fn claim_codex_home(home: &Path) -> Result<(), String> {
         .map_err(|_| "Failed to mark the isolated Codex profile".to_string())
 }
 
+/// A custom Codex profile folder of an earlier version holds files and has no
+/// marker, so it would be refused. The marker is written into it, and nothing
+/// else in it is touched, when it passes the path rules. Returns whether a
+/// marker was written.
+fn mark_custom_home(home: &Path) -> Result<bool, String> {
+    validate_codex_home(&home.to_string_lossy())?;
+    match codex_home_state(home) {
+        HomeState::Foreign | HomeState::Empty => {
+            fs::write(home.join(CODEX_HOME_MARKER), "This folder is ClawScribe's own Codex profile.\n")
+                .map_err(|_| "Failed to mark the Codex profile".to_string())?;
+            Ok(true)
+        }
+        HomeState::Marked | HomeState::New => Ok(false),
+    }
+}
+
+/// The first start of this build: the custom Codex home configured by an earlier
+/// version is marked once, so Codex summaries keep working and the folder can be
+/// chosen again. Recorded in the core-owned trust state.
+pub(crate) fn mark_custom_home_once<R: Runtime>(app: &AppHandle<R>) {
+    use tauri_plugin_store::StoreExt;
+    let Ok(store) = app.store(crate::trusted_roots::STORE_FILE) else { return };
+    if crate::trusted_roots::read(store.as_ref()).codex_done {
+        return;
+    }
+    let configured = load_processing_config(app)
+        .ok()
+        .and_then(|full| full.processing.codex.codex_home_path)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| expand_windows_style_appdata(&value));
+    if let Some(home) = configured.filter(|home| codex_path_key(home) != codex_path_key(&default_isolated_codex_home())) {
+        if let Err(message) = mark_custom_home(&home) {
+            log::warn!("The custom Codex profile folder was not marked: {message}");
+        }
+    }
+    let _ = crate::trusted_roots::mark_codex_done(store.as_ref());
+}
+
 /// Opens the folder dialog for ClawScribe's Codex profile. Returns the chosen
 /// folder, which `codex_save_config` then accepts once.
 #[tauri::command]
@@ -4400,6 +4438,28 @@ mod codex_home_marker_tests {
         assert_eq!(fs::read_to_string(foreign.join("config.toml")).unwrap(), "approval_policy = \"never\"\n");
         assert!(foreign.join("auth.json").exists());
         assert!(!foreign.join(CODEX_HOME_MARKER).exists());
+    }
+
+    #[test]
+    fn a_custom_home_of_an_earlier_version_is_marked_and_nothing_else_in_it_is_touched() {
+        let base = tempfile::tempdir().unwrap();
+        let home = base.path().join("custom-codex");
+        fs::create_dir(&home).unwrap();
+        fs::write(home.join("config.toml"), "model = \"x\"\n").unwrap();
+        fs::write(home.join("auth.json"), "{}").unwrap();
+        assert_eq!(codex_home_state(&home), HomeState::Foreign);
+        assert!(mark_custom_home(&home).unwrap());
+        assert_eq!(codex_home_state(&home), HomeState::Marked);
+        assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), "model = \"x\"\n");
+        assert!(home.join("auth.json").exists());
+        assert!(prepare_isolated_codex_home(&home, "model").is_ok(), "Codex summaries work again");
+        assert!(!mark_custom_home(&home).unwrap(), "already marked");
+        // A folder that does not exist yet is left for first use; one that fails the rules is refused.
+        assert!(!mark_custom_home(&base.path().join("not-yet")).unwrap());
+        if let Some(own) = dirs::home_dir().map(|home| home.join(".codex")) {
+            assert!(mark_custom_home(&own).is_err());
+            assert!(!own.join(CODEX_HOME_MARKER).exists());
+        }
     }
 
     #[test]
