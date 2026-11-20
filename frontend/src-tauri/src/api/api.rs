@@ -1490,6 +1490,11 @@ pub async fn api_save_transcript<R: Runtime>(
                     use crate::database::meeting_files;
                     let authorised =
                         meeting_files::authorize_new_meeting_folder(&requested, &roots)?;
+                    if crate::audio::recording_commands::active_recording_folder()
+                        .protects(std::path::Path::new(&authorised))
+                    {
+                        return Err("The recording is still being finalized. Try again after it stops.".into());
+                    }
                     let marker = meeting_files::read_marker(std::path::Path::new(&authorised))
                         .ok_or("The recording folder is no longer available.")?;
                     if meeting_files::has_invalid_marker_id(&marker) {
@@ -1502,15 +1507,6 @@ pub async fn api_save_transcript<R: Runtime>(
                 })
                 .await
                 .map_err(|_| "Could not check the recording folder".to_string())??;
-            use crate::audio::interrupted::{folder_key, ActiveFolder};
-            let active = crate::audio::recording_commands::active_recording_folder();
-            if matches!(active, ActiveFolder::Unknown)
-                || matches!(&active, ActiveFolder::Folder(folder) if folder_key(folder) == folder_key(std::path::Path::new(&authorised)))
-            {
-                return Err(
-                    "The recording is still being finalized. Try again after it stops.".into(),
-                );
-            }
             if !created_here && stamped_id.is_none() && recording_id.is_none() {
                 let existing: Option<String> = sqlx::query_scalar(
                     "SELECT id FROM meetings WHERE folder_path COLLATE NOCASE IN (?, ?) LIMIT 1",

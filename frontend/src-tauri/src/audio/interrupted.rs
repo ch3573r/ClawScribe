@@ -72,6 +72,29 @@ pub(crate) enum ActiveFolder {
     Unknown,
 }
 
+impl ActiveFolder {
+    fn canonical(&self) -> Self {
+        match self {
+            Self::Folder(path) => path.canonicalize().map(Self::Folder).unwrap_or(Self::Unknown),
+            other => other.clone(),
+        }
+    }
+
+    /// Both paths are core-owned or have already passed recording-root validation.
+    /// Windows can return a different spelling for the same folder (e.g. 8.3 names).
+    pub(crate) fn protects(&self, path: &Path) -> bool {
+        match self {
+            Self::None => false,
+            Self::Unknown => true,
+            Self::Folder(running) if folder_key(running) == folder_key(path) => true,
+            Self::Folder(running) => match (running.canonicalize(), path.canonicalize()) {
+                (Ok(a), Ok(b)) => folder_key(&a) == folder_key(&b),
+                _ => true,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct InterruptedRecording {
@@ -365,7 +388,8 @@ pub(crate) struct ScanInput<'a> {
 /// folder that is not itself a recording (a container). Links are never followed.
 pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
     let mut result = InterruptedScan::default();
-    if input.active == ActiveFolder::Unknown {
+    let active = input.active.canonical();
+    if active == ActiveFolder::Unknown {
         result.recording_active = true;
         return result;
     }
@@ -374,7 +398,7 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
     let mut seen_roots: Vec<String> = Vec::new();
     let mut seen_folders: Vec<String> = Vec::new();
 
-    let active_key = match &input.active {
+    let active_key = match &active {
         ActiveFolder::Folder(path) => Some(folder_key(path)),
         _ => None,
     };
@@ -439,6 +463,9 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
                 // The folder as the shell and the app's other commands will see it, inside a root.
                 match crate::database::meeting_files::resolve_recording_folder(&path, input.roots) {
                     Ok(canonical) => {
+                        if active_key.as_deref() == Some(folder_key(&canonical).as_str()) {
+                            continue;
+                        }
                         found.folder = crate::database::meeting_files::plain_path(&canonical)
                             .to_string_lossy()
                             .into_owned();
@@ -663,9 +690,7 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
     let active = super::recording_commands::active_recording_folder();
     let (authorised, meeting_id, registered_path, marker) = tokio::task::spawn_blocking(move || {
         let authorised = crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
-        if matches!(active, ActiveFolder::Unknown)
-            || matches!(&active, ActiveFolder::Folder(running) if folder_key(running) == folder_key(Path::new(&authorised)))
-        {
+        if active.protects(Path::new(&authorised)) {
             return Err("A recording is running. Try again when it has stopped.".into());
         }
         let registered = registered_map(rows.clone(), &roots, REGISTERED_BUDGET);
@@ -815,10 +840,8 @@ pub(crate) fn discard_folder(
     let canonical_key = std::fs::canonicalize(&path)
         .ok()
         .map(|canonical| folder_key(&crate::database::meeting_files::plain_path(&canonical)));
-    match active {
-        ActiveFolder::Unknown => return Err("A recording is running. Try again when it has stopped.".into()),
-        ActiveFolder::Folder(running) if folder_key(running) == key => return Err(REFUSED.into()),
-        _ => {}
+    if active.protects(&path) {
+        return Err("A recording is running. Try again when it has stopped.".into());
     }
     if registered.contains_key(&key) || canonical_key.as_ref().is_some_and(|key| registered.contains_key(key)) {
         return Err(REFUSED.into());
@@ -1267,6 +1290,18 @@ mod tests {
     }
 
     #[test]
+    fn active_folder_uses_directory_identity_and_refuses_an_unresolved_owner() {
+        let base = tempfile::tempdir().unwrap();
+        let running = make(base.path(), "running");
+        let other = make(base.path(), "other");
+        let alias = other.join("..").join("running");
+        let active = ActiveFolder::Folder(alias);
+        assert!(active.protects(&running));
+        assert!(!active.protects(&other));
+        assert!(ActiveFolder::Folder(base.path().join("unavailable")).protects(&other));
+    }
+
+    #[test]
     fn discarding_removes_only_an_unsaved_candidate_that_is_not_running() {
         let base = tempfile::tempdir().unwrap();
         let root = base.path().join("recordings");
@@ -1290,6 +1325,7 @@ mod tests {
         registered.insert(folder_key(&saved), "meeting-9".to_string());
         let active = ActiveFolder::Folder(running.clone());
         for refused in [&saved, &running, &finished, &foreign, &outside, &root.join("missing")] {
+            let existed = refused.exists();
             assert!(
                 discard_folder(
                     &refused.to_string_lossy(),
@@ -1303,9 +1339,7 @@ mod tests {
                 "{}",
                 refused.display()
             );
-            if refused.exists() {
-                assert!(refused.exists(), "{} was kept", refused.display());
-            }
+            assert_eq!(refused.exists(), existed, "the refused folder must be left alone");
         }
         assert!(discard_folder(
             r"\\server\share\victim",
