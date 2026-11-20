@@ -1215,6 +1215,7 @@ async fn import_manifest_impl(
         })
         .collect();
     let mut dropped_file_work = HashSet::new();
+    let mut summary_content_revisions = Vec::new();
     for table in TABLES {
         if table.starts_with("knowledge_") {
             continue;
@@ -1274,6 +1275,10 @@ async fn import_manifest_impl(
                 }
             }
             if *table == "meetings" {
+                if let Some(revision) = row.remove("summary_content_revision") {
+                    let revision = revision.as_i64().ok_or("Invalid summary content revision.")?;
+                    summary_content_revisions.push((parent, revision));
+                }
                 // One unreadable link must not block the restore. The meeting is
                 // kept and only its link is cleared; the title then stays local.
                 let readable = match row.get("calendar_link") {
@@ -1313,14 +1318,21 @@ async fn import_manifest_impl(
                 row.insert("folder_path".into(), Value::Null);
                 row.remove("recording_id");
             }
-            // Interrupted remote summary jobs cannot resume on the destination machine.
-            if *table == "summary_processes"
-                && row
+            if *table == "summary_processes" {
+                // A matching destination on this profile does not authorize a restored job.
+                row.insert("automatic_request_fingerprint".into(), Value::Null);
+                if row
                     .get("status")
                     .and_then(Value::as_str)
-                    .is_some_and(|s| !matches!(s, "completed" | "failed" | "cancelled"))
-            {
-                row.insert("status".into(), Value::String("cancelled".into()));
+                    .is_some_and(|status| {
+                        !matches!(
+                            status.to_ascii_lowercase().as_str(),
+                            "completed" | "failed" | "cancelled" | "skipped"
+                        )
+                    })
+                {
+                    row.insert("status".into(), Value::String("cancelled".into()));
+                }
             }
             let names = row
                 .keys()
@@ -1360,6 +1372,17 @@ async fn import_manifest_impl(
                 .await
                 .map_err(failure)?;
         }
+    }
+    // Replaying transcripts fires the revision triggers. Reinstate the saved
+    // counter so both current and stale partials retain their original state.
+    // Archives without this column keep the revision built by the triggers.
+    for (meeting_id, revision) in summary_content_revisions {
+        sqlx::query("UPDATE meetings SET summary_content_revision = ? WHERE id = ?")
+            .bind(revision)
+            .bind(meeting_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(failure)?;
     }
     let document_restore = archive_documents::restore_rows(
         &mut tx,
@@ -1941,6 +1964,172 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn summary_archive_preserves_partial_validity_and_excludes_imported_startup_retries() {
+        use crate::database::repositories::summary::SummaryProcessesRepository as Summaries;
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = empty_conversation_destination().await;
+        for meeting in ["matching", "stale", "existing"] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Archived meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+                .bind(meeting).execute(&source).await.unwrap();
+            sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp) VALUES (?1, ?1, 'Original passage', '00:00')")
+                .bind(meeting).execute(&source).await.unwrap();
+        }
+        sqlx::query("UPDATE transcripts SET transcript = 'Corrected passage' WHERE id = 'matching'")
+            .execute(&source)
+            .await
+            .unwrap();
+        let fingerprint = "synthetic-approved-destination";
+        assert!(
+            Summaries::create_automatic_process(&source, "matching", "import", fingerprint)
+                .await
+                .unwrap()
+        );
+        // Make the synthetic job eligible through the same interruption path as startup.
+        Summaries::fail_interrupted_processes(&source).await.unwrap();
+        let (interrupted, _) = Summaries::get_summary_status_data(&source, "matching")
+            .await
+            .unwrap()
+            .unwrap();
+        let reason = interrupted.error.unwrap();
+        assert!(
+            Summaries::fail_with_partial(&source, "matching", &reason, 2, "Matching partial")
+                .await
+                .unwrap()
+        );
+        let saved = serde_json::json!({"markdown": "Saved notes"}).to_string();
+        sqlx::query("UPDATE summary_processes SET result = ? WHERE meeting_id = 'matching'")
+            .bind(&saved)
+            .execute(&source)
+            .await
+            .unwrap();
+        Summaries::create_or_reset_process(&source, "stale")
+            .await
+            .unwrap();
+        assert!(
+            Summaries::fail_with_partial(&source, "stale", "Generation failed", 1, "Stale partial")
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE transcripts SET transcript = 'Edited after generation' WHERE id = 'stale'")
+            .execute(&source).await.unwrap();
+        Summaries::record_automatic_outcome(&source, "existing", "skipped", "Disabled", "recording")
+            .await
+            .unwrap();
+        assert_eq!(
+            Summaries::automatic_resume_candidates(&source, fingerprint)
+                .await
+                .unwrap(),
+            vec!["matching"]
+        );
+
+        let destination = empty_conversation_destination().await;
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('existing', 'Local meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+            .execute(&destination).await.unwrap();
+        sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp) VALUES ('existing', 'existing', 'Local passage', '00:00')")
+            .execute(&destination).await.unwrap();
+        sqlx::query("UPDATE transcripts SET transcript = 'Edited local passage' WHERE id = 'existing'")
+            .execute(&destination).await.unwrap();
+        assert!(
+            Summaries::create_automatic_process(&destination, "existing", "recording", fingerprint)
+                .await
+                .unwrap()
+        );
+        assert!(
+            Summaries::fail_with_partial(&destination, "existing", &reason, 2, "Local partial")
+                .await
+                .unwrap()
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("backup.zip");
+        let (manifest, folders) = snapshot(&source).await.unwrap();
+        write_archive(&archive, manifest, folders).unwrap();
+        let existing = HashSet::from(["existing".to_string()]);
+        let (manifest, stage) = unpack(&archive, root.path(), &existing).unwrap();
+        let report = import_manifest(&destination, manifest, stage).await.unwrap();
+        assert_eq!((report.meetings, report.skipped), (2, 1));
+
+        let (matching, partial) = Summaries::get_summary_status_data(&destination, "matching")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(matching.status, "failed");
+        assert_eq!(matching.error.as_deref(), Some(reason.as_str()));
+        assert_eq!(matching.result.as_deref(), Some(saved.as_str()));
+        assert_eq!(partial.as_deref(), Some("Matching partial"));
+
+        let (stale, partial) = Summaries::get_summary_status_data(&destination, "stale")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stale.metadata.unwrap().contains("Stale partial"));
+        assert!(partial.is_none());
+
+        let existing_transcript: String =
+            sqlx::query_scalar("SELECT transcript FROM transcripts WHERE id = 'existing'")
+                .fetch_one(&destination)
+                .await
+                .unwrap();
+        assert_eq!(existing_transcript, "Edited local passage");
+        let (_, partial) = Summaries::get_summary_status_data(&destination, "existing")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(partial.as_deref(), Some("Local partial"));
+        assert_eq!(
+            Summaries::automatic_resume_candidates(&destination, fingerprint)
+                .await
+                .unwrap(),
+            vec!["existing"]
+        );
+        assert!(
+            !Summaries::claim_automatic_resume(&destination, "matching", fingerprint)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_summary_archive_retains_a_partial_with_its_original_revision_check() {
+        use crate::database::repositories::summary::SummaryProcessesRepository as Summaries;
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let source = crate::database::transcript_edits::tests::fixture().await;
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        manifest.tables.get_mut("meetings").unwrap()[0].remove("summary_content_revision");
+        manifest.tables.get_mut("summary_processes").unwrap().push(
+            serde_json::from_value(serde_json::json!({
+                "meeting_id": "review-test",
+                "status": "FAILED",
+                "created_at": "2026-10-01 00:00:00",
+                "updated_at": "2026-10-01 00:00:00",
+                "metadata": r#"{"partial_notes":"Legacy partial","transcript_revision":3}"#
+            }))
+            .unwrap(),
+        );
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("legacy.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+        let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, manifest, stage).await.unwrap();
+        let (summary, partial) = Summaries::get_summary_status_data(&destination, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.status, "FAILED");
+        assert_eq!(partial.as_deref(), Some("Legacy partial"));
+        let content_revision: i64 = sqlx::query_scalar(
+            "SELECT summary_content_revision FROM meetings WHERE id = 'review-test'",
+        )
+        .fetch_one(&destination)
+        .await
+        .unwrap();
+        assert_eq!(content_revision, 2);
     }
 
     #[tokio::test]

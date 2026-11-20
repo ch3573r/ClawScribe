@@ -314,8 +314,10 @@ its audio can be extracted. Invalid archives leave existing meetings alone.
 Restore displays saved audio-omission warnings for imported meetings.
 Meetings whose recovery files were excluded retain a message directing recovery
 to the original computer.
-Folder references are rewritten for the destination computer. Interrupted summary
-jobs are marked cancelled; their saved output is retained.
+Folder references are rewritten for the destination computer. Restore retains
+saved summaries and partial notes that still match their transcripts. Summary jobs
+that were still in progress are marked cancelled. Restored jobs do not retry at
+startup, even when the same summary destination is approved.
 
 Archives also retain saved knowledge conversations, including independent
 library threads and the original citation labels. Existing conversation-owner
