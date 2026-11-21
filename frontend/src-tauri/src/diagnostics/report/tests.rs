@@ -78,6 +78,8 @@ fn snapshot() -> DiagnosticSnapshot {
                 enabled: true,
                 configured: true,
                 ready: true,
+                delivery_state: "failed".into(),
+                model_ready: false,
                 bearer_token_configured: true,
                 endpoint: private_endpoint.into(),
                 model_endpoint: private_endpoint.into(),

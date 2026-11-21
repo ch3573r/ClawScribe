@@ -938,6 +938,9 @@ pub fn run() {
             openclaw::get_openclaw_config_status,
             openclaw::save_openclaw_config,
             openclaw::clear_openclaw_bearer_token,
+            openclaw::handoff::get_openclaw_submission_status,
+            openclaw::handoff::submit_meeting_folder_to_openclaw,
+            openclaw::handoff::reconcile_openclaw_handoff,
             // Teams meeting detection commands
             teams_detection::get_teams_detection_config,
             teams_detection::get_teams_detection_status,

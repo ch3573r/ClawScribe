@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { MeetingHeader } from '@/components/MeetingDetails/MeetingHeader';
+import { OpenClawHandoff } from '@/components/MeetingDetails/OpenClawHandoff';
 import { SavedMeetingAttendance } from '@/components/MeetingAttendance';
 import { EvidenceRoute } from '@/components/Knowledge/EvidenceRoute';
 import { SavedSearchRoute } from '@/components/MeetingDetails/SavedSearchRoute';
@@ -348,6 +349,7 @@ export default function PageContent({
         attendance={<SavedMeetingAttendance key={meeting.id} meetingId={meeting.id} createdAt={meeting.created_at}
           durationSeconds={audioPlayer.duration || undefined} disabled={summaryBusy}
           templates={templates.availableTemplates} remembered={templates.seriesTemplate} />} />
+      <OpenClawHandoff key={meeting.id} meetingId={meeting.id} />
       {isAudioReady && (
         <SpeakerLaneTimeline
           bindings={playerBindings}

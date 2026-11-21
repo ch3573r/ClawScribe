@@ -1851,11 +1851,13 @@ async fn stop_recording_session<R: Runtime>(
 
     if suspend_attempt.is_none() && transcribes && !outcome.needs_recovery() && !library_save_failed
     {
-        crate::openclaw::submit_completed_recording(
-            app.clone(),
-            folder_path_str.clone(),
-            meeting_name_str.clone(),
-        );
+        if let Some(meeting_id) = meeting_id.clone() {
+            crate::openclaw::submit_completed_recording(
+                app.clone(),
+                meeting_id,
+                transcript_count == 0,
+            );
+        }
     }
 
     // Release the old job before admitting another start. Take the request

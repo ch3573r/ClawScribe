@@ -542,6 +542,7 @@ async function meetingPage({ audioReady = true } = {}) {
     '@/components/MeetingDetails/TranscriptPanel': { TranscriptPanel: 'TranscriptPanel' },
     '@/components/MeetingDetails/SummaryPanel': { SummaryPanel: 'SummaryPanel' },
     '@/components/MeetingDetails/MeetingHeader': { MeetingHeader: 'MeetingHeader' },
+    '@/components/MeetingDetails/OpenClawHandoff': { OpenClawHandoff: 'OpenClawHandoff' },
     '@/components/MeetingAttendance': { SavedMeetingAttendance: 'SavedMeetingAttendance' },
     '@/components/ui/button': { Button: 'button' },
     'next/link': { default: 'a', __esModule: true },

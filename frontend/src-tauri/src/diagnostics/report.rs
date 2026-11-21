@@ -116,6 +116,9 @@ fn last_openclaw_failure(snapshot: &DiagnosticSnapshot) -> Option<&'static str> 
         .as_ref()?
         .last_submission
         .as_ref()?;
+    if last_submission.state == "unknown" {
+        return Some("openclaw_handoff_outcome_unknown");
+    }
     if last_submission.state != "failed" {
         return None;
     }

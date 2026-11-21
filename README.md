@@ -345,7 +345,8 @@ See [call detection](docs/teams-detection.md).
   saved export history protects supported re-export paths against duplicates.
 - **Confluence:** copy rich text into a browser draft, or publish through a
   configured self-hosted Server/Data Center REST endpoint.
-- **OpenClaw:** optional handoff of completed Meetily-compatible recording folders.
+- **OpenClaw:** optional handoff of saved meeting transcripts. The meeting shows
+  the result and offers reviewed retry or confirmation of uncertain delivery.
 
 **Export history** shows Microsoft export results from the meeting and travels
 with portable backups. Microsoft exports stop if duplicate-protection history
