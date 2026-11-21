@@ -815,6 +815,7 @@ pub fn run() {
         .invoke_handler(floating::restrict_commands(tauri::generate_handler![
             floating::open_floating_controls,
             floating::floating_status,
+            floating::recording_window_appearance,
             floating::floating_set_paused,
             floating::floating_reconnect,
             floating::floating_note,

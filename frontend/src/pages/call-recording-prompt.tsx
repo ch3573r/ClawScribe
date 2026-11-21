@@ -4,19 +4,36 @@ import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
 import { CALL_PROVIDERS } from '@/lib/autoRecord';
 import type { CallPrompt } from '@/services/callDetectionService';
-import { applyThemePreference, subscribeToSystemTheme } from '@/lib/theme';
+import { applyAccent, applyThemePreference, DEFAULT_ACCENT_ID, subscribeToSystemTheme, type ThemePreference } from '@/lib/theme';
+
+interface Appearance {
+  theme: ThemePreference;
+  accent: string | null;
+}
 
 export default function CallRecordingPrompt() {
   const [prompt, setPrompt] = useState<CallPrompt | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
+  const [appearance, setAppearance] = useState<Appearance | null>(null);
   const answering = useRef(false);
 
   useEffect(() => {
-    const theme = () => applyThemePreference('system');
-    theme();
-    return subscribeToSystemTheme(theme);
+    let disposed = false;
+    void invoke<Appearance | null>('recording_window_appearance').then(value => {
+      if (!disposed) setAppearance(value);
+    }).catch(() => {});
+    return () => { disposed = true; };
   }, []);
+
+  useEffect(() => {
+    const applyAppearance = () => {
+      applyThemePreference(appearance?.theme ?? 'system');
+      applyAccent(appearance?.accent ?? DEFAULT_ACCENT_ID);
+    };
+    applyAppearance();
+    return subscribeToSystemTheme(applyAppearance);
+  }, [appearance]);
 
   useEffect(() => {
     let disposed = false;

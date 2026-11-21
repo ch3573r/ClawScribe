@@ -22,7 +22,7 @@ static LAST_REVIEW: Mutex<Option<String>> = Mutex::new(None);
 static APPEARANCE: Mutex<Option<Appearance>> = Mutex::new(None);
 
 #[derive(Clone, Serialize)]
-struct Appearance {
+pub(crate) struct Appearance {
     theme: String,
     accent: Option<String>,
 }
@@ -30,6 +30,11 @@ struct Appearance {
 pub(crate) fn set_appearance(theme: String, accent: Option<String>) {
     let accent = accent.filter(|id| id.len() <= 32 && id.bytes().all(|b| b.is_ascii_lowercase()));
     *APPEARANCE.lock().unwrap() = Some(Appearance { theme, accent });
+}
+
+#[tauri::command]
+pub(crate) fn recording_window_appearance() -> Option<Appearance> {
+    APPEARANCE.lock().ok()?.clone()
 }
 
 fn session(label: &str) -> Result<&str, &'static str> {
@@ -44,7 +49,9 @@ fn allowed(label: &str, command: &str) -> bool {
         || (label == crate::teams_detection::monitor::prompt_window::LABEL
             && matches!(
                 command,
-                "get_pending_call_prompt" | "confirm_call_detection_prompt"
+                "get_pending_call_prompt"
+                    | "confirm_call_detection_prompt"
+                    | "recording_window_appearance"
             ))
         || (session(label).is_ok()
             && matches!(
@@ -268,7 +275,7 @@ pub(crate) async fn floating_status<R: Runtime>(
     let id = session(window.label())?;
     Ok(Snapshot {
         status: recording_status(id)?,
-        appearance: APPEARANCE.lock().unwrap().clone(),
+        appearance: recording_window_appearance(),
         health: capture_snapshot(id),
     })
 }
@@ -473,10 +480,11 @@ mod tests {
     }
 
     #[test]
-    fn call_prompt_can_only_read_or_confirm_the_pending_call() {
+    fn call_prompt_can_only_read_appearance_or_read_and_confirm_the_pending_call() {
         let label = crate::teams_detection::monitor::prompt_window::LABEL;
         assert!(allowed(label, "get_pending_call_prompt"));
         assert!(allowed(label, "confirm_call_detection_prompt"));
+        assert!(allowed(label, "recording_window_appearance"));
         assert!(!allowed(label, "start_recording_with_devices_and_meeting"));
         assert!(!allowed(label, "floating_note"));
     }

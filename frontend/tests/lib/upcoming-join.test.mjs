@@ -27,6 +27,44 @@ test('only timed, uncancelled Teams meeting links offer a recording request', ()
   assert.equal(eligible({ ...chosen, allDay: true }), false);
 });
 
+test('the call panel uses the selected appearance and answers only the displayed prompt', async t => {
+  const hooks = createHookHarness();
+  t.after(hooks.unmount);
+  let scheduled;
+  t.mock.method(globalThis, 'setTimeout', fn => { scheduled = fn; return 1; });
+  t.mock.method(globalThis, 'clearTimeout', () => {});
+  let pending = { provider: 'teams', key: 'active-prompt', eventTitle: 'Planning', retry: false };
+  const replies = [], themes = [], accents = [];
+  const jsx = (type, props) => ({ type, props });
+  const Prompt = loadTsModule('src/pages/call-recording-prompt.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
+    'next/head': 'Head', '@/components/ui/button': { Button: 'button' },
+    '@/lib/theme': {
+      applyThemePreference: value => themes.push(value),
+      applyAccent: value => accents.push(value),
+      subscribeToSystemTheme: () => () => {}, DEFAULT_ACCENT_ID: 'claw',
+    },
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      if (command === 'recording_window_appearance') return { theme: 'dark', accent: 'violet' };
+      if (command === 'get_pending_call_prompt') return pending;
+      assert.equal(command, 'confirm_call_detection_prompt');
+      replies.push(args.key);
+      pending = null;
+    } },
+  }).default;
+  const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node?.props ? [node, ...nodes(node.props.children)] : [];
+  const button = () => nodes(hooks.render(Prompt)).find(node => node.type === 'button');
+  assert.equal(button(), undefined);
+  await flush();
+  button().props.onClick();
+  assert.equal(themes.at(-1), 'dark');
+  assert.equal(accents.at(-1), 'violet');
+  assert.deepEqual(replies, ['active-prompt']);
+  scheduled();
+  await flush();
+  assert.equal(button(), undefined);
+});
+
 test('Upcoming opens plain Join independently and binds a double click to one unreviewed invitation', async t => {
   const hooks = createHookHarness();
   t.after(() => hooks.unmount());
