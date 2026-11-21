@@ -21,7 +21,7 @@ import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { LibraryBackup } from "@/components/LibraryBackup";
 import { ArchiveMeetingRows, useArchiveMetadata } from "@/components/Archive/ArchiveMeetingRows";
 import { ArchiveStorageButton } from "@/components/Archive/ArchiveStorageButton";
-import { archiveReview, formatArchiveDate } from "@/lib/archive-review";
+import { archiveDateKey, archiveReview, formatArchiveDate, parseArchiveDate } from "@/lib/archive-review";
 import { receiveMatchScope, savedPassageUrl, sourceLabel, type MatchScope } from "@/lib/archive-search";
 import { KnowledgeArchive } from "@/components/Knowledge/KnowledgeArchive";
 import { bookmarkTime, matchesProjectFilter, type ProjectFilter } from "@/lib/library";
@@ -59,12 +59,6 @@ type SortMode = "newest" | "oldest" | "title";
 const noProjectFilter: ProjectFilter = { tags: [], untagged: false, mode: "any" };
 // Keep this view's filters in memory when a meeting route replaces it.
 let archiveView = { tab: "archive" as "archive" | "memory", memoryProject: noProjectFilter, query: "", from: "", to: "", attentionOnly: false, sortMode: "newest" as SortMode, projectFilter: noProjectFilter };
-
-function timeValue(value?: string): number {
-  if (!value) return 0;
-  const time = Date.parse(value);
-  return Number.isFinite(time) ? time : 0;
-}
 
 export default function MeetingsPage() {
   const router = useRouter();
@@ -117,15 +111,16 @@ export default function MeetingsPage() {
   const sortedMeetings = useMemo(() => {
     const next = meetings.filter(meeting => {
       if (invalidDates || (attentionOnly && !attentionIds.has(meeting.id)) || !matchesProjectFilter(meeting.id, projectFilter, projectTags)) return false;
-      const date = meeting.created_at?.slice(0, 10);
+      if (!from && !to) return true;
+      const date = archiveDateKey(meeting.created_at);
       return (!from || (!!date && date >= from)) && (!to || (!!date && date <= to));
     });
     next.sort((a, b) => {
       if (sortMode === "title") {
         return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
       }
-      const aTime = timeValue(a.created_at);
-      const bTime = timeValue(b.created_at);
+      const aTime = parseArchiveDate(a.created_at)?.getTime() ?? 0;
+      const bTime = parseArchiveDate(b.created_at)?.getTime() ?? 0;
       if (aTime !== bTime) {
         return sortMode === "oldest" ? aTime - bTime : bTime - aTime;
       }

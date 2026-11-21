@@ -9,6 +9,7 @@ import { MeetingTag } from '@/lib/library';
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, MAX, readStoredSidebarWidth } from '@/lib/sidebarWidth';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useSummaryPolling } from '@/hooks/useSummaryPolling';
+import { allowLoadedMeetingDrafts, discardMeetingDraft } from '@/lib/meetingDrafts';
 
 
 interface SidebarItem {
@@ -34,7 +35,7 @@ interface SidebarContextType extends ReturnType<typeof useSummaryPolling> {
   projectTagsLoading: boolean;
   refreshProjectTags: () => Promise<void>;
   currentMeeting: CurrentMeeting | null;
-  setCurrentMeeting: (meeting: CurrentMeeting | null) => void;
+  setCurrentMeeting: React.Dispatch<React.SetStateAction<CurrentMeeting | null>>;
   sidebarItems: SidebarItem[];
   isCollapsed: boolean;
   sidebarWidth: number;
@@ -114,11 +115,12 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     compact.addEventListener('change', update);
     return () => compact.removeEventListener('change', update);
   }, []);
-  const [meetings, setMeetings] = useState<CurrentMeeting[]>([]);
+  const [meetings, updateMeetings] = useState<CurrentMeeting[]>([]);
   // Set when the library could not be loaded, so a failure is not shown as an empty library.
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
   const [meetingsLoading, setMeetingsLoading] = useState(false);
-  const meetingLoads = React.useRef(0);
+  const meetingVersion = React.useRef(0);
+  const meetingLoadPending = React.useRef(false);
   const [isMeetingActive, setIsMeetingActive] = useState(false);
   const [serverAddress, setServerAddress] = useState('');
   const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
@@ -134,41 +136,69 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   // Extract fetchMeetings as a reusable function
   const fetchMeetings = React.useCallback(async () => {
     if (serverAddress) {
-      meetingLoads.current++;
+      const version = ++meetingVersion.current;
+      meetingLoadPending.current = true;
       setMeetingsLoading(true);
       try {
         const meetings = await invoke<CurrentMeeting[]>('api_get_meetings');
+        if (version !== meetingVersion.current) return;
         const transformedMeetings = meetings.map(meeting => ({
           id: meeting.id,
           title: meeting.title,
           created_at: meeting.created_at,
           updated_at: meeting.updated_at,
         }));
-        setMeetings(transformedMeetings);
+        allowLoadedMeetingDrafts(transformedMeetings);
+        updateMeetings(transformedMeetings);
         setMeetingsError(null);
         Analytics.trackBackendConnection(true);
       } catch (error) {
+        if (version !== meetingVersion.current) return;
         console.error('Error fetching meetings:', error);
         // Keep what was loaded before; an empty list would pass for an empty library.
         setMeetingsError('Could not load your meetings.');
         Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
       } finally {
-        meetingLoads.current--;
-        if (meetingLoads.current === 0) setMeetingsLoading(false);
+        if (version === meetingVersion.current) {
+          meetingLoadPending.current = false;
+          setMeetingsLoading(false);
+        }
       }
     }
   }, [serverAddress]);
 
-  useEffect(() => {
-    fetchMeetings();
-  }, [serverAddress, fetchMeetings]);
+  const setMeetings = React.useCallback<SidebarContextType['setMeetings']>(update => {
+    updateMeetings(update);
+    // A pre-mutation snapshot can be stale even if it is the newest request.
+    // Replace it so changes to other rows from that refresh are still picked up.
+    if (meetingLoadPending.current) void fetchMeetings();
+  }, [fetchMeetings]);
 
   useEffect(() => {
+    void fetchMeetings();
+    return () => { meetingVersion.current += 1; meetingLoadPending.current = false; };
+  }, [fetchMeetings]);
+
+  useEffect(() => {
+    let active = true;
     void refreshProjectTags();
-    const subscription = listen('library-changed', () => { void refreshProjectTags(); void fetchMeetings(); });
-    void subscription.catch(() => setProjectTagsError('Could not watch project tags. Reopen ClawScribe to retry.'));
-    return () => { tagsVersion.current += 1; void subscription.then(unlisten => unlisten()).catch(() => {}); };
-  }, [refreshProjectTags, fetchMeetings]);
+    const subscription = listen('library-changed', () => {
+      if (active) { void refreshProjectTags(); void fetchMeetings(); }
+    });
+    const deleted = listen<string>('library-meeting-deleted', ({ payload: id }) => {
+      if (!active) return;
+      discardMeetingDraft(id);
+      setMeetings(rows => rows.filter(row => row.id !== id));
+      void refreshProjectTags();
+    });
+    void subscription.catch(() => { if (active) setProjectTagsError('Could not watch project tags. Reopen ClawScribe to retry.'); });
+    void deleted.catch(() => {});
+    return () => {
+      active = false;
+      tagsVersion.current += 1;
+      for (const listener of [subscription, deleted]) void listener.then(unlisten => unlisten()).catch(() => {});
+    };
+  }, [refreshProjectTags, fetchMeetings, setMeetings]);
 
   useEffect(() => {
     const fetchSettings = async () => {

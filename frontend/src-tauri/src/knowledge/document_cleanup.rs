@@ -121,7 +121,8 @@ pub(crate) async fn sweep(
             break;
         };
         let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM knowledge_documents WHERE storage_name=?)",
+            "SELECT EXISTS(SELECT 1 FROM knowledge_documents WHERE storage_name=?1
+                           UNION ALL SELECT 1 FROM pending_meeting_file_cleanup WHERE kind='reference' AND target=?1)",
         )
         .bind(name)
         .fetch_one(&mut *connection)

@@ -28,6 +28,7 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
   const [isRestoring, setIsRestoring] = useState(false);
   const blockNoteSummaryRef = useRef<BlockNoteSummaryViewRef>(null);
   const { setCurrentMeeting, setMeetings } = useSidebar();
+  const publishedTitle = useRef({ id: meeting.id, title: meeting.title });
 
   useEffect(() => {
     const unsubscribe = draft.subscribe(() => refresh(value => value + 1));
@@ -54,12 +55,14 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
   }, [meeting.id, aiSummary]);
 
   const updateSidebar = useCallback((title: string) => {
+    publishedTitle.current = { id: meeting.id, title };
     setMeetings(previous => previous.map((item: CurrentMeeting) => item.id === meeting.id ? { ...item, title } : item));
-    setCurrentMeeting({ id: meeting.id, title });
+    setCurrentMeeting(previous => previous?.id === meeting.id ? { ...previous, title } : previous);
   }, [meeting.id, setMeetings, setCurrentMeeting]);
   useEffect(() => {
-    if (draft.state === 'saved') updateSidebar(meetingTitle);
-  }, [draft.state, meetingTitle, updateSidebar]);
+    if (publishedTitle.current.id !== meeting.id) publishedTitle.current = { id: meeting.id, title: meeting.title };
+    if (draft.state === 'saved' && publishedTitle.current.title !== meetingTitle) updateSidebar(meetingTitle);
+  }, [draft.state, meeting.id, meeting.title, meetingTitle, updateSidebar]);
 
   const handleTitleChange = useCallback((title: string) => {
     setMeetingTitle(title);

@@ -29,6 +29,7 @@ export interface DiskScan {
   recordings: DiskRecording[];
   truncated: boolean;
   recordingActive: boolean;
+  activeCacheId?: string;
   resolvedCacheIds?: string[];
 }
 
@@ -96,7 +97,9 @@ export function readDiskScan(value: unknown): DiskScan {
     : [];
   const resolvedCacheIds = Array.isArray(source.resolvedCacheIds)
     ? source.resolvedCacheIds.filter((id): id is string => typeof id === 'string') : [];
+  const activeCacheId = text(source.activeCacheId);
   return { recordings, truncated: source.truncated === true, recordingActive: source.recordingActive === true,
+    ...(activeCacheId ? { activeCacheId } : {}),
     ...(resolvedCacheIds.length > 0 ? { resolvedCacheIds } : {}) };
 }
 

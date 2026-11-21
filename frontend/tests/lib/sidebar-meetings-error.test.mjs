@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createHookHarness, flush } from './hook-harness.mjs';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
 const jsx = (type, props) => ({ type, props });
@@ -98,4 +98,37 @@ test('the library reports that a reload is running, so Retry can be disabled, an
   const done = app.render();
   assert.equal(done.meetingsLoading, false);
   assert.equal(done.meetingsError, null);
+});
+
+test('an older refresh cannot overwrite a newer result or report its failure', async t => {
+  const old = deferred();
+  let reply = () => [{ id: 'a', title: 'First' }];
+  const app = setup(t, () => reply());
+  const state = await app.value();
+  reply = () => old.promise;
+  const older = state.refetchMeetings();
+  reply = () => [{ id: 'a', title: 'New' }];
+  await state.refetchMeetings();
+  assert.equal(app.render().meetingsLoading, false);
+  old.reject(new Error('Obsolete result'));
+  await older;
+  assert.equal(app.render().meetingsError, null);
+  assert.equal(app.render().meetings[0].title, 'New');
+});
+
+test('a load begun before rename and deletion cannot revert those changes', async t => {
+  const old = deferred();
+  const before = [{ id: 'a', title: 'First' }, { id: 'b', title: 'Second' }];
+  let reply = () => before;
+  const app = setup(t, () => reply());
+  const state = await app.value();
+  reply = () => old.promise;
+  const loading = state.refetchMeetings();
+  reply = () => [{ id: 'a', title: 'Renamed' }];
+  state.setMeetings(rows => rows.map(row => row.id === 'a' ? { ...row, title: 'Renamed' } : row));
+  state.setMeetings(rows => rows.filter(row => row.id !== 'b'));
+  old.resolve(before);
+  await loading;
+  await flush();
+  assert.deepEqual(app.render().meetings.map(({ id, title }) => [id, title]), [['a', 'Renamed']]);
 });

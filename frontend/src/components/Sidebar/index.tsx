@@ -19,9 +19,10 @@ import {
 } from "lucide-react";
 import { useRouter, usePathname } from "next/navigation";
 import { useSidebar } from "./SidebarProvider";
-import type { CurrentMeeting } from "@/components/Sidebar/SidebarProvider";
 import { ConfirmationModal } from "../ConfirmationModel/confirmation-modal";
 import { indexedDBService } from "@/services/indexedDBService";
+import { discardMeetingDraft } from "@/lib/meetingDrafts";
+import { openStorageDialog } from "@/lib/storage-dialog-controller";
 import Analytics from "@/lib/analytics";
 import { groupMeetings, shortMeetingDate } from "@/lib/sidebarMeetings";
 import { Meta, StatusText } from "@/components/ui/settings-layout";
@@ -172,18 +173,11 @@ const Sidebar: React.FC = () => {
     console.log("Deleting item:", itemId);
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const metadata = await invoke<{ folder_path?: string | null }>('api_get_meeting_metadata', { meetingId: itemId });
-      const result = await invoke<{ warnings: string[] }>("api_delete_meeting", {
+      const result = await invoke<{ folder_path: string | null; cleanup_pending: boolean }>("api_delete_meeting", {
         meetingId: itemId,
         deleteFiles,
       });
-      try {
-        await indexedDBService.deleteMeeting(itemId, metadata.folder_path);
-      } catch {
-        toast.warning('Meeting deleted, but its cached recovery copy could not be removed.');
-      }
-      console.log("Meeting deleted successfully");
+      discardMeetingDraft(itemId);
       setMeetings(previous => previous.filter(meeting => meeting.id !== itemId));
 
       // Track meeting deletion
@@ -194,12 +188,22 @@ const Sidebar: React.FC = () => {
         description: deleteFiles ? "The meeting was removed from your library." : "Recording files were kept.",
       });
 
-      for (const warning of result.warnings ?? []) toast.warning(warning, { duration: 15000 });
+      if (result.cleanup_pending) {
+        toast.warning('Some meeting files were kept', {
+          description: 'Review the pending cleanup in Library storage.',
+          action: { label: 'Review files', onClick: openStorageDialog },
+        });
+      }
 
       // If deleting the active meeting, navigate to home
       if (currentMeeting?.id === itemId) {
-        setCurrentMeeting({ id: "intro-call", title: "+ New Call" });
+        setCurrentMeeting(previous => previous?.id === itemId ? { id: "intro-call", title: "+ New Call" } : previous);
         if (pathname === "/meeting-details") router.push("/");
+      }
+      try {
+        await indexedDBService.deleteMeeting(itemId, result.folder_path);
+      } catch {
+        toast.warning('Meeting deleted, but its cached recovery copy could not be removed.');
       }
     } catch (error) {
       console.error("Failed to delete meeting:", error);
@@ -245,15 +249,12 @@ const Sidebar: React.FC = () => {
       });
 
       // Update local state
-      const updatedMeetings = meetings.map((m: CurrentMeeting) =>
+      setMeetings(previous => previous.map(m =>
         m.id === meetingId ? { ...m, title: newTitle } : m,
-      );
-      setMeetings(updatedMeetings);
+      ));
 
       // Update current meeting if it's the one being edited
-      if (currentMeeting?.id === meetingId) {
-        setCurrentMeeting({ id: meetingId, title: newTitle });
-      }
+      setCurrentMeeting(previous => previous?.id === meetingId ? { ...previous, title: newTitle } : previous);
 
       // Track the edit
       Analytics.trackButtonClick("edit_meeting_title", "sidebar");
