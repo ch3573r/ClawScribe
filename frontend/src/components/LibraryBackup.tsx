@@ -19,6 +19,8 @@ export function LibraryBackup() {
   const { isRecording, isStarting, isStopping, isProcessing, isSaving } = useRecordingState();
   const { refetchMeetings, refreshProjectTags } = useSidebar();
   const unavailable = isRecording || isStarting || isStopping || isProcessing || isSaving;
+  const skippedTemplates = result?.report.skipped_template_items ?? 0;
+  const incompleteMeetings = result?.report.incomplete_meetings ?? [];
   const run = async (restore: boolean) => {
     if (pending.current) return;
     pending.current = true; setBusy(restore ? 'Restoring…' : 'Backing up…');
@@ -35,8 +37,10 @@ export function LibraryBackup() {
       setResult({ report, restore });
       const incomplete = report.incomplete_meetings?.length ?? 0;
       const unreadable = report.unreadable_calendar_links ?? 0;
+      const templatesSkipped = report.skipped_template_items ?? 0;
       const description = `${report.meetings} meetings, ${report.files} recording files.${report.skipped ? ` ${report.skipped} existing meetings skipped.` : ''}${unreadable ? ` ${unreadable} saved calendar links could not be read and were left unlinked.` : ''}${incomplete ? ` ${incomplete} meetings have incomplete audio; review the list below.` : ''}`;
       if (incomplete) toast.warning(restore ? 'Restore complete with incomplete audio' : 'Backup saved with incomplete audio', { description });
+      else if (templatesSkipped) toast.warning(restore ? 'Restore complete with templates skipped' : 'Backup saved with templates skipped', { description });
       else toast.success(restore ? 'Restore complete' : 'Backup saved', { description });
       if (restore) {
         const refreshed = await Promise.allSettled([refetchMeetings(), refreshProjectTags()]);
@@ -51,16 +55,19 @@ export function LibraryBackup() {
       <DialogHeader><DialogTitle>Backup and restore</DialogTitle><DialogDescription>Save meetings, recordings, transcript history, notes, custom templates, vocabulary, and saved series preferences.</DialogDescription></DialogHeader>
       <p className="text-sm text-muted-foreground">Archives contain private content. Store these unencrypted files in a trusted folder.</p>
       <p className="text-sm text-muted-foreground">Restore adds missing meetings and keeps your existing preferences. Finish recording and transcription jobs first.</p>
-      {result && !!result.report.incomplete_meetings?.length && <div role="alert" className="space-y-2 rounded border border-warning-border/40 bg-warning p-3 text-sm">
-        <p className="font-medium">{result.restore ? 'Restore complete with incomplete audio' : 'Backup saved with incomplete audio'}</p>
-        <p>Meeting data and available saved audio are included. If recovery files were excluded, keep a separate copy of the source recording folders, including hidden files.</p>
-        <ul className="list-disc space-y-1 pl-5">{result.report.incomplete_meetings.map(meeting => <li key={meeting.meeting_id}>
-          <span className="font-medium">{meeting.title || 'Untitled meeting'}</span>: {[
-            meeting.recovery_files_excluded && 'recovery files excluded',
-            meeting.recording_folder_missing && 'recording folder missing',
-            meeting.audio_unavailable && 'saved audio unavailable',
-          ].filter(Boolean).join('; ')}.
-        </li>)}</ul>
+      {result && (incompleteMeetings.length > 0 || skippedTemplates > 0) && <div role="alert" className="space-y-2 rounded border border-warning-border/40 bg-warning p-3 text-sm">
+        {skippedTemplates > 0 && <p>Skipped {skippedTemplates} template {skippedTemplates === 1 ? 'item' : 'items'} that could not be read or saved.</p>}
+        {incompleteMeetings.length > 0 && <>
+          <p className="font-medium">{result.restore ? 'Restore complete with incomplete audio' : 'Backup saved with incomplete audio'}</p>
+          <p>Meeting data and available saved audio are included. If recovery files were excluded, keep a separate copy of the source recording folders, including hidden files.</p>
+          <ul className="list-disc space-y-1 pl-5">{incompleteMeetings.map(meeting => <li key={meeting.meeting_id}>
+            <span className="font-medium">{meeting.title || 'Untitled meeting'}</span>: {[
+              meeting.recovery_files_excluded && 'recovery files excluded',
+              meeting.recording_folder_missing && 'recording folder missing',
+              meeting.audio_unavailable && 'saved audio unavailable',
+            ].filter(Boolean).join('; ')}.
+          </li>)}</ul>
+        </>}
       </div>}
       <div className="flex flex-wrap gap-2"><Button disabled={!!busy || unavailable} onClick={() => run(false)}>Save backup</Button><Button variant="outline" disabled={!!busy || unavailable} onClick={() => run(true)}>Choose archive to restore</Button></div>
       {busy && <p role="status" className="text-sm">{busy} Keep ClawScribe open until this finishes.</p>}

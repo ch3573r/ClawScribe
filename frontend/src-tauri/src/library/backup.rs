@@ -88,6 +88,7 @@ pub struct BackupReport {
     pub files: usize,
     /// Meetings restored without a calendar link that could not be read.
     pub unreadable_calendar_links: usize,
+    pub skipped_template_items: usize,
     pub incomplete_meetings: Vec<IncompleteMeeting>,
 }
 
@@ -559,6 +560,7 @@ fn write_archive_impl(
         skipped: 0,
         files,
         unreadable_calendar_links: 0,
+        skipped_template_items: 0,
         incomplete_meetings: incomplete_meetings(&manifest, None),
     })
 }
@@ -772,42 +774,63 @@ async fn insert_archive_row(
     Ok(())
 }
 
-/// Compare inside the restore transaction without loading canonical body strings.
-/// Archived text is already bounded by the manifest limit; SQLite compares it in place.
+/// Compare the archived source against the destination inside the import transaction.
+/// The temporary index holds only identities and comparison results, even for v3.
 async fn same_archived_source(
     connection: &mut sqlx::SqliteConnection,
     meeting: &Map<String, Value>,
-    rows: &[&Map<String, Value>],
     id: &str,
 ) -> Result<bool, String> {
-    let metadata: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM meetings WHERE id=? AND title IS ? AND created_at IS ?)",
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM meetings WHERE id=?1 AND title IS ?2 AND created_at IS ?3)
+         AND (SELECT count(*) FROM transcripts WHERE meeting_id=?1) =
+             (SELECT count(*) FROM temp.archive_transcript_comparisons WHERE meeting_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM temp.archive_transcript_comparisons
+                        WHERE meeting_id=?1 AND matches=0)",
     )
     .bind(id)
     .bind(meeting.get("title").and_then(Value::as_str))
     .bind(meeting.get("created_at").and_then(Value::as_str))
-    .fetch_one(&mut *connection)
+    .fetch_one(connection)
+    .await
+    .map_err(failure)
+}
+
+async fn compare_archived_transcript(
+    connection: &mut sqlx::SqliteConnection,
+    meeting: &str,
+    row: &Map<String, Value>,
+) -> Result<(), String> {
+    let text = |key| match row.get(key) {
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        None | Some(Value::Null) => Ok(None),
+        _ => Err("Invalid transcript text field."),
+    };
+    let time = |key| match row.get(key) {
+        Some(Value::Number(value)) => value.as_f64().map(Some).ok_or("Invalid transcript time."),
+        None | Some(Value::Null) => Ok(None),
+        _ => Err("Invalid transcript time."),
+    };
+    sqlx::query(
+        "INSERT INTO temp.archive_transcript_comparisons (id, meeting_id, matches)
+         VALUES (?1, ?2, EXISTS(SELECT 1 FROM transcripts WHERE id=?1 AND meeting_id=?2
+             AND transcript IS ?3 AND speaker IS ?4 AND timestamp IS ?5
+             AND audio_start_time IS ?6 AND audio_end_time IS ?7 AND duration IS ?8
+             AND word_timestamps_json IS ?9))",
+    )
+    .bind(text_field(row, "id")?)
+    .bind(meeting)
+    .bind(text_field(row, "transcript")?)
+    .bind(text("speaker")?)
+    .bind(text_field(row, "timestamp")?)
+    .bind(time("audio_start_time")?)
+    .bind(time("audio_end_time")?)
+    .bind(time("duration")?)
+    .bind(text("word_timestamps_json")?)
+    .execute(connection)
     .await
     .map_err(failure)?;
-    if !metadata {
-        return Ok(false);
-    }
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM transcripts WHERE meeting_id=?")
-        .bind(id)
-        .fetch_one(&mut *connection)
-        .await
-        .map_err(failure)?;
-    if count != rows.len() as i64 {
-        return Ok(false);
-    }
-    for row in rows {
-        let equal:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transcripts WHERE id=? AND meeting_id=? AND transcript IS ? AND speaker IS ? AND timestamp IS ? AND audio_start_time IS ? AND audio_end_time IS ? AND duration IS ? AND word_timestamps_json IS ?)")
-            .bind(row.get("id").and_then(Value::as_str)).bind(id).bind(row.get("transcript").and_then(Value::as_str)).bind(row.get("speaker").and_then(Value::as_str)).bind(row.get("timestamp").and_then(Value::as_str)).bind(row.get("audio_start_time").and_then(Value::as_f64)).bind(row.get("audio_end_time").and_then(Value::as_f64)).bind(row.get("duration").and_then(Value::as_f64)).bind(row.get("word_timestamps_json").and_then(Value::as_str)).fetch_one(&mut *connection).await.map_err(failure)?;
-        if !equal {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    Ok(())
 }
 
 async fn import_conversations(
@@ -823,12 +846,6 @@ async fn import_conversations(
         .iter()
         .filter_map(|row| row.get("id").and_then(Value::as_str).map(|id| (id, row)))
         .collect();
-    let mut canonical_rows = BTreeMap::<&str, Vec<&Map<String, Value>>>::new();
-    for row in rows("transcripts") {
-        if let Some(id) = row.get("meeting_id").and_then(Value::as_str) {
-            canonical_rows.entry(id).or_default().push(row);
-        }
-    }
     // Validate even skipped rows. Table-specific identities replace the generic
     // meeting_id assumption used by the older meeting-only child tables.
     for table in TABLES
@@ -1017,16 +1034,8 @@ async fn import_conversations(
         } else {
             let same = selected.contains(meeting)
                 || (known.contains(meeting)
-                    && same_archived_source(
-                        connection,
-                        canonical_meetings[meeting],
-                        canonical_rows
-                            .get(meeting)
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]),
-                        meeting,
-                    )
-                    .await?);
+                    && same_archived_source(connection, canonical_meetings[meeting], meeting)
+                        .await?);
             comparable.insert(meeting.to_string(), same);
             same
         };
@@ -1341,6 +1350,33 @@ async fn import_manifest_impl(
             selected.insert(id.to_string());
         }
     }
+    let comparisons: HashSet<&str> = manifest
+        .tables
+        .get("knowledge_request_sources")
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("source_id")?.as_str()?.strip_prefix("meeting:"))
+        .filter(|id| known.contains(*id) && !selected.contains(*id))
+        .collect();
+    if !comparisons.is_empty() {
+        // Desktop SQLite's temp database is file-backed. A unique transcript ID
+        // keeps a repeated archive row from passing the count check for a missing one.
+        sqlx::query(
+            "CREATE TEMP TABLE archive_transcript_comparisons (
+                 id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, matches INTEGER NOT NULL
+             ) WITHOUT ROWID",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(failure)?;
+        sqlx::query(
+            "CREATE INDEX temp.archive_transcript_comparison_meeting
+             ON archive_transcript_comparisons (meeting_id, matches)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(failure)?;
+    }
     // Meetings restored without a recording folder (the archive carried no
     // files for them). No transcript or metadata file can ever be written for
     // these, so pending file work from the source computer is inapplicable.
@@ -1403,6 +1439,9 @@ async fn import_manifest_impl(
                 return Err("Archive contains an unknown meeting reference.".into());
             }
             if !selected.contains(&parent) {
+                if *table == "transcripts" && comparisons.contains(parent.as_str()) {
+                    compare_archived_transcript(&mut tx, &parent, &source).await?;
+                }
                 continue;
             }
             let folderless_meeting = folderless.get(&parent).copied();
@@ -1555,6 +1594,12 @@ async fn import_manifest_impl(
         &document_restore.identities,
     )
     .await?;
+    if !comparisons.is_empty() {
+        sqlx::query("DROP TABLE temp.archive_transcript_comparisons")
+            .execute(&mut *tx)
+            .await
+            .map_err(failure)?;
+    }
     for (index, incomplete) in &manifest.incomplete_audio {
         if !incomplete.recovery_files_excluded {
             continue;
@@ -1641,6 +1686,7 @@ async fn import_manifest_impl(
     .await
     .map_err(failure)??;
     let document_files = originals.count();
+    let skipped_template_items = portable.skipped_templates;
     // Once commit starts, a detached task owns both the files and transaction.
     // Dropping an invoking future cannot remove originals after a successful commit.
     tokio::spawn(async move {
@@ -1661,6 +1707,7 @@ async fn import_manifest_impl(
         skipped,
         files: files + document_files,
         unreadable_calendar_links,
+        skipped_template_items,
         incomplete_meetings: incomplete_meetings(&manifest, Some(&selected)),
     })
 }
@@ -1764,15 +1811,17 @@ pub(super) async fn backup_with_permits(
     tokio::task::spawn_blocking(move || {
         let _permits = permits;
         archive_exports::capture(&mut manifest, &app_data)?;
-        manifest.portable.capture_files(&app_data)?;
-        write_archive_impl(
+        let skipped_template_items = manifest.portable.capture_files(&app_data)?;
+        let mut report = write_archive_impl(
             &path,
             manifest,
             folders,
             Some(&reference_root),
             Some(records.path()),
             exclusive,
-        )
+        )?;
+        report.skipped_template_items = skipped_template_items;
+        Ok(report)
     })
     .await
     .map_err(failure)?
@@ -3162,6 +3211,109 @@ mod tests {
                 assert!(history
                     .iter()
                     .any(|message| message.content == "21 September [K1]."));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn version_three_compares_skipped_conversation_transcripts_from_the_zip() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        use crate::knowledge::conversations;
+
+        let (source, request) = conversation_fixture().await;
+        let temp = tempfile::tempdir().unwrap();
+        let records = tempfile::tempdir_in(temp.path()).unwrap();
+        for (case, source_empty, destination_change, matches) in [
+            ("same", false, "", true),
+            (
+                "changed",
+                false,
+                "UPDATE transcripts SET transcript='Different' WHERE id='archive-second'",
+                false,
+            ),
+            ("destination-empty", false, "DELETE FROM transcripts", false),
+            ("archive-empty", true, "", false),
+            ("both-empty", true, "DELETE FROM transcripts", true),
+        ] {
+            let target = empty_conversation_destination().await;
+            // Use independent transcripts so a restore has to compare rather than
+            // relying on the origin of the destination's data or revision number.
+            sqlx::raw_sql(
+                "INSERT INTO meetings(id,title,created_at,updated_at)
+                 VALUES ('archive-source','Public archive fixture','2026-09-01','2026-11-21');
+                 INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES
+                 ('archive-second','archive-source','Budget unchanged.','2026-09-01'),
+                 ('archive-first','archive-source','Approved: 21 September.','2026-09-01');",
+            )
+            .execute(&target)
+            .await
+            .unwrap();
+            if !destination_change.is_empty() {
+                sqlx::query(destination_change)
+                    .execute(&target)
+                    .await
+                    .unwrap();
+            }
+            let transcript = || async {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT id,transcript FROM transcripts ORDER BY id",
+                )
+                .fetch_all(&target)
+                .await
+                .unwrap()
+            };
+            let before = transcript().await;
+            if source_empty {
+                sqlx::query("DELETE FROM transcripts")
+                    .execute(&source)
+                    .await
+                    .unwrap();
+            }
+            let archive = temp.path().join(format!("{case}.zip"));
+            let (manifest, folders) = snapshot_current(&source, records.path()).await.unwrap();
+            assert!(!manifest.tables.contains_key("transcripts"));
+            assert_eq!(
+                manifest.table_records["transcripts"],
+                if source_empty { 0 } else { 2 }
+            );
+            write_archive_impl(
+                &archive,
+                manifest,
+                folders,
+                Some(temp.path()),
+                Some(records.path()),
+                false,
+            )
+            .unwrap();
+            let (manifest, stage) = unpack(
+                &archive,
+                temp.path(),
+                &HashSet::from(["archive-source".into()]),
+            )
+            .unwrap();
+            let report = import_manifest_with_documents(&target, manifest, stage, temp.path())
+                .await
+                .unwrap();
+            assert_eq!((report.meetings, report.skipped), (0, 1), "{case}");
+            assert_eq!(transcript().await, before, "{case}");
+
+            let history = conversations::history(&target, &request.owner)
+                .await
+                .unwrap();
+            assert_eq!(history.len(), 2, "{case}");
+            if matches {
+                assert_eq!(history[0].content, "What was approved?", "{case}");
+                assert_eq!(history[1].content, "21 September [K1].", "{case}");
+                let reply = history[1].reply.as_ref().unwrap();
+                assert_eq!(reply.cited_tags, vec![1], "{case}");
+                assert!(reply.evidence[0].historical, "{case}");
+            } else {
+                assert!(
+                    history.iter().all(|message| message.status == "invalidated"
+                        && message.content.is_empty()
+                        && message.reply.is_none()),
+                    "{case}"
+                );
             }
         }
     }

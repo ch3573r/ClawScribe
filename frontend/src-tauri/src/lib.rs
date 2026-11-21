@@ -846,6 +846,7 @@ pub fn run() {
             library::backup_schedule::choose_scheduled_backup_folder,
             library::backup_schedule::set_scheduled_backups,
             database::recovery::startup_recovery_active,
+            database::recovery::return_to_original_library,
             library::archive::list_archive_rows,
             library::archive::storage::measure_archive_storage,
             library::file_cleanup::list_pending_meeting_file_cleanup,

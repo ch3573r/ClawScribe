@@ -75,5 +75,9 @@ for (const restore of [false, true]) {
     await run();
     assert.equal(notifications.at(-1).kind, 'success');
     assert.equal(flatten(render()).find(node => node.props?.role === 'alert'), undefined);
+    report = { ...report, skipped_template_items: 2 };
+    await run();
+    assert.equal(notifications.at(-1).kind, 'warning');
+    assert.match(text(flatten(render()).find(node => node.props?.role === 'alert')), /Skipped 2 template items/);
   });
 }
