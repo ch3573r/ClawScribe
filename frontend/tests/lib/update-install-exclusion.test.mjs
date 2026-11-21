@@ -45,9 +45,11 @@ test('summaries, saved answers and every export write are admitted through the i
   const exports = rust('exports/commands.rs');
   const lockUses = exports.match(/EXPORT_LOCK/g) ?? [];
   assert.equal(lockUses.length, 2, 'only the definition and the single guard helper take the lock');
+  assert.match(exports, /fn export_guard\([\s\S]{0,300}crate::updates::admit_work\(\)\?/);
   assert.equal((exports.match(/let _export_guard = export_guard\(\)\?;/g) ?? []).length, 7);
-  assert.match(exports, /export_meeting_to_onedrive_files[\s\S]{0,300}crate::updates::admit_work\(\)\?/);
-  assert.match(rust('exports/confluence.rs'), /confluence_export_page[\s\S]{0,300}crate::updates::admit_work\(\)\?/);
+  assert.match(exports, /export_meeting_to_onedrive_files[\s\S]{0,300}export_guard\(\)\?/);
+  assert.match(exports, /reconcile_meeting_export[\s\S]{0,300}export_guard\(\)\?/);
+  assert.match(rust('exports/confluence.rs'), /confluence_export_page[\s\S]{0,350}commands::export_guard\(\)\?/);
 });
 
 test('live context labels describe a fixed window of up to ten minutes', () => {

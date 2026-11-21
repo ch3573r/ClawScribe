@@ -97,14 +97,14 @@ export function PlannerExportPreview({
     setBuckets([]);
     (async () => {
       try {
-        const [{ items, suggestionCount }, bucketList] = await Promise.all([
+        const [{ items, suggestionCount, candidates }, bucketList] = await Promise.all([
           getMarkdown().then((md) =>
             microsoftExportService.previewPlannerTasks(meetingId, meetingTitle, md),
           ),
           microsoftExportService.listBuckets(planId),
         ]);
         if (cancelled) return;
-        setPreviewCandidates(taskPreviewCandidates(items));
+        setPreviewCandidates(candidates ?? taskPreviewCandidates(items));
         setPendingSuggestions(suggestionCount);
         setBuckets(bucketList);
         // Default each task to the bucket chosen in Settings (fall back to first).

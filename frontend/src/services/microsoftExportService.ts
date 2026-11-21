@@ -53,6 +53,8 @@ export interface OneNoteResume {
 }
 
 export interface MeetingExportHistory {
+  entryKey: string;
+  displayName?: string | null;
   actionId?: string | null;
   destination: string;
   status: string;
@@ -98,6 +100,7 @@ export interface OneDriveExportedFile {
 export interface OneDriveExportResponse {
   destination: DriveDestination;
   files: OneDriveExportedFile[];
+  issues: string[];
 }
 
 export interface OneDriveExportRequest {
@@ -143,11 +146,13 @@ export interface PlannerTaskPreview {
 export interface TaskPreviewCandidate {
   readonly localId: string;
   readonly originalTitleHash: string;
+  readonly done?: boolean;
 }
 
 interface MeetingTaskPreview {
   items: PlannerTaskPreview[];
   suggestionCount: number;
+  candidates?: TaskPreviewCandidate[];
 }
 
 export function taskPreviewCandidates(
@@ -278,6 +283,7 @@ export const microsoftExportService = {
     sectionName: string,
     options: MeetingExportOptions,
     resumeId: string | null,
+    replaceExisting = false,
   ): Promise<ExportReport> {
     return invoke<ExportReport>("export_meeting_to_onenote_section", {
       meetingId,
@@ -287,6 +293,7 @@ export const microsoftExportService = {
       sectionName,
       options,
       resumeId,
+      replaceExisting,
     });
   },
 
@@ -296,6 +303,10 @@ export const microsoftExportService = {
 
   async getMeetingExportHistory(meetingId: string): Promise<MeetingExportHistory[]> {
     return invoke("get_meeting_export_history", { meetingId });
+  },
+
+  async reconcileMeetingExport(meetingId: string, entryKey: string, existingRemoteId: string | null): Promise<void> {
+    return invoke("reconcile_meeting_export", { meetingId, entryKey, existingRemoteId });
   },
 
   async exportMeetingMarkdownToPlanner(

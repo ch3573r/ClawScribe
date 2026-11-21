@@ -77,13 +77,13 @@ export function ToDoExportPreview({
     (async () => {
       try {
         const md = await getMarkdown();
-        const { items, suggestionCount } = await microsoftExportService.previewToDoTasks(
+        const { items, suggestionCount, candidates } = await microsoftExportService.previewToDoTasks(
           meetingId,
           meetingTitle,
           md,
         );
         if (cancelled) return;
-        setPreviewCandidates(taskPreviewCandidates(items));
+        setPreviewCandidates(candidates ?? taskPreviewCandidates(items));
         setPendingSuggestions(suggestionCount);
         setRows(
           items.map((item) => ({

@@ -93,10 +93,13 @@ window titles are returned only when the settings diagnostics panel requests the
   split into per-VAD-segment provider calls.
 - Summary generation can be local or external depending on the configured
   provider.
-- Microsoft Graph is used only after Microsoft sign-in and only for calendar,
-  OneNote, Planner, and To Do workflows.
+- Microsoft Graph is used after Microsoft sign-in for calendar, OneNote,
+  Planner, To Do, and OneDrive or SharePoint.
 - Confluence direct publish uses the configured server URL and PAT. Browser
   draft export remains available when SSO, proxy, or tenant policy blocks REST.
+  Direct publishing uses the meeting export history to retain the page ID and
+  hold uncertain submissions for explicit reconciliation. The browser clipboard
+  includes readable source times, nested lists, quotes, code, and task status.
 - OpenClaw handoff is optional and sends completed recording artifacts only to
   the configured operator endpoint.
 

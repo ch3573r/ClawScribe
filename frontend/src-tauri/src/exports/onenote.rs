@@ -195,7 +195,7 @@ fn wrap_page(escaped_title: &str, created: &str, body: &str) -> String {
         )
     };
     format!(
-        "<!DOCTYPE html><html><head><title>{escaped_title}</title>{meta}</head><body>{body}</body></html>"
+        "<!DOCTYPE html><html><head><title>{escaped_title}</title>{meta}</head><body><div data-id=\"clawscribe-content\">{body}</div></body></html>"
     )
 }
 

@@ -24,6 +24,7 @@ async function setup({ connected = true, rest = false, restFailure = false, save
     '@/components/IntegrationIcons': names('ConfluenceIcon WordIcon OneNoteIcon OneDriveIcon PlannerIcon ToDoIcon'),
     '@/components/ui/button': names('Button'),
     '@/components/ui/input': names('Input'),
+    '@/components/ui/textarea': names('Textarea'),
     '@/components/ui/select': names('Select SelectContent SelectItem SelectTrigger SelectValue'),
     '@/components/ui/label': names('Label'),
     '@/components/ui/dropdown-menu': names('DropdownMenu DropdownMenuContent DropdownMenuItem DropdownMenuLabel DropdownMenuTrigger'),
@@ -54,6 +55,7 @@ async function setup({ connected = true, rest = false, restFailure = false, save
         connectionStatus: async () => ({ state: connected ? 'connected' : 'not_connected' }),
         listOneNoteResumes: async () => resumes,
         getMeetingExportHistory: async () => history,
+        reconcileMeetingExport: async (...args) => { calls.push({ kind: 'reconcile', args }); },
         listNotebooks: async () => [],
 
         exportMeetingToOneNoteSection: async (...args) => { calls.push({ kind: 'onenote', args }); return { overall: 'succeeded', items: [] }; },
@@ -63,7 +65,7 @@ async function setup({ connected = true, rest = false, restFailure = false, save
     '@/lib/confluenceDraft': { ...draft, writeConfluenceDraftToClipboard: async markdown => { calls.push({ kind: 'clipboard', markdown }); return 'rich'; } },
     '@/services/confluenceExportService': { confluenceExportService: { exportPage: async args => {
       calls.push({ kind: 'confluence', args });
-      if (restFailure) throw new Error('Synthetic REST failure');
+      if (restFailure) throw new Error(typeof restFailure === 'string' ? restFailure : 'Synthetic REST failure');
       return { title: 'Page' };
     } } },
   });
@@ -149,6 +151,13 @@ test('Confluence REST and clipboard fallback preserve the same selected transcri
   assert.equal(view.errors.length, 1, 'REST failure remains visible after copying a fallback');
 });
 
+test('Confluence does not copy a browser draft when the direct publish may have landed', async () => {
+  const view = await setup({ rest: true, restFailure: 'Check Confluence and resolve the outcome in Export history.' });
+  find(view.render(), 'DropdownMenuItem', 'Confluence').props.onClick();
+  await find(view.render(), 'Button', 'Export to Confluence').props.onClick();
+  assert.deepEqual(view.calls.map(call => call.kind), ['confluence']);
+});
+
 test('failed transcript reads prevent remote exports and leave the dialog open for retry', async () => {
   const view = await setup({ readFailure: true });
   find(view.render(), 'DropdownMenuItem', 'OneDrive DOCX/PDF').props.onClick();
@@ -192,13 +201,33 @@ test('OneNote resumes with the saved content options and explicit section identi
   const call = view.calls.find(call => call.kind === 'onenote');
   assert.equal(call.args[1], 'Original title');
   assert.equal(call.args[2], '## Transcript\n\nSaved words.');
-  assert.deepEqual(call.args.slice(5), [options, 'saved-section-attempt']);
+  assert.deepEqual(call.args.slice(5), [options, 'saved-section-attempt', false]);
+});
+
+test('OneNote edits are reviewed before updating the saved section', async () => {
+  const options = { content: 'summary', speakers: false, timestamps: false };
+  const view = await setup({ resumes: [{
+    id: 'saved', pageTitle: 'Original title', sectionName: 'Original section',
+    startedAt: '2026-01-01T12:00:00Z', options, canResume: true,
+  }] });
+  await find(view.render(), 'DropdownMenuItem', 'OneNote').props.onClick();
+  const select = nodes(view.render()).find(node => node.type === 'Select' && node.props.value === 'resume');
+  select.props.onValueChange('update');
+  await find(view.render(), 'Button', 'Review changes').props.onClick();
+  assert.ok(!view.calls.some(call => call.kind === 'onenote'));
+  const draft = find(view.render(), 'Textarea');
+  assert.equal(draft.props.value, 'Edited notes');
+  draft.props.onChange({ target: { value: 'Only these reviewed notes' } });
+  await find(view.render(), 'Button', 'Update exported page').props.onClick();
+  const { args } = view.calls.find(call => call.kind === 'onenote');
+  assert.equal(args[2], 'Only these reviewed notes');
+  assert.deepEqual(args.slice(5), [options, 'saved', true]);
 });
 
 test('offline export history shows results and offers safe available links', async () => {
   const view = await setup({ connected: false, history: [
     { destination: 'OneNote', status: 'succeeded', at: '2026-01-01T12:00:00Z', webUrl: 'https://www.onenote.com/page' },
-    { destination: 'Microsoft To Do', status: 'unknown_after_submit', at: null, webUrl: null },
+    { entryKey: 'opaque-key', destination: 'Microsoft To Do', status: 'unknown_after_submit', at: null, webUrl: null },
   ] });
   find(view.render(), 'DropdownMenuItem', 'Export history').props.onClick();
   await flush();
@@ -206,4 +235,20 @@ test('offline export history shows results and offers safe available links', asy
   assert.match(text(dialog), /OneNote · Exported/);
   assert.match(text(dialog), /Microsoft To Do · Outcome unknown/);
   assert.equal(find(dialog, 'Button', 'Open').props['aria-label'], 'Open in OneNote');
+});
+
+test('export history requires an explicit finding before allowing another submission', async () => {
+  const view = await setup({ history: [
+    { entryKey: 'opaque-key', destination: 'Confluence', status: 'unknown_after_submit', at: null, webUrl: null },
+  ] });
+  await find(view.render(), 'DropdownMenuItem', 'Export history').props.onClick();
+  await flush();
+  find(view.render(), 'Button', 'Resolve outcome').props.onClick();
+  assert.equal(find(view.render(), 'Button', 'Save outcome').props.disabled, true);
+  const select = nodes(view.render()).find(node => node.type === 'Select' && node.props.value === '');
+  select.props.onValueChange('absent');
+  assert.equal(find(view.render(), 'Button', 'Allow retry').props.disabled, false);
+  find(view.render(), 'form').props.onSubmit({ preventDefault() {} });
+  await flush();
+  assert.deepEqual(view.calls, [{ kind: 'reconcile', args: ['meeting', 'opaque-key', null] }]);
 });

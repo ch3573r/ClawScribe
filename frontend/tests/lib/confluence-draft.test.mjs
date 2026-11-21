@@ -28,9 +28,30 @@ test('Confluence table pipe escaping respects even and odd backslash counts', ()
 test('Confluence draft removes app citation targets and retains readable times', () => {
   const { buildConfluenceDraftMarkdown, markdownToConfluenceHtml } = loadTsModule('src/lib/confluenceDraft.ts');
   const summaryMarkdown = '- Send draft [00:12:34](#clawscribe-source-abc123)';
-  const draft = buildConfluenceDraftMarkdown({ meetingId: 'meeting', meetingTitle: 'Notes', summaryMarkdown });
+  const draft = buildConfluenceDraftMarkdown({ meetingId: 'internal-meeting-id', meetingTitle: 'Notes', summaryMarkdown });
+  assert.ok(!draft.includes('internal-meeting-id'));
   assert.ok(draft.includes('(00:12:34)'));
   assert.ok(!draft.includes('clawscribe-source'));
   assert.ok(!markdownToConfluenceHtml(draft).includes('clawscribe-source'));
   assert.ok(summaryMarkdown.includes('clawscribe-source'));
+});
+
+test('Confluence rich copy preserves nested lists, quotes, code, and task status', () => {
+  const { markdownToConfluenceHtml } = loadTsModule('src/lib/confluenceDraft.ts');
+  const html = markdownToConfluenceHtml([
+    '- [ ] Open action',
+    '  1. Nested step',
+    '  2. Another step',
+    '- [x] Finished action',
+    '',
+    '> A quoted decision',
+    '',
+    '```html',
+    '<b>**literal**</b>',
+    '```',
+  ].join('\n'));
+  assert.match(html, /<li>☐ Open action\s*<ol>[\s\S]*<li>Another step<\/li>\s*<\/ol>\s*<\/li>/);
+  assert.match(html, /<li>☑ Finished action<\/li>/);
+  assert.match(html, /<blockquote>\s*<p>A quoted decision<\/p>\s*<\/blockquote>/);
+  assert.ok(html.includes('<pre><code>&lt;b&gt;**literal**&lt;/b&gt;</code></pre>'));
 });

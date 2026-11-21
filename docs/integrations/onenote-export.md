@@ -8,10 +8,12 @@ OneDrive/SharePoint libraries.
 ## Current UX
 
 1. User signs in to Microsoft.
-2. User resumes in a saved section or selects a notebook for a new section.
+2. User selects a saved section or selects a notebook for a new section.
 3. User chooses summary, full transcript, or both, with optional speaker labels
    and timestamps for a new section. Resume uses the original title and options.
-4. ClawScribe writes editable OneNote pages into that section.
+4. ClawScribe writes editable OneNote pages into that section. To revise a saved
+   export, choose **Update exported page**, edit or review the prepared content,
+   and confirm the update.
 5. Local export metadata prevents accidental duplicate exports.
 
 The section name is generated from the meeting title/date and sanitized for
@@ -87,11 +89,13 @@ Matching re-exports skip confirmed pages; unavailable or invalid local history
 blocks export instead of disabling duplicate protection.
 
 The section ID is saved before ClawScribe submits any pages. **Resume export**
-uses that ID, skips pages already created, and protects pages with an unknown
-outcome from a duplicate submission. Resume requires the same export content.
-Select **Create another section** to export different content or start over in a
-new destination. If section creation itself had an unknown outcome, inspect
-OneNote before taking that step. See
+uses that ID, skips pages already created, and requires the same export content.
+**Update exported page** uses the saved page ID and the permission already
+requested for editing OneNote pages. It replaces the ClawScribe content block in
+that page. For older pages without an editable export block, the reviewed content
+is saved as a revised page in the same section. Edits made in the export preview
+apply to that export. If a section or page creation outcome is unknown, inspect
+OneNote and use **Resolve outcome** in **Export history**. See
 [export history and recovery](microsoft-graph.md#export-history-and-recovery).
 
 The ledger stores:

@@ -314,8 +314,9 @@ Changed or replaced passages are flagged and require regenerated references.
 Citation coverage depends on the model; inspect the passage to check the claim.
 
 Open **Meeting actions** from a saved meeting to review suggestions from the
-summary or add follow-ups manually. Saved actions keep their owner, due date,
-completion status, and any available source reference. This works offline.
+summary and its structured action list, or add follow-ups manually. Saved
+actions keep their owner, due date, completion status, and available transcript
+evidence when the summary is edited or regenerated. This works offline.
 
 **Settings → Calendars** lets you import an `.ics` file or add a read-only
 subscription from a calendar provider. Upcoming meetings appear on Home, and
@@ -337,20 +338,21 @@ for that call after the detector observes its end. Existing Teams preferences
 remain Teams-only until you select other providers.
 See [call detection](docs/teams-detection.md).
 
-- **OneNote:** export notes or transcripts into a new section or resume in the
-  saved section ID. Both paths work without listing sections.
-- **Planner and Microsoft To Do:** review and edit action items before exporting;
-  saved export history protects supported re-export paths against duplicates.
-- **Confluence:** copy rich text into a browser draft, or publish through a
-  configured self-hosted Server/Data Center REST endpoint.
+- **OneNote** exports notes or transcripts to a new section. Use a saved section
+  to resume an export or review and update an exported page without listing
+  sections.
+- **Planner and Microsoft To Do** export selected, reviewed actions. Repeat
+  the export to repair missing notes or due dates on tasks already created.
+- **OneDrive or SharePoint** saves Word and optional PDF files. Repeating a
+  partial export reuses confirmed files and retries unfinished steps.
+- **Confluence** copies nested lists, code, quotes, and checklist status into a
+  browser draft, or publishes through a configured self-hosted REST endpoint.
 - **OpenClaw:** optional handoff of completed Meetily-compatible recording folders.
 
-**Export history** shows Microsoft export results from the meeting and travels
-with portable backups. Microsoft exports stop if duplicate-protection history
-cannot be read or saved.
-An interrupted export with an unknown outcome is not automatically repeated;
-check the destination before creating another page or task. See
-[Microsoft export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
+**Export history** shows Microsoft and Confluence results from the meeting and
+travels with portable backups. If an export has an unknown outcome, inspect the
+destination and use **Resolve outcome** to link the existing item or confirm that
+it is missing before retrying. See [export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
 
 Private-network HTTP for OpenClaw, custom OpenAI endpoints, and Confluence requires
 an explicit unencrypted-HTTP opt-in in Settings. Existing private HTTP setups

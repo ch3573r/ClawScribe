@@ -9,7 +9,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::exports::error::GraphErrorKind;
-use crate::exports::transport::{GraphRequest, GraphResponse, GraphTransport, TransportError};
+use crate::exports::transport::{
+    GraphBinaryRequest, GraphBinaryResponse, GraphRequest, GraphResponse, GraphTransport,
+    TransportError,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
@@ -109,6 +112,30 @@ impl<T: GraphTransport, S: Sleeper> GraphClient<T, S> {
         self.execute_with(request, bearer_token, true).await
     }
 
+    pub(super) async fn execute_binary(
+        &self,
+        request: &GraphBinaryRequest,
+        token: &str,
+    ) -> Result<GraphBinaryResponse, TransportError> {
+        let mut attempt = 1;
+        loop {
+            let response = self.transport.send_binary(request, Some(token)).await?;
+            let rejected = response.status == 429;
+            let unavailable_read = request.method == "GET" && response.status == 503;
+            if (!rejected && !unavailable_read) || attempt >= self.policy.max_attempts {
+                return Ok(response);
+            }
+            self.sleeper
+                .sleep(backoff_delay(
+                    attempt,
+                    response.retry_after_secs,
+                    &self.policy,
+                ))
+                .await;
+            attempt += 1;
+        }
+    }
+
     async fn execute_with(
         &self,
         request: &GraphRequest,
@@ -120,7 +147,7 @@ impl<T: GraphTransport, S: Sleeper> GraphClient<T, S> {
             match self.transport.send(request, bearer_token).await {
                 Ok(resp) if resp.is_success() => return GraphOutcome::Success(resp),
                 Ok(resp) => {
-                    if is_create && resp.status >= 500 {
+                    if is_create && (resp.status >= 500 || resp.status == 408) {
                         return GraphOutcome::Unknown(
                             "The service did not confirm creation.".into(),
                         );

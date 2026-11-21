@@ -11,7 +11,7 @@ other summary providers.
 - Refresh-token storage through the platform credential store, with a
   current-user DPAPI-encrypted file fallback on Windows.
 - Calendar read for current/next meeting context and invited attendees.
-- OneNote notebook discovery/creation and export.
+- OneNote notebook discovery, creation, export, and reviewed updates by saved ID.
 - Planner plan/bucket discovery, optional bucket creation, task preview, and
   selected task export.
 - Microsoft To Do list discovery, task preview, and selected personal task
@@ -126,6 +126,7 @@ ClawScribe should therefore:
 - create a fresh dated section for an export
 - write notes/transcript pages under that section
 - use a known saved section ID only when one is already available
+- review and apply changes by saved page ID when the page has an editable export block
 - avoid making section listing a required export step
 
 See [onenote-export.md](onenote-export.md).
@@ -175,25 +176,33 @@ Graph failures should not delete local meeting artifacts.
 ## Export History And Recovery
 
 Choose **Export history** from a meeting’s export menu to see results and their
-dates. **Open** is available when Microsoft supplied a usable link. The history
-is stored in app data and included in portable library backups.
+dates. **Open** is available when Microsoft supplied a usable link. History
+includes Confluence direct publishing and travels with portable library backups.
 
-OneNote page and Planner/To Do task creation save a pending attempt locally before
-contacting Graph, then save each result. Completed items survive an interrupted
-batch and are skipped on a matching re-export. Exports run one at a time so
-separate dialogs cannot overwrite each other's history.
+OneNote, Planner, To Do, OneDrive, and Confluence record attempts before submitting
+creates and save each result. Completed items survive interrupted batches. Planner
+descriptions and To Do notes and due dates have separate completion state from
+task creation. A matching export checks incomplete fields on the saved task and
+fills missing values while preserving populated fields. Older task history with
+a saved ID is checked the first time the task is re-exported.
+
+OneDrive saves the Word file, PDF, and optional organization links independently.
+Repeating the same content in the same destination uses the confirmed Word ID
+for unfinished PDF conversion and reuses completed files and links. Changed
+content exports as a new file revision. The same directory can therefore keep
+several revisions of a meeting’s notes.
 
 Unreadable or invalid history blocks export. A history write failure stops the
 batch; it never silently disables duplicate protection. Restore access to the
 existing history before retrying rather than deleting it.
 
-If a response is lost, the app restarts during submission, or a result cannot be
-saved locally, an item can have an **unknown outcome** (`unknown_after_submit`).
-ClawScribe cannot determine from that state whether Microsoft created it and
-will not automatically submit that item again. Inspect the selected destination
-for the page or task before taking further action. There is no automatic remote
-reconciliation or reset control for these entries. A saved task keeps its identity
-across edits, and choosing a different destination starts a separate export.
+If a response is lost, the app restarts during submission, or the result cannot
+be saved locally, an item can have an **unknown outcome**. Inspect the selected
+destination, then choose **Resolve outcome** on that item. If it exists, enter
+its remote ID to preserve it. If you confirmed it is missing, choose **Allow
+retry** and start the export again. Saving the outcome changes local history.
+A saved task keeps its identity across edits and is scoped to the selected
+account and destination.
 
 Older Planner and To Do exports identified summary suggestions by title and
 position. When a title matches several past tasks, or several suggestions match
@@ -201,9 +210,10 @@ one past task, ClawScribe marks the affected tasks for review. Check the selecte
 destination for existing tasks. Open **Meeting actions**, use **Add action** for
 each task you confirm is new, and save those actions before exporting them.
 
-OneNote records the created section before submitting pages. Resume reuses that
-section with the same content and skips pages whose history protects them from a
-duplicate submission.
+OneNote saves the section ID before submitting pages. **Resume export** uses
+the saved section and original content options. **Update exported page** opens
+a review of the edited content and uses the saved page or section ID. Both
+operations work without enumerating sections.
 
 ## Test And Review Checklist
 

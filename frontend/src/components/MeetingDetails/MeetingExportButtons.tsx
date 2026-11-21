@@ -22,6 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import {
@@ -157,6 +158,11 @@ export function MeetingExportButtons({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<MeetingExportHistory[] | null>(null);
   const [historyError, setHistoryError] = useState("");
+  const [reviewItem, setReviewItem] = useState<MeetingExportHistory | null>(null);
+  const [reviewOutcome, setReviewOutcome] = useState("");
+  const [remoteId, setRemoteId] = useState("");
+  const [savingReview, setSavingReview] = useState(false);
+  const [reviewError, setReviewError] = useState("");
   const [busy, setBusy] = useState<Busy>(null);
   const pending = useRef(false);
   const [documentDestination, setDocumentDestination] = useState<DocumentDestination | null>(null);
@@ -171,6 +177,8 @@ export function MeetingExportButtons({
   const [resumes, setResumes] = useState<OneNoteResume[] | null>(null);
   const [resumeError, setResumeError] = useState("");
   const [resumeId, setResumeId] = useState("new");
+  const [replaceOneNotePage, setReplaceOneNotePage] = useState(false);
+  const [oneNoteDraft, setOneNoteDraft] = useState<string | null>(null);
   const selectedResume = resumes?.find(attempt => attempt.id === resumeId);
   const showNewSection = resumes !== null && !selectedResume;
   const [plannerOpen, setPlannerOpen] = useState(false);
@@ -253,6 +261,7 @@ export function MeetingExportButtons({
 
   const openHistory = useCallback(async () => {
     setHistoryOpen(true);
+    setReviewItem(null);
     setHistory(null);
     setHistoryError("");
     try {
@@ -261,6 +270,30 @@ export function MeetingExportButtons({
       setHistoryError(errorText(error));
     }
   }, [meetingId]);
+
+  function selectReview(item: MeetingExportHistory) {
+    setReviewItem(item);
+    setReviewOutcome("");
+    setRemoteId("");
+    setReviewError("");
+  }
+
+  async function reconcileExport() {
+    if (!reviewItem || pending.current || !reviewOutcome || (reviewOutcome === "exists" && !remoteId.trim())) return;
+    pending.current = true;
+    setSavingReview(true);
+    setReviewError("");
+    try {
+      await microsoftExportService.reconcileMeetingExport(meetingId, reviewItem.entryKey,
+        reviewOutcome === "exists" ? remoteId.trim() : null);
+      await openHistory();
+    } catch (error) {
+      setReviewError(errorText(error));
+    } finally {
+      pending.current = false;
+      setSavingReview(false);
+    }
+  }
 
   const reportToast = useCallback(
     (
@@ -284,7 +317,7 @@ export function MeetingExportButtons({
         });
       } else {
         const description = report.items.some(item => item.status === "unknownaftersubmit")
-          ? "Check Microsoft before retrying an export with an unknown outcome."
+          ? "Check the destination and resolve the outcome in Export history."
           : report.items.some(item => item.code === TASK_IDENTITY_REVIEW_CODE)
             ? "Check the tasks marked for review before exporting again."
             : report.items.some(item => item.status === "failedauth")
@@ -317,6 +350,8 @@ export function MeetingExportButtons({
 
   const openOneNote = useCallback(async () => {
     setExportOptions(defaultExportOptions());
+    setReplaceOneNotePage(false);
+    setOneNoteDraft(null);
     const saved = getExportDestinations();
     const generatedTitle = defaultDatedTitle(meetingTitle, meetingCreatedAt);
     setOneNoteNotebookId(saved.notebookId ?? "");
@@ -332,26 +367,38 @@ export function MeetingExportButtons({
 
   const confirmOneNote = useCallback(async () => {
     if (pending.current || !resumes || selectedResume?.canResume === false) return;
-    const pageTitle = selectedResume?.pageTitle ?? (oneNotePageTitle.trim() || defaultDatedTitle(meetingTitle, meetingCreatedAt));
+    const replaceExisting = !!selectedResume && replaceOneNotePage;
+    const pageTitle = selectedResume && !replaceExisting
+      ? selectedResume.pageTitle
+      : oneNotePageTitle.trim() || defaultDatedTitle(meetingTitle, meetingCreatedAt);
     const sectionName = sanitizeSectionName(oneNoteSectionName).trim();
     if (!selectedResume && (!oneNoteNotebookId || !sectionName)) return;
-    const options = selectedResume?.options ?? exportOptions;
+    const options = replaceExisting ? exportOptions : selectedResume?.options ?? exportOptions;
     pending.current = true;
     setBusy("onenote");
     try {
-      const { markdown: md } = await prepareMeetingExport(meetingId, getMarkdown, options);
+      const md = replaceExisting && oneNoteDraft !== null ? oneNoteDraft
+        : (await prepareMeetingExport(meetingId, getMarkdown, options)).markdown;
+      if (replaceExisting && oneNoteDraft === null) {
+        setOneNoteDraft(md);
+        return;
+      }
       if (!selectedResume) {
         const notebookName = oneNoteNotebooks.find(n => n.id === oneNoteNotebookId)?.displayName ?? oneNoteSavedNotebookName ?? undefined;
         setExportDestinations({ notebookId: oneNoteNotebookId, notebookName, sectionId: undefined, sectionName: undefined });
       }
       const report = await microsoftExportService.exportMeetingToOneNoteSection(
-        meetingId, pageTitle, md, oneNoteNotebookId, sectionName, options, selectedResume?.id ?? null,
+        meetingId, pageTitle, md, oneNoteNotebookId, sectionName, options, selectedResume?.id ?? null, replaceExisting,
       );
-      reportToast("OneNote", report);
+      if (replaceExisting && report.overall === "succeeded") toast.success("OneNote export saved");
+      else reportToast("OneNote", report);
       if (report.overall === "succeeded") setOneNoteOpen(false);
       else await loadResumes();
     } catch (error) {
-      toast.error("OneNote export failed", { description: errorText(error) });
+      const description = errorText(error);
+      toast.error("OneNote export failed", { description, action: /export history/i.test(description)
+        ? { label: "View history", onClick: () => { setOneNoteOpen(false); void openHistory(); } }
+        : undefined });
       // Section creation may already have been checkpointed before the failure.
       if (!selectedResume) await loadResumes();
     } finally {
@@ -359,7 +406,8 @@ export function MeetingExportButtons({
       setBusy(null);
     }
   }, [getMarkdown, exportOptions, loadResumes, meetingCreatedAt, meetingId, meetingTitle, oneNoteNotebookId,
-    oneNoteNotebooks, oneNoteSavedNotebookName, oneNotePageTitle, oneNoteSectionName, reportToast, resumes, selectedResume]);
+    oneNoteNotebooks, oneNoteSavedNotebookName, oneNotePageTitle, oneNoteSectionName, reportToast, resumes, selectedResume,
+    replaceOneNotePage, oneNoteDraft, openHistory]);
 
   const selectedNotebookMissing =
     !!oneNoteNotebookId && !oneNoteNotebooks.some((n) => n.id === oneNoteNotebookId);
@@ -394,7 +442,6 @@ export function MeetingExportButtons({
       const { markdown: md } = await prepareMeetingExport(meetingId, getMarkdown, exportOptions);
 
       const draft = buildConfluenceDraftMarkdown({
-        meetingId,
         meetingTitle,
         meetingCreatedAt,
         summaryMarkdown: md,
@@ -422,6 +469,7 @@ export function MeetingExportButtons({
 
         try {
           const report = await confluenceExportService.exportPage({
+            meetingId,
             baseUrl,
             spaceKey,
             parentId: confluenceParentId?.trim() || null,
@@ -431,13 +479,21 @@ export function MeetingExportButtons({
 
           setDocumentDestination(null);
           toast.success("Confluence export complete", {
-            description: report.webUrl ? "Page created in Confluence." : report.title,
+            description: report.title,
             action: report.webUrl
               ? { label: "Open", onClick: () => openExternal(report.webUrl!) }
               : undefined,
           });
           return;
         } catch (restError) {
+          if (/export history/i.test(errorText(restError))) {
+            setDocumentDestination(null);
+            toast.warning("Confluence export needs review", {
+              description: errorText(restError),
+              action: { label: "View history", onClick: () => void openHistory() },
+            });
+            return;
+          }
           const copyMode = await writeConfluenceDraftToClipboard(draft);
           if (url && confluenceOpenAfterCopy) {
             openExternal(url);
@@ -473,7 +529,7 @@ export function MeetingExportButtons({
       pending.current = false;
       setBusy(null);
     }
-  }, [getMarkdown, exportOptions, meetingCreatedAt, meetingId, meetingTitle]);
+  }, [getMarkdown, exportOptions, meetingCreatedAt, meetingId, meetingTitle, openHistory]);
 
   const exportOneDrive = useCallback(async () => {
     if (pending.current) return;
@@ -485,7 +541,7 @@ export function MeetingExportButtons({
       const destinations = getExportDestinations();
       const response = await microsoftExportService.exportMeetingToOneDriveFiles({
         meetingId,
-        meetingTitle: defaultDatedTitle(meetingTitle, meetingCreatedAt),
+        meetingTitle: meetingCreatedAt ? defaultDatedTitle(meetingTitle, meetingCreatedAt) : meetingTitle,
         markdown: summary,
         transcript,
         destination: destinations.oneDriveDestination ?? null,
@@ -499,6 +555,13 @@ export function MeetingExportButtons({
         null;
       const kinds = response.files.map((file) => file.kind.toUpperCase()).join(" + ");
       setDocumentDestination(null);
+      if (response.issues?.length) {
+        toast.warning(kinds ? "OneDrive export partially complete" : "OneDrive export needs attention", {
+          description: [kinds && `${kinds} in ${response.destination.name}.`, ...response.issues].filter(Boolean).join(" "),
+          action: { label: "View history", onClick: () => void openHistory() },
+        });
+        return;
+      }
       toast.success("OneDrive export complete", {
         description: `${kinds || "Files"} uploaded to ${response.destination.name}.`,
         action: openUrl
@@ -506,14 +569,18 @@ export function MeetingExportButtons({
           : undefined,
       });
     } catch (e) {
+      const description = errorText(e);
       toast.error("OneDrive export failed", {
-        description: errorText(e),
+        description,
+        action: /export history/i.test(description)
+          ? { label: "View history", onClick: () => { setDocumentDestination(null); void openHistory(); } }
+          : undefined,
       });
     } finally {
       pending.current = false;
       setBusy(null);
     }
-  }, [getMarkdown, exportOptions, meetingCreatedAt, meetingId, meetingTitle]);
+  }, [getMarkdown, exportOptions, meetingCreatedAt, meetingId, meetingTitle, openHistory]);
 
   const exportWord = async () => {
     if (pending.current) return;
@@ -608,26 +675,49 @@ export function MeetingExportButtons({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
+      <Dialog open={historyOpen} onOpenChange={open => { if (!savingReview) setHistoryOpen(open); }}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Export history</DialogTitle>
-            <DialogDescription>OneNote pages and tasks exported to Planner or Microsoft To Do from this meeting.</DialogDescription>
+            <DialogDescription>Remote exports from this meeting and any results that need review.</DialogDescription>
           </DialogHeader>
           {historyError && <div className="space-y-2">
             <p role="alert" className="text-sm text-destructive">{historyError}</p>
             <Button type="button" variant="outline" onClick={() => void openHistory()}>Retry loading</Button>
           </div>}
           {!history && !historyError && <p role="status" className="text-sm text-muted-foreground">Loading export history…</p>}
-          {history?.length === 0 && <p className="text-sm text-muted-foreground">No Microsoft exports recorded for this meeting.</p>}
-          {history?.some(item => item.status === "unknown_after_submit") && <p className="text-sm text-muted-foreground">Check Microsoft for exports with an unknown outcome before trying again.</p>}
-          {!!history?.length && <ul className="divide-y divide-border">
-            {history.map((item, index) => <li key={index} className="flex items-center gap-3 py-2 text-sm">
+          {history?.length === 0 && <p className="text-sm text-muted-foreground">No remote exports recorded for this meeting.</p>}
+          {reviewItem && <form className="space-y-3" onSubmit={event => { event.preventDefault(); void reconcileExport(); }}>
+            <p className="text-sm">Check {reviewItem.destination} for {reviewItem.displayName ? `“${reviewItem.displayName}”` : "the exported item"}, then record what you found.</p>
+            <Label htmlFor="export-review-outcome">What did you find?</Label>
+            <Select value={reviewOutcome} onValueChange={setReviewOutcome} disabled={savingReview}>
+              <SelectTrigger id="export-review-outcome"><SelectValue placeholder="Choose an outcome" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="exists">I found the exported item</SelectItem>
+                <SelectItem value="absent">I confirmed the item is missing</SelectItem>
+              </SelectContent>
+            </Select>
+            {reviewOutcome === "exists" && <div className="space-y-2">
+              <Label htmlFor="export-review-id">ID of the existing item</Label>
+              <Input id="export-review-id" maxLength={512} value={remoteId} onChange={event => setRemoteId(event.target.value)} disabled={savingReview} />
+            </div>}
+            {reviewError && <p role="alert" className="text-sm text-destructive">{reviewError}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setReviewItem(null)} disabled={savingReview}>Cancel</Button>
+              <Button type="submit" disabled={savingReview || !reviewOutcome || (reviewOutcome === "exists" && !remoteId.trim())}>
+                {reviewOutcome === "absent" ? "Allow retry" : "Save outcome"}
+              </Button>
+            </div>
+          </form>}
+          {!reviewItem && !!history?.length && <ul className="divide-y divide-border">
+            {history.map((item, index) => <li key={item.entryKey ?? index} className="flex items-center gap-3 py-2 text-sm">
               <div className="flex-1">
                 <p>{item.destination} · {historyStatus(item.status)}</p>
+                {item.displayName && <p className="break-words text-xs text-muted-foreground">{item.displayName}</p>}
                 {item.at && <time className="text-xs text-muted-foreground" dateTime={item.at}>{new Date(item.at).toLocaleString()}</time>}
               </div>
               {item.webUrl && <Button type="button" variant="outline" size="sm" aria-label={`Open in ${item.destination}`} onClick={() => void openExternal(item.webUrl!)}>Open</Button>}
+              {item.status === "unknown_after_submit" && <Button type="button" variant="outline" size="sm" onClick={() => selectReview(item)}>Resolve outcome</Button>}
             </li>)}
           </ul>}
         </DialogContent>
@@ -649,7 +739,7 @@ export function MeetingExportButtons({
             {!resumes && !resumeError && <p role="status" className="text-sm text-muted-foreground">Loading saved sections…</p>}
             {!!resumes?.length && <div className="space-y-2">
               <Label htmlFor="onenote-export-section">Section</Label>
-              <Select value={resumeId} onValueChange={setResumeId} disabled={busy === "onenote"}>
+              <Select value={resumeId} onValueChange={id => { setResumeId(id); setReplaceOneNotePage(false); setOneNoteDraft(null); }} disabled={busy === "onenote"}>
                 <SelectTrigger id="onenote-export-section"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {resumes.map(attempt => <SelectItem key={attempt.id} value={attempt.id}>{attempt.sectionName} · {new Date(attempt.startedAt).toLocaleString()}</SelectItem>)}
@@ -657,9 +747,32 @@ export function MeetingExportButtons({
                 </SelectContent>
               </Select>
             </div>}
-            {selectedResume && <p className="text-sm text-muted-foreground">{selectedResume.canResume
-              ? "Resume with the original title and content options. Previously created pages will be skipped."
-              : "The section creation outcome is unknown. Check OneNote before creating another section."}</p>}
+            {selectedResume?.canResume && <div className="space-y-2">
+              <Label htmlFor="onenote-saved-page-action">Saved page action</Label>
+              <Select value={replaceOneNotePage ? "update" : "resume"} onValueChange={value => {
+                setReplaceOneNotePage(value === "update");
+                setOneNoteDraft(null);
+                setOneNotePageTitle(selectedResume.pageTitle);
+                setExportOptions(selectedResume.options ?? defaultExportOptions());
+              }} disabled={busy === "onenote"}>
+                <SelectTrigger id="onenote-saved-page-action"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="resume">Resume export</SelectItem>
+                  <SelectItem value="update">Update exported page</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>}
+            {selectedResume && !selectedResume.canResume && <p className="text-sm text-muted-foreground">Check OneNote and resolve this section in Export history.</p>}
+            {selectedResume && replaceOneNotePage && <>
+              <Label htmlFor="onenote-updated-title">Page title</Label>
+              <Input id="onenote-updated-title" value={oneNotePageTitle} onChange={event => setOneNotePageTitle(event.target.value)} disabled={busy === "onenote"} />
+              <ExportContentOptions value={exportOptions} onChange={options => { setExportOptions(options); setOneNoteDraft(null); }} disabled={busy !== null} />
+              {oneNoteDraft !== null && <>
+                <Label htmlFor="onenote-page-draft">Review page content</Label>
+                <Textarea id="onenote-page-draft" value={oneNoteDraft} onChange={event => setOneNoteDraft(event.target.value)} disabled={busy === "onenote"} rows={8} />
+                <p className="text-xs text-muted-foreground">Updating replaces the exported content in the saved page. Older exports may receive a revised page in the same section.</p>
+              </>}
+            </>}
             {showNewSection && <>
               <ExportContentOptions value={exportOptions} onChange={setExportOptions} disabled={busy !== null} />
               <div className="space-y-2">
@@ -796,10 +909,10 @@ export function MeetingExportButtons({
             <Button
               type="button"
               onClick={confirmOneNote}
-              disabled={busy === "onenote" || !resumes || selectedResume?.canResume === false || (!selectedResume && (!oneNoteNotebookId || !oneNoteSectionName.trim()))}
+              disabled={busy === "onenote" || !resumes || selectedResume?.canResume === false || (replaceOneNotePage && oneNoteDraft !== null && !oneNoteDraft.trim()) || (!selectedResume && (!oneNoteNotebookId || !oneNoteSectionName.trim()))}
             >
               {busy === "onenote" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {selectedResume ? "Resume export" : resumes?.length ? "Create another section" : "Export page"}
+              {selectedResume ? (replaceOneNotePage ? (oneNoteDraft === null ? "Review changes" : "Update exported page") : "Resume export") : resumes?.length ? "Create another section" : "Export page"}
             </Button>
           </DialogFooter>
         </DialogContent>

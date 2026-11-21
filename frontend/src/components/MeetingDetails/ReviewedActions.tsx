@@ -83,7 +83,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
 
   function importSuggestions() {
     void run(async () => {
-      const suggestions = await invoke<ReviewedAction[]>("suggest_meeting_actions", { markdown: await getMarkdown(), reviewed: actions });
+      const suggestions = await invoke<ReviewedAction[]>("suggest_meeting_actions", { meetingId, markdown: await getMarkdown(), reviewed: actions });
       const additional = suggestions.slice(0, 250 - actions.length);
       setActions([...actions, ...additional]);
       if (!additional.length) setNotice("No new action suggestions found in the meeting summary.");
@@ -98,7 +98,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
   function inspectSource(action: ReviewedAction) {
     void run(async () => {
       setSource(null);
-      const passage = await invoke<ResolvedSummarySource>("api_resolve_summary_source", { meetingId, key: action.sourceKey });
+      const passage = await invoke<ResolvedSummarySource>("resolve_reviewed_action_source", { meetingId, actionId: action.id, key: action.sourceKey });
       setSource({ actionId: action.id, passage });
     });
   }
