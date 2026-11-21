@@ -303,7 +303,7 @@ export default function PageContent({
 
   // Space, arrows, speed, follow, bookmark and find. Resolved by playback-controls,
   // which stands down while typing, in dialogs and menus, and on controls that own the key.
-  usePlaybackShortcuts({
+  const playerBindings = usePlaybackShortcuts({
     toggle: isAudioReady ? handleTimelinePlayPause : undefined,
     seek: isAudioReady ? ({ seconds }) => { void audioPlayer.seekBy(seconds); } : undefined,
     rate: isAudioReady ? ({ direction }) => audioPlayer.setRate(stepPlaybackRate(audioPlayer.rate, direction)) : undefined,
@@ -350,6 +350,7 @@ export default function PageContent({
           templates={templates.availableTemplates} remembered={templates.seriesTemplate} />} />
       {isAudioReady && (
         <SpeakerLaneTimeline
+          bindings={playerBindings}
           key={meeting.id}
           segments={timelineSegments ?? []}
           showSpeakerAttribution={showSpeakerAttribution}
@@ -370,6 +371,7 @@ export default function PageContent({
       )}
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
         <TranscriptPanel
+          bindings={playerBindings}
           focusedBookmark={focusedBookmark}
           openTranscription={archiveAction === 'transcribe'}
           focusedSource={focusedSource}

@@ -228,12 +228,17 @@ changes the position and keeps the current play or pause state.
   hand, so it never fights the reader. It is on by default and applies while audio plays.
 - Bookmarks are drawn on the timeline and seek when chosen.
 
-Keyboard shortcuts work while the meeting page is open and stand down whenever you
-type (text fields and the summary editor), inside dialogs and menus, and on controls
-that already use the key (a focused button keeps Space; a focused slider keeps the
-arrows). Key combinations with Ctrl, Alt or Meta are never taken, except Ctrl+F.
+In **Settings → Shortcuts → Saved meeting player**, select an action and press
+a key or key combination. Each seek distance and speed direction has its own
+binding. The player remembers changes on this device and lists the current keys
+under **Playback shortcuts**. **Reset player shortcuts** restores the defaults
+below. Global recording shortcuts have their own reset.
 
-| Key | Action |
+Player shortcuts work while the saved meeting is open. Text fields, the summary
+editor, dialogs and menus keep their keyboard controls. Space still activates a
+focused button, and the arrows still move a focused slider.
+
+| Default key | Action |
 | --- | --- |
 | Space | Play or pause |
 | Left, Right | Back or forward 5 seconds (hold Shift for 15) |

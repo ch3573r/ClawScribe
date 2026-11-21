@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.65.0
+## 0.65.1
+
+- Floating controls open automatically when recording starts. Turn this off under **Settings → Recording → Capture**, or close the window for a single recording.
+- Customize the ten saved-meeting player shortcuts under **Settings → Shortcuts**. The player help shows the saved keys. Playback shortcuts and global recording shortcuts reset independently.
+- The stable Windows update includes **Join and record**, unified search, one-question review of selected personal notes, and the recording fixes in the 0.65.0 candidate.
+- [Windows release notes](docs/releases/0.65.1.md).
+
+## 0.65.0 (unpublished candidate)
 
 - Choose **Join and record** from an upcoming Teams invitation. A saved calendar choice now expires five minutes after the event ends.
 - Open floating controls during a recording to check both audio levels, add a timestamped note or bookmark, and stop recording.

@@ -1,3 +1,5 @@
+import { DEFAULT_PLAYER_BINDINGS, playerActionForChord, playerChord, type PlayerBindings } from './player-bindings';
+
 /**
  * Playback speed and keyboard shortcuts for the saved-meeting audio player.
  * Pure helpers: no DOM access beyond reading the event target, so the rules
@@ -6,8 +8,6 @@
 
 export const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
 export const DEFAULT_PLAYBACK_RATE = 1;
-export const SEEK_STEP_SECONDS = 5;
-export const SEEK_STEP_LARGE_SECONDS = 15;
 export const PLAYBACK_RATE_STORAGE_KEY = 'clawscribe.playbackRate';
 
 /** The nearest supported speed; anything unusable falls back to normal speed. */
@@ -75,47 +75,18 @@ export function isTextEntry(target: ShortcutTarget | null | undefined): boolean 
   return Boolean(target.closest?.('[contenteditable=""],[contenteditable="true"],[role="textbox"]'));
 }
 
-/**
- * The playback action a key press means, or null when the key belongs to
- * something else: a text field, the summary editor, a dialog or menu, a
- * control that already handles that key, or a key combined with a modifier.
- */
-export function resolvePlaybackShortcut(event: ShortcutEvent): PlaybackShortcut | null {
+/** Leave typing, menus, dialogs and the focused control's own navigation keys alone. */
+export function resolvePlaybackShortcut(event: ShortcutEvent, bindings: PlayerBindings = DEFAULT_PLAYER_BINDINGS): PlaybackShortcut | null {
   if (event.defaultPrevented || event.isComposing) return null;
-  const target = event.target ?? null;
+  const target = event.target;
   if (target && (isTextEntry(target) || target.closest?.(MODAL_SURFACE))) return null;
-  const key = event.key;
-  const modifier = Boolean(event.ctrlKey || event.metaKey);
-
-  if (modifier && !event.altKey && !event.shiftKey && key.toLowerCase() === 'f') return { type: 'find' };
-  if (modifier || event.altKey) return null;
-
   const tag = target?.tagName?.toUpperCase() ?? '';
   const targetRole = target ? role(target) : '';
-  switch (key) {
-    case ' ':
-      if (event.repeat || ACTIVATES_ON_SPACE.has(tag) || OWNS_SPACE.has(targetRole)) return null;
-      return { type: 'toggle' };
-    case 'ArrowLeft':
-    case 'ArrowRight': {
-      if (OWNS_ARROWS.has(targetRole)) return null;
-      const seconds = event.shiftKey ? SEEK_STEP_LARGE_SECONDS : SEEK_STEP_SECONDS;
-      return { type: 'seek', seconds: key === 'ArrowLeft' ? -seconds : seconds };
-    }
-    case '<': return { type: 'rate', direction: -1 };
-    case '>': return { type: 'rate', direction: 1 };
-    case 'f': case 'F': return event.repeat ? null : { type: 'follow' };
-    case 'b': case 'B': return event.repeat ? null : { type: 'bookmark' };
-    default: return null;
-  }
-}
+  if ((event.key === ' ' || event.key === 'Enter') && (ACTIVATES_ON_SPACE.has(tag) || OWNS_SPACE.has(targetRole))) return null;
+  if (/^(Arrow(Left|Right|Up|Down)|Home|End|PageUp|PageDown)$/.test(event.key) && OWNS_ARROWS.has(targetRole)) return null;
 
-export const PLAYBACK_SHORTCUT_HELP: readonly { keys: string; action: string }[] = [
-  { keys: 'Space', action: 'Play or pause' },
-  { keys: '← →', action: 'Back or forward 5 seconds' },
-  { keys: 'Shift + ← →', action: 'Back or forward 15 seconds' },
-  { keys: '< >', action: 'Slower or faster' },
-  { keys: 'F', action: 'Follow playback in the transcript' },
-  { keys: 'B', action: 'Add a bookmark at this moment' },
-  { keys: 'Ctrl + F', action: 'Find in transcript' },
-];
+  const chord = playerChord(event);
+  const command = chord && playerActionForChord(bindings, chord)?.command;
+  if (!command || (event.repeat && command.type !== 'seek' && command.type !== 'rate')) return null;
+  return command;
+}

@@ -34,7 +34,7 @@ test('start remediation uses native error codes, not words in raw error text', (
   assert.equal(liveModelStartFailure('live_model:unknown'), null);
 });
 
-test('Recording settings keeps audio-only saving read-only and rolls back rejected device saves', async t => {
+function recordingSettings(t, { preferences, save }) {
   const hook = createHookHarness();
   t.after(() => hook.unmount());
   const calls = [];
@@ -45,8 +45,8 @@ test('Recording settings keeps audio-only saving read-only and rolls back reject
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push([command, args]);
-      if (command === 'set_recording_preferences') throw new Error('could not save');
-      return { auto_save: false, file_format: 'mp4', preferred_mic_device: preferred.micDevice, preferred_system_device: null };
+      if (command === 'get_recording_preferences') return preferences();
+      if (command === 'set_recording_preferences') return save(args.preferences);
     } },
     '@/components/ui/switch': { Switch: 'Switch' },
     '@/components/ui/button': { Button: 'Button' },
@@ -69,6 +69,19 @@ test('Recording settings keeps audio-only saving read-only and rolls back reject
   const nodes = root => Array.isArray(root) ? root.flatMap(nodes) :
     root && typeof root === 'object' ? [root, ...nodes(root.props.children)] : [];
   const find = predicate => nodes(hook.render(() => RecordingSettings({}))).find(predicate);
+  return { calls, find, remount: () => hook.reset() };
+}
+
+const recordingPreferences = {
+  save_folder: 'Recordings', auto_save: false, file_format: 'mp4',
+  preferred_mic_device: 'Desk mic (input)', preferred_system_device: null,
+};
+
+test('Recording settings keeps audio-only saving read-only and rolls back rejected device saves', async t => {
+  const { calls, find } = recordingSettings(t, {
+    preferences: () => recordingPreferences,
+    save() { throw new Error('could not save'); },
+  });
   find(() => false);
   await flush();
   calls.length = 0;
@@ -89,6 +102,27 @@ test('Recording settings keeps audio-only saving read-only and rolls back reject
   }
   assert.deepEqual(calls.map(([command]) => command), ['set_recording_preferences', 'error']);
   assert.equal(devices().selectedDevices.micDevice, 'Desk mic (input)');
+});
+
+test('automatic floating controls can be turned off in Recording settings and back on after reopening', async t => {
+  let stored = { ...recordingPreferences, auto_open_floating_controls: true };
+  const { find, remount } = recordingSettings(t, {
+    preferences: () => ({ ...stored }),
+    save(next) { stored = { ...next }; },
+  });
+  const toggle = () => find(node => node.type === 'Switch' && node.props.id === 'auto-open-floating-controls');
+  toggle();
+  await flush();
+  assert.ok(toggle(), 'Recording settings must offer the automatic floating controls switch');
+  assert.equal(toggle().props.checked, true);
+  await toggle().props.onCheckedChange(false);
+  assert.deepEqual(stored, { ...recordingPreferences, auto_open_floating_controls: false });
+  remount();
+  toggle();
+  await flush();
+  assert.equal(toggle().props.checked, false);
+  await toggle().props.onCheckedChange(true);
+  assert.equal(stored.auto_open_floating_controls, true);
 });
 
 test('Home labels native live and hosted file transcription separately and can recheck disconnected devices', t => {

@@ -42,6 +42,15 @@ test('playback keys map to actions on the page itself', () => {
   assert.equal(press('x'), null);
 });
 
+test('the speed symbols follow the active layout without swallowing additional modifiers', () => {
+  // Browser KeyboardEvent properties are prototype accessors, not own properties.
+  const shiftedAngle = Object.create({ key: '<', code: 'Comma', shiftKey: true });
+  assert.deepEqual(plain(resolvePlaybackShortcut(shiftedAngle)), { type: 'rate', direction: -1 });
+  const ctrlAngle = Object.create({ key: '<', code: 'Comma', shiftKey: true, ctrlKey: true });
+  assert.equal(resolvePlaybackShortcut(ctrlAngle), null);
+  assert.deepEqual(plain(resolvePlaybackShortcut(ctrlAngle, { slower: 'Ctrl+<' })), { type: 'rate', direction: -1 });
+});
+
 test('shortcuts never steal typing, dialogs, menus or the control that owns the key', () => {
   for (const target of [
     element('INPUT'), element('TEXTAREA'), element('SELECT'),

@@ -911,6 +911,8 @@ pub fn run() {
             // Global keyboard shortcuts
             shortcuts::get_shortcuts,
             shortcuts::set_shortcuts,
+            shortcuts::set_shortcut_capture,
+            shortcuts::shortcut_key_characters,
             // Recording pause/resume commands
             audio::recording_commands::pause_recording,
             audio::recording_commands::resume_recording,

@@ -642,9 +642,11 @@ fn store_recording_manager(manager: RecordingManager) {
 fn activate_recording<R: Runtime>(
     app: &AppHandle<R>,
     transcribes: bool,
+    auto_open_floating_controls: bool,
     receiver: transcription::queue::TranscriptionQueueReceiver,
     sink: super::recording_manager::LiveTranscriptSink,
 ) {
+    let controls_session = auto_open_floating_controls.then(|| sink.session_id.clone());
     LIVE_TRANSCRIPTION.store(transcribes, Ordering::SeqCst);
     let mut task = TRANSCRIPTION_TASK.lock().unwrap();
     RECORDING_EPOCH.fetch_add(1, Ordering::AcqRel);
@@ -652,6 +654,9 @@ fn activate_recording<R: Runtime>(
     *task =
         transcribes.then(|| transcription::start_transcription_task(app.clone(), receiver, sink));
     drop(task);
+    if let Some(id) = controls_session {
+        floating::open_on_start(app.clone(), id);
+    }
     crate::teams_detection::monitor::join::cancel_pending(app);
 }
 
@@ -862,7 +867,13 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     store_recording_manager(manager);
     *RECORDING_JOB.lock().unwrap() = Some(job);
     drop(engine_lifecycle_guard);
-    activate_recording(&app, mode.transcribes(), transcription_receiver, live_sink);
+    activate_recording(
+        &app,
+        mode.transcribes(),
+        preferences.auto_open_floating_controls,
+        transcription_receiver,
+        live_sink,
+    );
 
     // Emit success event
     app.emit(
@@ -1175,7 +1186,13 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     store_recording_manager(manager);
     *RECORDING_JOB.lock().unwrap() = Some(job);
     drop(engine_lifecycle_guard);
-    activate_recording(&app, mode.transcribes(), transcription_receiver, live_sink);
+    activate_recording(
+        &app,
+        mode.transcribes(),
+        preferences.auto_open_floating_controls,
+        transcription_receiver,
+        live_sink,
+    );
 
     // Emit success event
     app.emit(

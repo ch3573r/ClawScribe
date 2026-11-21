@@ -57,7 +57,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
         "stop_recording" => stop_recording_handler(app),
         "floating_controls" => {
             use crate::audio::recording_commands::floating;
-            if let Some(id) = floating::available_session() {
+            if let Some(id) = floating::available_session(app) {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(message) = floating::open_floating_controls(app.clone(), id).await {

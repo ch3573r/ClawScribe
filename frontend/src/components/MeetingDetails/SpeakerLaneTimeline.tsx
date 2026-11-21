@@ -8,9 +8,11 @@ import { buildSpeakerCatalog, getSpeakerColor, speakerLabel, type SpeakerDetails
 import { RenameSpeakerPopover, type RenameSpeaker } from "./SpeakerLabelPopover";
 import { TranscriptSegmentData } from "@/types";
 import { PlaybackOptions } from "./PlaybackOptions";
+import type { PlayerBindings } from "@/lib/player-bindings";
 import { bookmarkTime, type MeetingBookmark } from "@/lib/library";
 
 interface SpeakerLaneTimelineProps {
+  bindings?: PlayerBindings;
   onApplySpeakerToMatching?: RenameSpeaker;
   segments: TranscriptSegmentData[]; totalCount?: number; showSpeakerAttribution?: boolean;
   currentTime?: number; durationSeconds?: number; isPlaying?: boolean; isAudioReady?: boolean;
@@ -81,7 +83,7 @@ const LaneBars = memo(function LaneBars({ lane, duration }: { lane: TimelineLane
   })}</>;
 });
 
-export function SpeakerLaneTimeline({ segments, onApplySpeakerToMatching, showSpeakerAttribution = true, currentTime = 0, durationSeconds = 0, isPlaying = false, isAudioReady = false, onPlayPause, onSeek, rate, onRateChange, followPlayback, onFollowChange, bookmarks = [] }: SpeakerLaneTimelineProps) {
+export function SpeakerLaneTimeline({ bindings, segments, onApplySpeakerToMatching, showSpeakerAttribution = true, currentTime = 0, durationSeconds = 0, isPlaying = false, isAudioReady = false, onPlayPause, onSeek, rate, onRateChange, followPlayback, onFollowChange, bookmarks = [] }: SpeakerLaneTimelineProps) {
   // Keep the rename anchor and draft mounted through optimistic label updates.
   const [renameSnapshot, setRenameSnapshot] = useState<TranscriptSegmentData[] | null>(null);
   const laneSegments = renameSnapshot ?? segments;
@@ -132,7 +134,7 @@ export function SpeakerLaneTimeline({ segments, onApplySpeakerToMatching, showSp
       </TooltipTrigger><TooltipContent>{bookmarkTime(mark.seconds)} · {mark.label}</TooltipContent></Tooltip>)}
     </div>
     <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">{formatDuration(duration)}</span>
-    <PlaybackOptions rate={rate} onRateChange={onRateChange} followPlayback={followPlayback} onFollowChange={onFollowChange} />
+    <PlaybackOptions bindings={bindings} rate={rate} onRateChange={onRateChange} followPlayback={followPlayback} onFollowChange={onFollowChange} />
     </div>
     {showSpeakerAttribution && lanes.length > 0 && <div className="space-y-1.5 px-5 pb-4">
       {lanes.map(lane => <div key={lane.segments[0].id} className="grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3">

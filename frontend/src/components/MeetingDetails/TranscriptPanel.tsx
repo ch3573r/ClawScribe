@@ -11,8 +11,10 @@ import { TranscriptFind } from './TranscriptFind';
 import { TranscriptCorrections } from './TranscriptCorrections';
 import { MeetingBookmarks } from './MeetingBookmarks';
 import { Button } from '@/components/ui/button';
+import type { PlayerBindings } from '@/lib/player-bindings';
 
 interface TranscriptPanelProps {
+  bindings?: PlayerBindings;
   focusedBookmark?: string | null;
   openTranscription?: boolean;
   speakerSegments?: TranscriptSegmentData[];
@@ -56,6 +58,7 @@ interface TranscriptPanelProps {
 }
 
 export function TranscriptPanel({
+  bindings,
   focusedBookmark,
   openTranscription = false,
   focusedSource,
@@ -194,7 +197,7 @@ export function TranscriptPanel({
   const renderToolbar = (actions?: ComponentProps<typeof TranscriptButtonGroup>['correctionActions']) => (
     <div className="flex shrink-0 items-center justify-between gap-1 border-b border-border px-3 py-2">
         <h2 className="text-sm font-semibold text-foreground">Transcript</h2>
-        <TranscriptButtonGroup transcriptCount={transcriptCount} transcribeOpen={transcribeOpen} onTranscribeOpenChange={setTranscribeOpen}
+        <TranscriptButtonGroup bindings={bindings} transcriptCount={transcriptCount} transcribeOpen={transcribeOpen} onTranscribeOpenChange={setTranscribeOpen}
           onCopyTranscript={onCopyTranscript} onOpenMeetingFolder={onOpenMeetingFolder} meetingId={meetingId} meetingFolderPath={meetingFolderPath}
           onRefetchTranscripts={onRefetchTranscripts} onFindReplace={meetingId ? () => setReplaceOpen(true) : undefined}
           onFind={meetingId ? openFind : undefined}
@@ -209,7 +212,7 @@ export function TranscriptPanel({
       {meetingId ? <TranscriptCorrections key={meetingId} meetingId={meetingId} editing={editing} onClose={() => setEditing(null)}
         onChanged={onRefetchTranscripts} replaceOpen={replaceOpen} onReplaceOpenChange={setReplaceOpen}
         renderActions={renderToolbar} /> : renderToolbar()}
-      {findOpen && <TranscriptFind query={findQuery} onQueryChange={setFindQuery} current={findIndex} total={findMatches.length} complete={searchComplete} focusRequest={findFocus}
+      {findOpen && <TranscriptFind bindings={bindings} query={findQuery} onQueryChange={setFindQuery} current={findIndex} total={findMatches.length} complete={searchComplete} focusRequest={findFocus}
         onStep={direction => void goToMatch(stepMatch(findIndex, findMatches.length, direction))} onClose={closeFind} />}
       {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} focusedBookmark={focusedBookmark} currentTime={activeTime} onSeek={onSeekToTime} addOpen={bookmarkOpen} onAddOpenChange={setBookmarkOpen} onBookmarksChange={onBookmarksChange} />}
       {/* Transcript content - use virtualized view for better performance */}

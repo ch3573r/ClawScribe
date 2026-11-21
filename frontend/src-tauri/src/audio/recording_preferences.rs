@@ -15,10 +15,16 @@ use crate::audio::capture::AudioCaptureBackend;
 const DEFAULT_RECORDINGS_FOLDER_NAME: &str = "ClawScribe";
 const LEGACY_RECORDINGS_FOLDER_NAME: &str = "meetily-recordings";
 
+fn default_auto_open_floating_controls() -> bool {
+    true
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RecordingPreferences {
     pub save_folder: PathBuf,
     pub auto_save: bool,
+    #[serde(default = "default_auto_open_floating_controls")]
+    pub auto_open_floating_controls: bool,
     pub file_format: String,
     #[serde(default)]
     pub preferred_mic_device: Option<String>,
@@ -38,6 +44,7 @@ impl Default for RecordingPreferences {
         Self {
             save_folder: get_default_recordings_folder(),
             auto_save: true,
+            auto_open_floating_controls: default_auto_open_floating_controls(),
             file_format: "mp4".to_string(),
             preferred_mic_device: None,
             preferred_system_device: None,
@@ -886,6 +893,24 @@ pub async fn get_audio_backend_info() -> Result<Vec<BackendInfo>, String> {
             name: "ScreenCaptureKit".to_string(),
             description: "Default system audio capture".to_string(),
         }])
+    }
+}
+
+#[cfg(test)]
+mod floating_controls_tests {
+    use super::*;
+
+    #[test]
+    fn new_and_legacy_preferences_open_controls_and_an_opt_out_survives_reload() {
+        assert!(RecordingPreferences::default().auto_open_floating_controls);
+        let legacy =
+            serde_json::json!({"save_folder":"Recordings","auto_save":true,"file_format":"mp4"});
+        let mut prefs: RecordingPreferences = serde_json::from_value(legacy).unwrap();
+        assert!(prefs.auto_open_floating_controls);
+        prefs.auto_open_floating_controls = false;
+        let stored = serde_json::to_value(prefs).unwrap();
+        let reloaded: RecordingPreferences = serde_json::from_value(stored).unwrap();
+        assert!(!reloaded.auto_open_floating_controls);
     }
 }
 

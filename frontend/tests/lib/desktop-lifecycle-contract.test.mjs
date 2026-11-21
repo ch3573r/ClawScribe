@@ -75,6 +75,17 @@ test('shortcuts and the command line go through the same gated start path as the
   assert.match(gate, /START_TIMEOUT/, 'an unanswered request ends');
 });
 
+test('a registered hotkey checks the foreground HWND before deciding whether settings or recording receives it', () => {
+  const shortcuts = rust('shortcuts.rs');
+  const route = functionBody(shortcuts, 'pub fn on_shortcut');
+  assert.ok(route.indexOf('capture_channel') >= 0 && route.indexOf('capture_channel') < route.indexOf('match action'));
+  const windows = functionBody(shortcuts, 'fn main_is_foreground');
+  assert.match(windows, /GetForegroundWindow\(\)/);
+  assert.match(windows, /GetAncestor\(foreground, GA_ROOT\)/);
+  assert.match(windows, /\.hwnd\(\)/);
+  assert.doesNotMatch(windows, /set_focus|SetForegroundWindow/);
+});
+
 test('hidden capture alerts use generic desktop messages and the existing notification preferences', () => {
   assert.match(rust('tray.rs'), /listen_for_background_alerts\(app\)/);
   const alerts = functionBody(rust('notifications/commands.rs'), 'pub(crate) fn listen_for_background_alerts');
