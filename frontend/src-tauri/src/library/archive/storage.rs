@@ -117,18 +117,6 @@ fn safe_folder(path: &Path, roots: &[PathBuf]) -> Result<PathBuf, &'static str> 
     if matching_roots.is_empty() {
         return Err(UNAVAILABLE);
     }
-    // Check ancestors from the root down, so a junction is never traversed.
-    let ancestors = path.ancestors().collect::<Vec<_>>();
-    for ancestor in ancestors
-        .into_iter()
-        .rev()
-        .filter(|path| path.parent().is_some())
-    {
-        let metadata = fs::symlink_metadata(ancestor).map_err(|_| UNAVAILABLE)?;
-        if !metadata.is_dir() || linked(&metadata) {
-            return Err(UNAVAILABLE);
-        }
-    }
     crate::database::meeting_files::resolve_recording_folder(path, &matching_roots)
         .map_err(|_| UNAVAILABLE)
 }

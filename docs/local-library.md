@@ -467,10 +467,24 @@ deletion with this option off is allowed.
 If file cleanup could not finish, open **Meetings → Archive → Storage**. Under
 **Pending file cleanup**, review the item and the reason it was kept. Close apps
 using the files or reconnect an unavailable recording location before retrying.
-ClawScribe checks the current ownership and recording location again before each
-retry. A recording-folder retry requires a marker that identifies that meeting.
-Choose **Keep files** to remove the entry from the cleanup list and retain the
-files. Pending entries are stored on this device and survive app restarts.
+ClawScribe verifies ownership before moving files to a temporary location beside
+the original, then removes the moved files. If removal stops partway through,
+the cleanup list shows the temporary location for the next retry. A new meeting
+using the original path can keep using it. A recording-folder retry before the
+files have moved requires a marker that identifies that meeting. If an older
+folder has no marker or its marker has no meeting ID, use **Keep files** and review
+the folder before removing it manually. **Keep files** clears the item from the
+cleanup list and preserves the files at the displayed location. Pending entries
+are stored on this device and survive app restarts.
+
+On Windows, a OneDrive Cloud Files placeholder can be part of a configured
+recording location. Opening or recovering its contents may require OneDrive to
+download them. ClawScribe refuses paths redirected through links or junctions.
+If the interrupted-recording check fails, choose **Retry scan** in the recovery
+dialog or under **Settings → General**. ClawScribe keeps cached drafts while the
+library is unavailable and uses saved recording identity and deletion history to
+check them on retry. Old cache entries without enough evidence to identify their
+recording folder can still hold a recoverable transcript.
 
 Pre-migration database snapshots in app-data `backups` can contain deleted
 meetings. Each new snapshot keeps the newest two, and startup cleanup removes

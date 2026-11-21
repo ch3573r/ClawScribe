@@ -2309,10 +2309,11 @@ async fn cleanup_orphaned_runs_at(pool: &sqlx::SqlitePool, root: &Path) {
         return;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry
-            .file_type()
-            .await
-            .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+        if !crate::database::meeting_files::is_cleanup_path(&entry.path())
+            && entry
+                .file_type()
+                .await
+                .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
             && !live.contains(&crate::library::file_cleanup::directory_key(&entry.path()))
         {
             let _ = tokio::fs::remove_dir_all(entry.path()).await;

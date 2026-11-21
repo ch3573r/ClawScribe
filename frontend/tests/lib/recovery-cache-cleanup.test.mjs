@@ -85,12 +85,12 @@ test('cached transcripts sort by sequence in both stored formats', async () => {
   assert.deepEqual(rows.map(row => row.sequenceId ?? row.sequence_id), [0, 1, 2]);
 });
 
-test('library deletion removes matching recovery IDs by folder without deleting other drafts', async () => {
+test('library deletion leaves a different draft reusing the same folder intact', async () => {
   const cache = recoveryCache([
-    { meetingId: 'recovery-id', folderPath: 'synthetic-folder', savedToSQLite: true },
-    { meetingId: 'other-draft', folderPath: 'other-folder', savedToSQLite: false },
+    { meetingId: 'sqlite-id', folderPath: 'synthetic-folder', savedToSQLite: true },
+    { meetingId: 'other-draft', folderPath: 'synthetic-folder', savedToSQLite: false },
   ]);
-  await cache.indexedDBService.deleteMeeting('sqlite-id', 'synthetic-folder');
+  await cache.indexedDBService.deleteMeeting('sqlite-id');
   assert.deepEqual([...cache.meetings.keys()], ['other-draft']);
   assert.deepEqual([...cache.transcripts.values()].map(row => row.meetingId), ['other-draft']);
 });

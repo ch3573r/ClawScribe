@@ -54,6 +54,8 @@ export default function Home() {
   // Recovery hook
   const {
     recoverableMeetings,
+    isLoading: isRecoveryScanning,
+    scanFailed: recoveryScanFailed,
     checkForRecoverableTranscripts,
     keepRecoverableMeeting,
     recoverMeeting,
@@ -105,22 +107,21 @@ export default function Home() {
     }
     if (!requested) return;
     // "Show kept" also lists the recordings the user asked not to be asked about.
-    void checkForRecoverableTranscripts({ includeKept: requested === RECOVERY_OPEN_ALL }).then(found => {
-      if (found.length > 0) setShowRecoveryDialog(true);
-    });
+    setShowRecoveryDialog(true);
+    void checkForRecoverableTranscripts({ includeKept: requested === RECOVERY_OPEN_ALL });
   }, [checkForRecoverableTranscripts]);
 
   // Watch for recoverable meetings changes and show dialog once per session
   useEffect(() => {
     // Only show dialog if we have meetings and haven't shown it yet this session
-    if (recoverableMeetings.length > 0) {
+    if (recoverableMeetings.length > 0 || recoveryScanFailed) {
       const shownThisSession = sessionStorage.getItem('recovery_dialog_shown');
       if (!shownThisSession) {
         setShowRecoveryDialog(true);
         sessionStorage.setItem('recovery_dialog_shown', 'true');
       }
     }
-  }, [recoverableMeetings]);
+  }, [recoverableMeetings, recoveryScanFailed]);
 
   // Handle recovery with toast notifications and navigation
   const handleRecovery = async (meetingId: string) => {
@@ -218,9 +219,12 @@ export default function Home() {
 
       {/* Recovery Dialog */}
       <TranscriptRecovery
-        isOpen={showRecoveryDialog}
+        isOpen={showRecoveryDialog && !isRecording && !isRecordingDisabled}
         onClose={handleDialogClose}
         recoverableMeetings={recoverableMeetings}
+        isScanning={isRecoveryScanning}
+        scanFailed={recoveryScanFailed}
+        onRetryScan={() => { void checkForRecoverableTranscripts(); }}
         onRecover={handleRecovery}
         onDelete={deleteRecoverableMeeting}
         onKeep={keepRecoverableMeeting}

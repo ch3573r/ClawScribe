@@ -29,6 +29,9 @@ interface TranscriptRecoveryProps {
   isOpen: boolean;
   onClose: () => void;
   recoverableMeetings: RecoveryCandidate[];
+  isScanning: boolean;
+  scanFailed: boolean;
+  onRetryScan: () => void;
   onRecover: (meetingId: string) => Promise<unknown>;
   onDelete: (meetingId: string) => Promise<void>;
   /** "Keep, do not ask again" for a recording found on disk. */
@@ -40,6 +43,9 @@ export function TranscriptRecovery({
   isOpen,
   onClose,
   recoverableMeetings,
+  isScanning,
+  scanFailed,
+  onRetryScan,
   onRecover,
   onDelete,
   onKeep,
@@ -130,6 +136,27 @@ export function TranscriptRecovery({
     : '';
   const deleteTarget = recoverableMeetings.find(m => m.meetingId === deleteTargetId);
   const deleteBlocked = !!selectedMeeting?.disk?.registeredMeetingId;
+
+  if (isScanning || scanFailed || recoverableMeetings.length === 0) {
+    return (
+      <Dialog open={isOpen} onOpenChange={open => { if (!open) onClose(); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Interrupted recordings</DialogTitle>
+            <DialogDescription role={scanFailed && !isScanning ? 'alert' : 'status'}>
+              {isScanning ? 'Checking for interrupted recordings…' : scanFailed
+                ? 'Could not check for interrupted recordings. Your recovery data is still available.'
+                : 'No interrupted recordings found.'}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={onClose}>Close</Button>
+            {scanFailed && !isScanning && <Button onClick={onRetryScan}>Retry scan</Button>}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog open={isOpen} onOpenChange={open => { if (!open && !isRecovering && !isDeleting) onClose(); }}>

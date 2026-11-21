@@ -140,6 +140,9 @@ pub(crate) fn root_problem(
         base
     };
     let folder = resolved(folder);
+    if crate::database::meeting_files::is_cleanup_path(&folder) {
+        return Some("is reserved for pending file cleanup");
+    }
     let text = folder.to_string_lossy();
     if text.is_empty()
         || text.contains('\0')
@@ -297,6 +300,9 @@ pub(crate) fn mark_codex_done(backing: &dyn Backing) -> Result<(), String> {
 
 /// Whether `folder` is exactly one of the trusted roots or a default one.
 pub(crate) fn is_trusted_or_default(trust: &Trust, folder: &Path, defaults: &[PathBuf]) -> bool {
+    if crate::database::meeting_files::is_cleanup_path(folder) {
+        return false;
+    }
     let wanted = crate::local_path::comparable_text(&folder.to_string_lossy());
     trust
         .trusted
@@ -391,6 +397,24 @@ mod tests {
             exact: vec![base.join("profile"), base.join("appdata")],
             trees: vec![base.join("system")],
         }
+    }
+
+    #[test]
+    fn pending_cleanup_locations_cannot_become_recording_roots() {
+        let base = tempfile::tempdir().unwrap();
+        let folder = base
+            .path()
+            .join(".clawscribe-cleanup~fixture")
+            .join("files");
+        std::fs::create_dir_all(&folder).unwrap();
+        let protected = protected(base.path());
+        let memory = Memory::default();
+        assert!(trust_folder(&memory, &folder, &protected).is_err());
+        let trust = Trust {
+            trusted: vec![folder.clone()],
+            ..Trust::default()
+        };
+        assert!(!is_trusted_or_default(&trust, &folder, &[]));
     }
 
     #[test]

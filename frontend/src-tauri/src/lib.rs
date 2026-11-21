@@ -269,7 +269,9 @@ fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, 
     if !trusted_roots::text_allowed(&path.to_string_lossy(), &roots) {
         return Ok(None);
     }
-    if !path.is_dir() {
+    if database::meeting_files::is_cleanup_path(path)
+        || database::meeting_files::directory_chain(path).is_err()
+    {
         return Ok(None);
     }
 
@@ -277,8 +279,9 @@ fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, 
         .canonicalize()
         .map_err(|_| "Failed to resolve the meeting folder".to_string())?;
     // A mapped network drive resolves to a UNC path: fine inside a trusted root.
-    Ok((local_path::is_local_canonical(&resolved)
-        || trusted_roots::canonical_inside(&resolved, &roots))
+    Ok((!database::meeting_files::is_cleanup_path(&resolved)
+        && (local_path::is_local_canonical(&resolved)
+            || trusted_roots::canonical_inside(&resolved, &roots)))
     .then_some(resolved))
 }
 

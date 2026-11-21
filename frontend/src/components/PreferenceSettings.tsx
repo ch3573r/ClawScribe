@@ -214,6 +214,13 @@ export function PreferenceSettings() {
           </SettingsRow>
         ))}
         {locationsUnavailable && <NoteRow tone="muted">The database and model locations could not be read.</NoteRow>}
+        {interrupted.scanFailed && (
+          <SettingsRow title="Interrupted recordings" description="Could not check for interrupted recordings">
+            <Button type="button" variant="outline" size="sm" disabled={interrupted.loading} onClick={interrupted.refresh}>
+              {interrupted.loading ? 'Checking…' : 'Retry scan'}
+            </Button>
+          </SettingsRow>
+        )}
         {(interrupted.count > 0 || interrupted.keptCount > 0) && (
           <SettingsRow
             title="Interrupted recordings"
