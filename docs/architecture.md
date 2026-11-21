@@ -66,6 +66,14 @@ startup removes snapshots older than 14 days. Deleted meeting data can remain
 longer while the app is closed or cleanup fails. A backup failure warns without
 blocking startup; already-applied migrations do not create another copy.
 
+An opening failure can start an isolated recovery profile with explicit user
+consent. Startup prepares and migrates a fresh SQLite database in a new app
+data folder, closes the pool, then atomically saves the active profile's UUID
+beside the original app data directory and requests a restart. The UUID resolves
+to a separate Tauri profile and recording roots. The recovery initializer
+does not open or move the original database or its WAL. A missing database
+with a SQLite recovery file is treated as a startup failure.
+
 Background Teams detection returns matching candidates only. Unmatched browser
 window titles are returned only when the settings diagnostics panel requests them.
 
@@ -613,6 +621,15 @@ state, and absence of a saved meeting before removing it.
 Restored recording outcomes retain whether recovery files were excluded from the
 archive. Those meetings direct recovery to the original computer; they do not
 recommend retranscribing unavailable audio. Older archives default this flag to false.
+
+Portable archive version 3 writes the four transcript tables to separate
+bounded record streams from the same SQLite snapshot as the manifest. Restore
+checks the stream entries and reads their rows into the import transaction
+with the same schema and meeting ownership checks used by earlier versions.
+Custom templates and vocabulary use create-only publication with rollback on
+import failure. Calendar series defaults use conflict-safe database inserts.
+Daily backups share the manual archive and audio/export locks. Retention uses
+a profile-local index and checks file identity before removing a prior ZIP.
 
 A meeting restored without its recording files has no folder to publish to. Its
 archived pending file-sync rows are not imported and its file-retry flag is

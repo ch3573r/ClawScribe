@@ -23,10 +23,16 @@ pub fn set_bundled_templates_dir(path: PathBuf) {
 /// - Windows: %APPDATA%\ClawScribe\templates\
 /// - Linux: ~/.config/ClawScribe/templates/
 pub(super) fn get_custom_templates_dir() -> Option<PathBuf> {
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return Some(root.join("templates"));
+    }
     data_templates_dir("ClawScribe")
 }
 
 fn get_legacy_custom_templates_dir() -> Option<PathBuf> {
+    if crate::database::recovery::data_dir().is_some() {
+        return None;
+    }
     data_templates_dir("Meetily")
 }
 
@@ -37,7 +43,7 @@ fn data_templates_dir(app_name: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-fn custom_template_dirs() -> Vec<PathBuf> {
+pub(crate) fn custom_template_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(dir) = get_custom_templates_dir() {
         dirs.push(dir);

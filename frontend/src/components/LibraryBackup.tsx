@@ -9,6 +9,7 @@ import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { flushMeetingContexts } from '@/lib/meetingContext';
 import { migrateLegacyMeetingCalendars } from '@/lib/meetingCalendarStore';
 import type { LibraryArchiveReport } from '@/lib/library';
+import { ScheduledBackups } from '@/components/ScheduledBackups';
 
 export function LibraryBackup() {
   const [visible, setVisible] = useState(false);
@@ -46,14 +47,14 @@ export function LibraryBackup() {
   };
   return <>
     <Button variant="outline" onClick={() => setVisible(true)}>Backup and restore</Button>
-    <Dialog open={visible} onOpenChange={value => { if (!busy) setVisible(value); }}><DialogContent>
-      <DialogHeader><DialogTitle>Backup and restore</DialogTitle><DialogDescription>Keep a portable copy of saved meetings, recordings, transcripts, notes, project tags, and bookmarks.</DialogDescription></DialogHeader>
-      <p className="text-sm text-muted-foreground">Archives contain private meeting content and are not encrypted. Store them somewhere you trust. Models, provider settings, and sign-in credentials are excluded.</p>
-      <p className="text-sm text-muted-foreground">Restore adds missing meetings. Meetings with an existing ID are skipped, so your current library is preserved. Stop recording and transcription jobs first.</p>
+    <Dialog open={visible} onOpenChange={value => { if (!busy) setVisible(value); }}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+      <DialogHeader><DialogTitle>Backup and restore</DialogTitle><DialogDescription>Save meetings, recordings, transcript history, notes, custom templates, vocabulary, and saved series preferences.</DialogDescription></DialogHeader>
+      <p className="text-sm text-muted-foreground">Archives contain private content. Store these unencrypted files in a trusted folder.</p>
+      <p className="text-sm text-muted-foreground">Restore adds missing meetings and keeps your existing preferences. Finish recording and transcription jobs first.</p>
       {result && !!result.report.incomplete_meetings?.length && <div role="alert" className="space-y-2 rounded border border-warning-border/40 bg-warning p-3 text-sm">
         <p className="font-medium">{result.restore ? 'Restore complete with incomplete audio' : 'Backup saved with incomplete audio'}</p>
         <p>Meeting data and available saved audio are included. If recovery files were excluded, keep a separate copy of the source recording folders, including hidden files.</p>
-        <ul className="max-h-48 list-disc space-y-1 overflow-y-auto pl-5">{result.report.incomplete_meetings.map(meeting => <li key={meeting.meeting_id}>
+        <ul className="list-disc space-y-1 pl-5">{result.report.incomplete_meetings.map(meeting => <li key={meeting.meeting_id}>
           <span className="font-medium">{meeting.title || 'Untitled meeting'}</span>: {[
             meeting.recovery_files_excluded && 'recovery files excluded',
             meeting.recording_folder_missing && 'recording folder missing',
@@ -64,6 +65,7 @@ export function LibraryBackup() {
       <div className="flex flex-wrap gap-2"><Button disabled={!!busy || unavailable} onClick={() => run(false)}>Save backup</Button><Button variant="outline" disabled={!!busy || unavailable} onClick={() => run(true)}>Choose archive to restore</Button></div>
       {busy && <p role="status" className="text-sm">{busy} Keep ClawScribe open until this finishes.</p>}
       {unavailable && <p role="status" className="text-sm">Finish the active recording before using backup or restore.</p>}
+      {visible && <ScheduledBackups disabled={!!busy || unavailable} />}
     </DialogContent></Dialog>
   </>;
 }

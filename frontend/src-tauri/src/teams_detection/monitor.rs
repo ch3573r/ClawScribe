@@ -462,6 +462,9 @@ impl Tracker {
 // ── Settings storage ──────────────────────────────────────────────────────
 
 fn settings_path() -> Option<PathBuf> {
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return Some(root.join("call_detection.json"));
+    }
     dirs::config_dir().map(|dir| dir.join("ClawScribe").join("call_detection.json"))
 }
 

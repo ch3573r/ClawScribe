@@ -175,6 +175,9 @@ pub fn set_shortcut_capture<R: Runtime>(
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return Some(root.join("shortcuts.json"));
+    }
     dirs::config_dir().map(|d| d.join("ClawScribe").join("shortcuts.json"))
 }
 

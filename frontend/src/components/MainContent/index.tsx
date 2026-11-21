@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 
 interface MainContentProps {
   children: React.ReactNode;
+  recoveryLibrary?: boolean;
 }
 
 function SavingRecordingBanner() {
@@ -40,7 +41,7 @@ function SavingRecordingBanner() {
   );
 }
 
-const MainContent: React.FC<MainContentProps> = ({ children }) => {
+const MainContent: React.FC<MainContentProps> = ({ children, recoveryLibrary }) => {
   const { sidebarOffset, isSidebarResizing } = useSidebar();
   return (
     <main
@@ -49,6 +50,9 @@ const MainContent: React.FC<MainContentProps> = ({ children }) => {
     >
       <RecordingHealthBanner />
       <SavingRecordingBanner />
+      {recoveryLibrary && <p className="shrink-0 border-b border-border bg-muted px-4 py-2 text-sm">
+        <strong>Recovery library.</strong> Your original library is still on disk. Restore a ZIP from Meetings.
+      </p>}
       <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
     </main>
   );

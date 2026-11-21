@@ -33,9 +33,9 @@ pub fn dispatch() -> Option<i32> {
         let identifier = config["identifier"]
             .as_str()
             .ok_or(io::ErrorKind::InvalidData)?;
-        let app_data = dirs::data_dir()
-            .ok_or(io::ErrorKind::NotFound)?
-            .join(identifier);
+        let base = dirs::data_dir().ok_or(io::ErrorKind::NotFound)?;
+        let app_data = crate::database::recovery::selected_data_dir(&base, identifier)
+            .map_err(io::Error::other)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;

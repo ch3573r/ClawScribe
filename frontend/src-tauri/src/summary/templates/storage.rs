@@ -1,14 +1,33 @@
 use super::{get_template, loader::get_custom_templates_dir, Template};
 use std::{io::Write, path::Path};
 
-pub(super) fn validate_id(id: &str) -> Result<(), String> {
+pub(crate) fn validate_id(id: &str) -> Result<(), String> {
+    let stem = id
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    let numbered_device = ["COM", "LPT"].iter().any(|prefix| {
+        stem.strip_prefix(*prefix).is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    });
     if id.is_empty()
         || id.len() > 120
         || id.trim() != id
+        || id.ends_with('.')
         || id.chars().any(|c| {
             c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
         })
-        || matches!(id, "." | "..")
+        || matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        )
+        || numbered_device
     {
         return Err("Invalid template identifier".into());
     }
@@ -16,6 +35,9 @@ pub(super) fn validate_id(id: &str) -> Result<(), String> {
 }
 
 pub fn save_template(id: &str, template: &Template) -> Result<(), String> {
+    let _archive = crate::library::backup::PORTABLE_SETTINGS_LOCK
+        .try_lock()
+        .map_err(|_| "Wait for the library restore to finish.")?;
     let directory = get_custom_templates_dir().ok_or("Template storage is unavailable")?;
     save_in(&directory, id, template)
 }

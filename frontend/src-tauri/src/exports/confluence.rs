@@ -83,8 +83,11 @@ impl std::fmt::Display for ConfluenceError {
 }
 
 fn credential_entry() -> Result<keyring::Entry, ConfluenceError> {
-    keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
-        .map_err(|e| ConfluenceError::Keyring(e.to_string()))
+    keyring::Entry::new(
+        &crate::database::recovery::credential_service(SERVICE_NAME),
+        ACCOUNT_NAME,
+    )
+    .map_err(|e| ConfluenceError::Keyring(e.to_string()))
 }
 
 #[derive(Serialize, Deserialize)]

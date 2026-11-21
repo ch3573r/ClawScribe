@@ -7,11 +7,15 @@ use crate::state::AppState;
 /// Initialize database on app startup
 /// Handles first launch detection and conditional initialization
 pub async fn initialize_database_on_startup(app: &AppHandle) -> Result<(), String> {
+    super::recovery::startup_status()?;
     // Check if this is the first launch (no database exists yet)
     let is_first_launch = DatabaseManager::is_first_launch(app)
         .await
         .map_err(|e| format!("Failed to check first launch status: {}", e))?;
 
+    if is_first_launch && super::recovery::data_dir().is_some() {
+        return Err("The selected recovery database is missing.".into());
+    }
     if is_first_launch {
         info!("First launch detected - will notify window when ready");
 
@@ -79,8 +83,8 @@ pub async fn initialize_database_on_startup(app: &AppHandle) -> Result<(), Strin
 static STARTUP_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// True once the meeting database could not be opened at startup. The app is
-/// then only waiting for the error dialog to be closed: nothing may show the
-/// window, start a recording or run a command line request.
+/// then waiting for the recovery choice. Do not show the main window, start
+/// a recording or run a command-line request in this state.
 pub fn startup_failed() -> bool {
     STARTUP_FAILED.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -109,11 +113,13 @@ pub(crate) fn startup_failure_message(
             .unwrap_or_else(|| "not available".to_string())
     };
     format!(
-        "ClawScribe could not open its meeting database, so it cannot start.\n\n\
+        "ClawScribe could not open its meeting database.\n\n\
          App data folder: {}\n\
          Log folder: {}\n\n\
-         The newest log file in the log folder says what went wrong. Close any other \
-         copy of ClawScribe, make sure the disk is not full, and start the app again.",
+         Choose Open recovery library to create an empty library in a separate \
+         folder and restart ClawScribe. You can restore a ZIP from Meetings. \
+         Your current database, recovery files and recordings stay in place.\n\n\
+         Choose Exit to close ClawScribe and check the log.",
         show(data_dir),
         show(log_dir)
     )
@@ -124,7 +130,7 @@ pub(crate) fn startup_failure_message(
 /// closes it. The dialog is not blocking, because setup runs on the main
 /// thread before the event loop starts.
 pub fn report_startup_failure(app: &AppHandle, error: &str) {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
     STARTUP_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
     log::error!("The meeting database could not be opened: {error}");
@@ -136,12 +142,35 @@ pub fn report_startup_failure(app: &AppHandle, error: &str) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
-    let exit_app = app.clone();
+    let recovery_app = app.clone();
     app.dialog()
         .message(message)
-        .title("ClawScribe cannot start")
+        .title("Recover the meeting library")
         .kind(MessageDialogKind::Error)
-        .show(move |_| exit_app.exit(1));
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Open recovery library".into(),
+            "Exit".into(),
+        ))
+        .show(move |recover| {
+            if !recover {
+                recovery_app.exit(1);
+                return;
+            }
+            tauri::async_runtime::spawn(async move {
+                match super::recovery::prepare().await {
+                    Ok(()) => recovery_app.request_restart(),
+                    Err(message) => {
+                        let exit_app = recovery_app.clone();
+                        recovery_app
+                            .dialog()
+                            .message(message)
+                            .title("Could not open a recovery library")
+                            .kind(MessageDialogKind::Error)
+                            .show(move |_| exit_app.exit(1));
+                    }
+                }
+            });
+        });
     // Fallback: the dialog normally ends the process (above). If it never
     // appears or is never closed, do not stay alive without a window.
     tauri::async_runtime::spawn(async {

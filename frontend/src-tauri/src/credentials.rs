@@ -92,17 +92,28 @@ trait CredentialBackend {
 struct PlatformCredentials;
 impl CredentialBackend for PlatformCredentials {
     fn save(&self, account: &str, value: &str) -> Result<(), String> {
-        keyring::Entry::new(SERVICE, account)
-            .and_then(|entry| entry.set_password(value))
-            .map_err(|_| UNAVAILABLE.into())
+        keyring::Entry::new(
+            &crate::database::recovery::credential_service(SERVICE),
+            account,
+        )
+        .and_then(|entry| entry.set_password(value))
+        .map_err(|_| UNAVAILABLE.into())
     }
     fn load(&self, account: &str) -> Result<String, String> {
-        keyring::Entry::new(SERVICE, account)
-            .and_then(|entry| entry.get_password())
-            .map_err(|_| UNAVAILABLE.into())
+        keyring::Entry::new(
+            &crate::database::recovery::credential_service(SERVICE),
+            account,
+        )
+        .and_then(|entry| entry.get_password())
+        .map_err(|_| UNAVAILABLE.into())
     }
     fn delete(&self, account: &str) -> Result<(), String> {
-        match keyring::Entry::new(SERVICE, account).and_then(|entry| entry.delete_credential()) {
+        match keyring::Entry::new(
+            &crate::database::recovery::credential_service(SERVICE),
+            account,
+        )
+        .and_then(|entry| entry.delete_credential())
+        {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(_) => Err(UNAVAILABLE.into()),
         }

@@ -5,6 +5,33 @@ use std::path::Path;
 use std::time::Duration;
 use tauri::Manager;
 
+pub(super) const DATABASE_FILENAME: &str = "meeting_minutes.sqlite";
+
+pub(super) fn database_exists(root: &Path) -> Result<bool> {
+    let inspect = |name: &str| -> std::io::Result<bool> {
+        match fs::symlink_metadata(root.join(name)) {
+            Ok(metadata) if metadata.is_file() && !crate::local_path::is_link(&metadata) => {
+                Ok(true)
+            }
+            Ok(_) => Err(std::io::Error::other(
+                "The database path is not a regular file",
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    };
+    let database = inspect(DATABASE_FILENAME)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        if inspect(&format!("{DATABASE_FILENAME}{suffix}"))? && !database {
+            return Err(std::io::Error::other(
+                "Database recovery files exist without the database",
+            )
+            .into());
+        }
+    }
+    Ok(database)
+}
+
 #[derive(Clone)]
 pub struct DatabaseManager {
     pool: SqlitePool,
@@ -145,14 +172,15 @@ impl DatabaseManager {
         let app_data_dir = app_handle
             .path()
             .app_data_dir()
-            .expect("failed to get app data dir");
+            .map_err(std::io::Error::other)?;
+        database_exists(&app_data_dir)?;
         if !app_data_dir.exists() {
             fs::create_dir_all(&app_data_dir).map_err(|e| sqlx::Error::Io(e))?;
         }
 
         // Define database paths
         let tauri_db_path = app_data_dir
-            .join("meeting_minutes.sqlite")
+            .join(DATABASE_FILENAME)
             .to_string_lossy()
             .to_string();
         // Legacy backend DB path (for auto-migration if exists)
@@ -183,11 +211,8 @@ impl DatabaseManager {
         let app_data_dir = app_handle
             .path()
             .app_data_dir()
-            .expect("failed to get app data dir");
-
-        let tauri_db_path = app_data_dir.join("meeting_minutes.sqlite");
-
-        Ok(!tauri_db_path.exists())
+            .map_err(std::io::Error::other)?;
+        Ok(!database_exists(&app_data_dir)?)
     }
 
     /// Import a legacy database from the specified path and initialize

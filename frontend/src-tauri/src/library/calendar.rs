@@ -229,7 +229,7 @@ impl CalendarLink {
         }
     }
 
-    fn series_key(&self) -> Option<(&str, &str)> {
+    pub(super) fn series_key(&self) -> Option<(&str, &str)> {
         match self.source {
             CalendarSource::Ical => Some((self.source_id.as_deref()?, self.series_id.as_deref()?)),
             // The account scope is already part of the Graph series digest.
