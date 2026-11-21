@@ -1,6 +1,6 @@
 # ClawScribe Privacy And Data Handling
 
-Updated: 2026-09-27 — ClawScribe 0.5.46.
+Updated 2026-11-21.
 
 ClawScribe is a local-first meeting recorder and summarizer. Local recording and
 local transcription do not require a ClawScribe account. Optional providers,
@@ -35,6 +35,13 @@ meeting text and supplied context needed for the selected operation. OpenAI,
 OpenAI-compatible endpoints, Anthropic, Groq, OpenRouter, remote Ollama, managed
 OpenClaw, and the configured Codex path are not equivalent to local-only
 processing. A provider named Ollama is local only when its endpoint is local.
+
+**Personal notes in a library question.** Searching personal notes and bookmarks
+runs on your device. **Ask about these results** opens a question scoped to the
+displayed meetings. To share a personal excerpt, select it, review the exact
+text, provider, model and destination, then confirm the question. Approval
+allows one send attempt. ClawScribe excludes that question and answer from
+the history it sends with later questions. A new attempt requires a new review.
 
 **OpenClaw handoff.** When enabled, completed recording artifacts are handed to
 the configured endpoint. OpenClaw is optional; it is not required for standalone
@@ -108,6 +115,10 @@ When enabled, call detection checks local Windows processes, window titles
 and call controls for the meeting apps you selected. For supported websites,
 it reads the browser's address bar to identify the meeting service and room.
 The automation keeps the call identifier in memory and runs on your PC.
+Choosing **Join and record** opens the selected invitation in Teams or your
+browser and temporarily checks for that call, even with continuous detection
+off. If the call cannot be identified as new and matched to the invitation,
+ClawScribe requires confirmation or leaves the recording stopped.
 
 ## Local MCP clients
 
