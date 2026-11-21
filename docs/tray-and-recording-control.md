@@ -41,6 +41,12 @@ the recording bar or tray.
 
 - The clock shows captured time and freezes during pauses. **Microphone** and
   **System audio** show levels from the running capture.
+- **Pause** and **Resume** control the current session. Capture warnings stay
+  visible in the panel. The panel also shows queued speech, free space and the
+  observed speech engine backend when available.
+- The panel remembers where you moved it. If that display is disconnected,
+  the next panel opens on a connected display. Turn off **Remember floating
+  controls position** in **Settings → Recording** to use the default placement.
 - Choose **Bookmark** to mark the current time, or type a note and press Enter.
   Find both in the saved meeting. Tab moves between the controls.
 - **Stop** shows the current save stage. The window closes when saving finishes,
@@ -58,7 +64,8 @@ The controls use a separate bundled page and a private WebView2 profile on
 Windows. The core supplies the selected theme and accent. The main window continues to own
 call prompts, recording starts and post-processing. The controls webview has
 no Tauri plugin permissions. Its app commands can read a small status snapshot,
-add a note, stop its own recording or close the controls. The native webview
+add a note, pause, resume, retry a source, stop its own recording or close the
+controls. The native webview
 label binds those commands to the original session, including after a reload.
 
 ## What the tray shows
@@ -70,9 +77,9 @@ for 15 seconds after previously arriving, check the microphone connection.
 Quiet samples still count as a working stream. A newly started or resumed
 meter continues to flag a microphone with no audible signal after 10 seconds.
 
-While the window is hidden or minimized, call prompts and recording problems
-can also show a Windows notification. These alerts contain generic text and
-use the existing meeting reminder and system error notification preferences.
+Call detection shows an actionable panel above other windows. You can also
+answer it from the tray. Recording problems can show a Windows notification
+while the main window is hidden or minimized.
 
 | State | Icon | Tooltip |
 | --- | --- | --- |

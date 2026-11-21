@@ -87,7 +87,7 @@ fn desktop_provider(exe: &str) -> Option<Provider> {
     }
 }
 
-pub(super) fn teams_room(url: &url::Url) -> Option<[u8; 32]> {
+pub(crate) fn teams_room(url: &url::Url) -> Option<[u8; 32]> {
     use sha2::{Digest, Sha256};
     if url.scheme() != "https"
         || !url.username().is_empty()

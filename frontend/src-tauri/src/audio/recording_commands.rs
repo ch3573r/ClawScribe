@@ -658,6 +658,7 @@ fn activate_recording<R: Runtime>(
     if let Some(id) = controls_session {
         floating::open_on_start(app.clone(), id);
     }
+    crate::teams_detection::monitor::capture_started(app);
     crate::teams_detection::monitor::join::cancel_pending(app);
 }
 
@@ -1222,6 +1223,14 @@ pub(crate) async fn start_selected_session<R: Runtime>(
         .collect::<Vec<_>>();
     let manager_timer = Instant::now();
     let mut staged_calendar_id = None;
+    // The durable fallback title stays neutral. A calendar subject is only
+    // available for live display after staging succeeded, and the library
+    // derives its saved title from the still-current draft.
+    let calendar_title = options
+        .calendar_link
+        .as_ref()
+        .and_then(|link| link.clone().normalized().ok())
+        .and_then(|link| link.subject().map(str::to_owned));
     let requested_mode = mode;
     let startup = async {
         let staged_id = &mut staged_calendar_id;
@@ -1310,7 +1319,10 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     let recording_folder = manager
         .get_meeting_folder()
         .map(|folder| folder.to_string_lossy().into_owned());
-    let recording_name = manager.get_meeting_name();
+    let recording_name = staged_calendar_id
+        .as_ref()
+        .and(calendar_title)
+        .or_else(|| manager.get_meeting_name());
     let recording_generation = live_startup.recording_generation;
     let live_session_id = live_startup.commit();
     if options.request.is_some_and(|request| request.is_call()) {

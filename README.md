@@ -34,13 +34,18 @@ meeting application. Make a short test recording and verify that both your
 voice and the remote participants are audible in playback. Start recording,
 review the live transcript, then stop and allow queued transcription to finish
 before generating notes. You can also enable call detection for selected
-meeting apps under **Settings → Recording → Call detection**.
+meeting apps under **Settings → Recording → Call detection**. Call prompts
+appear above the meeting app without taking focus. Timed Teams invitations
+from Microsoft 365 and iCalendar can use **Join and record**.
 
 **Test mic** in Recording settings shows the microphone actually tested. If a
 preferred Windows microphone is unavailable, the test identifies its fallback
 to the current default. A system-audio silence warning clears when sound later
 arrives. A separate warning appears if microphone samples stop arriving for
 15 seconds. Verify both sources in saved playback before relying on the recording.
+The recording bar and floating controls show capture warnings, queued speech,
+available disk space, and the observed recognition backend when available.
+The floating controls let you pause, resume, bookmark, and add notes.
 During Stop, the window shows what is being saved. Choose **Start after saving**
 to request the next recording once the previous one is in the library.
 

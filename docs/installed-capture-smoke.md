@@ -127,6 +127,54 @@ audio for these checks.
    text without changing playback. Reset the player shortcuts and verify
    that Space works again.
 
+## Capture health and call ownership
+
+Use the exact installed Windows GPU candidate on the designated machine.
+Record the source commit, installer and installed executable SHA-256, active
+`cpal` revision, Windows version, capture devices, model, language and observed
+backend. Record each scenario as passed, failed or not run.
+
+1. Play system audio while speaking into the microphone. Silence the output
+   for at least 15 seconds, restore it, then repeat. Verify the warning
+   reappears and clears independently of other warnings. Pause longer than
+   15 seconds and resume. Verify the silence timer restarts.
+2. Disconnect the selected output with the main window hidden. Verify the
+   microphone continues. Restore the same output. Reload the main window
+   and reopen the floating controls during a missing-source period. Verify
+   both windows agree on the session, its warnings and Retry state. After
+   saving, play both sources around the interruption and inspect the gap
+   and quiet-period notices. Repeat by disconnecting the microphone.
+3. Move the floating panel onto a secondary display. Pause and resume it
+   with a note draft present. Save the note and a bookmark, then check their
+   times in the library. Reopen the controls in another recording, remove
+   the secondary display and verify accessible placement. Repeat in light
+   and dark appearance and with the position preference disabled.
+4. Create a live backlog with sustained speech on the target notebook.
+   Check live lag and free space, then stop from the floating window. Record
+   time to stop capture, drain time, time to save, and time to the next
+   successful Start. If speech remains after the 120-second drain and
+   five-second cancellation grace, verify the incomplete outcome and playable
+   audio. Retranscribe through the saved meeting using a local model.
+   Repeat briefly with a hosted file provider configured and verify that
+   capture and Stop make no transcription upload. Compare Whisper, Parakeet
+   and Nemotron health labels against each engine's actual backend.
+5. Save a live recording with no detected speech. Verify its transcript tab
+   identifies the empty live result and that playback is available. Check an
+   audio-only recording still offers **Transcribe now**.
+6. Put Teams in front of the visible main window and type into a Teams input
+   while **Prompt me to record** is enabled. Verify the prompt is visible
+   and keystrokes stay in Teams until you deliberately click it. Confirm a
+   desktop invitation with an unknown room. Check that an already-active
+   call, a different identified room, multiple active calls, and an expired
+   or canceled invitation cannot start the requested recording.
+7. With automatic stopping enabled, end a detector-owned Teams call and
+   enter a second Teams call in another window. Verify the first save contains
+   its own title and playback, then verify the second call gets its own
+   prompt or session. A manual recording must survive either call ending.
+   Repeat with a timed iCalendar invitation containing a folded Teams link
+   in its description and no Microsoft sign-in. Verify the saved event
+   title and that attendance remains unreviewed.
+
 ## Interrupted or failed checks
 
 The harness refuses an occupied app session, an untrusted or nonempty

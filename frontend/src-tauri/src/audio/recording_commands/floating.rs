@@ -41,6 +41,11 @@ fn session(label: &str) -> Result<&str, &'static str> {
 
 fn allowed(label: &str, command: &str) -> bool {
     label == "main"
+        || (label == crate::teams_detection::monitor::prompt_window::LABEL
+            && matches!(
+                command,
+                "get_pending_call_prompt" | "confirm_call_detection_prompt"
+            ))
         || (session(label).is_ok()
             && matches!(
                 command,
@@ -465,5 +470,14 @@ mod tests {
         assert!(position_visible((-1200, 32), (-1920, 0), (1920, 1080)));
         assert!(!position_visible((-1200, 32), (0, 0), (1920, 1080)));
         assert!(!position_visible((1900, 100), (0, 0), (1920, 1080)));
+    }
+
+    #[test]
+    fn call_prompt_can_only_read_or_confirm_the_pending_call() {
+        let label = crate::teams_detection::monitor::prompt_window::LABEL;
+        assert!(allowed(label, "get_pending_call_prompt"));
+        assert!(allowed(label, "confirm_call_detection_prompt"));
+        assert!(!allowed(label, "start_recording_with_devices_and_meeting"));
+        assert!(!allowed(label, "floating_note"));
     }
 }

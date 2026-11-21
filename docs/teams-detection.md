@@ -30,10 +30,11 @@ you act on a prompt. Recording uses the selected audio devices, recording mode
 and pending calendar title. A calendar selection is optional. Detection
 requires no Microsoft sign-in.
 
-With **Prompt me to record**, the question appears in the window and, while it
-is waiting, as **Record this ... call** in the tray menu, so it can be answered
-without opening the window. It stays until the call ends, you answer, or you
-change the detection settings. If an automatic start fails, the same prompt
+With **Prompt me to record**, an actionable panel opens above other windows
+while the currently focused app keeps keyboard focus. The same pending
+question is available in ClawScribe and as **Record this ... call** in the tray
+menu. It clears when the call ends, you answer, another recording starts, or
+you change the detection settings. If an automatic start fails, the same prompt
 returns as **Try again**, except for a full disk, where trying again cannot
 help.
 
@@ -43,10 +44,11 @@ ones saved by earlier versions are handed to the core, which then keeps its own.
 ## Joining a Teams invitation from Upcoming
 
 On Home, **Join** opens the meeting link. **Join and record** opens a supported
-Teams link from Microsoft 365 and watches for that invitation, including when
+Teams link from Microsoft 365 or iCalendar and watches for that invitation, including when
 call detection is off. The request lasts five minutes or until the event ends,
 whichever comes first. Use **Cancel recording request** on Home to withdraw it.
-Microsoft sign-out or starting a separate recording also clears the request.
+Microsoft sign-out clears a Microsoft 365 request. Starting a separate
+recording clears any outstanding request.
 
 ClawScribe checks for active Teams calls before opening the link. An already
 active call window is ineligible. A call in a window that was already open
@@ -71,7 +73,9 @@ automatic stop applies when continuous Teams detection and automatic stop are on
 automatically or through the detector's Record prompt while that switch was
 on. After three consecutive completed checks confirm the tracked meeting
 window closed or shows a rejoin control, ClawScribe runs its usual stop and
-save flow. An active call in the same provider postpones that decision.
+save flow. After the library save it checks immediately for a new eligible
+call, including one in another window of the same provider. An open window
+with ambiguous call identity still requires manual Stop.
 
 A hidden browser tab or missing toolbar is ambiguous. If the browser window
 stays open on a different tab after a call ends, ClawScribe may keep recording

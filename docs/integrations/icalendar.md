@@ -14,7 +14,12 @@ credential storage.
 
 **Upcoming meetings** on Home shows the next five meetings across your
 configured calendars for the coming week. The Calendars page lists more
-occurrences. **Use for next recording** takes priority over automatic matching.
+occurrences. Timed invitations with a supported Teams URL offer **Join** and
+**Join and record** on Windows. ClawScribe accepts eligible Teams meeting URLs
+from the event's URL field or a single eligible link extracted from its
+description. It removes the original description text before storage or
+display. Links for unidentified calls still require confirmation.
+**Use for next recording** takes priority over automatic matching.
 The selection expires five minutes after the event ends. Choose **Clear selection**
 to remove it sooner. Invitations without an end time expire one hour after their
 start, or one hour after selection if the start time is also missing.

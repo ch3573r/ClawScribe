@@ -139,6 +139,7 @@ test('app and Windows capabilities grant no plugin access to the controls webvie
       const labels = [...(capability.windows ?? []), ...(capability.webviews ?? [])];
       for (const pattern of labels) {
         assert.equal(matchesGlob('recording-controls-00000000-0000-4000-8000-000000000001', pattern), false, pattern);
+        assert.equal(matchesGlob('call-recording-prompt', pattern), false, pattern);
       }
     }
   }

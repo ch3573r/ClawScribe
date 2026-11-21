@@ -55,25 +55,89 @@ pub(super) fn validate_calendar(content: &str) -> Result<(), String> {
     Ok(())
 }
 
-// Meeting lookups never read these properties. They hold most of a calendar's
-// bytes and its most private text, so drop them before the calendar is
-// cached, stored, or sent to the webview.
+// Strip free-form text before storage or IPC. Extract a single eligible Teams
+// link from event descriptions without keeping the surrounding content.
 const UNUSED_TEXT: [&str; 4] = ["DESCRIPTION", "X-ALT-DESC", "ATTACH", "COMMENT"];
+const EXTRACTED_TEAMS_URL: &str = "X-CLAWSCRIBE-TEAMS-URL;VALUE=URI:";
+
+fn teams_links(description: &str) -> impl Iterator<Item = Url> + '_ {
+    static URL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?i)\bhttps?://[^\s<>"'\\]+"#).expect("valid URL pattern")
+    });
+    URL.find_iter(description).filter_map(|entry| {
+        let value = entry.as_str().trim_end_matches(['.', ',', ')']);
+        if value.len() > 4096 {
+            return None;
+        }
+        let mut url = Url::parse(&value.replace("&amp;", "&")).ok()?;
+        crate::teams_detection::calls::teams_room(&url)?;
+        url.set_fragment(None);
+        Some(url)
+    })
+}
 
 pub(super) fn without_unused_text(calendar: &str) -> String {
     let mut kept = String::with_capacity(calendar.len());
-    let mut dropping = false;
-    for line in calendar.split_inclusive('\n') {
-        // A line that starts with a space or tab continues the previous property.
+    let mut lines = calendar.split_inclusive('\n').peekable();
+    let mut event_depth = 0u32;
+    let mut extracted = None;
+    let mut ambiguous = false;
+    while let Some(line) = lines.next() {
+        let text = line.trim_end_matches(['\r', '\n']);
+        if text.eq_ignore_ascii_case("BEGIN:VEVENT") {
+            event_depth = 1;
+            extracted = None;
+            ambiguous = false;
+        } else if event_depth == 1 && text.eq_ignore_ascii_case("END:VEVENT") {
+            if let Some(url) = extracted.take().filter(|_| !ambiguous) {
+                kept.push_str(EXTRACTED_TEAMS_URL);
+                kept.push_str(url::Url::as_str(&url));
+                kept.push_str(if line.ends_with("\r\n") { "\r\n" } else { "\n" });
+            }
+            event_depth = 0;
+        } else if event_depth > 0 {
+            let boundary = text.split_once(':').map(|(name, _)| name);
+            if boundary.is_some_and(|name| name.eq_ignore_ascii_case("BEGIN")) {
+                event_depth = event_depth.saturating_add(1);
+            } else if boundary.is_some_and(|name| name.eq_ignore_ascii_case("END")) {
+                event_depth -= 1;
+            }
+        }
         if !line.starts_with([' ', '\t']) {
             let name = line.split([';', ':']).next().unwrap_or_default().trim_end();
-            dropping = UNUSED_TEXT
+            if UNUSED_TEXT
                 .iter()
-                .any(|unused| name.eq_ignore_ascii_case(unused));
+                .any(|unused| name.eq_ignore_ascii_case(unused))
+            {
+                let extract = event_depth == 1
+                    && !ambiguous
+                    && (name.eq_ignore_ascii_case("DESCRIPTION")
+                        || name.eq_ignore_ascii_case("X-ALT-DESC"));
+                let mut description = if extract {
+                    text.split_once(':')
+                        .map_or(String::new(), |(_, value)| value.to_owned())
+                } else {
+                    String::new()
+                };
+                while let Some(folded) = lines.next_if(|next| next.starts_with([' ', '\t'])) {
+                    if extract {
+                        description.push_str(folded[1..].trim_end_matches(['\r', '\n']));
+                    }
+                }
+                if extract {
+                    let plain = description.replace("\\n", "\n").replace("\\N", "\n");
+                    for url in teams_links(&plain) {
+                        if extracted.as_ref().is_some_and(|previous| previous != &url) {
+                            ambiguous = true;
+                            break;
+                        }
+                        extracted = Some(url);
+                    }
+                }
+                continue;
+            }
         }
-        if !dropping {
-            kept.push_str(line);
-        }
+        kept.push_str(line);
     }
     kept
 }
@@ -193,5 +257,23 @@ mod tests {
         );
         let untouched = "\u{feff}BEGIN:VCALENDAR\nSUMMARY:Description: none\nEND:VCALENDAR";
         assert_eq!(without_unused_text(untouched), untouched);
+    }
+
+    #[test]
+    fn only_one_eligible_teams_link_survives_a_folded_description() {
+        let source = concat!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\n",
+            "DESCRIPTION:Private agenda\\nhttps://teams.microsoft.com/meet/\r\n",
+            " 123456?passcode=example\\nhttps://example.org/other\r\n",
+            "X-ALT-DESC:<a href=\"https://teams.microsoft.com/meet/123456?passcode=example\">Private</a>\r\n",
+            "END:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let sanitized = without_unused_text(source);
+        assert!(sanitized.contains("X-CLAWSCRIBE-TEAMS-URL;VALUE=URI:https://teams.microsoft.com/meet/123456?passcode=example"));
+        assert!(!sanitized.contains("Private"));
+        assert!(!sanitized.contains("example.org"));
+        assert_eq!(sanitized, without_unused_text(&sanitized));
+        let ambiguous = source.replace("Private agenda", "https://teams.live.com/meet/456");
+        assert!(!without_unused_text(&ambiguous).contains("X-CLAWSCRIBE-TEAMS-URL"));
     }
 }
