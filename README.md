@@ -281,7 +281,9 @@ bundled Codex app-server path, plus **Claude Code** using your own installation.
 Enable **Summarize automatically** in Summary settings to generate local notes
 with Built-in AI or loopback Ollama after saving a recording. External providers
 with a known destination require a review in Summary settings. A changed provider,
-model, or destination requires fresh approval. If a recording has a capture gap,
+model, destination, or expansion of the meeting data sent requires fresh approval.
+Review existing external approvals again to include the local meeting date and
+weekday, duration when known, and title when permitted. If a recording has a capture gap,
 notes can still use its saved transcript. Transcribing an audio-only recording
 also starts approved automatic notes once the transcript is saved. For audio
 imports, you can review and use the selected provider for that file. Reopen the

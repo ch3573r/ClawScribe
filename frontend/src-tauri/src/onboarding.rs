@@ -8,6 +8,9 @@ use crate::audio::recording_mode::{self, RecordingMode};
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
 use crate::summary::summary_engine::{self, ModelManagerState};
+use crate::summary::{automatic, llm_client::LLMProvider};
+
+static SETUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OnboardingStatus {
@@ -88,10 +91,7 @@ pub async fn load_onboarding_status<R: Runtime>(app: &AppHandle<R>) -> Result<On
 }
 
 /// Save onboarding status to store
-pub async fn save_onboarding_status<R: Runtime>(
-    app: &AppHandle<R>,
-    status: &OnboardingStatus,
-) -> Result<()> {
+fn save_onboarding_status<R: Runtime>(app: &AppHandle<R>, status: &OnboardingStatus) -> Result<()> {
     info!(
         "Saving onboarding status: step={}, completed={}",
         status.current_step, status.completed
@@ -130,6 +130,7 @@ pub async fn save_onboarding_status<R: Runtime>(
 
 /// Reset onboarding status (delete from store)
 pub async fn reset_onboarding_status<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
+    let _setup = SETUP_LOCK.lock().await;
     info!("Resetting onboarding status");
 
     let store = app
@@ -175,8 +176,8 @@ pub async fn save_onboarding_status_cmd<R: Runtime>(
     app: AppHandle<R>,
     status: OnboardingStatus,
 ) -> Result<(), String> {
+    let _setup = SETUP_LOCK.lock().await;
     save_onboarding_status(&app, &status)
-        .await
         .map_err(|e| format!("Failed to save onboarding status: {}", e))
 }
 
@@ -188,6 +189,7 @@ pub async fn complete_onboarding<R: Runtime>(
     local_notes_model: Option<String>,
     automatic_notes: Option<bool>,
 ) -> Result<(), String> {
+    let _setup = SETUP_LOCK.lock().await;
     let mut status = load_onboarding_status(&app)
         .await
         .map_err(|_| "Could not read setup status")?;
@@ -222,38 +224,80 @@ pub async fn complete_onboarding<R: Runtime>(
         .await
         .unwrap_or(false);
         if ready {
-            SettingsRepository::save_model_config(
-                state.db_manager.pool(),
-                "builtin-ai",
-                &model,
-                "large-v3",
-                None,
-            )
-            .await
-            .map_err(|_| "Could not save the local notes model preference")?;
             status.model_status.summary = "downloaded".into();
             status.model_status.selected_summary_model = Some(model);
         }
     }
-
-    recording_mode::set_recording_mode(app.clone(), mode).await?;
-    if let Some(enabled) = automatic_notes {
-        if status.model_status.selected_summary_model.is_none() {
-            return Err("The local notes model is unavailable.".into());
-        }
-        crate::summary::automatic::set_automatic_summary_preference(
-            app.clone(),
-            state,
-            enabled,
-            None,
-        )
-        .await?;
+    let model = status.model_status.selected_summary_model.as_deref();
+    if automatic_notes.is_some() && model.is_none() {
+        return Err("The local notes model is unavailable.".into());
     }
     status.completed = true;
     status.current_step = 4;
-    save_onboarding_status(&app, &status)
-        .await
-        .map_err(|_| "Could not save completed setup")?;
+
+    let _route = automatic::ROUTE_CHANGE_LOCK.lock().await;
+    let _mode = recording_mode::CHANGE_LOCK.lock().await;
+    let pool = state.db_manager.pool();
+    let previous_model = if model.is_some() {
+        SettingsRepository::get_model_config(pool)
+            .await
+            .map_err(|_| "Could not read the saved summary model preference")?
+    } else {
+        None
+    };
+    let previous_mode = recording_mode::replace(&app, Some(serde_json::json!(mode)))?;
+    let mut changed_model = false;
+    let result = async {
+        if let Some(model) = model.filter(|model| {
+            previous_model.as_ref().is_none_or(|old| {
+                LLMProvider::from_str(&old.provider) != Ok(LLMProvider::BuiltInAI)
+                    || old.model.trim() != *model
+            })
+        }) {
+            automatic::invalidate_external_review(&app)?;
+            SettingsRepository::save_model_config(
+                pool,
+                "builtin-ai",
+                model,
+                previous_model
+                    .as_ref()
+                    .map_or("large-v3", |old| old.whisper_model.as_str()),
+                previous_model
+                    .as_ref()
+                    .and_then(|old| old.ollama_endpoint.as_deref()),
+            )
+            .await
+            .map_err(|_| "Could not save the local notes model preference")?;
+            changed_model = true;
+        }
+        automatic::finish_builtin_onboarding(&app, automatic_notes, || {
+            save_onboarding_status(&app, &status)
+                .map_err(|_| "Could not save completed setup".into())
+        })
+    }
+    .await;
+    if let Err(error) = result {
+        if recording_mode::replace(&app, previous_mode).is_err() {
+            warn!("Could not restore the recording mode after setup failed");
+        }
+        if let Some(previous) = previous_model.filter(|_| changed_model) {
+            if SettingsRepository::save_model_config(
+                pool,
+                &previous.provider,
+                &previous.model,
+                &previous.whisper_model,
+                previous.ollama_endpoint.as_deref(),
+            )
+            .await
+            .is_err()
+            {
+                warn!("Could not restore the summary model selection after setup failed");
+            }
+        }
+        return Err(error);
+    }
+
+    recording_mode::notify_changed(&app, mode);
     crate::tray::update_tray_menu(&app);
     Ok(())
 }

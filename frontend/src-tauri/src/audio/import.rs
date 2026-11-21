@@ -512,7 +512,7 @@ impl Default for ImportDate {
 struct ImportOptions {
     meeting_id: String,
     date: ImportDate,
-    summary_request: Option<crate::summary::automatic::AuthorizedRequest>,
+    summary_request: Option<Result<crate::summary::automatic::AuthorizedRequest, String>>,
     summary_language: Option<String>,
     cloud_destination: Option<String>,
 }

@@ -2,14 +2,16 @@
 //! Cancelling an async waiter cannot release the model underneath a running FFI call.
 use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
+use std::future::{poll_fn, Future};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 static NATIVE: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(1)));
 static JOBS: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(1)));
+static FOREGROUND_DONE: Notify = Notify::const_new();
 
 #[cfg(test)]
 pub(crate) static GLOBAL_JOB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -48,25 +50,84 @@ pub(crate) fn claim_job() -> Result<OwnedSemaphorePermit, String> {
     claim_job_checked().map_err(|(_, message)| message)
 }
 
-/// Background notes can wait for foreground work to release both permits.
+/// Wait for foreground work to release both permits before restarting a job.
 pub(crate) async fn wait_for_job(
     token: &tokio_util::sync::CancellationToken,
-) -> Result<OwnedSemaphorePermit, String> {
+) -> Result<(), String> {
+    wait_for_slot(token, |_, _| ()).await
+}
+
+async fn wait_for_slot<T>(
+    token: &tokio_util::sync::CancellationToken,
+    on_claim: impl FnOnce(&mut SlotRegistration, OwnedSemaphorePermit) -> T,
+) -> Result<T, String> {
     crate::summary::llm_client::with_cancellation(Some(token), async {
+        enum SlotWait<T> {
+            Claimed(T),
+            Foreground,
+            Native,
+        }
+        let mut on_claim = Some(on_claim);
         loop {
-            let permit = JOBS
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| "The inference queue is unavailable")?;
-            if NATIVE.available_permits() > 0 {
-                return Ok(permit);
+            let foreground_done = FOREGROUND_DONE.notified();
+            let state = {
+                let acquire = JOBS.clone().acquire_owned();
+                tokio::pin!(acquire);
+                poll_fn(|cx| {
+                    let mut registration = slot_registration();
+                    if registration.foreground_waiters > 0 {
+                        return std::task::Poll::Ready(Ok(SlotWait::Foreground));
+                    }
+                    let permit = std::task::ready!(acquire.as_mut().poll(cx))
+                        .map_err(|_| "The inference queue is unavailable")?;
+                    let state = if NATIVE.available_permits() > 0 {
+                        let register = on_claim.take().expect("slot claimed once");
+                        SlotWait::Claimed(register(&mut registration, permit))
+                    } else {
+                        SlotWait::Native
+                    };
+                    std::task::Poll::Ready(Ok::<_, String>(state))
+                })
+                .await?
+            };
+            match state {
+                SlotWait::Claimed(permit) => return Ok(permit),
+                SlotWait::Foreground => foreground_done.await,
+                SlotWait::Native => wait_for_native_idle().await,
             }
-            drop(permit);
-            wait_for_native_idle().await;
         }
     })
     .await
+}
+
+pub(crate) struct LocalSummaryPermit(Option<OwnedSemaphorePermit>);
+
+impl Drop for LocalSummaryPermit {
+    fn drop(&mut self) {
+        let mut registration = slot_registration();
+        registration.local_summary = false;
+        drop(self.0.take());
+    }
+}
+
+/// Only a summary holding a permit can delay foreground preemption.
+pub(crate) async fn claim_local_summary(
+    wait: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<LocalSummaryPermit, String> {
+    let register = |registration: &mut SlotRegistration, permit| {
+        registration.local_summary = true;
+        LocalSummaryPermit(Some(permit))
+    };
+    if let Some(token) = wait {
+        wait_for_slot(token, register).await
+    } else {
+        let mut registration = slot_registration();
+        if registration.foreground_waiters > 0 {
+            return Err("Another recording or transcription job is starting.".into());
+        }
+        let permit = claim_job()?;
+        Ok(register(&mut registration, permit))
+    }
 }
 
 /// A caller already holding the exclusive job may need to restore a model
@@ -136,14 +197,41 @@ struct RunningBatch {
     cancel: CancelBatchJob,
 }
 
-static BATCH_REGISTRATION: std::sync::Mutex<Option<BatchRegistration>> =
-    std::sync::Mutex::new(None);
+#[derive(Default)]
+struct SlotRegistration {
+    batch: Option<BatchRegistration>,
+    local_summary: bool,
+    foreground_waiters: usize,
+}
+
+static SLOT_REGISTRATION: std::sync::LazyLock<std::sync::Mutex<SlotRegistration>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(SlotRegistration::default()));
 static NEXT_BATCH_ID: AtomicU64 = AtomicU64::new(1);
 
-fn batch_registration() -> std::sync::MutexGuard<'static, Option<BatchRegistration>> {
-    BATCH_REGISTRATION
+fn slot_registration() -> std::sync::MutexGuard<'static, SlotRegistration> {
+    SLOT_REGISTRATION
         .lock()
         .unwrap_or_else(|error| error.into_inner())
+}
+
+struct ForegroundClaim;
+
+impl ForegroundClaim {
+    fn enter() -> Self {
+        // Keep a queued summary from retaking the slot from a cancelled owner.
+        slot_registration().foreground_waiters += 1;
+        Self
+    }
+}
+
+impl Drop for ForegroundClaim {
+    fn drop(&mut self) {
+        let mut registration = slot_registration();
+        registration.foreground_waiters -= 1;
+        if registration.foreground_waiters == 0 {
+            FOREGROUND_DONE.notify_waiters();
+        }
+    }
 }
 
 /// The job slot plus, for a batch job, its registration. Dropping clears the
@@ -157,12 +245,13 @@ pub(crate) struct BatchPermit {
 
 impl Drop for BatchPermit {
     fn drop(&mut self) {
-        let mut registration = batch_registration();
+        let mut registration = slot_registration();
         if registration
+            .batch
             .as_ref()
             .is_some_and(|current| current.id == self.id)
         {
-            *registration = None;
+            registration.batch = None;
         }
         drop(self.permit.take());
     }
@@ -183,6 +272,7 @@ enum Poll {
         /// The registered batch job holding the slot, read under the same
         /// lock as the failed claim.
         batch: Option<RunningBatch>,
+        local_summary: bool,
     },
 }
 
@@ -191,13 +281,13 @@ enum Poll {
 /// same lock, so a recording never observes a batch job as an unregistered
 /// holder, nor a released job as still holding the slot.
 fn poll_claim(register: Option<(BatchJob, &CancelBatchJob)>) -> Poll {
-    let mut registration = batch_registration();
+    let mut registration = slot_registration();
     match claim_job_checked() {
         Ok(permit) => {
             let id = match register {
                 Some((job, cancel)) => {
                     let id = NEXT_BATCH_ID.fetch_add(1, Ordering::Relaxed);
-                    *registration = Some(BatchRegistration {
+                    registration.batch = Some(BatchRegistration {
                         id,
                         job,
                         cancel: cancel.clone(),
@@ -212,11 +302,12 @@ fn poll_claim(register: Option<(BatchJob, &CancelBatchJob)>) -> Poll {
         Err((block, message)) => Poll::Blocked {
             message,
             block,
-            batch: registration.as_ref().map(|current| RunningBatch {
+            batch: registration.batch.as_ref().map(|current| RunningBatch {
                 id: current.id,
                 job: current.job,
                 cancel: current.cancel.clone(),
             }),
+            local_summary: registration.local_summary,
         },
     }
 }
@@ -232,7 +323,7 @@ fn try_claim(
 
 /// True for the first caller only: one `batch-job-preempted` event per job.
 fn announce_once(id: u64) -> bool {
-    match batch_registration().as_mut() {
+    match slot_registration().batch.as_mut() {
         Some(current) if current.id == id && !current.announced => {
             current.announced = true;
             true
@@ -243,7 +334,8 @@ fn announce_once(id: u64) -> bool {
 
 #[cfg(test)]
 fn running_batch_job() -> Option<(BatchJob, CancelBatchJob)> {
-    batch_registration()
+    slot_registration()
+        .batch
         .as_ref()
         .map(|current| (current.job, current.cancel.clone()))
 }
@@ -351,6 +443,7 @@ async fn claim_with_preemption(
     summary_wait: std::time::Duration,
     batch_wait: std::time::Duration,
 ) -> Result<(OwnedSemaphorePermit, u64), String> {
+    let _foreground = ForegroundClaim::enter();
     // Block new indexing claims before cancelling the current input. Native FFI
     // retains both permits until it actually completes.
     let priority = crate::knowledge::scheduler::ForegroundPriority::enter();
@@ -368,15 +461,17 @@ async fn claim_with_preemption(
             return Ok(claimed);
         }
     }
-    let (original, first_batch) = match poll_claim(register) {
+    let (original, first_batch, local_summary) = match poll_claim(register) {
         Poll::Claimed(permit, id) => return Ok((permit, id)),
-        Poll::Blocked { message, batch, .. } => (message, batch),
+        Poll::Blocked {
+            message,
+            batch,
+            local_summary,
+            ..
+        } => (message, batch, local_summary),
     };
     // Only a recording pre-empts a batch job.
     if let (Some(on_preempt), Some(first)) = (preempt_batch, first_batch) {
-        if crate::summary::SummaryService::has_active_local_summary() {
-            crate::summary::SummaryService::cancel_local_summaries(reason);
-        }
         let mut stopping = first.job;
         let deadline = tokio::time::Instant::now() + batch_wait;
         loop {
@@ -399,6 +494,7 @@ async fn claim_with_preemption(
                     batch: None,
                     block: ClaimBlock::SlotHeld,
                     message,
+                    ..
                 } => return Err(message),
                 // The slot is free; a cancelled native call is still finishing.
                 Poll::Blocked {
@@ -417,16 +513,15 @@ async fn claim_with_preemption(
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     }
-    if !crate::summary::SummaryService::has_active_local_summary() {
+    if !local_summary {
         return Err(original);
     }
     crate::summary::SummaryService::cancel_local_summaries(reason);
     match tokio::time::timeout(summary_wait, JOBS.clone().acquire_owned()).await {
         Ok(Ok(permit)) if NATIVE.available_permits() > 0 => {
-            // The permit is already held; record the holder if requested.
             if let Some((job, cancel)) = register {
                 let id = NEXT_BATCH_ID.fetch_add(1, Ordering::Relaxed);
-                *batch_registration() = Some(BatchRegistration {
+                slot_registration().batch = Some(BatchRegistration {
                     id,
                     job,
                     cancel: cancel.clone(),

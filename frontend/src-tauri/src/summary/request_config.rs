@@ -16,7 +16,7 @@ pub(crate) type DispatchCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync
 #[derive(Clone)]
 pub(crate) struct AuthorizedRequest {
     pub request: AutomaticRequest,
-    pub check: Option<DispatchCheck>,
+    pub check: DispatchCheck,
 }
 
 // The executable request owns all provider inputs, including its credential.
@@ -257,8 +257,15 @@ impl AutomaticRequest {
             }
         };
         let provider = canonical_provider(&self.provider);
+        // A broader outbound payload requires a new approval for the same route.
+        // Keep existing local imports and interrupted local jobs eligible.
+        let version = if external {
+            "automatic-summary-v3"
+        } else {
+            "automatic-summary-v2"
+        };
         let identity = serde_json::to_vec(&(
-            "automatic-summary-v2",
+            version,
             provider,
             &self.model,
             endpoint

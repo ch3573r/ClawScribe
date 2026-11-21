@@ -625,6 +625,7 @@ impl SummaryService {
         }
     }
 
+    /// Includes parked jobs and jobs between inference requests.
     pub(crate) fn has_active_local_summary() -> bool {
         CANCELLATION_REGISTRY
             .lock()
@@ -635,6 +636,14 @@ impl SummaryService {
         CANCELLATION_REGISTRY
             .lock()
             .map_or(true, |jobs| jobs.contains_key(meeting_id))
+    }
+
+    pub(super) fn has_paused_automatic_job(meeting_id: &str) -> bool {
+        CANCELLATION_REGISTRY.lock().is_ok_and(|jobs| {
+            jobs.get(meeting_id).is_some_and(|job| {
+                job.automatic && job.builtin && job.reason != Some(USER_CANCELLED)
+            })
+        })
     }
 
     /// Cancels the summary generation for a meeting
@@ -750,7 +759,7 @@ impl SummaryService {
 
         // Parse provider
         let execution = automatic.as_ref().map(|job| &job.request.execution);
-        let check = automatic.as_ref().and_then(|job| job.check.as_ref());
+        let check = automatic.as_ref().map(|job| &job.check);
         if let Some(check) = check {
             if let Err(reason) = check() {
                 finish_provider_error(&pool, &meeting_id, cancellation_token, &reason).await;
@@ -2082,7 +2091,9 @@ mod recording_cancellation_tests {
             .await
             .unwrap();
         let local = SummaryService::register_job("preemption-owner", "builtin-ai").unwrap();
-        let held = crate::audio::inference::claim_job().unwrap();
+        let held = crate::audio::inference::claim_local_summary(None)
+            .await
+            .unwrap();
         let token = local.token.clone();
         let release = tokio::spawn(async move {
             token.cancelled().await;
@@ -2103,27 +2114,32 @@ mod recording_cancellation_tests {
     }
 
     #[tokio::test]
-    async fn preemption_refuses_other_jobs_and_times_out_without_cancelling_cloud() {
+    async fn parked_automatic_notes_do_not_delay_import_or_retranscription() {
         let _test_lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let held = crate::audio::inference::claim_job().unwrap();
         let cloud = SummaryService::register_job("preempt-cloud", "openai").unwrap();
         let expected = crate::audio::inference::claim_job().unwrap_err();
-        let immediate = tokio::time::timeout(
-            Duration::from_millis(100),
-            crate::audio::inference::claim_job_preempting_local_summary("test interruption"),
-        )
-        .await
-        .unwrap();
-        assert_eq!(immediate.unwrap_err(), expected);
-        let _local = SummaryService::register_job("preempt-stuck", "builtin-ai").unwrap();
-        assert_eq!(
-            crate::audio::inference::claim_job_preempting_local_summary("test interruption")
-                .await
-                .unwrap_err(),
-            expected
-        );
+        let local = SummaryService::try_register_job("preempt-parked", "builtin-ai", true)
+            .unwrap()
+            .unwrap();
+        assert!(SummaryService::has_active_local_summary());
+        let waiting = crate::audio::inference::claim_local_summary(Some(local.token()));
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        use crate::audio::inference::{claim_batch_job, BatchJob};
+        for batch in [BatchJob::Import, BatchJob::Retranscription] {
+            let result = tokio::time::timeout(
+                Duration::from_millis(200),
+                claim_batch_job(batch, Arc::new(|| true), "test interruption"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.err().as_deref(), Some(expected.as_str()));
+        }
         assert!(!cloud.token.is_cancelled());
+        assert!(!local.token.is_cancelled());
         drop(held);
+        assert!(waiting.await.is_ok());
     }
     #[tokio::test]
     async fn import_cancels_local_summary_with_its_specific_reason() {
