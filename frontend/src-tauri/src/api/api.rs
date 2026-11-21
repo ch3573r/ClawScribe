@@ -1319,6 +1319,97 @@ fn parse_recording_transcripts(
         .map_err(|_| "Invalid transcript segment data".into())
 }
 
+fn parse_recovery_transcript(
+    transcripts: Vec<serde_json::Value>,
+) -> Result<Vec<TranscriptSegment>, String> {
+    let mut segments = parse_recording_transcripts(transcripts)?;
+    segments.retain(|segment| !segment.text.trim().is_empty());
+    if segments.is_empty() {
+        return Err("There is no cached transcript to save.".into());
+    }
+    Ok(segments)
+}
+
+#[tauri::command]
+pub(crate) async fn save_offline_recording_transcript<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    meeting_title: String,
+    started_at: i64,
+    transcripts: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let _install_guard = crate::updates::admit_work()?;
+    if !crate::database::meeting_files::is_stable_recording_id(&meeting_id) {
+        return Err("This draft can be saved as a transcript copy.".into());
+    }
+    let _recording_job = crate::audio::inference::claim_job()?;
+    if crate::audio::recording_commands::active_recording_folder()
+        != crate::audio::interrupted::ActiveFolder::None
+    {
+        return Err("Try again when recording has stopped.".into());
+    }
+    let segments = parse_recovery_transcript(transcripts)?;
+    TranscriptsRepository::save_offline_recording_transcript(
+        state.db_manager.pool(),
+        &meeting_id,
+        &meeting_title,
+        &segments,
+        started_at,
+    )
+    .await
+    .map_err(|_| "Could not save the transcript to your library.".to_string())?;
+    let _ = app.emit("library-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn save_recovery_transcript_copy<R: Runtime>(
+    app: AppHandle<R>,
+    transcripts: Vec<serde_json::Value>,
+) -> Result<bool, String> {
+    let segments = parse_recovery_transcript(transcripts)?;
+    let chosen = crate::file_grants::pick_save(
+        app,
+        "Text transcript",
+        "txt",
+        "ClawScribe-recovered-transcript.txt".into(),
+    )
+    .await?;
+    tokio::task::spawn_blocking(move || write_recovery_transcript_copy(chosen, &segments))
+        .await
+        .map_err(|_| "Could not save the transcript copy.".to_string())?
+}
+
+fn write_recovery_transcript_copy(
+    chosen: Option<std::path::PathBuf>,
+    segments: &[TranscriptSegment],
+) -> Result<bool, String> {
+    use std::fmt::Write;
+    let Some(path) = chosen else {
+        return Ok(false);
+    };
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+    {
+        return Err("Choose a filename ending in .txt.".into());
+    }
+    crate::file_grants::save_target_parent_exists(&path)?;
+    let mut document = String::new();
+    for segment in segments {
+        if !segment.timestamp.trim().is_empty() {
+            let _ = write!(document, "[{}] ", segment.timestamp.trim());
+        }
+        if let Some(speaker) = segment.speaker.as_deref().filter(|s| !s.trim().is_empty()) {
+            let _ = write!(document, "{}: ", speaker.trim());
+        }
+        let _ = writeln!(document, "{}", segment.text);
+    }
+    crate::library::atomic_write(&path, document.as_bytes())?;
+    Ok(true)
+}
+
 fn read_recording_snapshot(
     folder: Option<&std::path::Path>,
 ) -> Result<Vec<TranscriptSegment>, String> {
@@ -1358,6 +1449,29 @@ fn select_recording_transcripts(
 #[cfg(test)]
 mod recording_snapshot_tests {
     use super::*;
+
+    #[test]
+    fn transcript_copy_writes_reviewed_text_and_keeps_existing_files_on_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let segments = parse_recovery_transcript(vec![serde_json::json!({
+            "id": "sample", "text": "Synthetic cached words", "speaker": "Me", "timestamp": "00:01"
+        })])
+        .unwrap();
+        assert!(!write_recovery_transcript_copy(None, &segments).unwrap());
+        let chosen = root.path().join("draft.txt");
+        assert!(write_recovery_transcript_copy(Some(chosen.clone()), &segments).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(chosen).unwrap(),
+            "[00:01] Me: Synthetic cached words\n"
+        );
+
+        let blocked = root.path().join("folder.txt");
+        std::fs::create_dir(&blocked).unwrap();
+        let original = blocked.join("keep.txt");
+        std::fs::write(&original, b"Existing file").unwrap();
+        assert!(write_recovery_transcript_copy(Some(blocked), &segments).is_err());
+        assert_eq!(std::fs::read(original).unwrap(), b"Existing file");
+    }
 
     #[test]
     fn missing_and_invalid_snapshots_fall_back_to_valid_ui_segments() {

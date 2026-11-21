@@ -259,9 +259,13 @@ pub(crate) fn stamped_meeting_id(marker: &serde_json::Value) -> Option<&str> {
 
 fn marker_id<'a>(marker: &'a serde_json::Value, field: &str) -> Option<&'a str> {
     let id = marker.get(field)?.as_str()?;
-    let raw = id.strip_prefix("meeting-")?;
-    let uuid = uuid::Uuid::parse_str(raw).ok()?;
-    (uuid.hyphenated().to_string() == raw).then_some(id)
+    is_stable_recording_id(id).then_some(id)
+}
+
+pub(crate) fn is_stable_recording_id(id: &str) -> bool {
+    id.strip_prefix("meeting-").is_some_and(|raw| {
+        uuid::Uuid::parse_str(raw).is_ok_and(|uuid| uuid.hyphenated().to_string() == raw)
+    })
 }
 
 pub(crate) fn has_invalid_marker_id(marker: &serde_json::Value) -> bool {

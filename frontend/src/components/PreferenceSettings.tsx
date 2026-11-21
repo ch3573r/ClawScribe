@@ -214,8 +214,12 @@ export function PreferenceSettings() {
           </SettingsRow>
         ))}
         {locationsUnavailable && <NoteRow tone="muted">The database and model locations could not be read.</NoteRow>}
-        {interrupted.scanFailed && (
-          <SettingsRow title="Recovery scan" description="Some recordings could not be checked. Reconnect the recordings location if needed, then retry.">
+        {(interrupted.scanFailed || interrupted.hasUnverifiedFolders || interrupted.waitingForAudio) && (
+          <SettingsRow title="Recovery scan" description={interrupted.scanFailed
+            ? "The recovery scan failed. Your drafts are kept."
+            : interrupted.hasUnverifiedFolders
+              ? "Some recording folders could not be verified. Reconnect the recordings location if needed, then retry."
+              : "Check for audio from recordings whose transcripts you saved."}>
             <Button type="button" variant="outline" size="sm" disabled={interrupted.loading} onClick={interrupted.refresh}>
               {interrupted.loading ? 'Checking…' : 'Retry scan'}
             </Button>
@@ -226,7 +230,7 @@ export function PreferenceSettings() {
             title="Interrupted recordings"
             description={
               interrupted.count > 0
-                ? `${interrupted.count} ${interrupted.count === 1 ? "recording was" : "recordings were"} interrupted. Review them to recover or delete them${interrupted.keptCount > 0 ? `. ${interrupted.keptCount} more ${interrupted.keptCount === 1 ? "is" : "are"} kept and not offered` : ""}`
+                ? `${interrupted.count} ${interrupted.count === 1 ? "recording was" : "recordings were"} interrupted. Review available recovery options${interrupted.keptCount > 0 ? `. ${interrupted.keptCount} more ${interrupted.keptCount === 1 ? "is" : "are"} kept and not offered` : ""}`
                 : `${interrupted.keptCount} ${interrupted.keptCount === 1 ? "recording is" : "recordings are"} kept and not offered`
             }
           >

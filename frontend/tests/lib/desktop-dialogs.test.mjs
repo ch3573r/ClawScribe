@@ -135,6 +135,51 @@ test('a late recovery preview cannot replace the selected meeting', async () => 
   hooks.unmount();
 });
 
+test('an unverified recording offers retry and an explicit transcript copy after preview', async () => {
+  const hooks = createHookHarness();
+  const calls = [];
+  let failSave = true;
+  const { TranscriptRecovery } = loadTsModule('src/components/TranscriptRecovery/TranscriptRecovery.tsx', {
+    ...primitives, react: hooks.react, sonner: { toast: {
+      error: message => calls.push(message),
+      success: message => calls.push(message),
+    } },
+  });
+  const render = () => hooks.render(() => TranscriptRecovery(props));
+  const props = {
+    isOpen: true,
+    recoverableMeetings: [{
+      meetingId: 'legacy', title: 'Example meeting', lastUpdated: Date.now(), startTime: Date.now(),
+      transcriptCount: 1, folderUnverified: true,
+    }],
+    hasUnverifiedFolders: true,
+    onLoadPreview: async () => [{ text: 'Reviewed draft' }],
+    onRetryScan: () => calls.push('retry'),
+    onSaveOfflineTranscript: async id => {
+      calls.push(id);
+      if (failSave) throw new Error('Could not save the transcript.');
+      return 'file';
+    },
+  };
+  const button = (tree, label) => nodes(tree).find(node => node.type === 'button' && text(node) === label);
+  render();
+  await flush();
+  const tree = render();
+  assert.match(text(tree), /Folder unverified/);
+  assert.match(text(tree), /Reviewed draft/);
+  assert.equal(button(tree, 'Recover'), undefined);
+  assert.equal(button(tree, 'Delete'), undefined);
+  assert.deepEqual(calls, []);
+  button(tree, 'Retry scan').props.onClick();
+  await button(tree, 'Save transcript copy…').props.onClick();
+  assert.deepEqual(calls, ['retry', 'legacy', 'Could not save the transcript.']);
+  assert.match(text(render()), /Reviewed draft/);
+  failSave = false;
+  await button(render(), 'Save transcript copy…').props.onClick();
+  assert.deepEqual(calls.slice(-2), ['legacy', 'Transcript copy saved']);
+  hooks.unmount();
+});
+
 test('permission settings errors give platform-neutral recovery instructions',async()=>{
   const hooks=createHookHarness(),errors=[];
   const {PermissionsStep}=loadTsModule('src/components/onboarding/steps/PermissionsStep.tsx',{

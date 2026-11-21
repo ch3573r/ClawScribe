@@ -454,7 +454,9 @@ meetings. See [local library tools](docs/local-library.md#deleting-meetings).
 The recordings folder picker saves the verified target of a link or junction.
 For an older linked setting, choose the folder again in **Settings → Recording**.
 If a recovery scan cannot verify a recording location, reconnect it and choose
-**Retry scan** to check the retained draft and audio together.
+**Retry scan**. You can preview an unverified draft and save its transcript
+while the folder is unavailable. ClawScribe can add verified audio to the same
+library meeting when it returns. Older drafts can be saved as a text file.
 
 ## Update Preferences
 

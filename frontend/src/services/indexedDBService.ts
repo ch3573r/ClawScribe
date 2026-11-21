@@ -282,7 +282,7 @@ class IndexedDBService {
       const store = transaction.objectStore('transcripts');
       const index = store.index('meetingId');
 
-      return new Promise((resolve, reject) => {
+      return await new Promise((resolve, reject) => {
         const request = index.getAll(meetingId);
         request.onsuccess = () => {
           const transcripts = request.result as StoredTranscript[];
@@ -292,9 +292,8 @@ class IndexedDBService {
         };
         request.onerror = () => reject(request.error);
       });
-    } catch (error) {
-      console.error('Failed to get transcripts from IndexedDB:', error);
-      return [];
+    } catch {
+      throw new Error('Could not read the cached transcript.');
     }
   }
 

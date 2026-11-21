@@ -85,6 +85,14 @@ test('cached transcripts sort by sequence in both stored formats', async () => {
   assert.deepEqual(rows.map(row => row.sequenceId ?? row.sequence_id), [0, 1, 2]);
 });
 
+test('an unavailable cache is reported as a read failure, rather than an empty draft', async () => {
+  const cache = recoveryCache([]);
+  cache.indexedDBService.db.transaction = () => { throw new Error('Synthetic storage failure'); };
+  await assert.rejects(cache.indexedDBService.getTranscripts('sample'), {
+    message: 'Could not read the cached transcript.',
+  });
+});
+
 test('library deletion leaves a different draft reusing the same folder intact', async () => {
   const cache = recoveryCache([
     { meetingId: 'sqlite-id', folderPath: 'synthetic-folder', savedToSQLite: true },

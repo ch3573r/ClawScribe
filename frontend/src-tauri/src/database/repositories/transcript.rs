@@ -509,6 +509,37 @@ impl TranscriptsRepository {
         .await
     }
 
+    /// The native recording ID is sufficient to save the text without
+    /// attaching an unverified path. Audio repair can later bind a trusted
+    /// folder whose recording marker carries this same ID.
+    pub(crate) async fn save_offline_recording_transcript(
+        pool: &SqlitePool,
+        recording_id: &str,
+        meeting_title: &str,
+        transcripts: &[TranscriptSegment],
+        started_at_ms: i64,
+    ) -> Result<String, SqlxError> {
+        Self::save_with_id(
+            pool,
+            recording_id.to_owned(),
+            meeting_title,
+            transcripts,
+            None,
+            Some(&crate::audio::outcome::RecordingOutcome {
+                audio_save_failed: true,
+                transcription_incomplete: true,
+                ..Default::default()
+            }),
+            None,
+            true,
+            RecordingProvenance {
+                started_at: chrono::DateTime::from_timestamp_millis(started_at_ms),
+                ..RecordingProvenance::recording(None, None)
+            },
+        )
+        .await
+    }
+
     async fn save_with_id(
         pool: &SqlitePool,
         meeting_id: String,
@@ -609,8 +640,6 @@ impl TranscriptsRepository {
             .await?;
         }
 
-        info!("Successfully created meeting with id: {}", meeting_id);
-
         // 2. Save each transcript segment with audio timing fields
         for segment in transcripts {
             let transcript_id = format!("transcript-{}", Uuid::new_v4());
@@ -643,11 +672,7 @@ impl TranscriptsRepository {
             }
         }
 
-        info!(
-            "Successfully saved {} transcript segments for meeting {}",
-            transcripts.len(),
-            meeting_id
-        );
+        info!("Saved {} transcript segments", transcripts.len());
 
         if let Some(outcome) = outcome {
             sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete, capture_incomplete, recording_files_incomplete, capture_details) VALUES (?, ?, ?, ?, ?, ?)")

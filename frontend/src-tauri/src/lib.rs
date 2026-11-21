@@ -1036,6 +1036,8 @@ pub fn run() {
             api::api_update_transcript_speakers_matching,
             api::api_save_meeting_title,
             api::api_save_transcript,
+            api::save_offline_recording_transcript,
+            api::save_recovery_transcript_copy,
             api::open_meeting_folder,
             api::open_external_url,
             // Custom OpenAI commands

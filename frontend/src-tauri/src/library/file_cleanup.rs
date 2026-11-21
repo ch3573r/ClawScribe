@@ -267,11 +267,11 @@ async fn stage_pending(
             match status {
                 Ok(StageStatus::Ready) => (tx, Ok(Some(stage))),
                 Ok(StageStatus::Gone) => (tx, Ok(None)),
-                Ok(status @ (StageStatus::Fresh | StageStatus::EmptyRecording)) => {
+                Ok(status @ (StageStatus::Fresh | StageStatus::EmptyReservation)) => {
                     match prepare(&mut tx, locations, &pending, initial_recording_job).await {
                         Ok(prepared) => tokio::task::spawn_blocking(move || {
                             let result = prepared
-                                .stage(stage, matches!(status, StageStatus::EmptyRecording));
+                                .stage(stage, matches!(status, StageStatus::EmptyReservation));
                             (tx, result)
                         })
                         .await
@@ -356,8 +356,8 @@ impl CleanupTarget {
             };
         }
         if reset_empty {
-            // Only a freshly verified recording can restart an incomplete
-            // reservation. A non-empty holder is left for manual review.
+            // Restart only after rechecking the target and reservation.
+            // Non-empty holders stay available for manual review.
             if !stage.holder_exists(true)? {
                 return Err(STAGE_UNCERTAIN);
             }
@@ -496,7 +496,7 @@ struct Stage {
 
 enum StageStatus {
     Fresh,
-    EmptyRecording,
+    EmptyReservation,
     Ready,
     Gone,
 }
@@ -609,13 +609,13 @@ impl Stage {
         }
         // A crash before publishing the rename can leave only the reservation.
         // If the original is absent, a non-recursive removal can clear an empty
-        // holder without touching a possible replacement at the original path.
+        // holder. Otherwise recheck ownership before retrying the move.
         let parent = self.holder.parent().ok_or(UNSAFE_PATH)?;
         #[cfg(windows)]
         let _parents = meeting_files::pin_directory_chain(parent).map_err(|_| UNAVAILABLE)?;
         match fs::symlink_metadata(&self.original) {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Ok(_) if self.recording_roots.is_some() => return Ok(StageStatus::EmptyRecording),
+            Ok(_) => return Ok(StageStatus::EmptyReservation),
             _ => return Err(STAGE_UNCERTAIN),
         }
         meeting_files::directory_chain(parent).map_err(|_| UNAVAILABLE)?;
@@ -752,7 +752,7 @@ mod tests {
         fs::create_dir(&stage.original).unwrap();
         assert!(matches!(
             stage.inspect(false),
-            Ok(StageStatus::EmptyRecording)
+            Ok(StageStatus::EmptyReservation)
         ));
         assert!(stage.holder.is_dir());
         fs::remove_dir(&stage.original).unwrap();
@@ -929,6 +929,40 @@ mod tests {
         assert_eq!(attempt(&pool, &locations, id, None).await.unwrap(), None);
         assert!(!stage.holder.exists());
         assert!(stage.original.join("new.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn retry_recovers_an_empty_app_data_reservation_without_removing_unknown_files() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let locations = locations(root.path());
+        MeetingsRepository::delete_from_library(&pool, "review-test", false)
+            .await
+            .unwrap()
+            .unwrap();
+        let id = entry(&pool, "outputs").await.id;
+        sqlx::query("UPDATE pending_meeting_file_cleanup SET stage_token=? WHERE id=?")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stage = Stage::for_entry(&locations, &entry(&pool, "outputs").await).unwrap();
+        fs::create_dir_all(&stage.holder).unwrap();
+        fs::create_dir(&stage.original).unwrap();
+        let unexpected = stage.holder.join("unexpected.txt");
+        fs::write(&unexpected, b"Preserve this file").unwrap();
+        assert_eq!(
+            attempt(&pool, &locations, id, None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(STAGE_UNCERTAIN)
+        );
+        assert!(stage.original.is_dir() && unexpected.is_file());
+        fs::remove_file(unexpected).unwrap();
+        assert_eq!(attempt(&pool, &locations, id, None).await.unwrap(), None);
+        assert!(!stage.original.exists() && !stage.holder.exists());
     }
 
     #[tokio::test]
