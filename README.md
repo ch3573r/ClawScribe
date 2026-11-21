@@ -7,13 +7,10 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-**0.64.1** is a Windows GPU preview. It fixes recording device selection,
-Stop feedback, citation navigation, and saved-note editing. See the
-[0.64.1 preview notes](docs/releases/0.64.1.md) and the
-[latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
-Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
-**Include prereleases** to discover later previews; drafts are excluded from
-updates.
+**0.65.0** adds **Join and record** for upcoming Teams meetings, floating
+recording controls, and one search across titles, transcripts, summaries and
+personal notes. See the [release notes](docs/releases/0.65.0.md) and
+[download the latest stable Windows release](https://github.com/ch3573r/ClawScribe/releases/latest).
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),

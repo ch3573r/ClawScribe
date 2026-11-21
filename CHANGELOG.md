@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.65.0
+
+- Choose **Join and record** from an upcoming Teams invitation. A saved calendar choice now expires five minutes after the event ends.
+- Open floating controls during a recording to check both audio levels, add a timestamped note or bookmark, and stop recording.
+- Search titles, transcripts, summaries, notes and bookmarks together. **Ask about these results** scopes a question to the matching meetings. Personal excerpts require a preview of the selected text and destination for each question.
+- A capture gap remains visible while automatic notes can use a complete saved transcript. A successful retranscription can start approved notes, including after an audio-only recording.
+- Recorded meetings use their capture start date through Stop and recovery. Local MCP meeting search finds mixed-case Unicode text, including German umlauts, across result pages.
+- [Windows release notes](docs/releases/0.65.0.md).
+
 ## 0.64.1
 
 - Windows recording uses the selected microphone and output. Stop shows save progress, and a new start request can wait for the previous save. Concurrent capture warnings stay visible.

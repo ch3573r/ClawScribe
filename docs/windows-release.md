@@ -417,11 +417,11 @@ commit separately instead of relabeling the binaries.
 
 ## Artifacts And Signing
 
-For source version 0.64.1, installer filenames are:
+For source version 0.65.0, installer filenames are:
 
 ```text
-ClawScribe_0.64.1_x64-setup.exe
-ClawScribe_0.64.1_x64_en-US.msi
+ClawScribe_0.65.0_x64-setup.exe
+ClawScribe_0.65.0_x64_en-US.msi
 ```
 
 Published installers include detached Tauri updater signatures (`.sig`).
@@ -584,7 +584,7 @@ version, audio devices, and result without publishing private meeting content.
    assistance-induced capture gaps or unbounded memory and no Stop wait on
    assistance backlog. Exact-build installed and two-hour checks remain pending
    when only fixture/helper/native tests exist. Preview notes must disclose
-   those missing checks. Stable is 0.5.58, which the owner published on 2026-11-15
+   those missing checks. Version 0.5.58 was published to stable on 2026-11-15
    without real-device acceptance; that exception does not change this policy.
 
 Optional hosted-provider verification is documented in
