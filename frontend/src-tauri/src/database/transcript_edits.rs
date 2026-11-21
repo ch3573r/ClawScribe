@@ -473,8 +473,9 @@ fn publish_import_metadata(
 ) -> Result<(), String> {
     let audio = crate::library::archive::storage::owned_audio_name(metadata, meeting)
         .ok_or("Missing import audio name")?;
-    if !std::fs::symlink_metadata(folder.join(audio))
-        .is_ok_and(|meta| meta.is_file() && !crate::local_path::is_link(&meta))
+    let audio_path = folder.join(audio);
+    if !std::fs::symlink_metadata(&audio_path)
+        .is_ok_and(|meta| meta.is_file() && !super::meeting_files::is_link(&audio_path, &meta))
     {
         return Err("The saved import audio could not be verified".into());
     }
@@ -849,7 +850,10 @@ pub(crate) async fn sync_file_with_profile(
                 };
                 publish_import_metadata(&folder, &meeting_id, &update.import_metadata)?;
                 match std::fs::symlink_metadata(&transcript_path) {
-                    Ok(meta) if meta.is_file() && !crate::local_path::is_link(&meta) => {
+                    Ok(meta)
+                        if meta.is_file()
+                            && !super::meeting_files::is_link(&transcript_path, &meta) =>
+                    {
                         let existing: serde_json::Value =
                             serde_json::from_reader(std::io::BufReader::new(
                                 std::fs::File::open(&transcript_path).map_err(error)?,
