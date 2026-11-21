@@ -9,7 +9,7 @@ const event = (...props) => ["BEGIN:VEVENT", ...props, "END:VEVENT"].join("\r\n"
 const from = new Date("2026-03-20T00:00Z");
 const until = new Date("2026-04-10T00:00Z");
 
-test("keeps a validated Teams URL from the event or the sanitized native feed", () => {
+test("keeps validated event URLs and ignores a supplied private Teams property", () => {
   const text = calendar(
     event("UID:explicit", "DTSTART:20260321T090000Z", "DURATION:PT30M",
       "URL:https://teams.cloud.microsoft/meet/456?passcode=example"),
@@ -18,12 +18,15 @@ test("keeps a validated Teams URL from the event or the sanitized native feed", 
       "DESCRIPTION:Private context"),
     event("UID:unsafe", "DTSTART:20260321T110000Z", "DURATION:PT30M",
       "URL:https://teams.microsoft.com.example.org/meet/456"),
+    event("UID:native-output", "DTSTART:20260321T120000Z", "DURATION:PT30M",
+      "URL;VALUE=URI:https://teams.microsoft.com/meet/123456/?passcode=example"),
   );
   const meetings = parse(text, "calendar-a", from, until);
   assert.deepEqual(Array.from(meetings, meeting => meeting.joinUrl), [
     "https://teams.cloud.microsoft/meet/456?passcode=example",
-    "https://teams.microsoft.com/meet/789",
     null,
+    null,
+    "https://teams.microsoft.com/meet/123456/?passcode=example",
   ]);
   assert.doesNotMatch(JSON.stringify(meetings), /Private context/);
 });

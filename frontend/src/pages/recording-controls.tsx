@@ -32,7 +32,10 @@ export default function FloatingControls() {
   const [status, setStatus] = useState<Snapshot | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [draft, setDraft] = useState('');
-  const [pending, setPending] = useState<'note' | 'stop' | 'pause' | 'reconnect' | null>(null);
+  const [pending, setPending] = useState<'note' | 'stop' | 'pause' | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const retryInFlight = useRef(false);
+  const [retryError, setRetryError] = useState('');
   const busy = useRef(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
@@ -83,7 +86,8 @@ export default function FloatingControls() {
   const warnings = health ? recordingHealthWarnings(health) : [];
   const metrics = health ? recordingHealthMetrics(health) : [];
   const canStop = !!recording && !unavailable && !pending;
-  const canNote = canStop && !health?.reconnecting;
+  const canNote = canStop;
+  const canRetry = canStop && !retrying && !health?.reconnecting;
 
   async function saveNote(event: FormEvent) {
     event.preventDefault();
@@ -137,18 +141,18 @@ export default function FloatingControls() {
   }
 
   async function reconnect(device: MissingRecordingDevice) {
-    if (!canNote || busy.current) return;
-    busy.current = true;
-    setPending('reconnect');
-    setError('');
+    if (!canRetry || retryInFlight.current) return;
+    retryInFlight.current = true;
+    setRetrying(true);
+    setRetryError('');
     try {
       const result = await invoke<{ reconnected: boolean }>('floating_reconnect', { deviceName: device.name, deviceType: device.device_type });
-      if (!result.reconnected) setError('Audio device still unavailable. Check its connection and try again.');
+      if (!result.reconnected) setRetryError('Audio device still unavailable. Check its connection and try again.');
     } catch (error) {
-      setError(typeof error === 'string' ? error : 'Could not reconnect the audio device.');
+      setRetryError(typeof error === 'string' ? error : 'Could not reconnect the audio device.');
     } finally {
-      busy.current = false;
-      setPending(null);
+      retryInFlight.current = false;
+      setRetrying(false);
     }
   }
 
@@ -186,8 +190,9 @@ export default function FloatingControls() {
       </ul>}
       {recording && health?.disconnected_devices.map(device => <div key={device.device_type} className="flex items-center justify-between gap-2 text-xs">
         <span>{deviceLabel(device)} unavailable</span>
-        <Button type="button" size="sm" variant="outline" disabled={!canNote} onClick={() => void reconnect(device)}>Retry</Button>
+        <Button type="button" size="sm" variant="outline" disabled={!canRetry} onClick={() => void reconnect(device)}>Retry</Button>
       </div>)}
+      {recording && !!health?.disconnected_devices.length && retryError && <p role="alert" className="text-xs text-destructive">{retryError}</p>}
       {saving ? <div className="space-y-2">
         <p className="text-sm" role="status">{saving.message}</p>
         <Progress value={saving.progress} aria-label="Recording save progress" aria-valuenow={saving.progress} />

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -113,7 +113,8 @@ pub struct RecordingState {
     microphone_device: Mutex<Option<Arc<AudioDevice>>>,
     system_device: Mutex<Option<Arc<AudioDevice>>>,
     // Track which device is disconnected for reconnection attempts
-    disconnected_devices: Mutex<Vec<(Arc<AudioDevice>, DeviceType)>>,
+    disconnected_devices: Mutex<Vec<(Arc<AudioDevice>, DeviceType, u64)>>,
+    source_failure_revision: AtomicU64,
 
     // Audio pipeline
     audio_sender: Mutex<Option<mpsc::Sender<AudioChunk>>>,
@@ -268,20 +269,48 @@ impl RecordingState {
 
     pub fn mark_source_missing(&self, device: Arc<AudioDevice>, device_type: DeviceType) {
         let mut pending = self.disconnected_devices.lock().unwrap();
-        pending.retain(|(_, source)| *source != device_type);
-        pending.push((device, device_type));
+        if !self.is_recording() {
+            return;
+        }
+        pending.retain(|(_, source, _)| *source != device_type);
+        let revision = self.source_failure_revision.fetch_add(1, Ordering::Relaxed);
+        pending.push((device, device_type, revision));
         self.mark_capture_incomplete();
     }
 
-    pub fn mark_source_reconnected(&self, device_type: &DeviceType) {
+    pub(super) fn source_failure_revision(&self, name: &str, kind: &DeviceType) -> Option<u64> {
         self.disconnected_devices
             .lock()
             .unwrap()
-            .retain(|(_, source)| source != device_type);
+            .iter()
+            .find(|(device, source, _)| device.name == name && source == kind)
+            .map(|(_, _, revision)| *revision)
+    }
+
+    pub(super) fn mark_source_reconnected(&self, device_type: &DeviceType, reopened_revision: u64) {
+        self.disconnected_devices
+            .lock()
+            .unwrap()
+            .retain(|(_, source, revision)| {
+                source != device_type || *revision != reopened_revision
+            });
     }
 
     pub fn disconnected_devices(&self) -> Vec<(Arc<AudioDevice>, DeviceType)> {
-        self.disconnected_devices.lock().unwrap().clone()
+        self.disconnected_devices
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(device, source, _)| (device.clone(), source.clone()))
+            .collect()
+    }
+
+    pub(super) fn source_is_missing(&self, kind: &DeviceType) -> bool {
+        self.disconnected_devices
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, source, _)| source == kind)
     }
 
     pub fn clear_active_device(&self, device_type: &DeviceType) {
@@ -359,6 +388,10 @@ impl RecordingState {
         let mut health = self.health.lock().unwrap();
         health.details.system_silence_periods =
             health.details.system_silence_periods.saturating_add(1);
+    }
+
+    pub(super) fn observe_transcription_backend(&self, backend: String) {
+        self.health.lock().unwrap().details.backend = Some(backend);
     }
 
     pub fn send_audio_chunk(&self, chunk: AudioChunk) -> Result<()> {
@@ -648,6 +681,7 @@ impl Default for RecordingState {
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
             disconnected_devices: Mutex::new(Vec::new()),
+            source_failure_revision: AtomicU64::new(0),
             audio_sender: Mutex::new(None),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
@@ -684,6 +718,18 @@ impl Clone for RecordingStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_quiet_loopback_updates_diagnostics_only() {
+        let state = RecordingState::new();
+        state.record_system_silence();
+        state.record_system_silence();
+        let health = state.health.lock().unwrap();
+        assert_eq!(health.details.system_silence_periods, 2);
+        assert_eq!(health.details.dropped_samples, 0);
+        assert!(health.warnings.is_empty());
+        assert!(!state.capture_incomplete());
+    }
 
     #[test]
     fn controls_levels_expire_without_changing_which_sources_are_captured() {

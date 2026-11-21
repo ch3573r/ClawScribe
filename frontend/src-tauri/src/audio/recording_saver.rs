@@ -103,6 +103,13 @@ impl RecordingTranscripts {
         self.lock().segments.clone()
     }
 
+    pub(super) fn segments(&self) -> Vec<TranscriptSegment> {
+        self.snapshot()
+            .iter()
+            .map(|segment| (**segment).clone())
+            .collect()
+    }
+
     pub(super) fn record_update(&self, session_id: &str, update: &TranscriptUpdate) -> bool {
         if update.session_id.as_deref() != Some(session_id) || update.text.trim().is_empty() {
             return false;
@@ -394,9 +401,9 @@ impl RecordingSaver {
 
     pub async fn failed_start(&mut self, capture_drained: bool) {
         self.close_transcript_input();
-        if let Some(task) = self.snapshot_task.take() {
+        if let Some(mut task) = self.snapshot_task.take() {
             task.abort();
-            let _ = task.await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), &mut task).await;
         }
         let Some(folder) = &self.meeting_folder else {
             return;
@@ -567,9 +574,9 @@ impl RecordingSaver {
     ) -> Result<RecordingSaveReport, String> {
         info!("Stopping recording saver");
         self.close_transcript_input();
-        if let Some(task) = self.snapshot_task.take() {
+        if let Some(mut task) = self.snapshot_task.take() {
             task.abort();
-            let _ = task.await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), &mut task).await;
         }
         let mut report = RecordingSaveReport {
             outcome,
@@ -697,11 +704,7 @@ impl RecordingSaver {
 
     /// Get accumulated transcript segments (for reload sync)
     pub fn get_transcript_segments(&self) -> Vec<TranscriptSegment> {
-        self.transcripts
-            .snapshot()
-            .iter()
-            .map(|segment| (**segment).clone())
-            .collect()
+        self.transcripts.segments()
     }
 
     /// Get meeting name (for reload sync)

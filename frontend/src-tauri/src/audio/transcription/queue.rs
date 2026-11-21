@@ -270,7 +270,6 @@ impl BufferedSpool {
                 self.mark_failed();
                 Self::report_loss(&self.state, self.capture, &self.warned);
                 worker.abort();
-                let _ = worker.await;
             }
         }
     }
@@ -449,20 +448,22 @@ impl TranscriptionQueueSender {
                 .saturating_mul(std::mem::size_of::<f32>() as u64),
         );
 
+        let incomplete = self
+            .shared
+            .retain_files
+            .then(|| self.shared.spool_dir.join(".incomplete"));
         let written = tokio::task::spawn_blocking(move || {
-            write_chunk(&temp_path, &final_path, &chunk, clear_source)
+            let result = write_chunk(&temp_path, &final_path, &chunk, clear_source);
+            if let (Err(_), Some(path)) = (&result, incomplete) {
+                let _ = fs::write(path, b"capture incomplete");
+            }
+            result
         })
         .await
         .map_err(|error| io::Error::other(format!("queue writer task failed: {error}")))
         .and_then(|result| result);
         if let Err(error) = written {
             self.shared.metrics.mark_failed();
-            if self.shared.retain_files {
-                let _ = fs::write(
-                    self.shared.spool_dir.join(".incomplete"),
-                    b"capture incomplete",
-                );
-            }
             return Err(error);
         }
 
