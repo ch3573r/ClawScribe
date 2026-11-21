@@ -41,10 +41,14 @@ export function AppShortcuts() {
       if (typing) return;
 
       if (key === "k") {
+        const archive = document.getElementById("meetings-search") as HTMLInputElement | null;
+        const search = archive ?? (document.getElementById("meeting-search") as HTMLInputElement | null);
+        if (!search) return;
         e.preventDefault();
-        const el = document.getElementById("meeting-search") as HTMLInputElement | null;
-        el?.focus();
-        el?.select();
+        if (archive?.closest("[hidden]")) {
+          document.getElementById("meetings-archive-tab")?.click();
+        }
+        window.requestAnimationFrame(() => { search.focus(); search.select(); });
       } else if (key === "g") {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent("shortcut:generate-summary"));

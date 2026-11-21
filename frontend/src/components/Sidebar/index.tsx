@@ -121,7 +121,9 @@ const Sidebar: React.FC = () => {
   // Get recording state from RecordingStateContext (single source of truth)
   const { isRecording, isPaused } = useRecordingState();
   const { openImportDialog } = useImportDialog();
-  const [searchQuery, handleSearchChange] = useState("");
+  const [sidebarQuery, handleSearchChange] = useState("");
+  const showSidebarSearch = pathname !== "/meetings";
+  const searchQuery = showSidebarSearch ? sidebarQuery : "";
   const { results: searchResults, searching: isSearching, error: searchError } = useLibrarySearch(searchQuery, !isCollapsed && pathname !== "/settings", undefined, true, meetings);
   const passageMatches = useMemo(() => new Map(searchResults?.passages.map(hit => [hit.meeting_id, hit])), [searchResults]);
   const titleMatches = useMemo(() => new Set(searchResults?.titles.map(hit => hit.id)), [searchResults]);
@@ -637,7 +639,7 @@ const Sidebar: React.FC = () => {
                 </Button>
               </div>
 
-              <div className="relative">
+              {showSidebarSearch && <div className="relative">
                 <InputGroup className="rounded-md border-sidebar-border bg-background/60 text-sidebar-foreground shadow-none">
                   <InputGroupInput
                     id="meeting-search"
@@ -658,7 +660,7 @@ const Sidebar: React.FC = () => {
                     </InputGroupAddon>
                   )}
                 </InputGroup>
-              </div>
+              </div>}
             </div>
 
             <nav className="flex-shrink-0 space-y-1 px-3 pt-3">
