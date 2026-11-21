@@ -1,5 +1,5 @@
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
-use sqlx::{migrate::MigrateDatabase, Result, Sqlite, SqlitePool, Transaction};
+use sqlx::{ConnectOptions, Connection, Result, Sqlite, SqlitePool, Transaction};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -67,7 +67,14 @@ impl DatabaseManager {
                 snapshot_database(Path::new(backend_db_path), Path::new(tauri_db_path)).await?;
             } else {
                 log::info!("Creating the local database");
-                Sqlite::create_database(tauri_db_path).await?;
+                // SQLx's URL parser treats the `?` in Windows verbatim paths
+                // as a query delimiter and decodes percent escapes in filenames.
+                connection_options(Path::new(tauri_db_path))
+                    .create_if_missing(true)
+                    .connect()
+                    .await?
+                    .close()
+                    .await?;
             }
         }
 
@@ -442,6 +449,21 @@ fn line_ending_variant_checksums(sql: &str) -> [Vec<u8>; 2] {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha384};
+
+    #[tokio::test]
+    async fn fresh_database_uses_the_literal_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("meeting%20minutes.sqlite");
+        let legacy = dir.path().join("missing.db");
+        let manager =
+            DatabaseManager::new_isolated(database.to_str().unwrap(), legacy.to_str().unwrap())
+                .await
+                .unwrap();
+
+        manager.cleanup().await.unwrap();
+        assert!(database.is_file());
+        assert!(!dir.path().join("meeting minutes.sqlite").exists());
+    }
 
     #[tokio::test]
     async fn startup_prunes_expired_snapshots_and_preserves_recent_and_unowned_files() {
