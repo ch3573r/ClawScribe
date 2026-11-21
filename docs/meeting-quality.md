@@ -42,7 +42,10 @@ that a segment is correct or incorrect.
 Microphone loudness normalization limits positive gain to about 18 dB so quiet
 room noise or far-end bleed cannot drive large amplification. During long quiet
 periods, speech detection retains only the recent audio needed to recognize the
-next voice and include its pre-roll.
+next voice and include its pre-roll. During uninterrupted speech, it releases
+PCM as each forced segment is emitted and preserves the model's state across
+the cut. Recording, import, and retranscription use the same sample clock for
+the cut and its remaining audio.
 
 ## Testing local transcription speed
 
