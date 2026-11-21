@@ -259,7 +259,7 @@ pub(crate) async fn summary_language(
     pool: &SqlitePool,
     link: &CalendarLink,
 ) -> Result<Option<String>, String> {
-    let Some(key) = link.series_key() else {
+    let Some(key) = link.reviewed_series_key() else {
         return Ok(None);
     };
     let mut conn = pool.acquire().await.map_err(|_| READ_ERROR)?;
@@ -768,6 +768,13 @@ mod tests {
         assert_eq!(evidence.actions.len(), 1);
         assert_eq!(evidence.actions[0].source_key.as_deref(), Some("12ab"));
         assert!(series_review(&pool, "unreviewed").await.unwrap().is_none());
+        for (id, expected) in [("target", Some("de")), ("unreviewed", None)] {
+            let link = calendar::read(&pool, id).await.unwrap().unwrap();
+            assert_eq!(
+                summary_language(&pool, &link).await.unwrap().as_deref(),
+                expected
+            );
+        }
         assert!(series_review(&pool, "other-account")
             .await
             .unwrap()
