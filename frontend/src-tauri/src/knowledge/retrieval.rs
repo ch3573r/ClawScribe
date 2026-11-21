@@ -71,7 +71,12 @@ pub(super) async fn freeze_scope_rows(
     {
         return Err(KnowledgeError::InvalidInput);
     }
-    let mut ids = BTreeMap::<String, Vec<String>>::new();
+    let wanted_tags: Vec<_> = filter.tags.iter().map(|tag| tag.to_lowercase()).collect();
+    let tags = if filter.untagged || !wanted_tags.is_empty() {
+        "(SELECT json_group_array(tag) FROM meeting_tags WHERE meeting_id=m.id)"
+    } else {
+        "'[]'"
+    };
     let selection = if filter.meeting_ids.is_empty() {
         None
     } else {
@@ -83,7 +88,7 @@ pub(super) async fn freeze_scope_rows(
         ""
     };
     let statement = format!(
-        "SELECT m.id,m.created_at,t.tag FROM meetings m LEFT JOIN meeting_tags t ON t.meeting_id=m.id
+        "SELECT m.id,m.created_at,{tags} AS tags FROM meetings m
          {restriction} ORDER BY m.id"
     );
     let mut query = sqlx::query(&statement);
@@ -91,9 +96,9 @@ pub(super) async fn freeze_scope_rows(
         query = query.bind(selection);
     }
     let mut rows = query.fetch(&mut *connection);
-    let mut matched = 0;
-    // Decode the same timestamps the sidebar receives. Apply the cap only to
-    // matching rows so other days cannot exhaust a narrow date search.
+    let mut meeting_ids = Vec::new();
+    // Decode the same timestamps the sidebar receives and count each meeting
+    // once, after applying both date and project filters.
     while let Some(row) = rows.try_next().await? {
         if from.is_some() || to.is_some() {
             let Some(date) = crate::database::models::local_meeting_date(&row, "created_at") else {
@@ -103,38 +108,26 @@ pub(super) async fn freeze_scope_rows(
                 continue;
             }
         }
-        matched += 1;
-        if row_limit.is_some_and(|limit| matched > limit) {
-            return Err(KnowledgeError::Busy);
-        }
-        let id: String = row.try_get("id")?;
-        let entry = ids.entry(id).or_default();
-        if let Some(tag) = row.try_get::<Option<String>, _>("tag")? {
-            entry.push(tag.to_lowercase());
-        }
-    }
-    let meeting_ids = ids
-        .into_iter()
-        .filter(|(_, tags)| {
-            if filter.untagged {
+        if filter.untagged || !wanted_tags.is_empty() {
+            let tags: sqlx::types::Json<Vec<String>> = row.try_get("tags")?;
+            let tags: Vec<_> = tags.0.iter().map(|tag| tag.to_lowercase()).collect();
+            let matches = if filter.untagged {
                 tags.is_empty()
-            } else if filter.tags.is_empty() {
-                true
             } else {
                 match filter.tag_mode {
-                    TagMatch::Any => filter
-                        .tags
-                        .iter()
-                        .any(|tag| tags.contains(&tag.to_lowercase())),
-                    TagMatch::All => filter
-                        .tags
-                        .iter()
-                        .all(|tag| tags.contains(&tag.to_lowercase())),
+                    TagMatch::Any => wanted_tags.iter().any(|tag| tags.contains(tag)),
+                    TagMatch::All => wanted_tags.iter().all(|tag| tags.contains(tag)),
                 }
+            };
+            if !matches {
+                continue;
             }
-        })
-        .map(|(id, _)| id)
-        .collect();
+        }
+        if row_limit.is_some_and(|limit| meeting_ids.len() as i64 >= limit) {
+            return Err(KnowledgeError::Busy);
+        }
+        meeting_ids.push(row.try_get("id")?);
+    }
     Ok(FrozenScope {
         scope: scope.clone(),
         meeting_ids,
@@ -1073,6 +1066,13 @@ mod tests {
             sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES (?,'Synthetic meeting',?,?)")
                 .bind(id).bind(&stamp).bind(&stamp).execute(&pool).await.unwrap();
         }
+        for tag in ["alpha", "beta", "gamma"] {
+            sqlx::query("INSERT INTO meeting_tags(meeting_id,tag) VALUES ('early',?)")
+                .bind(tag)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
         let scope = KnowledgeScope::Library {
             filter: MeetingFilter {
                 all_meetings: true,
@@ -1093,6 +1093,23 @@ mod tests {
                 .meeting_ids,
             expected
         );
+        let tagged_scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                all_meetings: true,
+                from: Some(day.into()),
+                to: Some(day.into()),
+                tags: vec!["ALPHA".into(), "gamma".into()],
+                tag_mode: TagMatch::All,
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            freeze_scope_rows(&mut *pool.acquire().await.unwrap(), &tagged_scope, Some(1))
+                .await
+                .unwrap()
+                .meeting_ids,
+            vec!["early"]
+        );
         let rows = crate::database::repositories::meeting::MeetingsRepository::get_meetings(&pool)
             .await
             .unwrap();
@@ -1110,6 +1127,47 @@ mod tests {
                 .created_at,
             late.with_timezone(&Utc).to_rfc3339()
         );
+    }
+
+    #[tokio::test]
+    async fn date_scope_uses_the_instant_for_both_copies_of_the_dst_repeated_hour() {
+        use chrono::{DateTime, Local};
+        let pool = fixture().await;
+        let stamps = [
+            ("summer-offset", "2026-10-25T02:30:00+02:00"),
+            ("winter-offset", "2026-10-25T02:30:00+01:00"),
+        ];
+        let local_day = |stamp| {
+            DateTime::parse_from_rfc3339(stamp)
+                .unwrap()
+                .with_timezone(&Local)
+                .format("%F")
+                .to_string()
+        };
+        for (id, stamp) in stamps {
+            sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES (?,'Synthetic meeting',?,?)")
+                .bind(id).bind(stamp).bind(stamp).execute(&pool).await.unwrap();
+        }
+        for (_, stamp) in stamps {
+            let day = local_day(stamp);
+            let scope = KnowledgeScope::Library {
+                filter: MeetingFilter {
+                    meeting_ids: stamps.iter().map(|(id, _)| id.to_string()).collect(),
+                    from: Some(day.clone()),
+                    to: Some(day.clone()),
+                    ..Default::default()
+                },
+            };
+            let expected: Vec<_> = stamps
+                .iter()
+                .filter(|(_, stamp)| local_day(stamp) == day)
+                .map(|(id, _)| *id)
+                .collect();
+            assert_eq!(
+                freeze_scope(&pool, &scope).await.unwrap().meeting_ids,
+                expected
+            );
+        }
     }
     #[tokio::test]
     async fn vector_scan_reaches_last_page_with_bounded_candidates_and_results() {

@@ -31,6 +31,7 @@ export interface DiskScan {
   recordingActive: boolean;
   activeCacheId?: string;
   resolvedCacheIds?: string[];
+  detachedCacheIds?: string[];
 }
 
 export type RecoverySource = "browser" | "disk";
@@ -38,6 +39,7 @@ export type RecoverySource = "browser" | "disk";
 /** An entry of the recovery list. `disk` is set when the folder is known to the scan. */
 export type RecoveryCandidate = MeetingMetadata & {
   source: RecoverySource;
+  recordingFolder?: string;
   disk?: DiskRecording;
 };
 
@@ -98,9 +100,12 @@ export function readDiskScan(value: unknown): DiskScan {
   const resolvedCacheIds = Array.isArray(source.resolvedCacheIds)
     ? source.resolvedCacheIds.filter((id): id is string => typeof id === 'string') : [];
   const activeCacheId = text(source.activeCacheId);
+  const detachedCacheIds = Array.isArray(source.detachedCacheIds)
+    ? source.detachedCacheIds.filter((id): id is string => typeof id === 'string') : [];
   return { recordings, truncated: source.truncated === true, recordingActive: source.recordingActive === true,
     ...(activeCacheId ? { activeCacheId } : {}),
-    ...(resolvedCacheIds.length > 0 ? { resolvedCacheIds } : {}) };
+    ...(resolvedCacheIds.length > 0 ? { resolvedCacheIds } : {}),
+    ...(detachedCacheIds.length > 0 ? { detachedCacheIds } : {}) };
 }
 
 /** A recording found only on disk, shaped like an entry of the browser list. */
@@ -138,7 +143,7 @@ export function mergeRecoveryCandidates(
     const key = folderKey(recordingFolder ?? entry.folderPath);
     const recording = key ? byFolder.get(key) : undefined;
     if (recording) claimed.add(key);
-    return { ...meeting, source: "browser" as const, ...(recording ? { disk: recording } : {}) };
+    return { ...meeting, ...(recordingFolder ? { recordingFolder } : {}), source: "browser" as const, ...(recording ? { disk: recording } : {}) };
   });
   for (const recording of disk) {
     const key = folderKey(recording.folder);

@@ -23,6 +23,7 @@
 //! is running but its folder cannot be told, is never listed. Nothing is
 //! deleted here.
 use super::provenance::RecordingProvenance;
+use crate::database::meeting_files;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -143,6 +144,81 @@ pub struct InterruptedScan {
     pub active_cache_id: Option<String>,
     /// Requested browser cache IDs that are already saved or were deleted.
     pub resolved_cache_ids: Vec<String>,
+    /// Cache entries that can be recovered only without their old folder.
+    pub detached_cache_ids: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryCacheEntry {
+    id: String,
+    folder: Option<String>,
+    started_at: i64,
+    last_updated: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct RecoveryOwner {
+    id: String,
+    folder: Option<String>,
+    created_at_ms: Option<i64>,
+    deleted_at_ms: Option<i64>,
+    is_deleted: bool,
+}
+
+const LEGACY_HANDOFF_GRACE_MS: i64 = 15_000;
+
+fn marker_start_ms(marker: &Value) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(marker.get("created_at")?.as_str()?)
+        .ok()
+        .map(|date| date.timestamp_millis())
+}
+
+impl RecoveryCacheEntry {
+    fn matches_marker(&self, marker: &Value) -> bool {
+        if let Some(id) = meeting_files::recording_id(marker) {
+            return self.id == id;
+        }
+        meeting_files::stamped_meeting_id(marker) == Some(self.id.as_str())
+            || marker_start_ms(marker).is_some_and(|started| {
+                started <= self.started_at
+                    && self.started_at.saturating_sub(started) <= LEGACY_HANDOFF_GRACE_MS
+            })
+    }
+
+    fn matches_owner(&self, owner: &RecoveryOwner, marker: Option<&Value>) -> bool {
+        if owner
+            .deleted_at_ms
+            .is_some_and(|deleted| deleted < self.started_at)
+        {
+            return false;
+        }
+        if let Some(marker) = marker {
+            let same_recording = self.matches_marker(marker);
+            if meeting_files::stamped_meeting_id(marker) == Some(owner.id.as_str()) {
+                return same_recording;
+            }
+            if same_recording && meeting_files::recording_id(marker).is_some() {
+                return false;
+            }
+            if !same_recording
+                && marker_start_ms(marker)
+                    .zip(owner.created_at_ms)
+                    .is_some_and(|(started, saved)| started <= saved)
+            {
+                return false;
+            }
+        }
+        // Old IDs and dates may be generated at save time. Match a native
+        // save in this cache entry's time window.
+        // A stamp on a different folder generation is never used as evidence.
+        self.started_at > 0
+            && self.last_updated >= self.started_at
+            && owner.created_at_ms.is_some_and(|created| {
+                created >= self.started_at
+                    && created <= self.last_updated.saturating_add(LEGACY_HANDOFF_GRACE_MS)
+            })
+    }
 }
 
 /// A path as text for comparison: both slash directions and (on Windows) letter
@@ -151,13 +227,10 @@ pub(crate) fn folder_key(path: &Path) -> String {
     crate::local_path::comparable_text(&path.to_string_lossy())
 }
 
-fn is_link(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
-}
-
 fn read_json(path: &Path, max_bytes: u64) -> Option<Value> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.is_file() || is_link(&metadata) || metadata.len() > max_bytes {
+    if !metadata.is_file() || meeting_files::is_link(path, &metadata) || metadata.len() > max_bytes
+    {
         return None;
     }
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
@@ -165,7 +238,7 @@ fn read_json(path: &Path, max_bytes: u64) -> Option<Value> {
 
 fn regular_file_size(path: &Path) -> Option<u64> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
-    (metadata.is_file() && !is_link(&metadata)).then_some(metadata.len())
+    (metadata.is_file() && !meeting_files::is_link(path, &metadata)).then_some(metadata.len())
 }
 
 pub(crate) fn is_recording_marker(marker: &Value) -> bool {
@@ -187,14 +260,14 @@ pub(crate) fn recovered_provenance(
     marker: &Value,
     recovered_name: Option<&str>,
 ) -> RecordingProvenance {
-    use crate::database::meeting_files;
     let imported = marker["source"].as_str() == Some("import");
     if !imported && !is_recording_marker(marker) {
         return RecordingProvenance::default();
     }
     let is_saved_audio = |name: &str| {
-        std::fs::symlink_metadata(folder.join(name)).is_ok_and(|metadata| {
-            metadata.is_file() && !meeting_files::is_link(&metadata) && metadata.len() > 0
+        let path = folder.join(name);
+        std::fs::symlink_metadata(&path).is_ok_and(|metadata| {
+            metadata.is_file() && !meeting_files::is_link(&path, &metadata) && metadata.len() > 0
         })
     };
     let name = if imported {
@@ -235,7 +308,7 @@ fn capture_entries(directory: &Path, accept: impl Fn(&Path) -> bool) -> (u32, u6
     let Ok(metadata) = std::fs::symlink_metadata(directory) else {
         return (0, 0);
     };
-    if !metadata.is_dir() || is_link(&metadata) {
+    if !metadata.is_dir() || meeting_files::is_link(directory, &metadata) {
         return (0, 0);
     }
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -308,6 +381,11 @@ fn classify_folder_with_deletions(
     }
     let recording_id = meeting_files::recording_id(&marker);
     let stamped = meeting_files::stamped_meeting_id(&marker);
+    // A folder name can be reused for a new recording. An existing meeting
+    // with a different native identity cannot be repaired from that copy.
+    if registered.is_some_and(|owner| stamped.or(recording_id).is_some_and(|id| id != owner)) {
+        return None;
+    }
     // A different restored copy owns the ID. Never offer to save, repair or
     // discard this copy via the path that is absent from the library.
     if [stamped, recording_id]
@@ -443,10 +521,7 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
             continue;
         }
         seen_roots.push(root_key);
-        let Ok(root_metadata) = std::fs::symlink_metadata(root) else {
-            continue;
-        };
-        if !root_metadata.is_dir() || is_link(&root_metadata) {
+        if meeting_files::is_cleanup_path(root) || meeting_files::directory_chain(root).is_err() {
             continue;
         }
         let Ok(top) = std::fs::read_dir(root) else {
@@ -469,14 +544,17 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
                 let Ok(metadata) = std::fs::symlink_metadata(&path) else {
                     continue;
                 };
-                if !metadata.is_dir() || is_link(&metadata) {
+                if meeting_files::is_cleanup_path(&path)
+                    || !metadata.is_dir()
+                    || meeting_files::is_link(&path, &metadata)
+                {
                     continue;
                 }
                 let key = folder_key(&path);
                 if seen_folders.contains(&key) {
                     continue;
                 }
-                if !path.join("metadata.json").exists() {
+                if std::fs::symlink_metadata(path.join("metadata.json")).is_err() {
                     // A container: look one level below, once.
                     if level.len() == 1 && index == 1 {
                         if let Ok(children) = std::fs::read_dir(&path) {
@@ -613,7 +691,10 @@ fn registered_map(
             continue;
         }
         map.insert(folder_key(Path::new(&folder)), id.clone());
-        if local && started.elapsed() < budget {
+        if local
+            && started.elapsed() < budget
+            && meeting_files::directory_chain(Path::new(&folder)).is_ok()
+        {
             if let Ok(canonical) = std::fs::canonicalize(&folder) {
                 map.insert(
                     folder_key(&crate::database::meeting_files::plain_path(&canonical)),
@@ -628,6 +709,98 @@ fn registered_map(
 /// How much of a scan's time the registered-folder lookup may use.
 const REGISTERED_BUDGET: Duration = Duration::from_millis(1_000);
 
+fn reconcile_cache_entries(
+    entries: Vec<RecoveryCacheEntry>,
+    owners: &[RecoveryOwner],
+    registered: &HashMap<String, String>,
+    roots: &[PathBuf],
+    active: &ActiveFolder,
+    deadline: Instant,
+) -> (Vec<String>, Vec<String>) {
+    let by_id: HashMap<_, _> = owners
+        .iter()
+        .map(|owner| (owner.id.as_str(), owner))
+        .collect();
+    let mut by_folder = HashMap::<_, Vec<&RecoveryOwner>>::new();
+    for owner in owners {
+        if let Some(folder) = owner.folder.as_deref() {
+            by_folder
+                .entry(folder_key(Path::new(folder)))
+                .or_default()
+                .push(owner);
+        }
+    }
+    let active_key = match active.canonical() {
+        ActiveFolder::Folder(folder) => Some(folder_key(&folder)),
+        _ => None,
+    };
+    let mut resolved = Vec::new();
+    let mut detached = Vec::new();
+    for entry in entries {
+        if by_id.contains_key(entry.id.as_str()) {
+            resolved.push(entry.id);
+            continue;
+        }
+        let Some(folder) = entry.folder.as_deref().map(Path::new) else {
+            continue;
+        };
+        let key = folder_key(folder);
+        let verified = (Instant::now() < deadline)
+            .then(|| meeting_files::resolve_recording_folder(folder, roots).ok())
+            .flatten();
+        let canonical_key = verified.as_deref().map(folder_key);
+        if active_key
+            .as_ref()
+            .is_some_and(|active| active == &key || Some(active) == canonical_key.as_ref())
+        {
+            resolved.push(entry.id);
+            continue;
+        }
+        let marker = verified.as_deref().and_then(meeting_files::read_marker);
+        let mut owners_for_folder = by_folder
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .copied()
+            .chain(
+                canonical_key
+                    .as_ref()
+                    .filter(|canonical| *canonical != &key)
+                    .and_then(|canonical| by_folder.get(canonical))
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            )
+            .chain(
+                canonical_key
+                    .as_ref()
+                    .and_then(|canonical| registered.get(canonical))
+                    .and_then(|id| by_id.get(id.as_str()))
+                    .copied(),
+            );
+        if owners_for_folder
+            .clone()
+            .any(|owner| entry.matches_owner(owner, marker.as_ref()))
+            || marker.as_ref().is_some_and(|marker| {
+                meeting_files::stamped_meeting_id(marker)
+                    .and_then(|id| by_id.get(id))
+                    .is_some_and(|owner| entry.matches_owner(owner, Some(marker)))
+            })
+        {
+            resolved.push(entry.id);
+        } else if owners_for_folder.any(|owner| !owner.is_deleted)
+            || marker
+                .as_ref()
+                .is_none_or(|marker| !entry.matches_marker(marker))
+        {
+            // Preserve the browser data. An unavailable or reused folder must
+            // never be used for playback, recovery, or attaching the transcript.
+            detached.push(entry.id);
+        }
+    }
+    (resolved, detached)
+}
+
 fn kept_folders<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<String> {
     use tauri_plugin_store::StoreExt;
     app.store(crate::trusted_roots::STORE_FILE)
@@ -641,19 +814,31 @@ fn kept_folders<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<String> {
 pub async fn find_interrupted_recordings<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::state::AppState>,
-    cache_ids: Option<Vec<String>>,
+    cache_entries: Option<Vec<RecoveryCacheEntry>>,
 ) -> Result<InterruptedScan, String> {
     let roots = super::recording_preferences::recording_roots(&app).await;
-    let rows = registered_rows(state.db_manager.pool()).await?;
-    let deleted = deleted_recording_ids(state.db_manager.pool()).await?;
-    let registered_ids: HashSet<String> = rows.iter().map(|(id, _)| id.clone()).collect();
-    let resolved_cache_ids = {
-        cache_ids
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|id| registered_ids.contains(id) || deleted.contains(id))
-            .collect()
-    };
+    let owners = recovery_owners(state.db_manager.pool()).await?;
+    let rows = owners
+        .iter()
+        .filter(|owner| !owner.is_deleted)
+        .filter_map(|owner| {
+            owner
+                .folder
+                .clone()
+                .map(|folder| (owner.id.clone(), folder))
+        })
+        .collect();
+    let registered_ids: HashSet<String> = owners
+        .iter()
+        .filter(|owner| !owner.is_deleted)
+        .map(|owner| owner.id.clone())
+        .collect();
+    // Earlier deletion rows carry only the ID. They still block recovery by ID.
+    let deleted = owners
+        .iter()
+        .filter(|owner| owner.is_deleted)
+        .map(|owner| owner.id.clone())
+        .collect();
     let (active, active_cache_id) = super::recording_commands::active_recording_recovery();
     let active_cache_unknown = active != ActiveFolder::None && active_cache_id.is_none();
     let kept = kept_folders(&app);
@@ -663,6 +848,14 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
         let started = Instant::now();
         let registered = registered_map(rows, &roots, REGISTERED_BUDGET);
         let limits = Limits::default();
+        let (resolved_cache_ids, detached_cache_ids) = reconcile_cache_entries(
+            cache_entries.unwrap_or_default(),
+            &owners,
+            &registered,
+            &roots,
+            &active,
+            started + limits.time_limit,
+        );
         let limits = Limits {
             time_limit: limits.time_limit.saturating_sub(started.elapsed()),
             ..limits
@@ -679,10 +872,21 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
         result.recording_active |= active_cache_unknown;
         result.active_cache_id = active_cache_id;
         result.resolved_cache_ids = resolved_cache_ids;
+        result.detached_cache_ids = detached_cache_ids;
         result
     })
     .await
     .map_err(|_| "Could not look for interrupted recordings".to_string())
+}
+
+async fn recovery_owners(pool: &sqlx::SqlitePool) -> Result<Vec<RecoveryOwner>, String> {
+    sqlx::query_as(
+        "SELECT id, folder_path AS folder, CAST(ROUND(unixepoch(created_at, 'subsec') * 1000) AS INTEGER) AS created_at_ms,
+                NULL AS deleted_at_ms, 0 AS is_deleted FROM meetings
+         UNION ALL
+         SELECT meeting_id, folder_path, meeting_created_at_ms, deleted_at_ms, 1
+         FROM recording_library_deletions d WHERE NOT EXISTS (SELECT 1 FROM meetings WHERE id=d.meeting_id)",
+    ).fetch_all(pool).await.map_err(|_| "Could not read the library's recovery status.".into())
 }
 
 /// The first lines of an interrupted recording's transcript snapshot.
@@ -777,6 +981,14 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
                 .find_map(|(id, path)| (id == meeting).then_some(path))
                 .ok_or("The recording is no longer saved in your library.")?;
             let marker = crate::database::meeting_files::read_marker(Path::new(&authorised));
+            if marker.as_ref().is_none_or(|marker| {
+                meeting_files::has_invalid_marker_id(marker)
+                    || meeting_files::stamped_meeting_id(marker)
+                        .or_else(|| meeting_files::recording_id(marker))
+                        .is_some_and(|id| id != meeting)
+            }) {
+                return Err("This folder belongs to a different recording.".into());
+            }
             Ok::<_, String>((authorised, meeting, registered_path, marker))
         })
         .await
@@ -964,6 +1176,101 @@ pub(crate) fn discard_folder(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cached_legacy_ids_resolve_by_folder_and_saved_or_deleted_provenance() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let root_path = meeting_files::plain_path(&root.path().canonicalize().unwrap());
+        let folder = root_path.join("older");
+        let folder_text = folder.to_string_lossy();
+        let saved = 1_700_000_000_250;
+        sqlx::query("UPDATE meetings SET folder_path=?, created_at=? WHERE id='review-test'")
+            .bind(folder_text.as_ref())
+            .bind(
+                chrono::DateTime::from_timestamp_millis(saved)
+                    .unwrap()
+                    .to_rfc3339(),
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        let entries = || {
+            vec![
+                RecoveryCacheEntry {
+                    id: "legacy-browser-id".into(),
+                    folder: Some(folder_text.to_string()),
+                    started_at: saved - 60_000,
+                    last_updated: saved - 500,
+                },
+                RecoveryCacheEntry {
+                    id: "new-browser-id".into(),
+                    folder: Some(folder_text.to_string()),
+                    started_at: saved + 60_000,
+                    last_updated: saved + 90_000,
+                },
+            ]
+        };
+        let roots = [root_path];
+        let check = |owners: &[RecoveryOwner]| {
+            reconcile_cache_entries(
+                entries(),
+                owners,
+                &HashMap::new(),
+                &roots,
+                &ActiveFolder::None,
+                Instant::now() + Duration::from_secs(2),
+            )
+        };
+        let owners = recovery_owners(&pool).await.unwrap();
+        assert_eq!(
+            check(&owners),
+            (
+                vec!["legacy-browser-id".to_string()],
+                vec!["new-browser-id".to_string()]
+            )
+        );
+        crate::database::repositories::meeting::MeetingsRepository::delete_from_library(
+            &pool,
+            "review-test",
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let owners = recovery_owners(&pool).await.unwrap();
+        assert!(owners[0].is_deleted);
+        assert!(owners[0].deleted_at_ms.is_some());
+        assert_eq!(
+            check(&owners),
+            (
+                vec!["legacy-browser-id".to_string()],
+                vec!["new-browser-id".to_string()]
+            )
+        );
+
+        // A new native capture reusing the deleted recording's folder keeps
+        // its own audio and is not treated as a copy of the deleted meeting.
+        let id = "meeting-89c5ce77-ffd1-4cc7-9c53-6b4856871e72";
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("metadata.json"), serde_json::json!({
+            "version": "1.0", "transcript_file": "transcripts.json", "recording_id": id,
+            "created_at": chrono::DateTime::from_timestamp_millis(saved + 60_000).unwrap().to_rfc3339(),
+        }).to_string()).unwrap();
+        let mut entries = entries();
+        entries[1].id = id.into();
+        assert_eq!(
+            reconcile_cache_entries(
+                entries,
+                &owners,
+                &HashMap::new(),
+                &roots,
+                &ActiveFolder::None,
+                Instant::now() + Duration::from_secs(2)
+            ),
+            (vec!["legacy-browser-id".to_string()], vec![])
+        );
+    }
 
     #[test]
     fn a_clean_stop_with_pending_handoff_is_recoverable_until_saved_or_deleted() {

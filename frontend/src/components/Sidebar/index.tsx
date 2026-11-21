@@ -201,7 +201,7 @@ const Sidebar: React.FC = () => {
         if (pathname === "/meeting-details") router.push("/");
       }
       try {
-        await indexedDBService.deleteMeeting(itemId, result.folder_path);
+        await indexedDBService.deleteMeeting(itemId);
       } catch {
         toast.warning('Meeting deleted, but its cached recovery copy could not be removed.');
       }

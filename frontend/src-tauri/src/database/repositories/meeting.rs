@@ -46,12 +46,6 @@ impl MeetingsRepository {
         if !deleted {
             return Ok(None);
         }
-        // The cache may survive a failed IndexedDB removal even when this
-        // meeting did not save a native recording folder.
-        sqlx::query("INSERT OR IGNORE INTO recording_library_deletions(meeting_id) VALUES (?)")
-            .bind(meeting_id)
-            .execute(&mut *tx)
-            .await?;
         let recording = folder
             .as_deref()
             .filter(|path| delete_files && !path.trim().is_empty());

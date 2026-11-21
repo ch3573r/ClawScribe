@@ -81,6 +81,7 @@ for (const status of ['none', 'failed', 'throw']) {
 for (const status of ['success', 'partial', 'none', 'failed']) {
   test(`recovered live transcript is incomplete when audio recovery is ${status}`, async () => {
     const h = recoveryHarness({ status, transcripts: [{ text: 'Synthetic saved words', timestamp: '00:00', sequenceId: 0 }] });
+    await h.render().checkForRecoverableTranscripts();
     const result = await h.render().recoverMeeting('interrupted');
     assert.equal(result.transcriptCount, 1);
     assert.equal(h.saves[0][1][0].text, 'Synthetic saved words');
@@ -100,6 +101,7 @@ test('recovery preserves timing, sequence, speaker and word fields from both cac
       confidence: null, is_partial: false, word_timestamps: words },
     { id: 2, text: 'Later', timestamp: '12:02', sequenceId: 3, speaker: 'Participants' },
   ] });
+  await h.render().checkForRecoverableTranscripts();
   await h.render().recoverMeeting('interrupted');
   const [first, second] = h.saves[0][1];
   assert.equal(first.id, '1');

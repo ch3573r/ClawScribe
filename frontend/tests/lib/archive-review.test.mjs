@@ -48,6 +48,29 @@ test('archive date keys follow the displayed local day for instants and legacy d
   }
 });
 
+test('archive date keys follow Berlin local midnight on both sides of DST changes', () => {
+  const previousZone = process.env.TZ;
+  try {
+    process.env.TZ = 'Europe/Berlin';
+    const { archiveDateKey } = loadTsModule('src/lib/archive-review.ts');
+    for (const [stamp, day] of [
+      ['2026-03-28T22:59:59Z', '2026-03-28'],
+      ['2026-03-28T23:00:00Z', '2026-03-29'],
+      ['2026-03-29T21:59:59Z', '2026-03-29'],
+      ['2026-03-29T22:00:00Z', '2026-03-30'],
+      ['2026-10-25T02:30:00+02:00', '2026-10-25'],
+      ['2026-10-25T02:30:00+01:00', '2026-10-25'],
+      ['2026-10-25T22:59:59Z', '2026-10-25'],
+      ['2026-10-25T23:00:00Z', '2026-10-26'],
+    ]) {
+      assert.equal(archiveDateKey(stamp), day);
+    }
+  } finally {
+    if (previousZone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousZone;
+  }
+});
+
 test('transcript-only meetings can generate a summary without entering the review queue', () => {
   const review = archiveReview({ ...meeting, has_folder: false });
   assert.equal(review.needsAttention, false);

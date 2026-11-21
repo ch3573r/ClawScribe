@@ -196,7 +196,7 @@ class IndexedDBService {
   /**
    * Delete meeting and all its transcripts
    */
-  async deleteMeeting(meetingId: string, folderPath?: string | null): Promise<void> {
+  async deleteMeeting(meetingId: string): Promise<void> {
     try {
       if (!this.db) await this.init();
 
@@ -210,24 +210,12 @@ class IndexedDBService {
         transaction.onabort = () => reject(transaction.error);
       });
       void complete.catch(() => {});
-      const ids = new Set([meetingId]);
-      if (folderPath) {
-        const meetings = await new Promise<MeetingMetadata[]>((resolve, reject) => {
-          const request = meetingsStore.getAll();
-          request.onsuccess = () => resolve(request.result);
-          request.onerror = () => reject(request.error);
-        });
-        // Recovery IDs predate the SQLite ID; the saved folder binds the copies.
-        for (const meeting of meetings) if (meeting.folderPath === folderPath) ids.add(meeting.meetingId);
-      }
-      for (const id of ids) {
-        await this.deleteTranscriptsForMeetingInternal(transcriptsStore, id);
-        await new Promise<void>((resolve, reject) => {
-          const request = meetingsStore.delete(id);
-          request.onsuccess = () => resolve();
-          request.onerror = () => reject(request.error);
-        });
-      }
+      await this.deleteTranscriptsForMeetingInternal(transcriptsStore, meetingId);
+      await new Promise<void>((resolve, reject) => {
+        const request = meetingsStore.delete(meetingId);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
       await complete;
     } catch (error) {
       console.error('Failed to delete meeting from IndexedDB:', error);

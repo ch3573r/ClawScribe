@@ -17,6 +17,11 @@ const UNSAFE_PATH: &str = "The file or folder could not be verified for removal.
 const DELETE_FAILED: &str =
     "Could not remove the file or folder. Close any app using it and try again.";
 const BUSY: &str = "Wait for recording or transcription to finish, then try again.";
+const STAGE_UNCERTAIN: &str =
+    "Could not verify the staged cleanup. Review the location before removing files manually.";
+// The desktop application is single-instance. Keep, retry and the first
+// attempt serialize through this gate even after the invoking view is gone.
+static CLEANUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct PendingFileCleanup {
@@ -29,9 +34,13 @@ pub(crate) struct PendingFileCleanup {
     #[serde(skip)]
     target: String,
     reason: Option<String>,
+    #[serde(skip)]
+    stage_token: Option<String>,
+    #[serde(skip)]
+    staged: bool,
 }
 
-const ROW: &str = "SELECT id,meeting_id,title,kind,target,reason,
+const ROW: &str = "SELECT id,meeting_id,title,kind,target,reason,stage_token,staged,
                    CASE WHEN kind='recording' THEN target END AS location
                    FROM pending_meeting_file_cleanup";
 
@@ -64,6 +73,7 @@ pub(crate) async fn enqueue(
     Ok(ids)
 }
 
+#[derive(Clone)]
 pub(crate) struct CleanupLocations {
     app_data: Option<PathBuf>,
     codex_runs: PathBuf,
@@ -104,6 +114,14 @@ impl CleanupLocations {
             _ => Err(UNSAFE_PATH),
         }
     }
+
+    fn original(&self, pending: &PendingFileCleanup) -> Result<PathBuf, &'static str> {
+        if pending.kind == "recording" {
+            Ok(PathBuf::from(&pending.target))
+        } else {
+            self.target(&pending.kind, &pending.meeting_id, &pending.target)
+        }
+    }
 }
 
 #[tauri::command]
@@ -118,14 +136,20 @@ pub(crate) async fn list_pending_meeting_file_cleanup<R: Runtime>(
             .map_err(|_| "Could not read pending file cleanup.")?;
     if !pending.is_empty() {
         let locations = CleanupLocations::for_app(&app).await;
-        for entry in &mut pending {
-            if entry.kind != "recording" {
-                entry.location = locations
-                    .target(&entry.kind, &entry.meeting_id, &entry.target)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned());
+        pending = tokio::task::spawn_blocking(move || {
+            for entry in &mut pending {
+                if let Ok(original) = locations.original(entry) {
+                    let location = Stage::for_entry(&locations, entry)
+                        .ok()
+                        .filter(|stage| entry.staged || stage.holder_exists().unwrap_or(false))
+                        .map_or(original, |stage| stage.payload);
+                    entry.location = Some(location.to_string_lossy().into_owned());
+                }
             }
-        }
+            pending
+        })
+        .await
+        .map_err(|_| "Could not read pending file cleanup locations.")?;
     }
     Ok(pending)
 }
@@ -146,6 +170,7 @@ pub(crate) async fn keep_pending_meeting_files(
     id: i64,
 ) -> Result<(), String> {
     let _work = crate::updates::admit_work()?;
+    let _cleanup = CLEANUP_LOCK.lock().await;
     sqlx::query("UPDATE pending_meeting_file_cleanup SET kept=1 WHERE id=?")
         .bind(id)
         .execute(state.db_manager.pool())
@@ -161,6 +186,60 @@ pub(crate) async fn attempt(
     initial_recording_job: Option<Arc<OwnedSemaphorePermit>>,
 ) -> Result<Option<String>, String> {
     let work = crate::updates::admit_work()?;
+    let pool = pool.clone();
+    let locations = locations.clone();
+    // A cancelled IPC request cannot release the cleanup gate or interrupt
+    // publication of the staging state while a filesystem operation runs.
+    tokio::spawn(async move {
+        let _work = work;
+        let _cleanup = CLEANUP_LOCK.lock().await;
+        attempt_locked(&pool, &locations, id, initial_recording_job).await
+    })
+    .await
+    .map_err(|_| "Could not finish removing the file or folder.")?
+}
+
+async fn attempt_locked(
+    pool: &SqlitePool,
+    locations: &CleanupLocations,
+    id: i64,
+    initial_recording_job: Option<Arc<OwnedSemaphorePermit>>,
+) -> Result<Option<String>, String> {
+    let result = match stage_pending(pool, locations, id, initial_recording_job).await? {
+        Ok(Some(stage)) => tokio::task::spawn_blocking(move || stage.remove())
+            .await
+            .map_err(|_| "Could not finish removing the file or folder.")?,
+        Ok(None) => Ok(()),
+        Err(reason) => Err(reason),
+    };
+    if let Err(reason) = result {
+        sqlx::query("UPDATE pending_meeting_file_cleanup SET reason=? WHERE id=?")
+            .bind(reason)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|_| "Could not update the file cleanup list.")?;
+    } else {
+        sqlx::query("DELETE FROM pending_meeting_file_cleanup WHERE id=? AND kept=0")
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|_| "Could not update the file cleanup list.")?;
+    }
+    Ok(result.err().map(str::to_owned))
+}
+
+async fn stage_pending(
+    pool: &SqlitePool,
+    locations: &CleanupLocations,
+    id: i64,
+    initial_recording_job: Option<Arc<OwnedSemaphorePermit>>,
+) -> Result<Result<Option<Stage>, &'static str>, String> {
+    // Commit the unique destination before touching the filesystem. A restart
+    // can find a successful rename even if the staging transaction rolled back.
+    sqlx::query("UPDATE pending_meeting_file_cleanup SET stage_token=? WHERE id=? AND kept=0 AND stage_token IS NULL")
+        .bind(uuid::Uuid::new_v4().to_string()).bind(id).execute(pool).await
+        .map_err(|_| "Could not reserve a file cleanup location.")?;
     let mut tx = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
@@ -172,39 +251,50 @@ pub(crate) async fn attempt(
             .await
             .map_err(|_| "Could not read this cleanup entry.")?;
     let Some(pending) = pending else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
 
-    let prepared = prepare(&mut tx, locations, &pending, initial_recording_job).await;
-    let (mut tx, result) = match prepared {
-        Ok(prepared) => tokio::task::spawn_blocking(move || {
-            // A cancelled webview request must not release file ownership or the
-            // recording/export guard while its filesystem call is still running.
-            let _work = work;
-            (tx, prepared.remove())
-        })
-        .await
-        .map_err(|_| "Could not finish removing the file or folder.")?,
+    let stage = Stage::for_entry(locations, &pending);
+    let (mut tx, stage) = match stage {
+        Ok(stage) => {
+            let already_staged = pending.staged;
+            let (stage, status) = tokio::task::spawn_blocking(move || {
+                let status = stage.inspect(already_staged);
+                (stage, status)
+            })
+            .await
+            .map_err(|_| "Could not inspect the file cleanup location.")?;
+            match status {
+                Ok(StageStatus::Ready) => (tx, Ok(Some(stage))),
+                Ok(StageStatus::Gone) => (tx, Ok(None)),
+                Ok(StageStatus::Fresh) => {
+                    match prepare(&mut tx, locations, &pending, initial_recording_job).await {
+                        Ok(prepared) => tokio::task::spawn_blocking(move || {
+                            let result = prepared.stage(stage);
+                            (tx, result)
+                        })
+                        .await
+                        .map_err(|_| "Could not move files to the cleanup location.")?,
+                        Err(reason) => (tx, Err(reason)),
+                    }
+                }
+                Err(reason) => (tx, Err(reason)),
+            }
+        }
         Err(reason) => (tx, Err(reason)),
     };
-    if let Err(reason) = result {
-        sqlx::query("UPDATE pending_meeting_file_cleanup SET reason=? WHERE id=?")
-            .bind(reason)
+    if matches!(&stage, Ok(Some(_))) {
+        sqlx::query("UPDATE pending_meeting_file_cleanup SET staged=1 WHERE id=?")
             .bind(id)
             .execute(&mut *tx)
             .await
-            .map_err(|_| "Could not update the file cleanup list.")?;
-    } else {
-        sqlx::query("DELETE FROM pending_meeting_file_cleanup WHERE id=?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| "Could not update the file cleanup list.")?;
+            .map_err(|_| "Could not save the staged cleanup.")?;
     }
     tx.commit()
         .await
-        .map_err(|_| "Could not update the file cleanup list.")?;
-    Ok(result.err().map(str::to_owned))
+        .map_err(|_| "Could not save the staged cleanup.")?;
+
+    Ok(stage)
 }
 
 const OWNERSHIP_CHECK: &str = "Could not check whether the file or folder is still in use.";
@@ -226,8 +316,16 @@ enum CleanupTarget {
 }
 
 impl CleanupTarget {
-    fn remove(self) -> Result<(), &'static str> {
-        match self {
+    fn stage(self, stage: Stage) -> Result<Option<Stage>, &'static str> {
+        // Keep the specialized recording/export guard through the rename.
+        #[cfg(windows)]
+        let _parents =
+            match meeting_files::pin_directory_chain(stage.original.parent().ok_or(UNSAFE_PATH)?) {
+                Ok(parents) => parents,
+                Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
+                Err(_) => return Err(UNSAFE_PATH),
+            };
+        let exists = match &self {
             Self::Recording {
                 folder,
                 meeting_id,
@@ -235,19 +333,25 @@ impl CleanupTarget {
                 other_folders,
                 exact_marker,
                 _job,
-            } => meeting_files::remove_library_recording_folder(
-                &folder,
-                &meeting_id,
-                &roots,
-                &other_folders,
-                exact_marker,
-            ),
+            } => meeting_files::verify_recording_deletion(
+                folder,
+                meeting_id,
+                roots,
+                other_folders,
+                *exact_marker,
+            )?
+            .is_some(),
             Self::AppData {
                 path,
                 directory,
                 _export,
-            } => remove_app_file(&path, directory),
+            } => checked_entry(path, *directory)?,
+        };
+        if !exists {
+            return Ok(None);
         }
+        stage.move_original()?;
+        Ok(Some(stage))
     }
 }
 
@@ -346,38 +450,143 @@ pub(crate) fn directory_key(path: &Path) -> String {
     }
 }
 
-fn remove_app_file(path: &Path, directory: bool) -> Result<(), &'static str> {
-    // App-owned roots are derived in the core. Refuse replacement links or
-    // junctions anywhere on the path before touching either kind of target.
-    let parents = path
-        .ancestors()
-        .skip(1)
-        .filter(|path| path.parent().is_some())
-        .collect::<Vec<_>>();
-    for parent in parents.into_iter().rev() {
-        match fs::symlink_metadata(parent) {
-            Ok(meta) if meta.is_dir() && !meeting_files::is_link(&meta) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-            _ => return Err(UNSAFE_PATH),
-        }
+fn checked_entry(path: &Path, directory: bool) -> Result<bool, &'static str> {
+    let parent = path.parent().ok_or(UNSAFE_PATH)?;
+    match meeting_files::directory_chain(parent) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(UNSAFE_PATH),
     }
     match fs::symlink_metadata(path) {
         Ok(meta)
-            if !meeting_files::is_link(&meta)
+            if !meeting_files::is_link(path, &meta)
                 && if directory {
                     meta.is_dir()
                 } else {
                     meta.is_file()
-                } => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        _ => return Err(UNSAFE_PATH),
+                } =>
+        {
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        _ => Err(UNSAFE_PATH),
     }
-    let removed = if directory {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    };
-    removed.map_err(|_| DELETE_FAILED)
+}
+
+struct Stage {
+    original: PathBuf,
+    holder: PathBuf,
+    payload: PathBuf,
+    directory: bool,
+    recording_roots: Option<Vec<PathBuf>>,
+}
+
+enum StageStatus {
+    Fresh,
+    Ready,
+    Gone,
+}
+
+impl Stage {
+    fn for_entry(
+        locations: &CleanupLocations,
+        pending: &PendingFileCleanup,
+    ) -> Result<Self, &'static str> {
+        let original = locations.original(pending)?;
+        let parent = original.parent().ok_or(UNSAFE_PATH)?;
+        if meeting_files::is_cleanup_path(&original) {
+            return Err(UNSAFE_PATH);
+        }
+        let token = pending
+            .stage_token
+            .as_deref()
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .ok_or(STAGE_UNCERTAIN)?;
+        let holder = parent.join(format!("{}{token}", meeting_files::CLEANUP_PREFIX));
+        let payload = holder.join("files");
+        Ok(Self {
+            original,
+            holder,
+            payload,
+            directory: pending.kind != "reference",
+            recording_roots: (pending.kind == "recording")
+                .then(|| locations.recording_roots.clone()),
+        })
+    }
+
+    fn holder_exists(&self) -> Result<bool, &'static str> {
+        if let Some(roots) = &self.recording_roots {
+            // The original may have been reused or replaced since the move.
+            // Inspect only the reserved sibling, under a still-trusted root.
+            if !crate::trusted_roots::text_allowed(&self.holder.to_string_lossy(), roots) {
+                return Err(UNSAFE_PATH);
+            }
+            if checked_entry(&self.holder, true)? {
+                let canonical = self.holder.canonicalize().map_err(|_| UNAVAILABLE)?;
+                if !roots
+                    .iter()
+                    .filter(|root| meeting_files::directory_chain(root).is_ok())
+                    .filter_map(|root| root.canonicalize().ok())
+                    .any(|root| canonical != root && canonical.starts_with(root))
+                {
+                    return Err(UNSAFE_PATH);
+                }
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        checked_entry(&self.holder, true)
+    }
+
+    fn payload_exists(&self) -> Result<bool, &'static str> {
+        checked_entry(&self.payload, self.directory)
+    }
+
+    fn inspect(&self, staged: bool) -> Result<StageStatus, &'static str> {
+        if !self.holder_exists()? {
+            return Ok(if staged {
+                StageStatus::Gone
+            } else {
+                StageStatus::Fresh
+            });
+        }
+        if self.payload_exists()? || staged {
+            return Ok(StageStatus::Ready);
+        }
+        // An empty holder before the rename was committed is ambiguous after
+        // a crash. Never retry against a possible replacement source.
+        Err(STAGE_UNCERTAIN)
+    }
+
+    fn move_original(&self) -> Result<(), &'static str> {
+        // A newly made holder guarantees the rename cannot overwrite another
+        // staged item. The sibling location also keeps the move on one volume.
+        fs::create_dir(&self.holder).map_err(|_| DELETE_FAILED)?;
+        if fs::rename(&self.original, &self.payload).is_err() {
+            let _ = fs::remove_dir(&self.holder);
+            return Err(DELETE_FAILED);
+        }
+        Ok(())
+    }
+
+    fn remove(self) -> Result<(), &'static str> {
+        if !self.holder_exists()? {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        let parents = meeting_files::pin_directory_chain(&self.holder).map_err(|_| UNSAFE_PATH)?;
+        if self.payload_exists()? {
+            if self.directory {
+                fs::remove_dir_all(&self.payload)
+            } else {
+                fs::remove_file(&self.payload)
+            }
+            .map_err(|_| DELETE_FAILED)?;
+        }
+        #[cfg(windows)]
+        drop(parents);
+        fs::remove_dir(&self.holder).map_err(|_| DELETE_FAILED)
+    }
 }
 
 #[cfg(test)]
@@ -508,6 +717,98 @@ mod tests {
         assert_eq!(attempt(&pool, &locations, id, None).await.unwrap(), None);
         assert!(!outputs.exists());
         assert_eq!(attempt(&pool, &locations, id, None).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn slow_removal_runs_after_commit_and_cannot_touch_a_replacement_owner() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let locations = locations(root.path());
+        let original = locations.target("outputs", "review-test", "").unwrap();
+        fs::create_dir_all(&original).unwrap();
+        fs::write(original.join("old.txt"), b"Old output").unwrap();
+        MeetingsRepository::delete_from_library(&pool, "review-test", false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let id = entry(&pool, "outputs").await.id;
+        let stage = stage_pending(&pool, &locations, id, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(entry(&pool, "outputs").await.staged);
+        assert!(stage.payload.join("old.txt").is_file());
+        assert!(!original.exists());
+
+        // A new writer can claim and populate the original path before any
+        // recursive deletion starts, including the same restored meeting ID.
+        let mut writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('review-test','Restored',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+            .execute(&mut *writer).await.unwrap();
+        writer.commit().await.unwrap();
+        fs::create_dir(&original).unwrap();
+        fs::write(original.join("new.txt"), b"Replacement output").unwrap();
+        assert_eq!(attempt(&pool, &locations, id, None).await.unwrap(), None);
+        assert!(!stage.holder.exists());
+        assert!(original.join("new.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn retry_resumes_a_rename_that_happened_before_the_staging_commit() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let locations = locations(root.path());
+        MeetingsRepository::delete_from_library(&pool, "review-test", false)
+            .await
+            .unwrap()
+            .unwrap();
+        let id = entry(&pool, "outputs").await.id;
+        sqlx::query("UPDATE pending_meeting_file_cleanup SET stage_token=? WHERE id=?")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stage = Stage::for_entry(&locations, &entry(&pool, "outputs").await).unwrap();
+        fs::create_dir_all(&stage.original).unwrap();
+        stage.move_original().unwrap();
+        fs::create_dir_all(&stage.original).unwrap();
+        fs::write(stage.original.join("new.txt"), b"Replacement output").unwrap();
+        assert!(!entry(&pool, "outputs").await.staged);
+        assert_eq!(attempt(&pool, &locations, id, None).await.unwrap(), None);
+        assert!(!stage.holder.exists());
+        assert!(stage.original.join("new.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn retry_keeps_a_legacy_folder_without_an_identity_marker() {
+        let _test = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let locations = locations(root.path());
+        let folder = locations.recording_roots[0].join("legacy");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("metadata.json"),
+            r#"{"version":"1.0","transcript_file":"transcripts.json"}"#,
+        )
+        .unwrap();
+        sqlx::query("UPDATE meetings SET folder_path=? WHERE id='review-test'")
+            .bind(folder.to_str().unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        MeetingsRepository::delete_from_library(&pool, "review-test", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let id = entry(&pool, "recording").await.id;
+        let reason = attempt(&pool, &locations, id, None).await.unwrap().unwrap();
+        assert!(reason.contains("marker"));
+        assert!(folder.join("metadata.json").is_file());
+        assert!(!entry(&pool, "recording").await.staged);
     }
 
     #[tokio::test]
