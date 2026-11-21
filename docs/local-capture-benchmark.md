@@ -99,6 +99,11 @@ All four original live replies returned nonempty text. With the corrected mix,
 all four live segments cover their full fixture cues and contain their
 bookmarks. Three still decode to different words. The saved pass misses one
 cue during VAD, although a direct window from the AAC decodes it correctly.
+In a frame trace on the merged audio path, the saved cue “right” crossed the
+0.50 speech-start threshold at 161.010 s. Its probability fell to 0.312 at
+161.220 s, below the 0.35 quiet threshold, before the 250 ms confirmation
+period elapsed. A second candidate lasted 180 ms. Neither produced a segment
+for the decoder. Direct decoding of the same AAC window returned the word.
 Both corrected passes produced zero false words in 119 s of guarded digital
 silence, and both narrated passages retained zero word errors.
 
