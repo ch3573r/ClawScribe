@@ -270,7 +270,7 @@ function RecordingCaptureDetails({ details }: { details: CaptureDetails }) {
   const items = [
     details.backend,
     details.dropped_samples > 0 ? 'Some samples were dropped during capture.' : null,
-    details.system_silence_periods > 0 ? 'System audio was quiet for one or more periods. Check playback for missing meeting audio.' : null,
+    details.system_silence_periods > 0 ? 'System audio was quiet for one or more periods.' : null,
   ].filter(Boolean);
   return items.length > 0
     ? <p className="shrink-0 border-b border-border px-4 py-2 text-xs text-muted-foreground">{items.join(' ')}</p>

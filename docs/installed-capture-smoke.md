@@ -135,13 +135,16 @@ Record the source commit, installer and installed executable SHA-256, active
 backend. Record each scenario as passed, failed or not run.
 
 1. Play system audio while speaking into the microphone. Silence the output
-   for at least 15 seconds, restore it, then repeat. Verify the warning
-   reappears and clears independently of other warnings. Pause longer than
-   15 seconds and resume. Verify the silence timer restarts.
+   for at least 15 seconds, restore it, then repeat. Verify there are no
+   silence alerts and the saved meeting shows quiet periods without a capture
+   gap. Pause longer than 15 seconds and resume. Verify that paused time
+   does not contribute to the silence timer.
 2. Disconnect the selected output with the main window hidden. Verify the
    microphone continues. Restore the same output. Reload the main window
    and reopen the floating controls during a missing-source period. Verify
-   both windows agree on the session, its warnings and Retry state. After
+   both windows agree on the session, its warnings and Retry state. While
+   the app checks the device, pause and resume, review the calendar event,
+   and save a bookmark or note. After
    saving, play both sources around the interruption and inspect the gap
    and quiet-period notices. Repeat by disconnecting the microphone.
 3. Move the floating panel onto a secondary display. Pause and resume it
@@ -167,7 +170,8 @@ backend. Record each scenario as passed, failed or not run.
    desktop invitation with an unknown room. Check that an already-active
    call, a different identified room, multiple active calls, and an expired
    or canceled invitation cannot start the requested recording.
-7. With automatic stopping enabled, end a detector-owned Teams call and
+7. With automatic stopping enabled, move an ongoing Teams desktop call to
+   another window and confirm capture continues. Then end the detected call and
    enter a second Teams call in another window. Verify the first save contains
    its own title and playback, then verify the second call gets its own
    prompt or session. A manual recording must survive either call ending.

@@ -62,10 +62,10 @@ function content(node) {
   return node?.props ? content(node.props.children) : [];
 }
 
-test('a restored window reads existing warnings and a cleared silence warning leaves the capture gap visible', async t => {
-  const silence = 'System audio is quiet.';
+test('quiet periods remain neutral and a restored window retains actionable warnings', async t => {
   const gap = 'Samples were dropped.';
-  let snapshot = health([silence, gap]);
+  let snapshot = health();
+  snapshot.details.system_silence_periods = 3;
   const view = createWarningView(t, async (command, args) => {
     assert.equal(command, 'get_recording_health');
     assert.equal(args.sessionId, 'session-a');
@@ -73,12 +73,12 @@ test('a restored window reads existing warnings and a cleared silence warning le
   });
   assert.equal(view.render(), null);
   await flush();
-  assert.ok(content(view.render()).includes(silence));
-  assert.ok(content(view.render()).includes(gap));
+  assert.equal(view.render(), null);
   snapshot = health([gap]);
+  snapshot.details.backend = 'Nemotron · CPU fallback encoder, DirectML decoder';
   await view.poll();
-  assert.ok(!content(view.render()).includes(silence));
   assert.ok(content(view.render()).includes(gap));
+  assert.ok(content(view.render()).some(message => message.includes('Check acceleration settings')));
 });
 
 test('a replacement recording never displays the prior session warnings', async t => {

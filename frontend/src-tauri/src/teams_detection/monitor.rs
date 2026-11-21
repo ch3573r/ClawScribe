@@ -87,14 +87,25 @@ impl CallSettings {
 /// toolbar, an inaccessible desktop or a failed scan cannot prove that a call
 /// ended; only a positive closure observation counts.
 fn ended_on_scan(call: &CallWindow, scan: &CallScan) -> bool {
+    let explicitly_ended = scan.ended.iter().any(|ended| ended.key == call.key);
     scan.supported
         && scan.complete
         && !scan.active.iter().any(|active| {
-            active.key == call.key
-                || (call.teams_room.is_some() && active.teams_room == call.teams_room)
+            same_observed_call(call, active)
+                || (!explicitly_ended && desktop_teams_continuation(call, active))
         })
-        && (scan.ended.iter().any(|ended| ended.key == call.key)
-            || !scan.open_windows.contains(&call.window))
+        && (explicitly_ended || !scan.open_windows.contains(&call.window))
+}
+
+fn same_observed_call(call: &CallWindow, active: &CallWindow) -> bool {
+    active.key == call.key || (call.teams_room.is_some() && active.teams_room == call.teams_room)
+}
+
+fn desktop_teams_continuation(call: &CallWindow, active: &CallWindow) -> bool {
+    call.desktop_teams
+        && active.desktop_teams
+        && call.teams_room.is_none()
+        && active.teams_room.is_none()
 }
 
 struct Observed {
@@ -321,6 +332,7 @@ impl Tracker {
         if prompt_gone {
             self.drop_prompt();
         }
+        self.follow_owned_window(scan);
         let ended = self.seen.update(scan);
         let owner_ended = self
             .owner
@@ -374,6 +386,39 @@ impl Tracker {
                 Decision::Prompt
             }
             Mode::Off => Decision::Nothing,
+        }
+    }
+
+    /// An HWND can change during a desktop Teams call. With no room ID, a
+    /// single continuing desktop surface is sufficient to keep recording
+    /// unless Teams positively reported the old call ended.
+    fn follow_owned_window(&mut self, scan: &CallScan) {
+        let Some(owner) = self.owner.as_mut() else {
+            return;
+        };
+        if scan
+            .active
+            .iter()
+            .any(|active| active.key == owner.call.key)
+        {
+            return;
+        }
+        let explicitly_ended = scan.ended.iter().any(|ended| ended.key == owner.call.key);
+        let mut candidates = scan.active.iter().filter(|active| {
+            same_observed_call(&owner.call, active)
+                || (!explicitly_ended && desktop_teams_continuation(&owner.call, active))
+        });
+        let Some(next) = candidates.next() else {
+            return;
+        };
+        if candidates.next().is_some() {
+            return;
+        }
+        if let Some(mut observation) = self.seen.calls.remove(&owner.call.key) {
+            observation.call = next.clone();
+            observation.misses = 0;
+            self.seen.calls.insert(next.key.clone(), observation);
+            owner.call = next.clone();
         }
     }
 
@@ -882,6 +927,7 @@ mod tests {
             window: window.to_string(),
             key: key.to_string(),
             teams_room: None,
+            desktop_teams: false,
         }
     }
 
@@ -1199,6 +1245,71 @@ mod tests {
         moved.teams_room = original.teams_room;
         let scan = snapshot(&[moved], &["second-window"], &[]);
         assert!(!ended_on_scan(&original, &scan));
+    }
+
+    #[test]
+    fn owned_desktop_teams_call_follows_a_new_window_and_stops_after_it_ends() {
+        let mut tracker = Tracker::new(CallSettings {
+            mode: Mode::Auto,
+            providers: vec![Provider::Teams],
+            auto_stop: true,
+        });
+        let revision = tracker.revision();
+        let mut original = call(Provider::Teams, "old-window", "old-call");
+        original.desktop_teams = true;
+        let first = snapshot(&[original.clone()], &["old-window"], &[]);
+        assert!(matches!(
+            tracker.observe(revision, Some(&first), IDLE),
+            Decision::Start { .. }
+        ));
+        tracker.started(&original, Some("session".into()), revision);
+        let mut moved = call(Provider::Teams, "new-window", "new-call");
+        moved.desktop_teams = true;
+        let moved_scan = snapshot(&[moved.clone()], &["old-window", "new-window"], &[]);
+        let running = Context {
+            idle: false,
+            recording: true,
+        };
+        for _ in 0..=MISSES_TO_END {
+            assert_eq!(
+                tracker.observe(revision, Some(&moved_scan), running),
+                Decision::Nothing
+            );
+        }
+        assert_eq!(tracker.watched_windows(), ["new-window"]);
+        let gone = snapshot(&[], &["old-window"], &[]);
+        for _ in 1..MISSES_TO_END {
+            assert_eq!(
+                tracker.observe(revision, Some(&gone), running),
+                Decision::Nothing
+            );
+        }
+        assert!(
+            matches!(tracker.observe(revision, Some(&gone), running), Decision::Stop(owner)
+            if owner.call == moved && owner.session == "session")
+        );
+    }
+
+    #[test]
+    fn explicit_desktop_end_and_distinct_known_rooms_still_show_succession() {
+        let mut original = call(Provider::Teams, "old-window", "old-call");
+        original.desktop_teams = true;
+        let mut next = call(Provider::Teams, "new-window", "new-call");
+        next.desktop_teams = true;
+        let transition = snapshot(
+            &[next.clone()],
+            &["old-window", "new-window"],
+            &[original.clone()],
+        );
+        assert!(ended_on_scan(&original, &transition));
+        original.desktop_teams = false;
+        original.teams_room = Some([1; 32]);
+        next.desktop_teams = false;
+        next.teams_room = Some([2; 32]);
+        assert!(ended_on_scan(
+            &original,
+            &snapshot(&[next], &["new-window"], &[])
+        ));
     }
 
     #[test]

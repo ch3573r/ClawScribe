@@ -16,9 +16,13 @@ credential storage.
 configured calendars for the coming week. The Calendars page lists more
 occurrences. Timed invitations with a supported Teams URL offer **Join** and
 **Join and record** on Windows. ClawScribe accepts eligible Teams meeting URLs
-from the event's URL field or a single eligible link extracted from its
-description. It removes the original description text before storage or
-display. Links for unidentified calls still require confirmation.
+from the event's URL field or, when that field has no supported Teams link,
+from the description if its eligible links all refer to one room. ClawScribe
+removes the description text and retains the selected join URL, including query
+parameters such as a passcode. The URL stays in the local imported calendar
+copy or in memory for a subscription. The saved meeting association stores
+the event reference and attendance separately from the join URL. Calls whose
+room cannot be identified still require confirmation.
 **Use for next recording** takes priority over automatic matching.
 The selection expires five minutes after the event ends. Choose **Clear selection**
 to remove it sooner. Invitations without an end time expire one hour after their
@@ -37,8 +41,6 @@ attendance in an automatic summary, or review after saving and regenerate.
 Active edits survive a window reload and are included when an interrupted
 recording is recovered in the same library. Saved links and attendance are
 included in library backups.
-
-Links and attendance are saved with the meeting and included in library backups.
 
 An event that ClawScribe links automatically is local convenience. It can name
 the meeting and prefill the invitee list, but its title and invitees are not sent

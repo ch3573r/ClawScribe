@@ -52,7 +52,6 @@ impl MicrophoneStreamWatch {
         Some(stalled)
     }
 }
-const SYSTEM_AUDIO_SILENCE_WARNING: &str = "System audio has been quiet for 15 seconds. If others are speaking, check that the meeting app uses the output selected in ClawScribe.";
 
 #[derive(Default)]
 struct QueueWriteFailureTracker {
@@ -71,13 +70,15 @@ impl QueueWriteFailureTracker {
 }
 
 #[derive(Default)]
-struct SystemAudioWarningTracker {
+struct SystemAudioSilenceTracker {
     last_signal: Option<std::time::Instant>,
-    warned: bool,
+    quiet: bool,
 }
 
-impl SystemAudioWarningTracker {
-    fn update(&mut self, now: std::time::Instant, active: bool, audible: bool) -> Option<bool> {
+impl SystemAudioSilenceTracker {
+    /// Returns true once per quiet period. WASAPI loopback can stop delivering
+    /// packets during normal silence, so this observation is diagnostic only.
+    fn update(&mut self, now: std::time::Instant, active: bool, audible: bool) -> bool {
         if !active {
             self.last_signal = None;
         } else if audible || self.last_signal.is_none() {
@@ -86,11 +87,9 @@ impl SystemAudioWarningTracker {
         let silent = self.last_signal.is_some_and(|last| {
             now.saturating_duration_since(last) >= std::time::Duration::from_secs(15)
         });
-        if self.warned == silent {
-            return None;
-        }
-        self.warned = silent;
-        Some(silent)
+        let began = silent && !self.quiet;
+        self.quiet = silent;
+        began
     }
 }
 
@@ -1060,11 +1059,7 @@ impl AudioPipeline {
     pub async fn run(mut self) -> Result<()> {
         info!("VAD-driven audio pipeline started - segments sent in real-time based on speech detection");
 
-        // System-audio silence detection: if a system device is selected but no
-        // non-silent samples ever arrive, the chosen loopback endpoint isn't the
-        // one audio actually plays through (e.g. an idle digital output). Warn
-        // once so it isn't a silent failure.
-        let mut system_audio_warning = SystemAudioWarningTracker::default();
+        let mut system_audio_silence = SystemAudioSilenceTracker::default();
         let mut microphone_stream = MicrophoneStreamWatch::default();
 
         // Speaker attribution ("Me" = mic, "Participants" = system). We compare
@@ -1115,8 +1110,7 @@ impl AudioPipeline {
                         self.last_summary_time = std::time::Instant::now();
                     }
 
-                    // Track whether the system-audio stream is actually carrying
-                    // sound (for the silence warning below).
+                    // Measure quiet loopback periods independently of capture loss.
                     system_audible = audible_system_audio(&chunk.device_type, &chunk.data);
 
                     // Live meters: one snapshot per ~100 ms, none while paused
@@ -1231,8 +1225,7 @@ impl AudioPipeline {
                     break;
                 }
                 Err(_) => {
-                    // Timeout - no chunk this tick. Fall through to the silence
-                    // check so a dead/silent system stream is still detected.
+                    // No chunk this tick. The stream timers still advance.
                 }
             }
 
@@ -1249,17 +1242,14 @@ impl AudioPipeline {
                 }
             }
 
-            if let Some(silent) = system_audio_warning.update(
+            if system_audio_silence.update(
                 std::time::Instant::now(),
-                self.state.is_active() && self.state.get_system_device().is_some(),
+                self.state.is_active()
+                    && self.state.get_system_device().is_some()
+                    && !self.state.source_is_missing(&DeviceType::System),
                 system_audible,
             ) {
-                if silent {
-                    self.state.record_system_silence();
-                    self.state.report_warning(SYSTEM_AUDIO_SILENCE_WARNING);
-                } else {
-                    self.state.clear_warning(SYSTEM_AUDIO_SILENCE_WARNING);
-                }
+                self.state.record_system_silence();
             }
         }
 
@@ -1268,10 +1258,14 @@ impl AudioPipeline {
 
         // Drain independent disk workers after capture has closed. The bounded
         // deadlines mark omissions and retain recovery data on a stalled drive.
-        if let Some(recording) = &mut self.recording_sender_for_mixed {
-            recording.finish().await;
-        }
-        self.transcription_sender.finish().await;
+        tokio::join!(
+            async {
+                if let Some(recording) = &mut self.recording_sender_for_mixed {
+                    recording.finish().await;
+                }
+            },
+            self.transcription_sender.finish(),
+        );
 
         info!("VAD-driven audio pipeline ended");
         Ok(())
@@ -1528,12 +1522,18 @@ impl AudioPipelineManager {
         self.audio_sender = None;
 
         // Wait for pipeline to finish
-        if let Some(handle) = self.pipeline_handle.take() {
-            match handle.await {
-                Ok(result) => result,
-                Err(e) => {
+        if let Some(mut handle) = self.pipeline_handle.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(45), &mut handle).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
                     error!("Pipeline task failed: {}", e);
                     Err(anyhow::anyhow!("Audio pipeline task failed"))
+                }
+                Err(_) => {
+                    handle.abort();
+                    Err(anyhow::anyhow!(
+                        "Audio pipeline did not flush before the deadline"
+                    ))
                 }
             }
         } else {
@@ -1686,8 +1686,8 @@ mod source_attribution_tests {
 }
 
 #[cfg(test)]
-mod system_audio_warning_tests {
-    use super::{audible_system_audio, DeviceType, SystemAudioWarningTracker};
+mod system_audio_silence_tests {
+    use super::{audible_system_audio, DeviceType, SystemAudioSilenceTracker};
     use std::time::Duration;
 
     #[test]
@@ -1715,29 +1715,29 @@ mod system_audio_warning_tests {
     }
 
     #[test]
-    fn system_warning_requires_a_selected_device_and_the_grace_period() {
-        let mut tracker = SystemAudioWarningTracker::default();
+    fn a_quiet_period_requires_a_selected_device_and_the_grace_period() {
+        let mut tracker = SystemAudioSilenceTracker::default();
         let start = std::time::Instant::now();
         let at = |seconds| start + Duration::from_secs(seconds);
-        assert_eq!(tracker.update(at(0), false, false), None);
-        assert_eq!(tracker.update(at(15), true, false), None);
-        assert_eq!(tracker.update(at(29), true, false), None);
-        assert_eq!(tracker.update(at(30), true, false), Some(true));
-        assert_eq!(tracker.update(at(31), true, false), None);
+        assert!(!tracker.update(at(0), false, false));
+        assert!(!tracker.update(at(15), true, false));
+        assert!(!tracker.update(at(29), true, false));
+        assert!(tracker.update(at(30), true, false));
+        assert!(!tracker.update(at(31), true, false));
     }
 
     #[test]
     fn system_audio_can_go_quiet_again_and_pause_resets_the_clock() {
-        let mut tracker = SystemAudioWarningTracker::default();
+        let mut tracker = SystemAudioSilenceTracker::default();
         let start = std::time::Instant::now();
         let at = |seconds| start + Duration::from_secs(seconds);
-        assert_eq!(tracker.update(at(0), true, true), None);
-        assert_eq!(tracker.update(at(15), true, false), Some(true));
-        assert_eq!(tracker.update(at(16), true, true), Some(false));
-        assert_eq!(tracker.update(at(31), true, false), Some(true));
-        assert_eq!(tracker.update(at(32), false, false), Some(false));
-        assert_eq!(tracker.update(at(120), true, false), None);
-        assert_eq!(tracker.update(at(135), true, false), Some(true));
+        assert!(!tracker.update(at(0), true, true));
+        assert!(tracker.update(at(15), true, false));
+        assert!(!tracker.update(at(16), true, true));
+        assert!(tracker.update(at(31), true, false));
+        assert!(!tracker.update(at(32), false, false));
+        assert!(!tracker.update(at(120), true, false));
+        assert!(tracker.update(at(135), true, false));
     }
 }
 

@@ -40,9 +40,10 @@ from Microsoft 365 and iCalendar can use **Join and record**.
 
 **Test mic** in Recording settings shows the microphone actually tested. If a
 preferred Windows microphone is unavailable, the test identifies its fallback
-to the current default. A system-audio silence warning clears when sound later
-arrives. A separate warning appears if microphone samples stop arriving for
-15 seconds. Verify both sources in saved playback before relying on the recording.
+to the current default. The saved meeting records quiet system-audio periods as
+diagnostics. A warning appears if a previously responsive microphone stops
+delivering samples for 15 seconds. Verify both sources in saved playback before
+relying on the recording.
 The recording bar and floating controls show capture warnings, queued speech,
 available disk space, and the observed recognition backend when available.
 The floating controls let you pause, resume, bookmark, and add notes.

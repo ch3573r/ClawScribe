@@ -310,6 +310,7 @@ mod tests {
             key: window.into(),
             window: window.into(),
             teams_room: room,
+            desktop_teams: room.is_none(),
         }
     }
 

@@ -27,15 +27,19 @@ an unavailable preferred microphone falls back to the current default, with the
 actual tested device and fallback shown beside its levels. Saved preferences
 remain unchanged.
 
-The system-audio warning appears after 15 seconds without audible system
-samples, including after the output has already carried sound. Audible system
-samples clear it. Pausing resets the silence timer. The saved meeting records
-that quiet periods occurred. Normal quiet periods can produce this observation.
-Confirm microphone and meeting audio in saved playback.
+The recorder counts each stretch of at least 15 seconds without audible
+system samples while the selected output is connected. Pausing resets the timer.
+The saved meeting shows these stretches as quiet periods. Capture warnings
+track separate evidence such as device failures, stalls in a previously
+responsive microphone stream, and dropped samples. Confirm microphone and
+meeting audio in saved playback.
 
 The recorder watches the selected input and output during capture, including
 while the main window is hidden or reloading. It tries to restore the same
-missing source while the other stream continues. Use **Retry** to check sooner.
+missing source while the other stream continues. Automatic checks begin after
+12 seconds and back off to at most one minute between failed checks. A device
+returning can trigger an earlier check, and **Retry** requests an immediate one.
+Pause, bookmarks, notes and calendar review remain available during a check.
 The live health display shows speech waiting or processing, free space for the
 recording and transcription scratch volumes when known, and the backend observed
 during inference. Whisper reports its runtime backend. Parakeet reports its
@@ -213,9 +217,11 @@ is frozen before transcription drain, and device-error limits apply to a recent
 and once more before audio finalization. The core saves the finalized transcript
 and outcome directly to the library. If the library write fails after the files
 are saved, open **Interrupted recordings** to finish saving the meeting.
-Stop gives a driver up to five seconds to release its streams after the capture
-pipeline flush. A driver that is already busy reconnecting has a separately
-bounded wait. Live transcription gets up to two minutes to drain and five
+Stop gives the capture pipeline up to 45 seconds to flush, then allows up to
+five more seconds for stream release. If the pipeline flush completes, a slow
+driver release is recorded in diagnostics. A driver busy reconnecting has a
+separate 20-second wait when Stop is requested. Live transcription gets up to
+two minutes to drain and five
 seconds to cancel. Saved audio remains available for manual retranscription
 when speech segments are unfinished. Live capture and Stop use local
 transcription even when a hosted file provider is configured.

@@ -32,6 +32,9 @@ export function recordingHealthWarnings(health: RecordingHealth) {
   if (health.transcription?.failed_chunks) {
     warnings.push('Live transcription is incomplete. Check the saved audio and use Retranscribe to recover missing speech.');
   }
+  if (health.details.backend?.includes('CPU fallback')) {
+    warnings.push('Live transcription is using CPU fallback. Check acceleration settings if transcription falls behind.');
+  }
   if (health.scratch_free_bytes != null && health.scratch_free_bytes < 250_000_000) {
     warnings.push('Transcription scratch space is low. Free disk space or stop and save the recording.');
   }

@@ -73,9 +73,12 @@ automatic stop applies when continuous Teams detection and automatic stop are on
 automatically or through the detector's Record prompt while that switch was
 on. After three consecutive completed checks confirm the tracked meeting
 window closed or shows a rejoin control, ClawScribe runs its usual stop and
-save flow. After the library save it checks immediately for a new eligible
-call, including one in another window of the same provider. An open window
-with ambiguous call identity still requires manual Stop.
+save flow. The same identified Teams room can continue in another window.
+When Teams desktop does not expose a room ID, ClawScribe follows a single
+active desktop Teams window if it sees no explicit end for the original call.
+Back-to-back desktop calls can therefore share a recording if the detector
+misses the transition. Use Stop to separate them when needed. After the
+library save ClawScribe checks immediately for a new eligible call.
 
 A hidden browser tab or missing toolbar is ambiguous. If the browser window
 stays open on a different tab after a call ends, ClawScribe may keep recording

@@ -756,13 +756,14 @@ async fn transcribe_chunk_with_provider(
                         Some(WhisperCompiledBackend::Cpu)
                             if WhisperCompiledBackend::current() != WhisperCompiledBackend::Cpu =>
                         {
-                            "CPU fallback"
+                            Some("CPU fallback")
                         }
-                        Some(backend) => backend.as_str(),
-                        None => "backend unconfirmed",
+                        Some(backend) => Some(backend.as_str()),
+                        None => None,
                     };
-                    capture.health.lock().unwrap().details.backend =
-                        Some(format!("Whisper · {backend}"));
+                    if let Some(backend) = backend {
+                        capture.observe_transcription_backend(format!("Whisper · {backend}"));
+                    }
                     let cleaned_text = text.trim().to_string();
                     if cleaned_text.is_empty() {
                         return Ok((String::new(), confidence, is_partial, None, None));
@@ -799,8 +800,7 @@ async fn transcribe_chunk_with_provider(
                         } else {
                             "CPU"
                         };
-                        capture.health.lock().unwrap().details.backend =
-                            Some(format!("Parakeet · {backend}"));
+                        capture.observe_transcription_backend(format!("Parakeet · {backend}"));
                     }
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
@@ -835,8 +835,9 @@ async fn transcribe_chunk_with_provider(
             // NEW: Trait-based provider (clean, unified interface)
             match provider.transcribe(speech_samples, language).await {
                 Ok(result) => {
-                    let backend = provider.live_backend().await;
-                    capture.health.lock().unwrap().details.backend = backend;
+                    if let Some(backend) = provider.live_backend().await {
+                        capture.observe_transcription_backend(backend);
+                    }
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
                         return Ok((

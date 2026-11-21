@@ -122,6 +122,21 @@ test('pause and resume target the bound recording and preserve an unfinished not
   assert.equal(app.find('Input').props.value, 'Draft note');
 });
 
+test('checking a missing device leaves recording controls and notes usable', async t => {
+  const app = panel(t);
+  await flush();
+  await app.refresh({ ...live, health: {
+    reconnecting: true, disconnected_devices: [{ name: 'Synthetic output', device_type: 'SystemAudio' }],
+    warnings: [], details: { dropped_samples: 0 },
+  } });
+  assert.equal(app.find('Input').props.readOnly, false);
+  assert.equal(app.find('Button', 'children', 'Pause').props.disabled, false);
+  assert.equal(app.find('Button', 'variant', 'destructive').props.disabled, false);
+  assert.equal(app.find('Button', 'children', 'Retry').props.disabled, true);
+  await app.find('form').props.onSubmit({ preventDefault() {} });
+  assert.equal(app.calls.at(-1).name, 'floating_note');
+});
+
 test('the panel can reopen during a save and keeps recovery directions visible', async t => {
   const app = panel(t, { state: 'saving', seconds: 70, progress: 90, message: 'Saving…' });
   await flush();

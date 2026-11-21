@@ -114,9 +114,8 @@ type MeetingFields = Pick<ICalendarEvent, "subject" | "organizer" | "attendees" 
 
 function fields(event: ICAL.Component, fallback?: MeetingFields): MeetingFields {
   const explicitUrl = event.getFirstPropertyValue("url");
-  const extractedUrl = event.getFirstPropertyValue("x-clawscribe-teams-url");
-  const joinUrl = teamsJoinLink(explicitUrl) ?? teamsJoinLink(extractedUrl)
-    ?? (explicitUrl == null && extractedUrl == null ? fallback?.joinUrl ?? null : null);
+  const joinUrl = teamsJoinLink(explicitUrl)
+    ?? (explicitUrl == null ? fallback?.joinUrl ?? null : null);
   return {
     subject: singleLine(event.getFirstPropertyValue("summary"), 1024) ?? fallback?.subject ?? null,
     organizer: attendee(event.getFirstProperty("organizer")) ?? fallback?.organizer ?? null,
