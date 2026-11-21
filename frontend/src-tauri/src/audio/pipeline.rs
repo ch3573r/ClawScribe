@@ -242,53 +242,27 @@ impl SourceAttributionHistory {
 struct AudioMixerRingBuffer {
     mic_buffer: VecDeque<f32>,
     system_buffer: VecDeque<f32>,
-    window_size_samples: usize, // Fixed mixing window (e.g., 50ms)
-    max_buffer_size: usize,     // Safety limit (e.g., 100ms)
+    window_size_samples: usize,
+    source_grace_samples: usize,
+    max_buffer_size: usize,
 }
 
 impl AudioMixerRingBuffer {
     fn new(sample_rate: u32) -> Self {
-        // Use 50ms windows for mixing
-        let window_ms = 600.0;
-        let window_size_samples = (sample_rate as f32 * window_ms / 1000.0) as usize;
-
-        // CRITICAL FIX: Increase max buffer to 400ms for system audio stability
-        // System audio (especially Core Audio on macOS) can have significant jitter
-        // due to sample-by-sample streaming → batching → channel transmission
-        // Accounts for: RNNoise buffering + Core Audio jitter + processing delays
-        let max_buffer_size = window_size_samples * 8; // 400ms (was 200ms)
-
-        info!(
-            "🔊 Ring buffer initialized: window={}ms ({} samples), max={}ms ({} samples)",
-            window_ms,
-            window_size_samples,
-            window_ms * 8.0,
-            max_buffer_size
-        );
+        let window_size_samples = sample_rate as usize * 600 / 1_000;
+        let source_grace_samples = sample_rate as usize / 10;
+        let max_buffer_size = window_size_samples * 8;
 
         Self {
             mic_buffer: VecDeque::with_capacity(max_buffer_size),
             system_buffer: VecDeque::with_capacity(max_buffer_size),
             window_size_samples,
+            source_grace_samples,
             max_buffer_size,
         }
     }
 
     fn add_samples(&mut self, device_type: DeviceType, samples: Vec<f32>) {
-        // Log buffer health periodically for diagnostics
-        static mut SAMPLE_COUNTER: u64 = 0;
-        unsafe {
-            SAMPLE_COUNTER += 1;
-            if SAMPLE_COUNTER % 200 == 0 {
-                debug!(
-                    "📊 Ring buffer status: mic={} samples, sys={} samples (max={})",
-                    self.mic_buffer.len(),
-                    self.system_buffer.len(),
-                    self.max_buffer_size
-                );
-            }
-        }
-
         match device_type {
             DeviceType::Microphone => self.mic_buffer.extend(samples),
             DeviceType::System => self.system_buffer.extend(samples),
@@ -310,7 +284,7 @@ impl AudioMixerRingBuffer {
                   self.system_buffer.len() - self.max_buffer_size);
         }
 
-        // Safety: prevent buffer overflow (keep only last 200ms)
+        // Bound retained capture if an input overruns the mixer.
         while self.mic_buffer.len() > self.max_buffer_size {
             self.mic_buffer.pop_front();
         }
@@ -320,8 +294,13 @@ impl AudioMixerRingBuffer {
     }
 
     fn can_mix(&self) -> bool {
-        self.mic_buffer.len() >= self.window_size_samples
-            || self.system_buffer.len() >= self.window_size_samples
+        let mic = self.mic_buffer.len();
+        let system = self.system_buffer.len();
+        // A callback arriving just before its counterpart must not advance the
+        // mix clock with padding. Allow bounded sample lookahead so a missing
+        // or stalled source cannot block the active source.
+        mic.min(system) >= self.window_size_samples
+            || mic.max(system) >= self.window_size_samples + self.source_grace_samples
     }
 
     fn extract_window(&mut self) -> Option<(Vec<f32>, Vec<f32>)> {
@@ -1144,18 +1123,6 @@ impl AudioPipeline {
             .await
             {
                 Ok(Some(chunk)) => {
-                    // PERFORMANCE: Check for flush signal (special chunk with ID >= u64::MAX - 10)
-                    // Multiple flush signals may be sent to ensure processing
-                    if chunk.chunk_id >= u64::MAX - 10 {
-                        info!(
-                            "📥 Received FLUSH signal #{} - flushing VAD processor",
-                            u64::MAX - chunk.chunk_id
-                        );
-                        self.flush_remaining_audio().await?;
-                        // Continue processing to handle any remaining chunks
-                        continue;
-                    }
-
                     // PERFORMANCE OPTIMIZATION: Eliminate per-chunk logging overhead
                     // Logging in hot paths causes severe performance degradation
                     self.processed_chunks += 1;
@@ -1210,7 +1177,7 @@ impl AudioPipeline {
                     self.ring_buffer
                         .add_samples(chunk.device_type.clone(), chunk.data);
 
-                    // STEP 2: Mix audio in fixed windows when both streams have sufficient data
+                    // Mix paired windows, allowing one source to continue after the grace period.
                     while self.ring_buffer.can_mix() {
                         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_window() {
                             // Simple mixing without aggressive ducking
@@ -1802,6 +1769,18 @@ mod system_audio_warning_tests {
 #[cfg(test)]
 mod queue_failure_tests {
     use super::*;
+
+    #[test]
+    fn mixer_continues_when_only_one_source_delivers() {
+        let mut mixer = AudioMixerRingBuffer::new(48_000);
+        mixer.add_samples(DeviceType::System, vec![0.5; 28_800]);
+        assert!(mixer.extract_window().is_none());
+        mixer.add_samples(DeviceType::System, vec![0.5; 4_800]);
+        let (mic, system) = mixer.extract_window().unwrap();
+        assert_eq!(mic, vec![0.0; 28_800]);
+        assert_eq!(system, vec![0.5; 28_800]);
+        assert_eq!(mixer.system_buffer.len(), 4_800);
+    }
 
     #[tokio::test]
     async fn audio_only_flush_preserves_audio_without_vad_or_transcription() {

@@ -39,6 +39,8 @@ struct VadResampler {
     input_rate: u32,
     resampler: Option<SincFixedIn<f32>>,
     input_buffer: Vec<f32>,
+    input_samples: u64,
+    output_samples: u64,
 }
 
 impl VadResampler {
@@ -81,6 +83,8 @@ impl VadResampler {
             input_rate,
             resampler,
             input_buffer: Vec::with_capacity(VAD_RESAMPLE_CHUNK * 2),
+            input_samples: 0,
+            output_samples: 0,
         }
     }
 
@@ -95,6 +99,7 @@ impl VadResampler {
             return legacy_downsample(samples, self.input_rate);
         }
 
+        self.input_samples += samples.len() as u64;
         self.input_buffer.extend_from_slice(samples);
         let mut output = Vec::new();
         let resampler = self.resampler.as_mut().expect("checked above");
@@ -112,7 +117,35 @@ impl VadResampler {
                 }
             }
         }
+        self.output_samples += output.len() as u64;
         output
+    }
+
+    fn flush(&mut self) -> Result<Vec<f32>> {
+        let Some(resampler) = self.resampler.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let expected_samples =
+            self.input_samples * u64::from(VAD_SAMPLE_RATE) / u64::from(self.input_rate);
+        let remaining = expected_samples.saturating_sub(self.output_samples) as usize;
+        let mut tail = Vec::new();
+        // The partial block plus one zero block cover the sinc filter's lookahead.
+        // Use the input clock to keep only output samples from the real audio.
+        for _ in 0..2 {
+            if tail.len() == remaining {
+                break;
+            }
+            self.input_buffer.resize(VAD_RESAMPLE_CHUNK, 0.0);
+            let waves = resampler.process(&[&self.input_buffer], None)?;
+            self.input_buffer.clear();
+            tail.extend(waves[0].iter().take(remaining - tail.len()));
+        }
+        anyhow::ensure!(
+            tail.len() == remaining,
+            "VAD resampler did not drain its input"
+        );
+        self.output_samples += tail.len() as u64;
+        Ok(tail)
     }
 }
 
@@ -315,6 +348,10 @@ impl ContinuousVadProcessor {
         let resampled_audio = self.resampler.process(samples);
 
         self.buffer.extend_from_slice(&resampled_audio);
+        self.process_buffered_frames()
+    }
+
+    fn process_buffered_frames(&mut self) -> Result<Vec<SpeechSegment>> {
         let mut completed_segments = Vec::new();
 
         // Process complete 30ms chunks (480 samples at 16kHz)
@@ -337,7 +374,8 @@ impl ContinuousVadProcessor {
         debug!("VAD flush: in_speech={}, current_speech_len={}, buffer_len={}, speech_segments_queued={}",
               self.in_speech, self.current_speech.len(), self.buffer.len(), self.speech_segments.len());
 
-        let mut completed_segments = Vec::new();
+        self.buffer.extend(self.resampler.flush()?);
+        let mut completed_segments = self.process_buffered_frames()?;
         // Bound every segment emitted by the padded terminal frame to real PCM.
         let real_end_sample = self.processed_samples + self.buffer.len();
 
@@ -1088,6 +1126,35 @@ mod tests {
             assert_eq!(last_end, audio.len());
             assert!(processor.flush().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn flush_preserves_the_resampled_end_of_active_speech() {
+        let speech: Vec<_> = include_bytes!("pc_test_samples/de.s16le")
+            .chunks_exact(2)
+            .take(23_365)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0)
+            .collect();
+        let mut audio = vec![0.0; 48_000];
+        audio.extend(speech.windows(2).flat_map(|pair| {
+            let [first, next] = [pair[0], pair[1]];
+            [
+                first,
+                first + (next - first) / 3.0,
+                first + (next - first) * (2.0 / 3.0),
+            ]
+        }));
+        // Stop in voiced audio, with a partial 512-sample resampler input block.
+        audio.truncate(114_090);
+        let mut vad = ContinuousVadProcessor::new(48_000, 400).unwrap();
+        for chunk in audio.chunks(317) {
+            assert!(vad.process_audio(chunk).unwrap().is_empty());
+        }
+        let segments = vad.flush().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].end_timestamp_ms, samples_to_ms(38_030));
+        assert!(rms(&segments[0].samples[segments[0].samples.len() - 80..]) > 0.05);
+        assert!(vad.flush().unwrap().is_empty());
     }
 
     #[test]
