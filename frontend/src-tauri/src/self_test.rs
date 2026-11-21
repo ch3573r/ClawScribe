@@ -1427,7 +1427,7 @@ async fn summary_against(
         .build()
         .map_err(failed("create the loopback client"))?;
     let transcript = IMPORT_LINES.join("\n");
-    let (markdown, _english, chunks) = generate_meeting_summary(
+    let notes = generate_meeting_summary(
         &client,
         &LLMProvider::CustomOpenAI,
         "stub-model",
@@ -1453,7 +1453,7 @@ async fn summary_against(
     )
     .await
     .map_err(failed("generate the summary"))?;
-    if !markdown.contains(STUB_MARKER) {
+    if !notes.markdown.contains(STUB_MARKER) {
         return Err("The summary does not contain the stub's answer".into());
     }
     let seen = stub
@@ -1473,8 +1473,8 @@ async fn summary_against(
     SummaryProcessesRepository::update_process_completed(
         pool,
         meeting_id,
-        json!({ "markdown": markdown }),
-        chunks,
+        json!({ "markdown": notes.markdown }),
+        notes.chunks,
         0.1,
     )
     .await

@@ -1610,7 +1610,7 @@ impl CodexAppServerProvider {
             success: true,
             exit_code: None,
             stdout: "Codex app-server turn completed.".to_string(),
-            stderr: session.take_stderr().await,
+            stderr: String::new(),
             message: "Codex app-server meeting processing succeeded.".to_string(),
         };
         write_processing_log(&output_dir, &status, started.elapsed(), "completed")?;

@@ -130,7 +130,7 @@ struct ImportFolderGuard {
 
 impl ImportFolderGuard {
     fn owned(path: PathBuf, meeting_id: &str, audio_name: &str) -> Result<Self> {
-        if !unlinked_import_path(&path) {
+        if crate::database::meeting_files::directory_chain(&path).is_err() {
             return Err(anyhow!("Could not verify the new import folder"));
         }
         let marker = path.join(IMPORT_OWNER_FILE);
@@ -164,26 +164,13 @@ const COPY_BUFFER_BYTES: usize = 256 * 1024;
 
 pub(crate) fn owns_import_folder(folder: &Path, meeting_id: &str) -> bool {
     let marker = folder.join(IMPORT_OWNER_FILE);
-    unlinked_import_path(folder)
-        && std::fs::symlink_metadata(&marker)
-            .is_ok_and(|meta| meta.is_file() && meta.len() == meeting_id.len() as u64)
-        && std::fs::read_to_string(&marker).is_ok_and(|id| id == meeting_id)
-}
-
-fn unlinked_import_path(folder: &Path) -> bool {
-    folder.ancestors().all(|path| {
-        std::fs::symlink_metadata(path).is_ok_and(|meta| {
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt;
-                const REPARSE_POINT: u32 = 0x400;
-                if meta.file_attributes() & REPARSE_POINT != 0 {
-                    return false;
-                }
-            }
-            meta.is_dir() && !crate::database::meeting_files::is_link(&meta)
+    crate::database::meeting_files::directory_chain(folder).is_ok()
+        && std::fs::symlink_metadata(&marker).is_ok_and(|meta| {
+            meta.is_file()
+                && !crate::database::meeting_files::is_link(&marker, &meta)
+                && meta.len() == meeting_id.len() as u64
         })
-    })
+        && std::fs::read_to_string(&marker).is_ok_and(|id| id == meeting_id)
 }
 
 fn copy_audio_chunks(

@@ -789,12 +789,12 @@ pub(crate) async fn sync_file_with_profile(
         if !update.transcript_pending {
             let target = folder.clone();
             let roots = roots.to_vec();
-            let meeting = meeting.to_string();
+            let folder_owner = meeting.to_string();
             let other_folders = others.clone();
             let metadata = update.import_metadata.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                let folder = guarded_import_folder(&target, &meeting, &roots, &other_folders)?;
-                publish_import_metadata(&folder, &meeting, &metadata)
+                let folder = guarded_import_folder(&target, &folder_owner, &roots, &other_folders)?;
+                publish_import_metadata(&folder, &folder_owner, &metadata)
             })
             .await
             .map_err(error)??;
