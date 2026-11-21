@@ -134,17 +134,19 @@ pub(super) async fn source_dependencies(
     pool: &SqlitePool,
     selected: &[Passage],
 ) -> Result<Vec<SourceDependency>, String> {
-    let mut passages = selected
+    if selected
         .iter()
-        .filter(|p| !matches!(p.evidence.locator, EvidenceLocator::Live { .. }))
-        .peekable();
-    let mut dependencies = Vec::new();
-    if passages.peek().is_none() {
-        return Ok(dependencies);
+        .all(|passage| matches!(passage.evidence.locator, EvidenceLocator::Live { .. }))
+    {
+        return Ok(Vec::new());
     }
     let mut conn = pool.acquire().await.map_err(|_| SOURCE_CHANGED)?;
-    for passage in passages {
+    let mut dependencies = Vec::new();
+    for passage in selected {
         let reference = &passage.evidence;
+        if matches!(reference.locator, EvidenceLocator::Live { .. }) {
+            continue;
+        }
         let attachment_meeting = matches!(reference.locator, EvidenceLocator::Document { .. })
             .then_some(passage.meeting_id.as_str());
         let incarnation = source_incarnation(&mut conn, reference, attachment_meeting)
@@ -416,6 +418,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_selected_answer_follows_only_the_recording_handoff_with_its_original_citation() {
+        fn require_send<T: Send>(future: T) -> T {
+            future
+        }
+
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let snapshot = LiveSnapshot {
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -431,6 +437,10 @@ mod tests {
             transcription_available: true,
         };
         let passage = super::super::live_context::passage(&snapshot, &snapshot.segments[0]);
+        let dependencies = require_send(source_dependencies(&pool, std::slice::from_ref(&passage)))
+            .await
+            .unwrap();
+        assert!(dependencies.is_empty());
         let note = SelectedAnswer {
             id: uuid::Uuid::new_v4().to_string(),
             content: "The staging plan stays [K1]".into(),
@@ -453,7 +463,7 @@ mod tests {
         let id = format!("meeting-{}", uuid::Uuid::new_v4());
         let candidate = NoteCandidate {
             answer: note.clone(),
-            dependencies: vec![],
+            dependencies,
         };
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
         store(&mut tx, &id, &candidate).await.unwrap();
