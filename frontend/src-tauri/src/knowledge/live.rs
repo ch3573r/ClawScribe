@@ -86,7 +86,7 @@ struct Session {
     document_sharing: bool,
     request: Option<(String, CancellationToken)>,
     history: VecDeque<HistoryMessage>,
-    note_candidates: VecDeque<live_notes::SelectedAnswer>,
+    note_candidates: VecDeque<live_notes::NoteCandidate>,
 }
 const CONTEXT_SECONDS: f64 = 600.;
 const MAX_SEGMENTS: usize = 1024;
@@ -485,7 +485,7 @@ impl LiveState {
         &self,
         session_id: &str,
         answer_id: &str,
-    ) -> Result<live_notes::SelectedAnswer, String> {
+    ) -> Result<live_notes::NoteCandidate, String> {
         let inner = self
             .inner
             .lock()
@@ -498,7 +498,9 @@ impl LiveState {
         session
             .note_candidates
             .iter()
-            .find(|note| note.id == answer_id && note.context.session_id == session_id)
+            .find(|note| {
+                note.answer.id == answer_id && note.answer.context.session_id == session_id
+            })
             .cloned()
             .ok_or_else(|| "This answer is no longer available to save.".into())
     }
@@ -550,7 +552,7 @@ impl LiveState {
         lease: &LiveLease,
         request: &AskRequest,
         reply: &AssistantReply,
-        citations: Vec<live_notes::Citation>,
+        note: Option<live_notes::NoteCandidate>,
     ) -> Result<(), String> {
         if lease.token.is_cancelled() || tokio::time::Instant::now() >= lease.deadline {
             return Err("Live request cancelled or deadline expired".into());
@@ -567,7 +569,7 @@ impl LiveState {
             .as_mut()
             .ok_or("This recording session has ended")?;
         let timestamp = chrono::Utc::now().to_rfc3339();
-        if let Some(candidate) = live_notes::SelectedAnswer::from_reply(reply, citations) {
+        if let Some(candidate) = note {
             if session.note_candidates.len() == MAX_NOTE_CANDIDATES {
                 session.note_candidates.pop_front();
             }
@@ -690,6 +692,9 @@ where
         if prompt.len() > budget {
             return Err("Live context exceeds the configured model budget".into());
         }
+        // Track every external passage in the final prompt, including passages
+        // omitted from the provider's citations. Live history is display-only.
+        let dependencies = live_notes::source_dependencies(pool, &selected).await?;
         super::live_context::recheck(pool, saved_scope.as_ref(), &selected).await?;
         load_sharing(pool, state).await?;
         state.validate(&lease, documents)?;
@@ -701,6 +706,13 @@ where
             return Err("Live answer exceeded the bounded response limit".into());
         }
         super::live_context::recheck(pool, saved_scope.as_ref(), &selected).await?;
+        if !dependencies.is_empty() {
+            let mut conn = pool
+                .acquire()
+                .await
+                .map_err(|_| "Reference storage unavailable")?;
+            live_notes::recheck_dependencies(&mut conn, &dependencies).await?;
+        }
         load_sharing(pool, state).await?;
         state.validate(&lease, documents)?;
         let reply = AssistantReply {
@@ -744,7 +756,13 @@ where
             })
             .collect();
         let citations = live_notes::citations(&reply, &snapshot, &selected);
-        state.complete(&lease, &request, &reply, citations)?;
+        let note = live_notes::SelectedAnswer::from_reply(&reply, citations).map(|answer| {
+            live_notes::NoteCandidate {
+                answer,
+                dependencies,
+            }
+        });
+        state.complete(&lease, &request, &reply, note)?;
         Ok(reply)
     };
     tokio::select! {biased;
@@ -1036,7 +1054,7 @@ mod tests {
                     resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
                 }));
             });
-            complete_state.complete(&lease, &ask, &reply, vec![])
+            complete_state.complete(&lease, &ask, &reply, None)
         });
         checked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         // Completion has passed its first token check. Hold the actual state
@@ -1517,9 +1535,10 @@ mod tests {
         assert!(!context.transcription_incomplete);
         assert_eq!(state.history(&id).unwrap().len(), 2);
         let selected = state.select_note(&id, &reply.message_id).unwrap();
-        assert_eq!(selected.provider, "openai");
-        assert_eq!(selected.context.finalized_through_seconds, 7.);
-        assert_eq!(selected.citations.len(), 1);
+        assert_eq!(selected.answer.provider, "openai");
+        assert_eq!(selected.answer.context.finalized_through_seconds, 7.);
+        assert_eq!(selected.answer.citations.len(), 1);
+        assert!(selected.dependencies.is_empty());
         assert!(state.select_note(&id, &request_id).is_err());
         for table in [
             "knowledge_owners",
@@ -1529,6 +1548,7 @@ mod tests {
             "knowledge_request_sources",
             "knowledge_document_permissions",
             "saved_live_answers",
+            "saved_live_answer_dependencies",
         ] {
             let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
                 .fetch_one(&pool)
@@ -1932,6 +1952,180 @@ mod tests {
         assert!(result.is_err());
         assert!(state.history(&id).unwrap().is_empty());
     }
+
+    async fn select_uncited_note(
+        pool: &sqlx::SqlitePool,
+        state: &Arc<LiveState>,
+        session: &str,
+        meeting: Option<&str>,
+        document: Option<&str>,
+    ) -> live_notes::NoteCandidate {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let mut input = request(session, &request_id);
+        if let Some(meeting) = meeting {
+            input.live_reference_scope = Some(MeetingFilter {
+                meeting_ids: vec![meeting.into()],
+                ..Default::default()
+            });
+        }
+        if let Some(document) = document {
+            input.search.document_ids = vec![document.into()];
+        }
+        input.search.query = if document.is_some() {
+            "decision_p24"
+        } else {
+            "meeting_budget"
+        }
+        .into();
+        let expects_saved_evidence = meeting.is_some();
+        let expects_document = document.is_some();
+        let reply = answer(
+            pool,
+            state,
+            input,
+            state.claim(session, &request_id, "openai").unwrap(),
+            16384,
+            |prompt, _| async move {
+                assert!(!prompt.contains("Earlier uncited answer."));
+                let prompt: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+                let section = if expects_document {
+                    "document_evidence"
+                } else {
+                    "transcript_evidence"
+                };
+                let passages = prompt[section].as_array().unwrap();
+                assert_eq!(
+                    passages.iter().any(|entry| {
+                        entry["text"]
+                            .as_str()
+                            .unwrap()
+                            .contains(if expects_document {
+                                "decision_p24"
+                            } else {
+                                "meeting_budget"
+                            })
+                    }),
+                    expects_saved_evidence
+                );
+                Ok(ConfiguredTextReply {
+                    text: "Earlier uncited answer.".into(),
+                    provider: "openai".into(),
+                    model: "synthetic".into(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert!(reply.cited_tags.is_empty());
+        state.select_note(session, &reply.message_id).unwrap()
+    }
+
+    async fn store_note(
+        pool: &sqlx::SqlitePool,
+        recording: &str,
+        note: &live_notes::NoteCandidate,
+    ) -> Result<(), String> {
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        live_notes::store(&mut tx, recording, note).await?;
+        tx.commit().await.unwrap();
+        Ok(())
+    }
+
+    async fn note_exists(pool: &sqlx::SqlitePool, note: &live_notes::NoteCandidate) -> bool {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM saved_live_answers WHERE id=?)")
+            .bind(&note.answer.id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn deleting_an_uncited_meeting_source_wins_against_old_note_saves() {
+        let (state, session) = ready();
+        let pool = enabled_pool(&state).await;
+        let add_source = || async {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('aster', 'Source meeting', '2026-09-01', '2026-09-01')")
+                .execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp) VALUES
+                ('source-row-a', 'aster', 'The meeting_budget was proposed.', '00:01'),
+                ('source-row-b', 'aster', 'The meeting_budget was approved.', '00:02')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        };
+        add_source().await;
+        let saved = select_uncited_note(&pool, &state, &session, Some("aster"), None).await;
+        let waiting = select_uncited_note(&pool, &state, &session, Some("aster"), None).await;
+        let live_only = select_uncited_note(&pool, &state, &session, None, None).await;
+        store_note(&pool, &session, &saved).await.unwrap();
+        store_note(&pool, &session, &saved).await.unwrap();
+        store_note(&pool, &session, &live_only).await.unwrap();
+        let passages: Vec<String> = sqlx::query_scalar(
+            "SELECT json_extract(reference_json, '$.locator.transcript_ids[0]')
+             FROM saved_live_answer_dependencies WHERE answer_id=? ORDER BY 1",
+        )
+        .bind(&saved.answer.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(passages, ["source-row-a", "source-row-b"]);
+
+        let mut deletion = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("DELETE FROM meetings WHERE id='aster'")
+            .execute(&mut *deletion)
+            .await
+            .unwrap();
+        let queued = store_note(&pool, &session, &waiting);
+        tokio::pin!(queued);
+        assert!(futures_util::poll!(&mut queued).is_pending());
+        deletion.commit().await.unwrap();
+        assert!(queued.await.is_err());
+        add_source().await;
+        assert!(store_note(&pool, &session, &saved).await.is_err());
+        assert!(!note_exists(&pool, &saved).await);
+        assert!(!note_exists(&pool, &waiting).await);
+        assert!(note_exists(&pool, &live_only).await);
+    }
+
+    #[tokio::test]
+    async fn shared_document_detach_invalidates_only_the_original_scoped_association() {
+        let (pool, document) = super::super::document_context::tests::fixture().await;
+        let (state, session) = ready();
+        save_sharing(&pool, &state, true).await.unwrap();
+        state.set_document_sharing(&session, true).unwrap();
+        let attach = || {
+            sqlx::query("INSERT INTO knowledge_document_attachments(meeting_id,document_id) VALUES ('birch',?)")
+                .bind(&document)
+                .execute(&pool)
+        };
+        attach().await.unwrap();
+        let aster =
+            select_uncited_note(&pool, &state, &session, Some("aster"), Some(&document)).await;
+        let birch =
+            select_uncited_note(&pool, &state, &session, Some("birch"), Some(&document)).await;
+        store_note(&pool, &session, &aster).await.unwrap();
+        store_note(&pool, &session, &birch).await.unwrap();
+        let documents = super::super::documents::store::detach(&pool, "birch", &document)
+            .await
+            .unwrap();
+        assert!(documents.is_none());
+        assert!(note_exists(&pool, &aster).await);
+        assert!(!note_exists(&pool, &birch).await);
+        attach().await.unwrap();
+        assert!(store_note(&pool, &session, &birch).await.is_err());
+        let fresh =
+            select_uncited_note(&pool, &state, &session, Some("birch"), Some(&document)).await;
+        store_note(&pool, &session, &fresh).await.unwrap();
+
+        super::super::documents::store::delete(&pool, "aster", &document)
+            .await
+            .unwrap();
+        assert!(!note_exists(&pool, &aster).await);
+        assert!(!note_exists(&pool, &fresh).await);
+    }
+
     #[test]
     fn live_citations_are_canonical_and_expire_with_the_session() {
         let (state, id) = ready();
@@ -2007,7 +2201,11 @@ mod tests {
         .unwrap();
         assert!(state.history(&id).unwrap().is_empty());
         assert_eq!(
-            state.select_note(&id, &reply.message_id).unwrap().content,
+            state
+                .select_note(&id, &reply.message_id)
+                .unwrap()
+                .answer
+                .content,
             reply.content
         );
         state.clear_history(&id).unwrap();

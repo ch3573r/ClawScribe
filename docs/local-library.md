@@ -54,7 +54,10 @@ During live assistance, choose **Save answer to meeting notes** on a completed
 reply. **Saved live answers** in the saved meeting shows the provider, the
 finalized-through time, and the original excerpts from the recording. Citations
 to other saved meetings or documents display only while the original references
-still verify. Choose **Remove** to delete a saved answer from the meeting.
+still verify. Deleting a source meeting or reference document also removes any
+saved live answer that used it, including answers without a citation. Detaching
+a shared document from a meeting removes answers that used it through that meeting.
+Choose **Remove** to delete a saved answer from the meeting.
 Unselected live chat clears at Stop. Saved answers attach to that specific
 recording at Stop or during local recovery and can be removed from **Manage
 pending notes** if the recording was never saved. Portable archives currently

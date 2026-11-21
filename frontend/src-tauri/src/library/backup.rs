@@ -1915,6 +1915,8 @@ mod tests {
             "recurring_meeting_preferences",
             "retranscription_notes_retry",
             "saved_live_answers",
+            "saved_live_answer_attachment_instances",
+            "saved_live_answer_dependencies",
             "settings",
             "transcript_settings",
         ];
