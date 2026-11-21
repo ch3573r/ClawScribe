@@ -508,16 +508,26 @@ mod tests {
     #[test]
     fn parses_localized_lists_and_project_sync_tables() {
         let markdown = "## Aufgaben\n- [x] Bericht senden [00:01:18](#clawscribe-source-abc123)\n\n## Entscheidungen\n- Kein Auftrag\n\n## Próximos pasos\n| **Responsable** | **Tarea** | **Fecha límite** | **Estado** |\n| --- | --- | --- | --- |\n| Éva | Enviar informe | 2026-11-20 | Completado |\n\n## Action Items\n| **Owner** | **Task** | **Due Date** | **Priority** | **Status** |\n| --- | --- | --- | --- | --- |\n| Dana | Send draft | 2026-11-22 | High | Open |";
-        let items = parse_action_items(markdown);
+        let suggestions = parse_action_suggestions(markdown);
         assert_eq!(
-            items
+            suggestions
                 .iter()
-                .map(|item| item.task.as_str())
+                .map(|item| (item.action.task.as_str(), item.done))
                 .collect::<Vec<_>>(),
-            ["Bericht senden", "Enviar informe", "Send draft"]
+            [
+                ("Bericht senden", true),
+                ("Enviar informe", true),
+                ("Send draft", false)
+            ]
         );
-        assert_eq!(items[1].owner.as_deref(), Some("Éva"));
-        assert_eq!(items[2].due_date.as_deref(), Some("2026-11-22"));
+        assert_eq!(suggestions[1].action.owner.as_deref(), Some("Éva"));
+        assert_eq!(
+            suggestions[2].action.due_date.as_deref(),
+            Some("2026-11-22")
+        );
+        let open = parse_action_items(markdown);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].local_action_id, "action-3");
     }
 
     #[test]
