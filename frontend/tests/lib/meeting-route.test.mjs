@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
 import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
-function createView({ fromRecording = false } = {}) {
+function createView({ fromRecording = false, outcome = null } = {}) {
   const harness = createHookHarness();
   let meetingId = 'first';
   let metadata = null;
@@ -27,6 +27,7 @@ function createView({ fromRecording = false } = {}) {
     '@tauri-apps/api/event': { listen: async () => () => {} },
     '@tauri-apps/api/core': { invoke(command, args) {
       calls.push({ command, args });
+      if (command === 'get_recording_outcome') return Promise.resolve(outcome);
       if (command === 'api_get_summary') {
         const request = deferred();
         summaries.set(args.meetingId, request);
@@ -48,6 +49,21 @@ function createView({ fromRecording = false } = {}) {
     navigate(id) { meetingId = id; metadata = null; render(); },
     loadMetadata() { metadata = { id: meetingId, title: meetingId }; render(); },
   };
+}
+
+for (const incomplete of [false, true]) {
+  test(`a capture gap stays visible with automatic notes ${incomplete ? 'paused for incomplete recognition' : 'available'}`, async () => {
+    const view = createView({ outcome: { capture_incomplete: true, transcription_incomplete: incomplete } });
+    view.render();
+    view.loadMetadata();
+    await flush();
+    const alert = view.render().props.children.find(child => child?.props?.role === 'alert');
+    const message = alert.props.children.filter(child => typeof child === 'string').join(' ');
+    assert.match(message, /lost during capture/);
+    assert.equal(/notes are paused/i.test(message), incomplete);
+    assert.ok(view.content().meeting.transcripts.length);
+    view.unmount();
+  });
 }
 
 test('a summary that arrives after navigation cannot appear in or overwrite the next meeting', async () => {

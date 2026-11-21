@@ -264,9 +264,12 @@ bundled Codex app-server path, plus **Claude Code** using your own installation.
 Enable **Summarize automatically** in Summary settings to generate local notes
 with Built-in AI or loopback Ollama after saving a recording. External providers
 with a known destination require a review in Summary settings. A changed provider,
-model, or destination requires fresh approval. For audio imports, you can review
-and use the selected provider for that file. Reopen the meeting to check progress,
-see why notes were skipped, or recover excerpt notes after a failed attempt.
+model, or destination requires fresh approval. If a recording has a capture gap,
+notes can still use its saved transcript. Transcribing an audio-only recording
+also starts approved automatic notes once the transcript is saved. For audio
+imports, you can review and use the selected provider for that file. Reopen the
+meeting to check progress, see why notes were skipped, or recover excerpt
+notes after a failed attempt.
 Windows notifications can tell you when automatic notes are ready. See
 [Automatic notes](docs/automatic-notes.md) for supported providers and recovery.
 

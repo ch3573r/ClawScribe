@@ -1,5 +1,6 @@
 use crate::api::{TranscriptWord, TranscriptWordTimestampSource};
 use crate::audio::decoder::decode_audio_file;
+use crate::database::transcript_edits::SyncedFiles;
 use crate::state::AppState;
 use crate::summary::language_detection::detect_summary_language;
 use crate::summary::metadata::{
@@ -1774,6 +1775,8 @@ pub struct SpeakerDiarizationComplete {
     pub speaker_count: usize,
     pub updated_segments: usize,
     pub file_warning: bool,
+    #[serde(skip)]
+    published_retranscription: bool,
     pub duration_seconds: f64,
     pub processing_seconds: f64,
     pub provider: String,
@@ -2008,7 +2011,7 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     // recording start re-issues it, so only an effective cancel is announced.
     let cancel: super::inference::CancelBatchJob =
         Arc::new(move || matches!(request_diarization_cancel(&cancel_meeting), Ok(true)));
-    let _job = super::inference::claim_batch_job(
+    let job = super::inference::claim_batch_job(
         super::inference::BatchJob::SpeakerDetection,
         cancel,
         "Local summary stopped because speaker detection started. Generate it again afterwards.",
@@ -2018,7 +2021,6 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
     let meeting_id_for_task = meeting_id.clone();
 
-    let _guard = guard;
     let result = run_speaker_diarization_for_meeting(
         app.clone(),
         meeting_id_for_task.clone(),
@@ -2034,6 +2036,11 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
     match result {
         Ok(complete) => {
             let _ = app.emit("speaker-diarization-complete", complete.clone());
+            drop(guard);
+            drop(job);
+            if complete.published_retranscription {
+                super::recording_commands::wake_saved_recording_summary(&app, meeting_id);
+            }
             Ok(complete)
         }
         Err(error) => {
@@ -2323,7 +2330,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
 
     let mapped_segments = attempt.mapped_segments;
     let roots = super::recording_preferences::recording_roots(&app).await;
-    let (updated_segments, file_warning) = save_diarization_labels(
+    let (updated_segments, synced) = save_diarization_labels(
         &pool,
         &meeting_id,
         &stored_segments,
@@ -2353,7 +2360,8 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         meeting_id,
         speaker_count,
         updated_segments,
-        file_warning,
+        file_warning: synced.is_none(),
+        published_retranscription: synced == Some(SyncedFiles::Retranscription),
         duration_seconds: sample_count as f64 / f64::from(DIARIZATION_SAMPLE_RATE),
         processing_seconds: run_started.elapsed().as_secs_f64(),
         provider: attempt.provider.to_string(),
@@ -2376,7 +2384,7 @@ async fn save_diarization_labels(
     stored_segments: &[StoredTranscriptSegment],
     mapped_segments: &[TranscriptSegment],
     roots: &[PathBuf],
-) -> Result<(usize, bool)> {
+) -> Result<(usize, Option<SyncedFiles>)> {
     begin_diarization_save(meeting_id)?;
     // Speaker labels do not change what produced the text; keep its provenance
     // with the archived revision so a later restore does not turn it "unknown".
@@ -2458,10 +2466,8 @@ async fn save_diarization_labels(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    let file_warning = crate::database::transcript_edits::sync_file(pool, meeting_id, roots)
-        .await
-        .is_err();
-    Ok((updated_segments, file_warning))
+    let synced = crate::database::transcript_edits::sync_file(pool, meeting_id, roots).await;
+    Ok((updated_segments, synced.ok()))
 }
 
 async fn run_diarization_mapping_attempt<R: Runtime>(
@@ -4368,12 +4374,12 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let (updated, warning) =
+        let (updated, synced) =
             save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
                 .await
                 .unwrap();
         assert_eq!(updated, 2);
-        assert!(warning);
+        assert!(synced.is_none());
         let labels: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE speaker = 'Speaker 1'")
                 .fetch_one(&pool)

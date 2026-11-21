@@ -569,13 +569,19 @@ fn publish_json(path: &Path, data: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
-// The calling job holds the inference permit through publication. A retry reads
-// current SQLite text and the committed metadata and is safe after a restart.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SyncedFiles {
+    Other,
+    Retranscription,
+}
+
+// The calling job holds the inference permit through publication. Only the
+// caller that publishes a pending retranscription can wake automatic notes.
 pub(crate) async fn sync_file(
     pool: &SqlitePool,
     meeting: &str,
     roots: &[PathBuf],
-) -> Result<(), String> {
+) -> Result<SyncedFiles, String> {
     let Some(payload) = sqlx::query_scalar::<_, Option<String>>(
         "SELECT retranscription_json FROM transcript_file_sync WHERE meeting_id = ?",
     )
@@ -584,13 +590,17 @@ pub(crate) async fn sync_file(
     .await
     .map_err(error)?
     else {
-        return Ok(());
+        return Ok(SyncedFiles::Other);
     };
     let publication: Option<FilePublication> = payload
         .as_deref()
         .map(serde_json::from_str)
         .transpose()
         .map_err(error)?;
+    let synced = match publication {
+        Some(FilePublication::Retranscription(_)) => SyncedFiles::Retranscription,
+        _ => SyncedFiles::Other,
+    };
     let folder: Option<String> =
         sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
             .bind(meeting)
@@ -616,7 +626,7 @@ pub(crate) async fn sync_file(
             .await
             .map_err(error)?;
         tx.commit().await.map_err(error)?;
-        return Ok(());
+        return Ok(SyncedFiles::Other);
     };
     let mut outcome: Option<RecordingOutcome> = None;
     if publication.is_some() {
@@ -704,7 +714,7 @@ pub(crate) async fn sync_file(
             "Transcript saved; recovery originals retained because cleanup could not finish"
         );
     }
-    Ok(())
+    Ok(synced)
 }
 
 #[derive(Serialize)]
@@ -754,16 +764,21 @@ async fn complete<R: Runtime>(
     pool: &SqlitePool,
     meeting: &str,
     changed: usize,
+    job: tokio::sync::OwnedSemaphorePermit,
 ) -> EditResult {
     let roots = crate::audio::recording_preferences::recording_roots(app).await;
-    let file_warning = sync_file(pool, meeting, &roots).await.is_err();
+    let synced = sync_file(pool, meeting, &roots).await;
     let _ = app.emit(
         "transcript-text-edited",
         serde_json::json!({ "meeting_id": meeting }),
     );
+    drop(job);
+    if synced == Ok(SyncedFiles::Retranscription) {
+        crate::audio::recording_commands::wake_saved_recording_summary(app, meeting.to_owned());
+    }
     EditResult {
         changed,
-        file_warning,
+        file_warning: synced.is_err(),
     }
 }
 
@@ -776,7 +791,7 @@ pub async fn api_update_transcript_text<R: Runtime>(
     text: String,
     expected_text: String,
 ) -> Result<EditResult, String> {
-    let _job = crate::audio::inference::claim_job()?;
+    let job = crate::audio::inference::claim_job()?;
     validate_text(&text)?;
     let pool = state.db_manager.pool();
     let row: Transcript =
@@ -804,7 +819,7 @@ pub async fn api_update_transcript_text<R: Runtime>(
         )
         .await?;
     }
-    Ok(complete(&app, pool, &meeting_id, changed).await)
+    Ok(complete(&app, pool, &meeting_id, changed, job).await)
 }
 
 #[tauri::command]
@@ -834,7 +849,7 @@ pub async fn api_replace_transcript_text<R: Runtime>(
     match_case: bool,
     preview_token: String,
 ) -> Result<EditResult, String> {
-    let _job = crate::audio::inference::claim_job()?;
+    let job = crate::audio::inference::claim_job()?;
     let pool = state.db_manager.pool();
     let transcripts = rows(pool, &meeting_id).await?;
     let (preview, changes) = tauri::async_runtime::spawn_blocking(move || {
@@ -846,7 +861,7 @@ pub async fn api_replace_transcript_text<R: Runtime>(
         return Err("The transcript changed. Preview the replacements again.".into());
     }
     apply(pool, &meeting_id, &changes).await?;
-    Ok(complete(&app, pool, &meeting_id, changes.len()).await)
+    Ok(complete(&app, pool, &meeting_id, changes.len(), job).await)
 }
 
 #[tauri::command]
@@ -855,10 +870,10 @@ pub async fn api_undo_transcript_edit<R: Runtime>(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<EditResult, String> {
-    let _job = crate::audio::inference::claim_job()?;
+    let job = crate::audio::inference::claim_job()?;
     let pool = state.db_manager.pool();
     let count = undo(pool, &meeting_id).await?;
-    Ok(complete(&app, pool, &meeting_id, count).await)
+    Ok(complete(&app, pool, &meeting_id, count, job).await)
 }
 
 #[tauri::command]
@@ -867,11 +882,11 @@ pub async fn api_restore_previous_transcript<R: Runtime>(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<EditResult, String> {
-    let _job = crate::audio::inference::claim_job()?;
+    let job = crate::audio::inference::claim_job()?;
     let pool = state.db_manager.pool();
     let roots = crate::audio::recording_preferences::recording_roots(&app).await;
     let count = restore_previous(pool, &meeting_id, &roots).await?;
-    Ok(complete(&app, pool, &meeting_id, count).await)
+    Ok(complete(&app, pool, &meeting_id, count, job).await)
 }
 
 #[tauri::command]
@@ -880,13 +895,17 @@ pub async fn api_sync_transcript_file<R: Runtime>(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<(), String> {
-    let _job = crate::audio::inference::claim_job()?;
+    let job = crate::audio::inference::claim_job()?;
     let roots = crate::audio::recording_preferences::recording_roots(&app).await;
-    sync_file(state.db_manager.pool(), &meeting_id, &roots).await?;
+    let synced = sync_file(state.db_manager.pool(), &meeting_id, &roots).await?;
     let _ = app.emit(
         "transcript-files-synchronized",
         serde_json::json!({ "meeting_id": meeting_id }),
     );
+    drop(job);
+    if synced == SyncedFiles::Retranscription {
+        crate::audio::recording_commands::wake_saved_recording_summary(&app, meeting_id);
+    }
     Ok(())
 }
 

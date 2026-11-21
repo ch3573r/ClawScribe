@@ -204,15 +204,16 @@ native call may finish after cancellation, retaining its model/permit and
 blocking another job until it returns.
 
 Audio-save failures, capture gaps, incomplete recording files and incomplete
-transcription are saved with the meeting and
-in its recording folder. Automatic notes wait only for failed audio saves or an
-incomplete transcript. Capture gaps and recording-file warnings remain visible
-without blocking notes. Successful retranscription clears audio-save and
+transcription are saved with the meeting and in its recording folder.
+Automatic notes pause after a failed audio save or incomplete transcription.
+Capture gaps stay visible when notes use the available transcript.
+Successful retranscription clears audio-save and
 transcript failure flags. Recording-file warnings clear after the transcript,
-metadata, and recording status are written. If a folder write fails, the new
-transcript is available in the library and **Retry file update** stays available
-after restarting. Empty retranscription is rejected before replacement. A
-successful replacement retains the prior transcript as a database revision.
+metadata, and recording status are written. If a retranscription folder write
+fails, the new transcript is available in the library and **Retry file update**
+stays available after restarting. A successful file update lets approved notes
+start from that transcript. Empty retranscription is rejected before replacement.
+A successful replacement retains the prior transcript as a database revision.
 Permanent capture gaps remain visible after retranscribing the available audio.
 
 ## Reviewing a saved meeting
