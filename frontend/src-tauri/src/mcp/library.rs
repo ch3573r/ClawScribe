@@ -242,12 +242,12 @@ async fn search_meetings(
     let transcript_filter = if anchor.is_some() {
         // Probe the index for this segment. Materializing the global hit list
         // once per meeting makes common terms time out on later result pages.
-        "AND EXISTS (SELECT 1 FROM knowledge_transcript_literal(?3) hit WHERE hit.rowid=t.rowid)"
+        "AND EXISTS (SELECT 1 FROM knowledge_transcript_literal(?4) hit WHERE hit.rowid=t.rowid)"
     } else {
         ""
     };
     let segment_sql = format!("SELECT t.rowid FROM transcripts t WHERE t.meeting_id=(SELECT id FROM meetings WHERE rowid=?1)
-        AND (?2 IS NULL OR t.rowid>?2) {transcript_filter} ORDER BY t.rowid LIMIT 128");
+        AND (?2 IS NULL OR t.rowid>?2) {transcript_filter} ORDER BY t.rowid LIMIT ?3");
     let mut matcher = literal::MeetingMatcher::new(query);
     let mut page = Vec::new();
     let mut skip = offset;
@@ -278,7 +278,17 @@ async fn search_meetings(
                 .map_err(search_error)?;
             let mut after = None::<i64>;
             while !matched {
-                let mut query = sqlx::query_scalar(&segment_sql).bind(rowid).bind(after);
+                // One confirmed segment is sufficient to include a meeting.
+                // For common indexed terms, the first candidate usually matches.
+                let batch_size = if anchor.is_some() && after.is_none() {
+                    1
+                } else {
+                    128
+                };
+                let mut query = sqlx::query_scalar(&segment_sql)
+                    .bind(rowid)
+                    .bind(after)
+                    .bind(batch_size);
                 if let Some(anchor) = &anchor {
                     query = query.bind(anchor);
                 }
@@ -293,7 +303,7 @@ async fn search_meetings(
                         break;
                     }
                 }
-                if ids.len() < 128 {
+                if ids.len() < batch_size as usize {
                     break;
                 }
                 after = ids.last().copied();
@@ -775,6 +785,37 @@ mod tests {
                 json!([])
             );
         }
+    }
+
+    #[tokio::test]
+    async fn indexed_search_pages_meetings_after_rejecting_partial_segment_matches() {
+        let (root, mut writer) = fixture().await;
+        sqlx::raw_sql(
+            "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<239)
+             INSERT INTO meetings(id,title,created_at,updated_at)
+             SELECT printf('m%03d',x),'Planning','2025-03-01','2025-03-01' FROM n;
+             WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<15)
+             INSERT INTO transcripts(id,meeting_id,transcript)
+             SELECT m.id||'-'||x,m.id,CASE WHEN x=0 THEN 'shipping' ELSE 'Ö shipping' END
+             FROM meetings m CROSS JOIN n WHERE m.id GLOB 'm[0-9]*' ORDER BY m.id,x;
+             CREATE INDEX by_meeting ON transcripts(meeting_id);
+             CREATE VIRTUAL TABLE knowledge_title_literal USING fts5(title,content='meetings',tokenize='trigram');
+             CREATE VIRTUAL TABLE knowledge_transcript_literal USING fts5(transcript,content='transcripts',tokenize='trigram');
+             INSERT INTO knowledge_title_literal(knowledge_title_literal) VALUES('rebuild');
+             INSERT INTO knowledge_transcript_literal(knowledge_transcript_literal) VALUES('rebuild');",
+        )
+        .execute(&mut writer)
+        .await
+        .unwrap();
+        let mut reader = connect(root.path()).await.unwrap();
+        let page = search_meetings(&mut reader, "ö shipping", 10, 200)
+            .await
+            .unwrap();
+        let hits = page["meetings"].as_array().unwrap();
+        assert_eq!(hits.len(), 10);
+        assert_eq!(hits.first().unwrap()["id"], "m200");
+        assert_eq!(hits.last().unwrap()["id"], "m209");
+        assert_eq!(page["next_offset"], 210);
     }
 
     #[tokio::test]
