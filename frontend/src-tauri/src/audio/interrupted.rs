@@ -146,6 +146,8 @@ pub struct InterruptedScan {
     pub resolved_cache_ids: Vec<String>,
     /// Cache entries that can be recovered only without their old folder.
     pub detached_cache_ids: Vec<String>,
+    /// Cache entries that must wait for another attempt to verify the folder.
+    pub unverified_cache_ids: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -709,6 +711,46 @@ fn registered_map(
 /// How much of a scan's time the registered-folder lookup may use.
 const REGISTERED_BUDGET: Duration = Duration::from_millis(1_000);
 
+#[derive(Debug, Default, PartialEq)]
+struct CacheReconciliation {
+    resolved: Vec<String>,
+    detached: Vec<String>,
+    unverified: Vec<String>,
+    unverified_folders: HashSet<String>,
+}
+
+impl CacheReconciliation {
+    fn defer(&mut self, id: String, key: String, canonical_key: Option<String>) {
+        self.unverified.push(id);
+        self.unverified_folders.insert(key);
+        self.unverified_folders.extend(canonical_key);
+    }
+}
+
+/// A missing leaf only proves absence if its own parent is reachable and
+/// inside a trusted root. An offline root can also make metadata return NotFound.
+fn cache_folder_is_absent(folder: &Path, roots: &[PathBuf]) -> bool {
+    let Some(parent) = folder.parent() else {
+        return false;
+    };
+    if meeting_files::is_cleanup_path(folder)
+        || !crate::trusted_roots::text_allowed(&folder.to_string_lossy(), roots)
+        || meeting_files::directory_chain(parent).is_err()
+    {
+        return false;
+    }
+    let Ok(canonical_parent) = parent.canonicalize() else {
+        return false;
+    };
+    roots.iter().any(|root| {
+        meeting_files::directory_chain(root).is_ok()
+            && root
+                .canonicalize()
+                .is_ok_and(|root| canonical_parent.starts_with(root))
+    }) && matches!(std::fs::symlink_metadata(folder), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        && meeting_files::directory_chain(parent).is_ok()
+}
+
 fn reconcile_cache_entries(
     entries: Vec<RecoveryCacheEntry>,
     owners: &[RecoveryOwner],
@@ -716,7 +758,7 @@ fn reconcile_cache_entries(
     roots: &[PathBuf],
     active: &ActiveFolder,
     deadline: Instant,
-) -> (Vec<String>, Vec<String>) {
+) -> CacheReconciliation {
     let by_id: HashMap<_, _> = owners
         .iter()
         .map(|owner| (owner.id.as_str(), owner))
@@ -734,29 +776,45 @@ fn reconcile_cache_entries(
         ActiveFolder::Folder(folder) => Some(folder_key(&folder)),
         _ => None,
     };
-    let mut resolved = Vec::new();
-    let mut detached = Vec::new();
+    let mut result = CacheReconciliation::default();
     for entry in entries {
         if by_id.contains_key(entry.id.as_str()) {
-            resolved.push(entry.id);
+            result.resolved.push(entry.id);
             continue;
         }
         let Some(folder) = entry.folder.as_deref().map(Path::new) else {
             continue;
         };
         let key = folder_key(folder);
-        let verified = (Instant::now() < deadline)
-            .then(|| meeting_files::resolve_recording_folder(folder, roots).ok())
-            .flatten();
-        let canonical_key = verified.as_deref().map(folder_key);
-        if active_key
-            .as_ref()
-            .is_some_and(|active| active == &key || Some(active) == canonical_key.as_ref())
-        {
-            resolved.push(entry.id);
+        if active_key.as_ref() == Some(&key) {
+            result.resolved.push(entry.id);
             continue;
         }
-        let marker = verified.as_deref().and_then(meeting_files::read_marker);
+        if Instant::now() >= deadline {
+            result.defer(entry.id, key, None);
+            continue;
+        }
+        let verified = meeting_files::resolve_recording_folder(folder, roots).ok();
+        let canonical_key = verified.as_deref().map(folder_key);
+        if active_key.is_some() && active_key == canonical_key {
+            result.resolved.push(entry.id);
+            continue;
+        }
+        let absent = verified.is_none()
+            && Instant::now() < deadline
+            && cache_folder_is_absent(folder, roots);
+        let marker = verified
+            .as_deref()
+            .filter(|_| Instant::now() < deadline)
+            .and_then(meeting_files::read_marker)
+            .filter(|marker| !meeting_files::has_invalid_marker_id(marker));
+        if Instant::now() >= deadline || (!absent && marker.is_none()) {
+            result.defer(entry.id, key, canonical_key);
+            continue;
+        }
+        let matches_marker = marker
+            .as_ref()
+            .is_some_and(|marker| entry.matches_marker(marker));
         let mut owners_for_folder = by_folder
             .get(&key)
             .into_iter()
@@ -787,18 +845,25 @@ fn reconcile_cache_entries(
                     .is_some_and(|owner| entry.matches_owner(owner, Some(marker)))
             })
         {
-            resolved.push(entry.id);
-        } else if owners_for_folder.any(|owner| !owner.is_deleted)
-            || marker
-                .as_ref()
-                .is_none_or(|marker| !entry.matches_marker(marker))
+            result.resolved.push(entry.id);
+        } else if absent
+            || (!matches_marker
+                && marker.as_ref().is_some_and(|marker| {
+                    meeting_files::recording_id(marker).is_some()
+                        || marker_start_ms(marker).is_some_and(|started| {
+                            entry.last_updated >= entry.started_at
+                                && entry.started_at > 0
+                                && started
+                                    > entry.last_updated.saturating_add(LEGACY_HANDOFF_GRACE_MS)
+                        })
+                }))
         {
-            // Preserve the browser data. An unavailable or reused folder must
-            // never be used for playback, recovery, or attaching the transcript.
-            detached.push(entry.id);
+            result.detached.push(entry.id);
+        } else if !matches_marker || owners_for_folder.any(|owner| !owner.is_deleted) {
+            result.defer(entry.id, key, canonical_key);
         }
     }
-    (resolved, detached)
+    result
 }
 
 fn kept_folders<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<String> {
@@ -848,7 +913,7 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
         let started = Instant::now();
         let registered = registered_map(rows, &roots, REGISTERED_BUDGET);
         let limits = Limits::default();
-        let (resolved_cache_ids, detached_cache_ids) = reconcile_cache_entries(
+        let cache = reconcile_cache_entries(
             cache_entries.unwrap_or_default(),
             &owners,
             &registered,
@@ -871,8 +936,14 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
         });
         result.recording_active |= active_cache_unknown;
         result.active_cache_id = active_cache_id;
-        result.resolved_cache_ids = resolved_cache_ids;
-        result.detached_cache_ids = detached_cache_ids;
+        result.recordings.retain(|recording| {
+            !cache
+                .unverified_folders
+                .contains(&folder_key(Path::new(&recording.folder)))
+        });
+        result.resolved_cache_ids = cache.resolved;
+        result.detached_cache_ids = cache.detached;
+        result.unverified_cache_ids = cache.unverified;
         result
     })
     .await
@@ -1225,10 +1296,11 @@ mod tests {
         let owners = recovery_owners(&pool).await.unwrap();
         assert_eq!(
             check(&owners),
-            (
-                vec!["legacy-browser-id".to_string()],
-                vec!["new-browser-id".to_string()]
-            )
+            CacheReconciliation {
+                resolved: vec!["legacy-browser-id".into()],
+                detached: vec!["new-browser-id".into()],
+                ..CacheReconciliation::default()
+            }
         );
         crate::database::repositories::meeting::MeetingsRepository::delete_from_library(
             &pool,
@@ -1243,10 +1315,11 @@ mod tests {
         assert!(owners[0].deleted_at_ms.is_some());
         assert_eq!(
             check(&owners),
-            (
-                vec!["legacy-browser-id".to_string()],
-                vec!["new-browser-id".to_string()]
-            )
+            CacheReconciliation {
+                resolved: vec!["legacy-browser-id".into()],
+                detached: vec!["new-browser-id".into()],
+                ..CacheReconciliation::default()
+            }
         );
 
         // A new native capture reusing the deleted recording's folder keeps
@@ -1268,8 +1341,75 @@ mod tests {
                 &ActiveFolder::None,
                 Instant::now() + Duration::from_secs(2)
             ),
-            (vec!["legacy-browser-id".to_string()], vec![])
+            CacheReconciliation {
+                resolved: vec!["legacy-browser-id".into()],
+                ..CacheReconciliation::default()
+            }
         );
+    }
+
+    #[test]
+    fn cached_folder_uncertainty_defers_until_a_marker_or_absence_is_verified() {
+        let base = tempfile::tempdir().unwrap();
+        let root =
+            meeting_files::plain_path(&base.path().canonicalize().unwrap()).join("recordings");
+        let folder = root.join("meeting");
+        let id = "meeting-89c5ce77-ffd1-4cc7-9c53-6b4856871e72";
+        let check = |deadline| {
+            reconcile_cache_entries(
+                vec![RecoveryCacheEntry {
+                    id: id.into(),
+                    folder: Some(folder.to_string_lossy().into_owned()),
+                    started_at: 1,
+                    last_updated: 2,
+                }],
+                &[],
+                &HashMap::new(),
+                std::slice::from_ref(&root),
+                &ActiveFolder::None,
+                deadline,
+            )
+        };
+        let check_now = || check(Instant::now() + Duration::from_secs(2));
+        let deferred = CacheReconciliation {
+            unverified: vec![id.into()],
+            unverified_folders: HashSet::from([folder_key(&folder)]),
+            ..CacheReconciliation::default()
+        };
+        assert_eq!(check_now(), deferred, "recording root unavailable");
+
+        std::fs::create_dir(&root).unwrap();
+        assert_eq!(check(Instant::now()), deferred, "deadline expired");
+        assert_eq!(
+            check_now().detached,
+            [id],
+            "folder absent under reachable parent"
+        );
+
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("audio.wav"), b"Synthetic audio").unwrap();
+        assert_eq!(check_now(), deferred, "marker missing but audio present");
+        let metadata = folder.join("metadata.json");
+        std::fs::write(&metadata, "{").unwrap();
+        assert_eq!(check_now(), deferred, "marker only partially available");
+        let write_id = |id: &str| {
+            std::fs::write(
+                &metadata,
+                serde_json::json!({
+                    "version": "1.0", "transcript_file": "transcripts.json", "recording_id": id
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        write_id(id);
+        assert_eq!(
+            check_now(),
+            CacheReconciliation::default(),
+            "matching marker on retry"
+        );
+        write_id("meeting-2e96a857-4344-4a44-8025-610a152cb99a");
+        assert_eq!(check_now().detached, [id], "different recording verified");
     }
 
     #[test]

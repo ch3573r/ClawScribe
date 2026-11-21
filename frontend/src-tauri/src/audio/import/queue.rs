@@ -379,7 +379,7 @@ async fn prepare_options<R: Runtime>(
                 settings.summary_destination_fingerprint.as_deref(),
                 settings.summary_use_automatic_preference,
             )
-            .await?,
+            .await,
         )
     } else {
         None

@@ -56,5 +56,6 @@ Ambiguous matches with older suggestions are held for review.
 The ledger saves each pending attempt before contacting Graph and each result
 afterwards. Unreadable history or a failed write stops export. If a submission
 has an unknown outcome, inspect the To Do list and record the result in
-**Export history** before retrying. See
+**Export history** before retrying. The history includes task titles, list and
+task IDs, and completion state for tasks and their fields. See
 [export history and recovery](microsoft-graph.md#export-history-and-recovery).

@@ -10,7 +10,9 @@ use super::exporter::{
 use super::ledger::{valid_remote_id, ExportLedger, OneNoteOptions, OneNoteSection};
 use super::model::{ExportStatus, MeetingExport, MicrosoftConnectionState};
 use super::onenote::{self, DEFAULT_PAGE_BUDGET_BYTES};
-use super::transport::GraphTransport;
+use super::transport::{GraphRequest, GraphTransport};
+
+pub(super) const UNCONFIRMED_UPDATE: &str = "onenote_page_update_unconfirmed";
 
 pub(super) struct SectionRequest {
     pub notebook_id: String,
@@ -51,6 +53,24 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
         if !valid_remote_id(&id) {
             return Err("Invalid saved OneNote section reference.".into());
         }
+        if !super::resolution::section_is_in_notebook(client, account, &id, &section.notebook_id)
+            .await?
+        {
+            return Err("The saved OneNote section is missing or in a different notebook. Review its link in Export history.".into());
+        }
+        let changed =
+            section.content_hash != content_hash || section.page_title != request.page_title;
+        if !request.replace_existing || !changed {
+            let prefix = format!("onenote:{}:{}:{id}:", account.tenant_id, account.user_id);
+            if ledger
+                .entries
+                .range(prefix.clone()..)
+                .take_while(|(key, _)| key.starts_with(&prefix))
+                .any(|(_, entry)| entry.code.as_deref() == Some(UNCONFIRMED_UPDATE))
+            {
+                return Err("Review the unconfirmed OneNote update in Export history before resuming this export.".into());
+            }
+        }
         if request.replace_existing {
             let meeting = super::markdown_notes::meeting_export_for_onenote(
                 &ledger.meeting_id,
@@ -58,8 +78,6 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
                 None,
                 &request.markdown,
             );
-            let changed =
-                section.content_hash != content_hash || section.page_title != request.page_title;
             let report = if changed {
                 replace_notes_page(
                     client,
@@ -71,14 +89,7 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
                 )
                 .await?
             } else {
-                exporter::export_onenote(
-                    client,
-                    ledger,
-                    &meeting,
-                    &OneNoteTarget { section_id: id },
-                    account,
-                )
-                .await
+                export_saved_section_notes(client, ledger, &meeting, &id, account).await
             };
             if report.overall == ExportStatus::Succeeded {
                 let section = ledger
@@ -167,14 +178,7 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
         None,
         &request.markdown,
     );
-    let report = exporter::export_onenote(
-        client,
-        ledger,
-        &meeting,
-        &OneNoteTarget { section_id },
-        account,
-    )
-    .await;
+    let report = export_saved_section_notes(client, ledger, &meeting, &section_id, account).await;
     if let Some(page_id) = page_id_from_report(&report) {
         ledger
             .onenote_sections
@@ -184,6 +188,34 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
         ledger.checkpoint().await?;
     }
     Ok(report)
+}
+
+async fn export_saved_section_notes<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    ledger: &mut ExportLedger,
+    meeting: &MeetingExport,
+    section_id: &str,
+    account: &ExportContext<'_>,
+) -> ExportReport {
+    let revision = onenote::notes_revision(meeting);
+    let target = OneNoteTarget {
+        section_id: section_id.into(),
+    };
+    let prefix = format!(
+        "onenote:{}:{}:{section_id}:",
+        account.tenant_id, account.user_id
+    );
+    let legacy = meeting.artifact_hash();
+    let revision = if ledger
+        .entry(&format!("{prefix}{revision}:notes:0"))
+        .is_none()
+        && ledger.entry(&format!("{prefix}{legacy}:notes:0")).is_some()
+    {
+        &legacy
+    } else {
+        &revision
+    };
+    exporter::export_onenote_revision(client, ledger, meeting, &target, account, revision).await
 }
 
 fn page_id_from_report(report: &ExportReport) -> Option<String> {
@@ -208,7 +240,8 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
         "onenote:{}:{}:{section_id}:",
         account.tenant_id, account.user_id
     );
-    let key = format!("{prefix}{}:notes:0", meeting.artifact_hash());
+    let revision = onenote::notes_revision(meeting);
+    let key = format!("{prefix}{revision}:notes:0");
     let mut pages = std::collections::BTreeMap::new();
     for (history_key, entry) in ledger.entries.range(prefix.clone()..) {
         if !history_key.starts_with(&prefix) {
@@ -217,10 +250,14 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
         if !history_key.ends_with(":notes:0") {
             continue;
         }
-        if matches!(
-            entry.status,
-            ExportStatus::UnknownAfterSubmit | ExportStatus::Pending
-        ) || (entry.status == ExportStatus::Succeeded && entry.resource_id.is_none())
+        let retrying_same_update =
+            history_key == &key && entry.code.as_deref() == Some(UNCONFIRMED_UPDATE);
+        if (!retrying_same_update
+            && matches!(
+                entry.status,
+                ExportStatus::UnknownAfterSubmit | ExportStatus::Pending
+            ))
+            || (entry.status == ExportStatus::Succeeded && entry.resource_id.is_none())
         {
             return Err(
                 "Check the previous page attempt in Export history before updating this section."
@@ -256,7 +293,7 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
     } else if pages.len() == 1 {
         pages.into_iter().next().expect("one known page")
     } else if pages.is_empty() {
-        return Ok(exporter::export_onenote(
+        return Ok(exporter::export_onenote_revision(
             client,
             ledger,
             meeting,
@@ -264,6 +301,7 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
                 section_id: section_id.into(),
             },
             account,
+            &revision,
         )
         .await);
     } else {
@@ -273,9 +311,16 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
         .into_iter()
         .next()
         .expect("notes page");
-    let outcome = match patch_notes_page(client, account.bearer_token, &page_id, &page).await {
-        Ok(false) => {
-            return Ok(exporter::export_onenote(
+    if !super::resolution::page_is_in_section(client, account, &page_id, section_id).await? {
+        return Err("The saved OneNote page is missing or in a different section. Review its link in Export history.".into());
+    }
+    let retrying_update = ledger
+        .entry(&key)
+        .is_some_and(|entry| entry.code.as_deref() == Some(UNCONFIRMED_UPDATE));
+    let marker_prefix = onenote::notes_marker_prefix(&meeting.meeting_id);
+    let outcome = match prepare_notes_patch(client, account.bearer_token, &page_id, &page, &marker_prefix).await {
+        Ok(None) if !retrying_update => {
+            return Ok(exporter::export_onenote_revision(
                 client,
                 ledger,
                 meeting,
@@ -283,10 +328,23 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
                     section_id: section_id.into(),
                 },
                 account,
+                &revision,
             )
             .await)
         }
-        outcome => outcome.map(|_| ()),
+        Ok(None) => return Err("The last OneNote update is unconfirmed. Check the page and review its link in Export history.".into()),
+        Ok(Some(patch)) => {
+            ledger.begin_attempt(&key, now_rfc3339());
+            ledger.label_attempt(&key, &page.title);
+            let entry = ledger.entries.get_mut(&key).expect("pending OneNote update");
+            entry.resource_id = Some(page_id.clone());
+            entry.web_url.clone_from(&web_url);
+            entry.status = ExportStatus::UnknownAfterSubmit;
+            entry.code = Some(UNCONFIRMED_UPDATE.into());
+            ledger.checkpoint().await?;
+            graph_body(client.execute(&patch, account.bearer_token).await).map(|_| ())
+        }
+        Err(status) => Err(status),
     };
     let (status, connection_state) = match outcome {
         Ok(()) => {
@@ -299,6 +357,14 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
             // the same content block is safe after a lost update response.
             let connection =
                 (status == ExportStatus::FailedAuth).then_some(MicrosoftConnectionState::Expired);
+            let unconfirmed = ledger
+                .entry(&key)
+                .is_some_and(|entry| entry.code.as_deref() == Some(UNCONFIRMED_UPDATE));
+            let status = if unconfirmed && status != ExportStatus::FailedAuth {
+                ExportStatus::UnknownAfterSubmit
+            } else {
+                status
+            };
             return Ok(ExportReport {
                 overall: status,
                 connection_state: connection,
@@ -308,7 +374,14 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
                     status,
                     resource_id: Some(page_id),
                     web_url,
-                    code: Some("onenote_page_update_failed".into()),
+                    code: Some(
+                        if unconfirmed {
+                            UNCONFIRMED_UPDATE
+                        } else {
+                            "onenote_page_update_failed"
+                        }
+                        .into(),
+                    ),
                     graph_called: false,
                 }],
             });
@@ -322,46 +395,68 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
     Ok(report)
 }
 
-async fn patch_notes_page<T: GraphTransport, S: Sleeper>(
+async fn prepare_notes_patch<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     token: &str,
     page_id: &str,
     page: &onenote::OneNotePage,
-) -> Result<bool, ExportStatus> {
+    marker_prefix: &str,
+) -> Result<Option<GraphRequest>, ExportStatus> {
     if !valid_remote_id(page_id) {
         return Err(ExportStatus::DestinationNotFound);
     }
     let endpoint = graph_url_with_path_segments(&["me", "onenote", "pages", page_id, "content"]);
+    let html = read_page_html(client, token, &endpoint).await?;
+    let Some((target, _)) = editable_container(&html, marker_prefix) else {
+        return Ok(None);
+    };
+    let body = page
+        .xhtml
+        .split_once("<body><div>")
+        .and_then(|(_, body)| body.strip_suffix("</div></body></html>"))
+        .ok_or(ExportStatus::Failed)?;
+    Ok(Some(json_request(
+        "PATCH",
+        endpoint,
+        serde_json::json!([
+            {"target":"title", "action":"replace", "content": page.title},
+            {"target": target, "action":"replace", "content": body},
+        ]),
+    )))
+}
+
+async fn read_page_html<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    endpoint: &str,
+) -> Result<String, ExportStatus> {
     let read = json_request(
         "GET",
         format!("{endpoint}?includeIDs=true"),
         serde_json::Value::Null,
     );
-    let html = graph_body(client.execute(&read, token).await)?;
-    let Some(target) = editable_container_id(&html)? else {
-        return Ok(false);
-    };
-    let (_, body) = page
-        .xhtml
-        .split_once("<body>")
-        .ok_or(ExportStatus::Failed)?;
-    let (body, _) = body.rsplit_once("</body>").ok_or(ExportStatus::Failed)?;
-    let title = page
-        .xhtml
-        .split_once("<title>")
-        .and_then(|(_, rest)| rest.split_once("</title>"))
-        .map(|(title, _)| title)
-        .ok_or(ExportStatus::Failed)?;
-    let patch = json_request(
-        "PATCH",
-        endpoint,
-        serde_json::json!([
-            {"target":"title", "action":"replace", "content": title},
-            {"target": target, "action":"replace", "content": body},
-        ]),
-    );
-    graph_body(client.execute(&patch, token).await)?;
-    Ok(true)
+    graph_body(client.execute(&read, token).await)
+}
+
+pub(super) async fn verify_updated_notes<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    page: &str,
+    meeting: &str,
+    revision: &str,
+) -> Result<(), String> {
+    let endpoint = graph_url_with_path_segments(&["me", "onenote", "pages", page, "content"]);
+    let html = read_page_html(client, token, &endpoint)
+        .await
+        .map_err(|_| "Could not verify the OneNote revision. Try again.")?;
+    let prefix = onenote::notes_marker_prefix(meeting);
+    if editable_container(&html, &prefix)
+        .is_some_and(|(_, marker)| marker == format!("{prefix}{revision}"))
+    {
+        Ok(())
+    } else {
+        Err("This page does not contain the pending revision. Review the draft and retry the OneNote update.".into())
+    }
 }
 
 fn graph_body(outcome: GraphOutcome) -> Result<String, ExportStatus> {
@@ -372,27 +467,58 @@ fn graph_body(outcome: GraphOutcome) -> Result<String, ExportStatus> {
     }
 }
 
-fn editable_container_id(html: &str) -> Result<Option<&str>, ExportStatus> {
-    use std::sync::LazyLock;
-    static DIV: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r#"(?i)<div\b[^>]*>"#).unwrap());
-    static MANAGED: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r#"\sdata-id=["']clawscribe-content["']"#).unwrap());
-    static ID: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r#"\sid=["'](div:[^"']+)["']"#).unwrap());
-    let mut blocks = DIV
-        .find_iter(html)
-        .filter(|tag| MANAGED.is_match(tag.as_str()));
-    let Some(block) = blocks.next() else {
-        return Ok(None);
-    };
-    if blocks.next().is_some() {
-        return Err(ExportStatus::Failed);
+fn editable_container(html: &str, prefix: &str) -> Option<(String, String)> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(html);
+    let mut parents = Vec::new();
+    let mut target = None;
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(tag) => {
+                let is_div = tag.name().as_ref() == b"div";
+                if is_div {
+                    let marker = tag.try_get_attribute("data-id").ok()?.and_then(|attr| {
+                        attr.decode_and_unescape_value(reader.decoder())
+                            .ok()
+                            .map(|value| value.into_owned())
+                    });
+                    if let Some(marker) = marker.filter(|marker| {
+                        marker.strip_prefix(prefix).is_some_and(|revision| {
+                            revision.len() == 64
+                                && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                    }) {
+                        if target.is_some() || parents.last() != Some(&true) {
+                            return None;
+                        }
+                        let id = tag
+                            .try_get_attribute("id")
+                            .ok()??
+                            .decode_and_unescape_value(reader.decoder())
+                            .ok()?
+                            .into_owned();
+                        if !id.strip_prefix("div:{").is_some_and(|rest| {
+                            rest.ends_with('}')
+                                && rest.contains("}{")
+                                && rest.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric()
+                                        || matches!(byte, b'{' | b'}' | b'-')
+                                })
+                        }) {
+                            return None;
+                        }
+                        target = Some((id, marker));
+                    }
+                }
+                parents.push(is_div);
+            }
+            Event::End(_) => {
+                parents.pop()?;
+            }
+            Event::Eof => return if parents.is_empty() { target } else { None },
+            _ => {}
+        }
     }
-    ID.captures(block.as_str())
-        .and_then(|captures| captures.get(1))
-        .map(|id| Some(id.as_str()))
-        .ok_or(ExportStatus::Failed)
 }
 
 #[cfg(test)]
@@ -403,6 +529,174 @@ mod tests {
     use crate::exports::transport::{GraphResponse, MockGraphTransport};
 
     const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
+    const SECTION_DETAILS: &str =
+        "https://graph.microsoft.com/v1.0/me/onenote/sections/section-a?$expand=parentNotebook";
+    const PAGE_DETAILS: &str =
+        "https://graph.microsoft.com/v1.0/me/onenote/pages/page-a?$expand=parentSection";
+
+    fn queue_section_details(transport: &MockGraphTransport, repeats: usize) {
+        transport.queue_for_url(SECTION_DETAILS, (0..repeats).map(|_| GraphResponse::success(200,
+            r#"{"id":"section-a","displayName":"Weekly sync","parentNotebook":{"id":"notebook"}}"#)));
+    }
+
+    fn page_details() -> GraphResponse {
+        GraphResponse::success(
+            200,
+            r#"{"id":"page-a","title":"Release follow-ups","parentSection":{"id":"section-a"}}"#,
+        )
+    }
+
+    #[test]
+    fn only_one_owned_nested_one_note_container_is_editable() {
+        let prefix = onenote::notes_marker_prefix("meeting");
+        let marker = format!("{prefix}{}", "a".repeat(64));
+        let owned = format!(
+            r#"<div id="div:{{abc}}{{14}}" data-id="{marker}"><p>Recorded notes</p></div>"#
+        );
+        assert_eq!(
+            editable_container(&format!("<div>{owned}</div>"), &prefix),
+            Some(("div:{abc}{14}".into(), marker))
+        );
+        for html in [
+            format!("<body>{owned}</body>"),
+            format!("<div>{owned}{owned}</div>"),
+            format!("<div><!-- {owned} --></div>"),
+            format!("<div>{owned}</div>").replace(&prefix, "other-meeting-"),
+            format!("<div>{owned}</div>").replace("div:{abc}{14}", "custom-id"),
+        ] {
+            assert!(editable_container(&html, &prefix).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn one_note_creates_one_separate_revision_when_the_saved_block_is_uneditable() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ledger = ExportLedger::load_or_new(temp.path(), "meeting").unwrap();
+        let transport = MockGraphTransport::new();
+        let sections = format!("{GRAPH_BASE}/me/onenote/notebooks/notebook/sections");
+        let pages = format!("{GRAPH_BASE}/me/onenote/sections/section-a/pages");
+        let content = format!("{GRAPH_BASE}/me/onenote/pages/page-a/content?includeIDs=true");
+        let marker = format!(
+            "{}{}",
+            onenote::notes_marker_prefix("meeting"),
+            "a".repeat(64)
+        );
+        let html = format!(
+            r#"<body><div data-id="{marker}" id="div:{{abc}}{{14}}"><p>Old</p></div></body>"#
+        );
+        transport.queue_for_url(
+            &sections,
+            [GraphResponse::success(
+                201,
+                r#"{"id":"section-a","displayName":"Weekly sync"}"#,
+            )],
+        );
+        transport.queue_for_url(
+            &pages,
+            [
+                GraphResponse::success(201, r#"{"id":"page-a"}"#),
+                GraphResponse::success(201, r#"{"id":"page-b"}"#),
+            ],
+        );
+        transport.queue_for_url(&content, [GraphResponse::success(200, html.as_str())]);
+        queue_section_details(&transport, 2);
+        transport.queue_for_url(PAGE_DETAILS, [page_details()]);
+        let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+        let account = ExportContext {
+            tenant_id: "tenant",
+            user_id: "user",
+            bearer_token: "<redacted>",
+        };
+        export_section(&client, &mut ledger, &account, request(None))
+            .await
+            .unwrap();
+        let id = ledger.onenote_sections.keys().next().unwrap().clone();
+        for _ in 0..2 {
+            let mut ledger = ExportLedger::load_or_new(temp.path(), "meeting").unwrap();
+            let mut revision = request(Some(id.clone()));
+            revision.replace_existing = true;
+            revision.markdown.push_str("\n- Update the reviewed draft");
+            let report = export_section(&client, &mut ledger, &account, revision)
+                .await
+                .unwrap();
+            assert_eq!(report.items[0].resource_id.as_deref(), Some("page-b"));
+        }
+        assert_eq!(client.transport().calls_for(&pages), 2);
+        assert!(client
+            .transport()
+            .recorded()
+            .iter()
+            .all(|call| call.method != "PATCH"));
+    }
+
+    #[tokio::test]
+    async fn losing_the_owned_block_after_an_unconfirmed_update_never_creates_a_new_page() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ledger = ExportLedger::load_or_new(temp.path(), "meeting").unwrap();
+        let transport = MockGraphTransport::new();
+        let sections = format!("{GRAPH_BASE}/me/onenote/notebooks/notebook/sections");
+        let pages = format!("{GRAPH_BASE}/me/onenote/sections/section-a/pages");
+        let content = format!("{GRAPH_BASE}/me/onenote/pages/page-a/content");
+        let marker = format!(
+            "{}{}",
+            onenote::notes_marker_prefix("meeting"),
+            "a".repeat(64)
+        );
+        let html = format!(
+            r#"<div><div data-id="{marker}" id="div:{{abc}}{{14}}">Old content</div></div>"#
+        );
+        transport.queue_for_url(
+            &sections,
+            [GraphResponse::success(
+                201,
+                r#"{"id":"section-a","displayName":"Weekly sync"}"#,
+            )],
+        );
+        transport.queue_for_url(&pages, [GraphResponse::success(201, r#"{"id":"page-a"}"#)]);
+        transport.queue_for_url(
+            &format!("{content}?includeIDs=true"),
+            [
+                GraphResponse::success(200, html),
+                GraphResponse::success(200, "<div><p>Missing marker</p></div>"),
+            ],
+        );
+        transport.queue_for_url(&content, [GraphResponse::failure(503, None)]);
+        queue_section_details(&transport, 2);
+        transport.queue_for_url(PAGE_DETAILS, [page_details(), page_details()]);
+        let client = GraphClient::new(
+            transport,
+            TokioSleeper,
+            RetryPolicy {
+                max_attempts: 1,
+                ..RetryPolicy::default()
+            },
+        );
+        let account = ExportContext {
+            tenant_id: "tenant",
+            user_id: "user",
+            bearer_token: "<redacted>",
+        };
+        export_section(&client, &mut ledger, &account, request(None))
+            .await
+            .unwrap();
+        let id = ledger.onenote_sections.keys().next().unwrap().clone();
+        let revised = || {
+            let mut revision = request(Some(id.clone()));
+            revision.replace_existing = true;
+            revision.markdown.push_str("\n- Reviewed edits");
+            revision
+        };
+        let report = export_section(&client, &mut ledger, &account, revised())
+            .await
+            .unwrap();
+        assert_eq!(report.overall, ExportStatus::UnknownAfterSubmit);
+        let mut ledger = ExportLedger::load_or_new(temp.path(), "meeting").unwrap();
+        assert!(export_section(&client, &mut ledger, &account, revised())
+            .await
+            .unwrap_err()
+            .contains("unconfirmed"));
+        assert_eq!(client.transport().calls_for(&pages), 1);
+    }
 
     fn request(resume_id: Option<String>) -> SectionRequest {
         SectionRequest {
@@ -453,6 +747,7 @@ mod tests {
         let transport = MockGraphTransport::new();
         let sections = format!("{GRAPH_BASE}/me/onenote/notebooks/notebook/sections");
         let pages = format!("{GRAPH_BASE}/me/onenote/sections/section-a/pages");
+        queue_section_details(&transport, 3);
         transport.queue_for_url(
             &sections,
             [GraphResponse::success(
@@ -495,7 +790,7 @@ mod tests {
         assert!(!repeated.items[0].graph_called);
         assert_eq!(client.transport().calls_for(&sections), 1);
         assert_eq!(client.transport().calls_for(&pages), 2);
-        assert_eq!(client.transport().recorded().len(), 3);
+        assert_eq!(client.transport().recorded().len(), 6);
     }
 
     #[tokio::test]
@@ -506,7 +801,16 @@ mod tests {
         let sections = format!("{GRAPH_BASE}/me/onenote/notebooks/notebook/sections");
         let pages = format!("{GRAPH_BASE}/me/onenote/sections/section-a/pages");
         let content = format!("{GRAPH_BASE}/me/onenote/pages/page-a/content");
-        let html = r#"<div data-id="_default"><div data-id="clawscribe-content" id="div:{abc}{14}"><p>Old</p></div></div>"#;
+        let marker = format!(
+            "{}{}",
+            onenote::notes_marker_prefix("meeting"),
+            "a".repeat(64)
+        );
+        let html = format!(
+            r#"<div data-id="_default"><p>User-owned text</p><div data-id="{marker}" id="div:{{abc}}{{14}}"><p>Old</p></div></div>"#
+        );
+        queue_section_details(&transport, 1);
+        transport.queue_for_url(PAGE_DETAILS, [page_details()]);
         transport.queue_for_url(
             &sections,
             [GraphResponse::success(
@@ -517,7 +821,10 @@ mod tests {
         transport.queue_for_url(&pages, [GraphResponse::success(201, r#"{"id":"page-a"}"#)]);
         transport.queue_for_url(
             &format!("{content}?includeIDs=true"),
-            [GraphResponse::success(200, html)],
+            [
+                GraphResponse::success(200, html.as_str()),
+                GraphResponse::success(200, html.as_str()),
+            ],
         );
         transport.queue_for_url(&content, [GraphResponse::success(204, "")]);
         let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
@@ -533,8 +840,32 @@ mod tests {
         let id = ledger.onenote_sections.keys().next().unwrap().clone();
         let mut revision = request(Some(id.clone()));
         revision.replace_existing = true;
-        revision.page_title = "Reviewed follow-ups".into();
+        revision.page_title = "Budget & plans <draft>".into();
         revision.markdown = "## Decisions\n- Send the reviewed draft".into();
+        let meeting = super::super::markdown_notes::meeting_export_for_onenote(
+            "meeting",
+            &revision.page_title,
+            None,
+            &revision.markdown,
+        );
+        let page = onenote::build_pages(&meeting, DEFAULT_PAGE_BUDGET_BYTES).remove(0);
+        let patch = prepare_notes_patch(
+            &client,
+            account.bearer_token,
+            "page-a",
+            &page,
+            &onenote::notes_marker_prefix("meeting"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&patch.body).unwrap();
+        assert_eq!(body[0]["content"], "Budget & plans <draft>");
+        assert_eq!(body[1]["target"], "div:{abc}{14}");
+        assert!(!body[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("User-owned text"));
         let report = export_section(&client, &mut ledger, &account, revision)
             .await
             .unwrap();
@@ -543,7 +874,7 @@ mod tests {
         let ledger = ExportLedger::load_or_new(temp.path(), "meeting").unwrap();
         assert_eq!(
             ledger.onenote_sections[&id].page_title,
-            "Reviewed follow-ups"
+            "Budget & plans <draft>"
         );
         assert_eq!(client.transport().calls_for(&sections), 1);
         assert_eq!(client.transport().calls_for(&pages), 1);

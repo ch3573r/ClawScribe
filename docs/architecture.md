@@ -105,8 +105,9 @@ window titles are returned only when the settings diagnostics panel requests the
   Planner, To Do, and OneDrive or SharePoint.
 - Confluence direct publish uses the configured server URL and PAT. Browser
   draft export remains available when SSO, proxy, or tenant policy blocks REST.
-  Direct publishing uses the meeting export history to retain the page ID and
-  hold uncertain submissions for explicit reconciliation. The browser clipboard
+  Direct publishing uses the meeting export history to retain the page ID,
+  account fingerprint, and draft revision. Repeats open the existing page for
+  reviewed edits. Uncertain submissions stay held for reconciliation. The browser clipboard
   includes readable source times, nested lists, quotes, code, and task status.
 - OpenClaw handoff is optional and sends completed recording artifacts only to
   the configured operator endpoint.
@@ -494,28 +495,31 @@ workspace lookup are available only in debug builds.
 
 ### Summary context budgets
 
-`summary/context_budget.rs` resolves summary and chat budgets together. These
-are ClawScribe's request-planning limits, not guarantees about a provider account:
+ClawScribe selects the planning budget by provider and model. A compatible
+endpoint can use the same model name with different limits.
 
-| Provider or model family | Context tokens |
+| Provider or model | Context tokens used for planning |
 | --- | --- |
-| GPT-4o; GPT-5/6 and o1/o3/o4 reasoning names | 128,000 |
-| GPT-4.1 | 1,047,576 |
-| Llama 3.1/3.3 | 131,072 |
-| Claude | 200,000 |
-| Unknown cloud model | 32,768 |
-| Custom/OpenAI-compatible/OpenClaw endpoint | Configured context; otherwise 128,000 for reasoning names, 8,192 for other names |
-| Ollama | Model metadata, capped at 16,384; 8,192 fallback |
-| Built-in AI | Model registry, capped at 16,384 |
-| Codex | 32,768 |
+| OpenAI GPT-5.4, GPT-5.5 and listed GPT-5.6/6 Sol or Luna models | 1,050,000 |
+| OpenAI GPT-4.1, Mini and Nano | 1,047,576 |
+| OpenAI GPT-4o and GPT-4o mini | 128,000 |
+| Groq Llama 3.3 70B Versatile and GPT-OSS 120B | 131,072 |
+| Claude API models in the catalog | 1,000,000 for the listed Fable 5.2, Opus 5/5.5, Sonnet/Haiku 5.5 and Opus/Sonnet 4.6 models. 200,000 for the listed 4.5 models. |
+| Other cloud models, including OpenRouter | Configured context, or 32,768 by default |
+| Custom, OpenAI-compatible and OpenClaw endpoints | Configured context, or 8,192 by default |
+| Ollama and Built-in AI | Configured Ollama context or local model registry, capped at 16,384. The fallback is 8,192. |
+| Bundled Codex | 500,000 for GPT-6.1 Sol, otherwise 32,768 |
+| Claude Code | 200,000 |
 
-Family matching also applies to namespaced OpenRouter IDs. GPT-5/6 and o1/o3/o4
-names, and the Claude provider, default to 16,000 output tokens and up to 8,000
-extraction tokens. Other names default to 4,096 output tokens for Built-in AI
-and Codex, or 2,048 elsewhere. Default output is capped at `max(context / 4, 1024)`;
-thus it never exceeds a quarter of context when context is at least 4,096.
-Explicit output settings override the default. Codex reasoning names still use
-the Codex context budget, so their default output is capped at 8,192.
+Reasoning models and the Claude providers default to 16,000 output tokens.
+Other models default to 4,096 for Built-in AI and Codex, or 2,048 elsewhere.
+The default is capped at a quarter of the context with a 1,024-token floor for
+that cap. A configured output budget takes precedence, subject to the cataloged
+model's output limit. Provider references include the [OpenAI API model
+catalog](https://developers.openai.com/api/docs/models), the [Codex default for
+GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol), and
+[Anthropic's model limits](https://platform.claude.com/docs/en/models/overview).
+
 The local helper receives the resolved local context.
 After reserving output tokens and 256 tokens, planning converts the remainder
 to three UTF-8 bytes per token and subtracts prompt overhead in bytes. Extraction

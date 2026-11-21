@@ -125,11 +125,11 @@ impl Portable {
         Ok(())
     }
 
-    pub(super) fn capture_files(&mut self, app_data: &Path) -> Result<(), String> {
+    pub(super) fn capture_files(&mut self, app_data: &Path) -> Result<usize, String> {
         self.capture_from(app_data, &custom_template_dirs())
     }
 
-    fn capture_from(&mut self, app_data: &Path, directories: &[PathBuf]) -> Result<(), String> {
+    fn capture_from(&mut self, app_data: &Path, directories: &[PathBuf]) -> Result<usize, String> {
         let vocabulary = vocabulary_settings::portable_path(app_data);
         if let Some(metadata) = file_metadata(&vocabulary)? {
             if metadata.len() > vocabulary_settings::MAX_STORE_BYTES {
@@ -138,33 +138,23 @@ impl Portable {
             self.words = vocabulary_settings::read_saved_words(&vocabulary).0;
         }
         let mut seen = HashSet::new();
+        let mut skipped = 0;
         for directory in directories {
-            for entry in template_entries(directory)? {
-                let (id, path) = entry?;
+            skipped += scan_templates(directory, |id, path| {
                 if !seen.insert(id.to_lowercase()) {
-                    continue;
+                    return Ok(());
                 }
-                let file = File::open(path).map_err(failure)?;
-                let mut bytes = Vec::new();
-                file.take(MAX_TEMPLATE_BYTES + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(failure)?;
-                if bytes.len() as u64 > MAX_TEMPLATE_BYTES {
-                    return Err("A custom template exceeds the 128 KiB template limit.".into());
+                if let Some(template) = read_template(path)? {
+                    if self.templates.len() >= MAX_TEMPLATES {
+                        return Err("There are too many custom templates for backup.".into());
+                    }
+                    self.templates.insert(id, template);
                 }
-                // A deletion marker shadows the legacy copy under the same ID.
-                if bytes == REMOVED_TEMPLATE.as_bytes() {
-                    continue;
-                }
-                if self.templates.len() >= MAX_TEMPLATES {
-                    return Err("There are too many custom templates for backup.".into());
-                }
-                let template = serde_json::from_slice::<Template>(&bytes).map_err(failure)?;
-                template_bytes(&template)?;
-                self.templates.insert(id, template);
-            }
+                Ok(())
+            })
+            .unwrap_or(1);
         }
-        Ok(())
+        Ok(skipped)
     }
 
     pub(super) fn publish(self, app_data: Option<&Path>) -> Result<Published, String> {
@@ -180,22 +170,40 @@ impl Portable {
     fn publish_into(self, app_data: &Path, directories: &[PathBuf]) -> Result<Published, String> {
         let mut published = Published::default();
         if !self.templates.is_empty() {
-            let target = directories
-                .first()
-                .ok_or("Template storage is unavailable.")?;
             let mut existing = HashSet::new();
-            for directory in directories {
-                for entry in template_entries(directory)? {
-                    existing.insert(entry?.0.to_lowercase());
+            let mut target = None;
+            for (index, directory) in directories.iter().enumerate() {
+                let skipped = scan_templates(directory, |id, path| {
+                    if existing.insert(id.to_lowercase()) {
+                        read_template(path)?;
+                    }
+                    Ok(())
+                });
+                match skipped {
+                    Ok(count) => {
+                        published.skipped_templates += count;
+                        if index == 0 {
+                            target = Some(directory);
+                        }
+                    }
+                    // Count an unavailable legacy location once. An unavailable
+                    // personal location is counted per template we could not save.
+                    Err(_) if index != 0 => published.skipped_templates += 1,
+                    Err(_) => {}
                 }
             }
             for (id, template) in self.templates {
                 validate_id(&id)?;
-                if !existing.contains(&id.to_lowercase()) {
-                    published.create(
-                        &target.join(format!("{id}.json")),
-                        &template_bytes(&template)?,
-                    )?;
+                let bytes = template_bytes(&template)?;
+                if !existing.contains(&id.to_lowercase())
+                    && !target.is_some_and(|target| {
+                        template_directory_exists(target).is_ok()
+                            && published
+                                .create(&target.join(format!("{id}.json")), &bytes)
+                                .is_ok()
+                    })
+                {
+                    published.skipped_templates += 1;
                 }
             }
         }
@@ -207,6 +215,28 @@ impl Portable {
         }
         Ok(published)
     }
+}
+
+fn read_template(path: &Path) -> Result<Option<Template>, String> {
+    let metadata = file_metadata(path)?.ok_or("The template file is unavailable.")?;
+    if metadata.len() > MAX_TEMPLATE_BYTES {
+        return Err("A custom template exceeds the 128 KiB template limit.".into());
+    }
+    let file = File::open(path).map_err(failure)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_TEMPLATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(failure)?;
+    if bytes.len() as u64 > MAX_TEMPLATE_BYTES {
+        return Err("A custom template exceeds the 128 KiB template limit.".into());
+    }
+    // A deletion marker reserves the ID and shadows the legacy copy.
+    if bytes == REMOVED_TEMPLATE.as_bytes() {
+        return Ok(None);
+    }
+    let template = serde_json::from_slice::<Template>(&bytes).map_err(failure)?;
+    template_bytes(&template)?;
+    Ok(Some(template))
 }
 
 fn template_bytes(template: &Template) -> Result<Vec<u8>, String> {
@@ -228,36 +258,64 @@ fn file_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
     }
 }
 
-fn template_entries(
-    directory: &Path,
-) -> Result<impl Iterator<Item = Result<(String, PathBuf), String>>, String> {
-    let entries = match std::fs::symlink_metadata(directory) {
-        Ok(metadata) if metadata.is_dir() && !crate::local_path::is_link(&metadata) => {
-            crate::local_path::require_unlinked_directory(directory)?;
-            Some(std::fs::read_dir(directory).map_err(failure)?)
+fn template_directory_exists(directory: &Path) -> Result<bool, String> {
+    let text = directory.to_str().ok_or(crate::local_path::LOCAL_ONLY)?;
+    let local = text.strip_prefix(r"\\?\").unwrap_or(text);
+    if !directory.is_absolute()
+        || !crate::local_path::is_local_path_text(local)
+        || directory
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+    {
+        return Err(crate::local_path::LOCAL_ONLY.into());
+    }
+    // Check every parent before inspecting a child of a redirected location.
+    for ancestor in directory.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.is_dir() && !crate::local_path::is_link(&metadata) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            _ => return Err("Template storage is unreadable or linked.".into()),
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        _ => return Err("Template storage is unreadable or linked.".into()),
-    };
-    Ok(entries.into_iter().flatten().filter_map(|entry| {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => return Some(Err(failure(error))),
+    }
+    Ok(true)
+}
+
+fn scan_templates(
+    directory: &Path,
+    mut visit: impl FnMut(String, &Path) -> Result<(), String>,
+) -> Result<usize, String> {
+    if !template_directory_exists(directory)? {
+        return Ok(0);
+    }
+    let mut skipped = 0;
+    for entry in std::fs::read_dir(directory).map_err(failure)? {
+        let Ok(entry) = entry else {
+            skipped += 1;
+            continue;
         };
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            return None;
+            continue;
         }
-        let id = path.file_stem()?.to_str()?.to_owned();
-        Some(validate_id(&id).and_then(|_| {
-            file_metadata(&path)?.ok_or("A template changed during the archive operation.")?;
-            Ok((id, path))
-        }))
-    }))
+        let id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default();
+        if validate_id(id)
+            .and_then(|_| visit(id.to_owned(), &path))
+            .is_err()
+        {
+            skipped += 1;
+        }
+    }
+    Ok(skipped)
 }
 
 #[derive(Default)]
-pub(super) struct Published(Vec<PathBuf>);
+pub(super) struct Published {
+    files: Vec<PathBuf>,
+    pub(super) skipped_templates: usize,
+}
 
 impl Published {
     fn create(&mut self, path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -276,7 +334,7 @@ impl Published {
         file.write_all(bytes).map_err(failure)?;
         file.as_file().sync_all().map_err(failure)?;
         match file.persist_noclobber(path) {
-            Ok(_) => self.0.push(path.to_owned()),
+            Ok(_) => self.files.push(path.to_owned()),
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(failure(error)),
         }
@@ -284,13 +342,13 @@ impl Published {
     }
 
     pub(super) fn keep(mut self) {
-        self.0.clear();
+        self.files.clear();
     }
 }
 
 impl Drop for Published {
     fn drop(&mut self) {
-        for path in self.0.drain(..) {
+        for path in self.files.drain(..) {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -375,10 +433,147 @@ mod tests {
         std::fs::write(personal.join("custom.json"), REMOVED_TEMPLATE).unwrap();
         std::fs::write(legacy.join("custom.json"), b"shadowed legacy copy").unwrap();
         let mut portable = Portable::default();
-        portable
-            .capture_from(root.path(), &[personal, legacy])
-            .unwrap();
+        assert_eq!(
+            portable
+                .capture_from(root.path(), &[personal, legacy])
+                .unwrap(),
+            0
+        );
         assert!(portable.templates.is_empty());
+    }
+
+    #[test]
+    fn malformed_oversized_and_invalid_local_templates_are_optional() {
+        let root = tempfile::tempdir().unwrap();
+        let personal = root.path().join("personal");
+        let legacy = root.path().join("legacy");
+        let destination = root.path().join("destination");
+        for directory in [&personal, &legacy, &destination] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let body =
+            template_bytes(&crate::summary::templates::get_template("daily_standup").unwrap())
+                .unwrap();
+        std::fs::write(personal.join("valid.json"), &body).unwrap();
+        std::fs::write(personal.join("broken.json"), b"{").unwrap();
+        std::fs::write(
+            legacy.join("oversized.json"),
+            vec![b' '; MAX_TEMPLATE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let invalid = format!("{}.json", "a".repeat(121));
+        std::fs::write(legacy.join(&invalid), &body).unwrap();
+        std::fs::write(destination.join("valid.json"), REMOVED_TEMPLATE).unwrap();
+        std::fs::write(destination.join(&invalid), &body).unwrap();
+
+        let mut portable = Portable::default();
+        assert_eq!(
+            portable
+                .capture_from(root.path(), &[personal, legacy])
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            portable
+                .templates
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["valid"]
+        );
+        portable
+            .templates
+            .insert("new".into(), serde_json::from_slice(&body).unwrap());
+        let published = portable
+            .publish_into(root.path(), std::slice::from_ref(&destination))
+            .unwrap();
+        assert_eq!(published.skipped_templates, 1);
+        published.keep();
+        assert_eq!(
+            std::fs::read(destination.join("valid.json")).unwrap(),
+            REMOVED_TEMPLATE.as_bytes()
+        );
+        assert_eq!(std::fs::read(destination.join("new.json")).unwrap(), body);
+    }
+
+    #[test]
+    fn unavailable_template_storage_does_not_block_library_preferences() {
+        let root = tempfile::tempdir().unwrap();
+        let blocked = root.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let templates = blocked.join("templates");
+        let mut portable = Portable::default();
+        assert_eq!(
+            portable
+                .capture_from(root.path(), std::slice::from_ref(&templates))
+                .unwrap(),
+            1
+        );
+        portable.words = vec!["Exampleterm".into()];
+        portable.templates.insert(
+            "custom".into(),
+            crate::summary::templates::get_template("daily_standup").unwrap(),
+        );
+        let published = portable.publish_into(root.path(), &[templates]).unwrap();
+        assert_eq!(published.skipped_templates, 1);
+        published.keep();
+        assert_eq!(std::fs::read(&blocked).unwrap(), b"not a directory");
+        assert_eq!(
+            vocabulary_settings::read_saved_words(&vocabulary_settings::portable_path(root.path()))
+                .0,
+            ["Exampleterm"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redirected_template_ancestors_are_not_read_or_written() {
+        let root = tempfile::tempdir().unwrap();
+        let external = root.path().join("external");
+        let templates = external.join("templates");
+        std::fs::create_dir_all(&templates).unwrap();
+        let redirected = root.path().join("redirected");
+        std::os::unix::fs::symlink(&external, &redirected).unwrap();
+        let redirected = redirected.join("templates");
+        let template = crate::summary::templates::get_template("daily_standup").unwrap();
+        std::fs::write(
+            templates.join("external.json"),
+            template_bytes(&template).unwrap(),
+        )
+        .unwrap();
+        let mut portable = Portable::default();
+        assert_eq!(
+            portable
+                .capture_from(root.path(), std::slice::from_ref(&redirected))
+                .unwrap(),
+            1
+        );
+        assert!(portable.templates.is_empty());
+        portable.templates.insert("new".into(), template);
+        let published = portable.publish_into(root.path(), &[redirected]).unwrap();
+        assert_eq!(published.skipped_templates, 1);
+        published.keep();
+        assert!(!templates.join("new.json").exists());
+    }
+
+    #[test]
+    fn invalid_archive_templates_are_rejected() {
+        let mut portable = Portable::default();
+        let valid = crate::summary::templates::get_template("daily_standup").unwrap();
+        portable
+            .templates
+            .insert("../outside".into(), valid.clone());
+        assert!(portable.validate(&[]).is_err());
+        portable.templates.clear();
+        let mut invalid = valid;
+        invalid.sections.clear();
+        portable.templates.insert("invalid".into(), invalid);
+        assert!(portable.validate(&[]).is_err());
+        portable.templates.clear();
+        let mut oversized = crate::summary::templates::get_template("daily_standup").unwrap();
+        oversized.sections[0].item_format = Some("x".repeat(MAX_TEMPLATE_BYTES as usize));
+        portable.templates.insert("oversized".into(), oversized);
+        assert!(portable.validate(&[]).is_err());
     }
 
     #[tokio::test]

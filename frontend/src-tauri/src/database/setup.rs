@@ -116,8 +116,9 @@ pub(crate) fn startup_failure_message(
         "ClawScribe could not open its meeting database.\n\n\
          App data folder: {}\n\
          Log folder: {}\n\n\
-         Choose Open recovery library to create an empty library in a separate \
-         folder and restart ClawScribe. You can restore a ZIP from Meetings. \
+         Choose Open recovery library to restart ClawScribe in a separate \
+         workspace. A previous recovery workspace is reused when available. \
+         You can restore a ZIP from Meetings. \
          Your current database, recovery files and recordings stay in place.\n\n\
          Choose Exit to close ClawScribe and check the log.",
         show(data_dir),

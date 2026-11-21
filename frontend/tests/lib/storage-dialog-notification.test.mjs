@@ -164,3 +164,12 @@ test('clicking Review storage on blocked start does not start or stop a recordin
   assert.ok(typeof toasts[0].action.onClick === 'function');
   assert.doesNotThrow(() => toasts[0].action.onClick());
 });
+
+test('a recording folder refusal offers recording settings from a sidebar or call start', t => {
+  const { reportStartFailure, toasts } = setupStartFailure(t);
+  const message = 'The recordings folder is unavailable. Reconnect it or choose another folder in Settings → Recording.';
+  reportStartFailure(`Failed to start recording: ${message}`);
+  assert.equal(toasts[0].title, 'Recordings folder unavailable');
+  assert.equal(toasts[0].description, message);
+  assert.equal(toasts[0].action.label, 'Recording settings');
+});

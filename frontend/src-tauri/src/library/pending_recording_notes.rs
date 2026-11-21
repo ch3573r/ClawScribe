@@ -244,7 +244,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            delete_reviewed(&pool, RECOVER, 1, true).await.unwrap_err(),
+            delete_reviewed(&pool, RECOVER, 1, 0, true)
+                .await
+                .unwrap_err(),
             "This recording has already been saved."
         );
         assert!(list(&pool, 0).await.unwrap().entries.is_empty());

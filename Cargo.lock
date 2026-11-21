@@ -958,6 +958,7 @@ dependencies = [
  "which 6.0.3",
  "whisper-rs",
  "windows 0.57.0",
+ "xattr",
  "xz2",
  "zip 2.4.2",
 ]

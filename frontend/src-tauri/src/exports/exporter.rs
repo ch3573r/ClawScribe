@@ -273,10 +273,28 @@ pub async fn export_onenote<T: GraphTransport, S: Sleeper>(
     target: &OneNoteTarget,
     ctx: &ExportContext<'_>,
 ) -> ExportReport {
+    export_onenote_revision(
+        client,
+        ledger,
+        meeting,
+        target,
+        ctx,
+        &meeting.artifact_hash(),
+    )
+    .await
+}
+
+pub(super) async fn export_onenote_revision<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    ledger: &mut ExportLedger,
+    meeting: &MeetingExport,
+    target: &OneNoteTarget,
+    ctx: &ExportContext<'_>,
+    revision: &str,
+) -> ExportReport {
     let url =
         graph_url_with_path_segments(&["me", "onenote", "sections", &target.section_id, "pages"]);
     let pages = onenote::build_pages(meeting, DEFAULT_PAGE_BUDGET_BYTES);
-    let meeting_hash = meeting.artifact_hash();
     let mut items = Vec::new();
 
     for page in pages {
@@ -285,7 +303,7 @@ pub async fn export_onenote<T: GraphTransport, S: Sleeper>(
             ctx.tenant_id,
             ctx.user_id,
             target.section_id,
-            meeting_hash,
+            revision,
             page.kind.as_str(),
             page.index,
         );
@@ -447,10 +465,28 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
                     });
                 if pending.notes_pending {
                     let description = planner::build_task_details_description(meeting, action);
-                    let error =
-                        set_planner_task_details(client, ctx.bearer_token, &task_id, &description)
-                            .await
-                            .err();
+                    let checked = if result.graph_called {
+                        Ok(())
+                    } else {
+                        check_planner_task_destination(
+                            client,
+                            ctx.bearer_token,
+                            &task_id,
+                            destination,
+                        )
+                        .await
+                    };
+                    let error = match checked {
+                        Ok(()) => set_planner_task_details(
+                            client,
+                            ctx.bearer_token,
+                            &task_id,
+                            &description,
+                        )
+                        .await
+                        .err(),
+                        Err(reason) => Some(reason),
+                    };
                     pending.notes_pending = error.is_some();
                     stop = checkpoint_enrichment(
                         ledger,
@@ -739,6 +775,25 @@ async fn set_planner_task_details<T: GraphTransport, S: Sleeper>(
     );
     patch.headers.push(("If-Match".into(), etag.into()));
     graph_failed_reason(client.execute(&patch, token).await)?;
+    Ok(())
+}
+
+async fn check_planner_task_destination<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    id: &str,
+    destination: &PlannerDestination,
+) -> Result<(), &'static str> {
+    let url = graph_url_with_path_segments(&["planner", "tasks", id]);
+    let get = json_request("GET", url, serde_json::Value::Null);
+    let body = graph_failed_reason(client.execute(&get, token).await)?;
+    let task: serde_json::Value = serde_json::from_str(&body).map_err(|_| "invalid_response")?;
+    if task["id"].as_str() != Some(id)
+        || task["planId"].as_str() != Some(&destination.plan_id)
+        || task["bucketId"].as_str() != Some(&destination.bucket_id)
+    {
+        return Err("destination_mismatch");
+    }
     Ok(())
 }
 
@@ -1497,6 +1552,13 @@ mod tests {
         client.transport().queue_for_url(
             &planner_url(),
             [GraphResponse::success(201, r#"{"id":"task-1"}"#)],
+        );
+        client.transport().queue_for_url(
+            &format!("{}/task-1", planner_url()),
+            [GraphResponse::success(
+                200,
+                r#"{"id":"task-1","planId":"plan-1","bucketId":"bucket-1"}"#,
+            )],
         );
         client.transport().queue_for_url(
             &details_url,

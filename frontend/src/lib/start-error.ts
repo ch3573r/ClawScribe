@@ -19,6 +19,14 @@ export function isDiskSpaceRefusal(error: unknown): boolean {
 
 export interface StartErrorDisplay { title: string; message: string }
 
+export function describeRecordingsFolderRefusal(error: unknown): StartErrorDisplay | null {
+  const message = startErrorText(error).replace(/^Failed to start recording: /, '');
+  if (message.startsWith('The recordings folder is unavailable.') || message.startsWith('The recordings folder uses a link,')) {
+    return { title: 'Recordings folder unavailable', message };
+  }
+  return null;
+}
+
 export type LiveModelFailure = 'missing' | 'downloading' | 'load_failed' | 'unsupported_provider';
 
 export function liveModelStartFailure(error: unknown): LiveModelFailure | null {
@@ -53,6 +61,8 @@ export function transcriptionSettingsPath(provider?: string | null): string {
  */
 export function describeStartError(error: unknown): StartErrorDisplay {
   if (isDiskSpaceRefusal(error)) return { title: 'Not enough disk space', message: startErrorText(error) };
+  const folderRefusal = describeRecordingsFolderRefusal(error);
+  if (folderRefusal) return folderRefusal;
   const text = startErrorText(error);
   if (text.includes('microphone') || text.includes('mic') || text.includes('input')) {
     return {

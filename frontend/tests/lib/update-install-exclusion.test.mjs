@@ -50,7 +50,7 @@ test('summaries, saved answers and every export write are admitted through the i
   assert.match(exports, /fn export_guard\([\s\S]{0,300}crate::updates::admit_work\(\)\?/);
   assert.equal((exports.match(/let _export_guard = export_guard\(\)\?;/g) ?? []).length, 7);
   assert.match(exports, /export_meeting_to_onedrive_files[\s\S]{0,300}export_guard\(\)\?/);
-  assert.match(exports, /reconcile_meeting_export[\s\S]{0,300}export_guard\(\)\?/);
+  assert.match(exports, /fn reconcile_meeting_export[^{]*\{\s*let _guard = export_guard\(\)\?;/);
   assert.match(rust('exports/confluence.rs'), /confluence_export_page[\s\S]{0,350}commands::export_guard\(\)\?/);
 });
 

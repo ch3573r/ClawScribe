@@ -7,11 +7,16 @@ use super::{
 };
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction};
 use std::collections::BTreeSet;
+
+#[path = "live_notes/portable.rs"]
+mod portable;
+pub(crate) use portable::is_portable_live_answer;
 
 const SAVE_ERROR: &str = "Could not save this answer to meeting notes.";
 const READ_ERROR: &str = "Could not load saved live answers.";
+const SOURCE_CHANGED: &str = "Saved evidence used for this answer changed or was removed.";
 const MAX_NOTES: i64 = 32;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,6 +85,104 @@ pub(super) struct SelectedAnswer {
     pub(super) question_tags: Vec<usize>,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct NoteCandidate {
+    pub(super) answer: SelectedAnswer,
+    pub(super) dependencies: Vec<SourceDependency>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct SourceDependency {
+    reference: EvidenceRef,
+    attachment_meeting: Option<String>,
+    incarnation: (String, Option<String>),
+}
+
+impl SourceDependency {
+    fn document_id(&self) -> Option<&str> {
+        match &self.reference.locator {
+            EvidenceLocator::Document { document_id, .. } => Some(document_id),
+            _ => None,
+        }
+    }
+}
+
+async fn source_incarnation(
+    conn: &mut SqliteConnection,
+    reference: &EvidenceRef,
+    attachment_meeting: Option<&str>,
+) -> Result<Option<(String, Option<String>)>, sqlx::Error> {
+    let (meeting, document) = match &reference.locator {
+        EvidenceLocator::Transcript { meeting_id, .. } => (Some(meeting_id.as_str()), None),
+        EvidenceLocator::Document { document_id, .. } => {
+            (attachment_meeting, Some(document_id.as_str()))
+        }
+        EvidenceLocator::Live { .. } => return Ok(None),
+    };
+    sqlx::query_as(
+        "SELECT s.live_answer_incarnation, a.incarnation FROM knowledge_sources s
+         LEFT JOIN saved_live_answer_attachment_instances a ON a.meeting_id = ?2 AND a.document_id = ?3
+         WHERE s.id = ?1 AND s.revision = ?4 AND s.live_answer_incarnation <> '' AND
+           ((?3 IS NULL AND s.kind = 'meeting' AND s.meeting_id = ?2)
+            OR (?3 IS NOT NULL AND s.kind = 'document' AND a.incarnation IS NOT NULL))",
+    )
+    .bind(&reference.source_id)
+    .bind(meeting)
+    .bind(document)
+    .bind(reference.source_revision)
+    .fetch_optional(conn)
+    .await
+}
+
+pub(super) async fn source_dependencies(
+    pool: &SqlitePool,
+    selected: &[Passage],
+) -> Result<Vec<SourceDependency>, String> {
+    let mut passages = selected
+        .iter()
+        .filter(|p| !matches!(p.evidence.locator, EvidenceLocator::Live { .. }))
+        .peekable();
+    let mut dependencies = Vec::new();
+    if passages.peek().is_none() {
+        return Ok(dependencies);
+    }
+    let mut conn = pool.acquire().await.map_err(|_| SOURCE_CHANGED)?;
+    for passage in passages {
+        let reference = &passage.evidence;
+        let attachment_meeting = matches!(reference.locator, EvidenceLocator::Document { .. })
+            .then_some(passage.meeting_id.as_str());
+        let incarnation = source_incarnation(&mut conn, reference, attachment_meeting)
+            .await
+            .map_err(|_| SOURCE_CHANGED)?
+            .ok_or(SOURCE_CHANGED)?;
+        dependencies.push(SourceDependency {
+            reference: reference.clone(),
+            attachment_meeting: attachment_meeting.map(str::to_owned),
+            incarnation,
+        });
+    }
+    Ok(dependencies)
+}
+
+pub(super) async fn recheck_dependencies(
+    conn: &mut SqliteConnection,
+    dependencies: &[SourceDependency],
+) -> Result<(), String> {
+    for dependency in dependencies {
+        let current = source_incarnation(
+            conn,
+            &dependency.reference,
+            dependency.attachment_meeting.as_deref(),
+        )
+        .await
+        .map_err(|_| SOURCE_CHANGED)?;
+        if current.as_ref() != Some(&dependency.incarnation) {
+            return Err(SOURCE_CHANGED.into());
+        }
+    }
+    Ok(())
+}
+
 impl SelectedAnswer {
     pub(super) fn from_reply(reply: &AssistantReply, citations: Vec<Citation>) -> Option<Self> {
         let question_tags = reply
@@ -135,30 +238,53 @@ pub(crate) async fn save_selected_live_answer(
     tx.commit().await.map_err(|_| SAVE_ERROR.into())
 }
 
-async fn store(
-    conn: &mut SqliteConnection,
+pub(super) async fn store(
+    tx: &mut Transaction<'_, Sqlite>,
     recording_id: &str,
-    answer: &SelectedAnswer,
+    candidate: &NoteCandidate,
 ) -> Result<(), String> {
-    let json = serde_json::to_string(answer).map_err(|_| SAVE_ERROR)?;
+    let answer = &candidate.answer;
     let (count, exists): (i64, bool) = sqlx::query_as(
         "SELECT count(*), coalesce(max(id = ?2), 0) FROM saved_live_answers WHERE recording_id = ?1",
     )
     .bind(recording_id).bind(&answer.id)
-    .fetch_one(&mut *conn).await.map_err(|_| SAVE_ERROR)?;
+    .fetch_one(&mut **tx).await.map_err(|_| SAVE_ERROR)?;
     if exists {
         return Ok(());
     }
     if count >= MAX_NOTES {
         return Err("This recording already has 32 saved live answers.".into());
     }
-    sqlx::query("INSERT INTO saved_live_answers (id, recording_id, answer) VALUES (?, ?, ?)")
+    // Dispatch verified the exact canonical passages. Check their revisions and
+    // incarnations before inserting the answer in this writer transaction.
+    recheck_dependencies(tx, &candidate.dependencies).await?;
+    let json = serde_json::to_string(answer).map_err(|_| SAVE_ERROR)?;
+    sqlx::query(
+        "INSERT INTO saved_live_answers (id, recording_id, answer, source_dependencies_complete)
+         VALUES (?, ?, ?, 1)",
+    )
+    .bind(&answer.id)
+    .bind(recording_id)
+    .bind(json)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| SAVE_ERROR)?;
+    for (index, dependency) in candidate.dependencies.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO saved_live_answer_dependencies
+             (answer_id, ordinal, source_id, document_id, attachment_meeting_id, reference_json)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
         .bind(&answer.id)
-        .bind(recording_id)
-        .bind(json)
-        .execute(conn)
+        .bind(index as i64 + 1)
+        .bind(&dependency.reference.source_id)
+        .bind(dependency.document_id())
+        .bind(&dependency.attachment_meeting)
+        .bind(serde_json::to_string(&dependency.reference).map_err(|_| SAVE_ERROR)?)
+        .execute(&mut **tx)
         .await
         .map_err(|_| SAVE_ERROR)?;
+    }
     Ok(())
 }
 
@@ -329,9 +455,13 @@ mod tests {
             question_tags: vec![],
         };
         let id = format!("meeting-{}", uuid::Uuid::new_v4());
+        let candidate = NoteCandidate {
+            answer: note.clone(),
+            dependencies: vec![],
+        };
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
-        store(&mut tx, &id, &note).await.unwrap();
-        store(&mut tx, &id, &note).await.unwrap();
+        store(&mut tx, &id, &candidate).await.unwrap();
+        store(&mut tx, &id, &candidate).await.unwrap();
         tx.commit().await.unwrap();
         assert!(list(&pool, &id).await.unwrap().is_empty());
         assert!(resolve(&pool, "review-test", &note.id, 1)

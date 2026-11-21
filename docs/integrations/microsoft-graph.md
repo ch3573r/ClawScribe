@@ -196,22 +196,39 @@ fills missing values while preserving populated fields. Older task history with
 a saved ID is checked the first time the task is re-exported.
 
 OneDrive saves the Word file, PDF, and optional organization links independently.
-Repeating the same content in the same destination uses the confirmed Word ID
-for unfinished PDF conversion and reuses completed files and links. Changed
-content exports as a new file revision. The same directory can therefore keep
-several revisions of a meeting’s notes.
+Repeating the same content checks the confirmed files in the original folder and
+uses the Word file for unfinished PDF conversion. Edited drafts get a dated
+filename. The Word and PDF files share the same name before the extension, and
+retries keep that name. Legacy entries may require reopening the original export
+with the same destination and content to restore the recorded folder reference.
 
 Unreadable or invalid history blocks export. A history write failure stops the
 batch; it never silently disables duplicate protection. Restore access to the
 existing history before retrying rather than deleting it.
 
 If a response is lost, the app restarts during submission, or the result cannot
-be saved locally, an item can have an **unknown outcome**. Inspect the selected
-destination, then choose **Resolve outcome** on that item. If it exists, enter
-its remote ID to preserve it. If you confirmed it is missing, choose **Allow
-retry** and start the export again. Saving the outcome changes local history.
-A saved task keeps its identity across edits and is scoped to the selected
-account and destination.
+be saved locally, an item can have an **unknown outcome**. Inspect the original
+destination, then choose **Resolve outcome**. For a saved item that has moved,
+was deleted, or was linked incorrectly, choose **Review link**. Select the item
+from the Microsoft list or paste the Confluence page address from **Page
+information**. ClawScribe reads the candidate again under the original account
+and checks the recorded destination before saving the link. A temporary service
+failure leaves history intact. Microsoft candidate lists show up to 100 entries
+and can be limited by service access or OneNote section listing limits.
+
+After confirming an item is absent in the service, choose **Allow retry** where
+available. A saved Microsoft item that can still be found or an inaccessible
+original destination blocks this option. Resolve saved child items before
+replacing their OneDrive folder or OneNote section. Saving a resolution changes
+local history. A new export requires separate review and submission. Saved tasks
+keep their identity across edits.
+
+Confluence identifies the PAT account before publishing. History records a
+fingerprint of the account and draft. Repeating a publish offers **Open** for
+the existing page. If the local draft changed, review and apply those edits in
+Confluence. A previously linked page might be hidden by a permissions change.
+Use the browser draft to review replacement of a deleted page. Legacy entries
+can be linked to an existing page after verifying it in the original destination.
 
 Older Planner and To Do exports identified summary suggestions by title and
 position. When a title matches several past tasks, or several suggestions match

@@ -9,7 +9,10 @@ Remote Ollama, OpenAI, OpenAI-compatible endpoints, OpenClaw, OpenRouter, Claude
 and Groq require you to review the provider, model, and destination before
 ClawScribe sends transcript text and notes context. The review identifies
 unencrypted HTTP connections. Changes to the selected destination, model, or
-provider require another review. Use Codex or Claude Code from a saved meeting.
+provider require another review. Earlier external approvals must be renewed before
+automatic notes can include the local meeting date and weekday, duration when
+known, and title when permitted. Built-in AI and loopback Ollama keep their local
+preferences. Use Codex or Claude Code from a saved meeting.
 The current Codex protocol exposes a workspace display name, and Claude Code
 checks sign-in separately from the generation process. ClawScribe needs a
 verifiable account binding at dispatch before either can run automatic notes.
@@ -22,7 +25,9 @@ In the audio import dialog, **Generate a summary after transcription** applies
 only to that import and uses the destination shown in the dialog. An approved
 automatic notes setting selects the option by default. You can clear it for
 the file or select it even when automatic notes are off. ClawScribe captures
-the selected provider and destination when you begin the import.
+the selected provider and destination when you begin the import. If an older
+import approval no longer covers the external request, transcription can still
+finish. Open the saved meeting to generate its summary manually.
 
 Open the saved meeting to check progress or see why automatic notes were skipped.
 Capture gaps stay visible in the meeting. Notes can cover the available speech
@@ -41,8 +46,11 @@ Meeting backups exclude this pending check.
 ClawScribe can retry an interrupted background job once on startup when
 automatic notes are still enabled and the same destination is approved. A
 recording or transcription can pause automatic Built-in AI notes. They resume
-when local inference is available, including after restarting ClawScribe.
-**Stop** cancels the current job, including a paused job.
+when local inference is available, including after restarting ClawScribe when
+the original approval is still valid. **Stop** cancels the current job, including
+a paused job. If approval changes, or you restore a meeting with paused notes
+from a backup, open the meeting and select **Retry summary** to generate notes
+manually.
 
 Summary generation uses a snapshot of the saved transcript. The prompt includes
 the displayed local meeting date and weekday, measured duration when available,

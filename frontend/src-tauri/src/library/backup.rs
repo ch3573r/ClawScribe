@@ -5,14 +5,20 @@ use serde_json::{Map, Value};
 use sqlx::{Row, SqlitePool};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 use tauri::{AppHandle, Emitter, Manager};
 use zip::write::SimpleFileOptions;
 #[path = "backup/documents.rs"]
 mod archive_documents;
 #[path = "backup/exports.rs"]
 mod archive_exports;
+#[path = "backup/follow_through.rs"]
+mod archive_follow_through;
 #[path = "backup/preferences.rs"]
 mod preferences;
 #[path = "backup/records.rs"]
@@ -45,6 +51,129 @@ static ARCHIVE_JOB: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub(crate) static PORTABLE_SETTINGS_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 
+pub(super) const BACKUP_DEFERRED: &str = "Scheduled backup deferred for a recording.";
+const NO_SPACE: &str = "Not enough free disk space for the scheduled backup.";
+const COPYING: u8 = 0;
+const DEFERRED: u8 = 1;
+const SEALED: u8 = 2;
+
+#[derive(Default)]
+pub(super) struct ScheduledBackup {
+    state: AtomicU8,
+    records_budget: Option<u64>,
+    archive_budget: Option<u64>,
+    shared_volume: bool,
+    #[cfg(test)]
+    pause_copy: std::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
+}
+
+impl ScheduledBackup {
+    pub(super) fn new(
+        records_volume: Option<(PathBuf, u64)>,
+        archive_volume: Option<(PathBuf, u64)>,
+    ) -> Self {
+        use crate::audio::disk_space::START_FLOOR_BYTES;
+        let budget = |volume: &(_, u64)| volume.1.saturating_sub(START_FLOOR_BYTES);
+        Self {
+            records_budget: records_volume.as_ref().map(budget),
+            archive_budget: archive_volume.as_ref().map(budget),
+            shared_volume: records_volume
+                .zip(archive_volume)
+                .is_some_and(|((source, _), (target, _))| source == target),
+            ..Self::default()
+        }
+    }
+
+    fn defer(&self) -> bool {
+        !matches!(
+            self.state
+                .compare_exchange(COPYING, DEFERRED, Ordering::AcqRel, Ordering::Acquire),
+            Err(SEALED)
+        )
+    }
+
+    fn seal(&self) -> Result<(), String> {
+        self.state
+            .compare_exchange(COPYING, SEALED, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| BACKUP_DEFERRED.into())
+    }
+
+    fn checkpoint(&self) -> Result<(), String> {
+        if self.state.load(Ordering::Acquire) == DEFERRED {
+            return Err(BACKUP_DEFERRED.into());
+        }
+        Ok(())
+    }
+
+    fn archive_budget(&self, staged_bytes: u64) -> Option<u64> {
+        self.archive_budget.map(|budget| {
+            if self.shared_volume {
+                budget.saturating_sub(staged_bytes)
+            } else {
+                budget
+            }
+        })
+    }
+}
+
+fn backup_checkpoint(scheduled: Option<&ScheduledBackup>) -> Result<(), String> {
+    scheduled.map_or(Ok(()), ScheduledBackup::checkpoint)
+}
+
+// Job admission stays responsive even inside a single large ZIP member. This
+// also bounds the space consumed by the stored ZIP, including its headers.
+struct ArchiveOutput<'a> {
+    file: &'a mut File,
+    scheduled: Option<&'a ScheduledBackup>,
+    limit: Option<u64>,
+    position: u64,
+}
+
+impl Write for ArchiveOutput<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        if self.position >= 64 * 1024 {
+            if let Some((entered, blocked)) = self
+                .scheduled
+                .and_then(|scheduled| scheduled.pause_copy.lock().unwrap().take())
+            {
+                let _ = entered.send(());
+                let _ = blocked.recv_timeout(std::time::Duration::from_secs(5));
+            }
+        }
+        backup_checkpoint(self.scheduled).map_err(io::Error::other)?;
+        let bytes = &bytes[..bytes.len().min(64 * 1024)];
+        if self
+            .limit
+            .is_some_and(|limit| self.position.saturating_add(bytes.len() as u64) > limit)
+        {
+            return Err(io::Error::other(NO_SPACE));
+        }
+        let written = self.file.write(bytes)?;
+        self.position += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        backup_checkpoint(self.scheduled).map_err(io::Error::other)?;
+        self.file.flush()
+    }
+}
+
+impl Seek for ArchiveOutput<'_> {
+    fn seek(&mut self, seek: SeekFrom) -> io::Result<u64> {
+        backup_checkpoint(self.scheduled).map_err(io::Error::other)?;
+        self.position = self.file.seek(seek)?;
+        Ok(self.position)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     format: String,
@@ -54,6 +183,11 @@ struct Manifest {
     table_records: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "preferences::Portable::is_empty")]
     portable: preferences::Portable,
+    #[serde(
+        default,
+        skip_serializing_if = "archive_follow_through::Portable::is_empty"
+    )]
+    follow_through: archive_follow_through::Portable,
     // Index into the meetings array -> leaf filenames. Never contains source paths.
     files: BTreeMap<usize, Vec<String>>,
     // Optional in V1; omissions remain visible when this archive is restored.
@@ -88,7 +222,9 @@ pub struct BackupReport {
     pub files: usize,
     /// Meetings restored without a calendar link that could not be read.
     pub unreadable_calendar_links: usize,
+    pub skipped_template_items: usize,
     pub incomplete_meetings: Vec<IncompleteMeeting>,
+    pub omitted_saved_live_answers: u64,
 }
 
 fn incomplete_meetings(
@@ -234,14 +370,15 @@ async fn snapshot_tables(
     meeting_tables: &[&str],
     with_documents: bool,
 ) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
-    snapshot_tables_impl(pool, meeting_tables, with_documents, None).await
+    snapshot_tables_impl(pool, meeting_tables, with_documents, None, None).await
 }
 
 async fn snapshot_tables_impl(
     pool: &SqlitePool,
     meeting_tables: &[&str],
     with_documents: bool,
-    records_root: Option<&Path>,
+    record_files: Option<&records::SnapshotFiles>,
+    scheduled: Option<&ScheduledBackup>,
 ) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut tables = BTreeMap::new();
@@ -252,6 +389,7 @@ async fn snapshot_tables_impl(
         .iter()
         .chain(archive_documents::TABLES.iter().filter(|_| with_documents))
     {
+        backup_checkpoint(scheduled)?;
         let columns = sqlx::query(&format!("PRAGMA table_info({table})"))
             .fetch_all(&mut *tx)
             .await
@@ -281,14 +419,22 @@ async fn snapshot_tables_impl(
         let select = format!(
             "SELECT rowid AS record_id, json_object({args}) AS record FROM {table}{filter}"
         );
-        if let Some(root) = records_root.filter(|_| records::TABLES.contains(table)) {
-            let count =
-                records::snapshot(&mut tx, root, table, &select, &mut records_bytes).await?;
+        if let Some(files) = record_files.filter(|_| records::TABLES.contains(table)) {
+            let count = records::snapshot(
+                &mut tx,
+                files,
+                table,
+                &select,
+                &mut records_bytes,
+                scheduled,
+            )
+            .await?;
             table_records.insert(table.to_string(), count);
             continue;
         }
         // Page the snapshot so the SQLite result itself is bounded.
         loop {
+            backup_checkpoint(scheduled)?;
             let page: Vec<String> = sqlx::query_scalar(&format!(
                 "SELECT record FROM ({select}) ORDER BY record_id LIMIT 500 OFFSET ?"
             ))
@@ -298,6 +444,7 @@ async fn snapshot_tables_impl(
             .map_err(failure)?;
             let count = page.len();
             for row in page {
+                backup_checkpoint(scheduled)?;
                 budget = budget
                     .checked_sub(row.len() as u64)
                     .ok_or("Meeting metadata exceeds the 128 MiB archive limit.")?;
@@ -310,9 +457,19 @@ async fn snapshot_tables_impl(
         tables.insert(table.to_string(), rows);
     }
     let mut portable = preferences::Portable::default();
-    if records_root.is_some() {
+    backup_checkpoint(scheduled)?;
+    let follow_through = if record_files.is_some() {
         portable.series = preferences::capture_series(&mut tx, &tables["meetings"]).await?;
-    }
+        archive_follow_through::Portable::capture(
+            &mut tx,
+            &tables["meetings"],
+            &mut budget,
+            scheduled,
+        )
+        .await?
+    } else {
+        archive_follow_through::Portable::default()
+    };
     tx.commit().await.map_err(failure)?;
     let mut folders = Vec::new();
     for row in tables.get_mut("meetings").unwrap() {
@@ -335,7 +492,7 @@ async fn snapshot_tables_impl(
     Ok((
         Manifest {
             format: "ClawScribe meeting archive".into(),
-            version: if records_root.is_some() {
+            version: if record_files.is_some() {
                 3
             } else if with_documents {
                 2
@@ -345,6 +502,7 @@ async fn snapshot_tables_impl(
             tables,
             table_records,
             portable,
+            follow_through,
             files: BTreeMap::new(),
             incomplete_audio: BTreeMap::new(),
             document_files: BTreeMap::new(),
@@ -363,27 +521,111 @@ fn write_archive(
     write_archive_impl(path, manifest, folders, None, None, false)
 }
 
+#[cfg(test)]
 fn write_archive_impl(
     path: &Path,
-    mut manifest: Manifest,
+    manifest: Manifest,
     folders: Vec<Option<PathBuf>>,
     reference_root: Option<&Path>,
     records_root: Option<&Path>,
     exclusive: bool,
 ) -> Result<BackupReport, String> {
-    archive_documents::set_file_references(&mut manifest)?;
-    let documents = archive_documents::validate(&manifest)?;
+    let records = records_root.map(|path| records::SnapshotFiles::Named(path.to_owned()));
+    prepare_archive(
+        archive_tempfile(path)?,
+        manifest,
+        folders,
+        reference_root,
+        records.as_ref(),
+        None,
+    )?
+    .publish(path, exclusive)
+}
+
+fn archive_tempfile(path: &Path) -> Result<tempfile::NamedTempFile, String> {
+    tempfile::NamedTempFile::new_in(path.parent().ok_or("Choose a destination folder.")?)
+        .map_err(failure)
+}
+
+struct PreparedBackup {
+    output: tempfile::NamedTempFile,
+    report: BackupReport,
+}
+
+impl PreparedBackup {
+    fn publish(self, path: &Path, exclusive: bool) -> Result<BackupReport, String> {
+        self.output.as_file().sync_all().map_err(failure)?;
+        if exclusive {
+            // A renamed or replaced temporary file must never be published.
+            self.output.reopen().map_err(failure)?;
+            self.output.persist_noclobber(path).map_err(failure)?;
+        } else {
+            self.output.persist(path).map_err(failure)?;
+        }
+        Ok(self.report)
+    }
+}
+
+fn prepare_archive(
+    mut output: tempfile::NamedTempFile,
+    mut manifest: Manifest,
+    folders: Vec<Option<PathBuf>>,
+    reference_root: Option<&Path>,
+    record_files: Option<&records::SnapshotFiles>,
+    scheduled: Option<&ScheduledBackup>,
+) -> Result<PreparedBackup, String> {
+    let result = write_archive_contents(
+        output.as_file_mut(),
+        &mut manifest,
+        folders,
+        reference_root,
+        record_files,
+        scheduled,
+    );
+    backup_checkpoint(scheduled)?;
+    let files = result?;
+    let report = BackupReport {
+        meetings: manifest.tables["meetings"].len(),
+        skipped: 0,
+        files,
+        unreadable_calendar_links: 0,
+        skipped_template_items: 0,
+        incomplete_meetings: incomplete_meetings(&manifest, None),
+        omitted_saved_live_answers: manifest.follow_through.omitted_answers(None),
+    };
+    Ok(PreparedBackup { output, report })
+}
+
+fn write_archive_contents(
+    output: &mut File,
+    manifest: &mut Manifest,
+    folders: Vec<Option<PathBuf>>,
+    reference_root: Option<&Path>,
+    record_files: Option<&records::SnapshotFiles>,
+    scheduled: Option<&ScheduledBackup>,
+) -> Result<usize, String> {
+    backup_checkpoint(scheduled)?;
+    archive_documents::set_file_references(manifest)?;
+    let documents = archive_documents::validate(manifest)?;
     manifest.portable.validate(&manifest.tables["meetings"])?;
-    let mut output =
-        tempfile::NamedTempFile::new_in(path.parent().ok_or("Choose a destination folder.")?)
-            .map_err(failure)?;
-    let mut zip = zip::ZipWriter::new(output.as_file_mut());
+    manifest.follow_through.validate(manifest, scheduled)?;
+    let staged_bytes = record_files.map_or(Ok(0), records::SnapshotFiles::bytes)?;
+    let limit = scheduled.and_then(|backup| backup.archive_budget(staged_bytes));
+    if limit.is_some_and(|limit| staged_bytes > limit) {
+        return Err(NO_SPACE.into());
+    }
+    let mut zip = zip::ZipWriter::new(ArchiveOutput {
+        file: output,
+        scheduled,
+        limit,
+        position: 0,
+    });
     let options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
         .large_file(true);
     let mut files = 0;
-    let mut total = match records_root {
-        Some(root) => records::write(&mut zip, root, options)?,
+    let mut total = match record_files {
+        Some(files) => records::write(&mut zip, files, options)?,
         None => 0,
     };
     let mut history_budget = archive_exports::remaining_budget(&manifest.export_ledgers)?;
@@ -400,6 +642,7 @@ fn write_archive_impl(
         })
         .collect();
     for (index, folder) in folders.iter().enumerate() {
+        backup_checkpoint(scheduled)?;
         let meeting = &manifest.tables["meetings"][index];
         let recovery_pending = meeting
             .get("id")
@@ -484,6 +727,7 @@ fn write_archive_impl(
         let mut has_audio = false;
         let mut unique = HashSet::new();
         for entry in entries {
+            backup_checkpoint(scheduled)?;
             let entry = entry.map_err(failure)?;
             let name = entry.file_name().to_string_lossy().to_string();
             if !allowed_file(&name) {
@@ -518,6 +762,9 @@ fn write_archive_impl(
             if files > MAX_FILES || total > MAX_BYTES {
                 return Err("Archive exceeds 100 GiB or 100,000 files.".into());
             }
+            if limit.is_some_and(|limit| total > limit) {
+                return Err(NO_SPACE.into());
+            }
             zip.start_file(format!("recordings/{index}/{name}"), options)
                 .map_err(failure)?;
             if std::io::copy(&mut Read::take(&mut input, size + 1), &mut zip).map_err(failure)?
@@ -544,27 +791,16 @@ fn write_archive_impl(
         &mut files,
         &mut total,
     )?;
-    archive_exports::validate(&manifest)?;
-    let bytes = serde_json::to_vec(&manifest).map_err(failure)?;
+    backup_checkpoint(scheduled)?;
+    archive_exports::validate(manifest)?;
+    let bytes = serde_json::to_vec(manifest).map_err(failure)?;
     if bytes.len() as u64 > MAX_MANIFEST {
         return Err("Meeting metadata exceeds the archive limit.".into());
     }
     zip.start_file("manifest.json", options).map_err(failure)?;
     zip.write_all(&bytes).map_err(failure)?;
     zip.finish().map_err(failure)?;
-    output.as_file().sync_all().map_err(failure)?;
-    if exclusive {
-        output.persist_noclobber(path).map_err(failure)?;
-    } else {
-        output.persist(path).map_err(failure)?;
-    }
-    Ok(BackupReport {
-        meetings: manifest.tables["meetings"].len(),
-        skipped: 0,
-        files,
-        unreadable_calendar_links: 0,
-        incomplete_meetings: incomplete_meetings(&manifest, None),
-    })
+    Ok(files)
 }
 
 fn unpack(
@@ -615,6 +851,7 @@ fn unpack(
     }
     let documents = archive_documents::validate(&manifest)?;
     manifest.portable.validate(&manifest.tables["meetings"])?;
+    manifest.follow_through.validate(&manifest, None)?;
     if manifest
         .incomplete_audio
         .keys()
@@ -776,42 +1013,63 @@ async fn insert_archive_row(
     Ok(())
 }
 
-/// Compare inside the restore transaction without loading canonical body strings.
-/// Archived text is already bounded by the manifest limit; SQLite compares it in place.
+/// Compare the archived source against the destination inside the import transaction.
+/// The temporary index holds only identities and comparison results, even for v3.
 async fn same_archived_source(
     connection: &mut sqlx::SqliteConnection,
     meeting: &Map<String, Value>,
-    rows: &[&Map<String, Value>],
     id: &str,
 ) -> Result<bool, String> {
-    let metadata: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM meetings WHERE id=? AND title IS ? AND created_at IS ?)",
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM meetings WHERE id=?1 AND title IS ?2 AND created_at IS ?3)
+         AND (SELECT count(*) FROM transcripts WHERE meeting_id=?1) =
+             (SELECT count(*) FROM temp.archive_transcript_comparisons WHERE meeting_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM temp.archive_transcript_comparisons
+                        WHERE meeting_id=?1 AND matches=0)",
     )
     .bind(id)
     .bind(meeting.get("title").and_then(Value::as_str))
     .bind(meeting.get("created_at").and_then(Value::as_str))
-    .fetch_one(&mut *connection)
+    .fetch_one(connection)
+    .await
+    .map_err(failure)
+}
+
+async fn compare_archived_transcript(
+    connection: &mut sqlx::SqliteConnection,
+    meeting: &str,
+    row: &Map<String, Value>,
+) -> Result<(), String> {
+    let text = |key| match row.get(key) {
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        None | Some(Value::Null) => Ok(None),
+        _ => Err("Invalid transcript text field."),
+    };
+    let time = |key| match row.get(key) {
+        Some(Value::Number(value)) => value.as_f64().map(Some).ok_or("Invalid transcript time."),
+        None | Some(Value::Null) => Ok(None),
+        _ => Err("Invalid transcript time."),
+    };
+    sqlx::query(
+        "INSERT INTO temp.archive_transcript_comparisons (id, meeting_id, matches)
+         VALUES (?1, ?2, EXISTS(SELECT 1 FROM transcripts WHERE id=?1 AND meeting_id=?2
+             AND transcript IS ?3 AND speaker IS ?4 AND timestamp IS ?5
+             AND audio_start_time IS ?6 AND audio_end_time IS ?7 AND duration IS ?8
+             AND word_timestamps_json IS ?9))",
+    )
+    .bind(text_field(row, "id")?)
+    .bind(meeting)
+    .bind(text_field(row, "transcript")?)
+    .bind(text("speaker")?)
+    .bind(text_field(row, "timestamp")?)
+    .bind(time("audio_start_time")?)
+    .bind(time("audio_end_time")?)
+    .bind(time("duration")?)
+    .bind(text("word_timestamps_json")?)
+    .execute(connection)
     .await
     .map_err(failure)?;
-    if !metadata {
-        return Ok(false);
-    }
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM transcripts WHERE meeting_id=?")
-        .bind(id)
-        .fetch_one(&mut *connection)
-        .await
-        .map_err(failure)?;
-    if count != rows.len() as i64 {
-        return Ok(false);
-    }
-    for row in rows {
-        let equal:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transcripts WHERE id=? AND meeting_id=? AND transcript IS ? AND speaker IS ? AND timestamp IS ? AND audio_start_time IS ? AND audio_end_time IS ? AND duration IS ? AND word_timestamps_json IS ?)")
-            .bind(row.get("id").and_then(Value::as_str)).bind(id).bind(row.get("transcript").and_then(Value::as_str)).bind(row.get("speaker").and_then(Value::as_str)).bind(row.get("timestamp").and_then(Value::as_str)).bind(row.get("audio_start_time").and_then(Value::as_f64)).bind(row.get("audio_end_time").and_then(Value::as_f64)).bind(row.get("duration").and_then(Value::as_f64)).bind(row.get("word_timestamps_json").and_then(Value::as_str)).fetch_one(&mut *connection).await.map_err(failure)?;
-        if !equal {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    Ok(())
 }
 
 async fn import_conversations(
@@ -827,12 +1085,6 @@ async fn import_conversations(
         .iter()
         .filter_map(|row| row.get("id").and_then(Value::as_str).map(|id| (id, row)))
         .collect();
-    let mut canonical_rows = BTreeMap::<&str, Vec<&Map<String, Value>>>::new();
-    for row in rows("transcripts") {
-        if let Some(id) = row.get("meeting_id").and_then(Value::as_str) {
-            canonical_rows.entry(id).or_default().push(row);
-        }
-    }
     // Validate even skipped rows. Table-specific identities replace the generic
     // meeting_id assumption used by the older meeting-only child tables.
     for table in TABLES
@@ -1021,16 +1273,8 @@ async fn import_conversations(
         } else {
             let same = selected.contains(meeting)
                 || (known.contains(meeting)
-                    && same_archived_source(
-                        connection,
-                        canonical_meetings[meeting],
-                        canonical_rows
-                            .get(meeting)
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]),
-                        meeting,
-                    )
-                    .await?);
+                    && same_archived_source(connection, canonical_meetings[meeting], meeting)
+                        .await?);
             comparable.insert(meeting.to_string(), same);
             same
         };
@@ -1321,6 +1565,7 @@ async fn import_manifest_impl(
     let documents = archive_documents::validate(&manifest)?;
     archive_exports::validate(&manifest)?;
     manifest.portable.validate(&manifest.tables["meetings"])?;
+    manifest.follow_through.validate(&manifest, None)?;
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut selected = HashSet::new();
     let mut known = HashSet::new();
@@ -1344,6 +1589,33 @@ async fn import_manifest_impl(
         } else {
             selected.insert(id.to_string());
         }
+    }
+    let comparisons: HashSet<&str> = manifest
+        .tables
+        .get("knowledge_request_sources")
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("source_id")?.as_str()?.strip_prefix("meeting:"))
+        .filter(|id| known.contains(*id) && !selected.contains(*id))
+        .collect();
+    if !comparisons.is_empty() {
+        // Desktop SQLite's temp database is file-backed. A unique transcript ID
+        // keeps a repeated archive row from passing the count check for a missing one.
+        sqlx::query(
+            "CREATE TEMP TABLE archive_transcript_comparisons (
+                 id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, matches INTEGER NOT NULL
+             ) WITHOUT ROWID",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(failure)?;
+        sqlx::query(
+            "CREATE INDEX temp.archive_transcript_comparison_meeting
+             ON archive_transcript_comparisons (meeting_id, matches)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(failure)?;
     }
     // Meetings restored without a recording folder (the archive carried no
     // files for them). No transcript or metadata file can ever be written for
@@ -1407,6 +1679,9 @@ async fn import_manifest_impl(
                 return Err("Archive contains an unknown meeting reference.".into());
             }
             if !selected.contains(&parent) {
+                if *table == "transcripts" && comparisons.contains(parent.as_str()) {
+                    compare_archived_transcript(&mut tx, &parent, &source).await?;
+                }
                 continue;
             }
             let folderless_meeting = folderless.get(&parent).copied();
@@ -1542,6 +1817,10 @@ async fn import_manifest_impl(
         .portable
         .restore_series(&mut tx, &manifest.tables["meetings"], &selected)
         .await?;
+    let omitted_saved_live_answers = manifest
+        .follow_through
+        .restore(&mut tx, &manifest.tables["meetings"], &selected)
+        .await?;
     let document_restore = archive_documents::restore_rows(
         &mut tx,
         &manifest,
@@ -1559,6 +1838,12 @@ async fn import_manifest_impl(
         &document_restore.identities,
     )
     .await?;
+    if !comparisons.is_empty() {
+        sqlx::query("DROP TABLE temp.archive_transcript_comparisons")
+            .execute(&mut *tx)
+            .await
+            .map_err(failure)?;
+    }
     for (index, incomplete) in &manifest.incomplete_audio {
         if !incomplete.recovery_files_excluded {
             continue;
@@ -1645,6 +1930,7 @@ async fn import_manifest_impl(
     .await
     .map_err(failure)??;
     let document_files = originals.count();
+    let skipped_template_items = portable.skipped_templates;
     // Once commit starts, a detached task owns both the files and transaction.
     // Dropping an invoking future cannot remove originals after a successful commit.
     tokio::spawn(async move {
@@ -1665,7 +1951,9 @@ async fn import_manifest_impl(
         skipped,
         files: files + document_files,
         unreadable_calendar_links,
+        skipped_template_items,
         incomplete_meetings: incomplete_meetings(&manifest, Some(&selected)),
+        omitted_saved_live_answers,
     })
 }
 
@@ -1676,12 +1964,23 @@ async fn snapshot_with_documents(
     snapshot_impl(pool, true).await
 }
 
+#[cfg(test)]
 async fn snapshot_current(
     pool: &SqlitePool,
     records_root: &Path,
 ) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
+    let files = records::SnapshotFiles::Named(records_root.to_owned());
+    snapshot_for_backup(pool, &files, None).await
+}
+
+async fn snapshot_for_backup(
+    pool: &SqlitePool,
+    files: &records::SnapshotFiles,
+    scheduled: Option<&ScheduledBackup>,
+) -> Result<(Manifest, Vec<Option<PathBuf>>), String> {
+    backup_checkpoint(scheduled)?;
     super::attach_bookmarks(pool).await.map_err(failure)?;
-    snapshot_tables_impl(pool, TABLES, true, Some(records_root)).await
+    snapshot_tables_impl(pool, TABLES, true, Some(files), scheduled).await
 }
 
 #[cfg(test)]
@@ -1708,6 +2007,10 @@ async fn import_manifest_with_documents(
 #[path = "backup/document_tests.rs"]
 mod document_tests;
 
+#[cfg(test)]
+#[path = "backup/follow_through_tests.rs"]
+mod follow_through_tests;
+
 #[tauri::command]
 pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport, String> {
     // Only a path the user chose in the save dialog the core opened
@@ -1721,35 +2024,99 @@ pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport
 }
 
 async fn backup_library_to(app: AppHandle, path: PathBuf) -> Result<BackupReport, String> {
-    backup_with_permits(app, path, false, claim_archive()?).await
+    backup_with_permits(app, path, claim_archive()?, None).await
 }
 
-pub(super) struct ArchivePermits {
+enum ArchiveAudio {
+    Foreground {
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    },
+    Scheduled {
+        _permit: crate::audio::inference::BatchPermit,
+    },
+}
+
+struct ArchivePermits {
+    audio: Option<ArchiveAudio>,
     _archive: tokio::sync::MutexGuard<'static, ()>,
-    _audio: tokio::sync::OwnedSemaphorePermit,
     _export: tokio::sync::MutexGuard<'static, ()>,
 }
 
-pub(super) fn claim_archive() -> Result<ArchivePermits, String> {
+impl ArchivePermits {
+    fn finish_reading_for_schedule(&mut self, control: &ScheduledBackup) -> Result<(), String> {
+        // The completed ZIP contains everything it needs. Only capture can
+        // resume here: restore and exports are locked through publication.
+        control.seal()?;
+        drop(self.audio.take());
+        Ok(())
+    }
+}
+
+fn claim_archive() -> Result<ArchivePermits, String> {
+    claim_archive_with(|| {
+        let permit = crate::audio::inference::claim_job()?;
+        Ok(ArchiveAudio::Foreground { _permit: permit })
+    })
+}
+
+pub(super) fn scheduled_backup_should_yield() -> bool {
+    // A local summary releases its inference permit between model requests.
+    crate::summary::SummaryService::has_active_local_summary()
+        || crate::knowledge::scheduler::foreground_waiting()
+}
+
+fn claim_scheduled_archive(control: &Arc<ScheduledBackup>) -> Result<ArchivePermits, String> {
+    let control = control.clone();
+    claim_archive_with(|| {
+        use crate::audio::inference::{claim_batch_job_without_preemption, BatchJob};
+        if scheduled_backup_should_yield() {
+            return Err(BACKUP_DEFERRED.into());
+        }
+        let permit = claim_batch_job_without_preemption(
+            BatchJob::ScheduledBackup,
+            Arc::new(move || control.defer()),
+        )?;
+        Ok(ArchiveAudio::Scheduled { _permit: permit })
+    })
+}
+
+fn claim_archive_with(
+    claim_audio: impl FnOnce() -> Result<ArchiveAudio, String>,
+) -> Result<ArchivePermits, String> {
     let archive = ARCHIVE_JOB
         .try_lock()
         .map_err(|_| "Another archive operation is running.")?;
-    let audio = crate::audio::inference::claim_job()?;
     let export = crate::exports::commands::EXPORT_LOCK
         .try_lock()
         .map_err(|_| "Finish the Microsoft export before working with an archive.")?;
     Ok(ArchivePermits {
+        audio: Some(claim_audio()?),
         _archive: archive,
-        _audio: audio,
         _export: export,
     })
 }
 
-pub(super) async fn backup_with_permits(
+pub(super) async fn try_scheduled_backup(
     app: AppHandle,
     path: PathBuf,
-    exclusive: bool,
+    output: tempfile::NamedTempFile,
+    control: Arc<ScheduledBackup>,
+) -> Result<Option<BackupReport>, String> {
+    let Ok(permits) = claim_scheduled_archive(&control) else {
+        return Ok(None);
+    };
+    let result = backup_with_permits(app, path, permits, Some((output, control.clone()))).await;
+    match result {
+        Err(_) if control.checkpoint().is_err() => Ok(None),
+        result => result.map(Some),
+    }
+}
+
+async fn backup_with_permits(
+    app: AppHandle,
+    path: PathBuf,
     permits: ArchivePermits,
+    scheduled_output: Option<(tempfile::NamedTempFile, Arc<ScheduledBackup>)>,
 ) -> Result<BackupReport, String> {
     if !path
         .extension()
@@ -1757,26 +2124,49 @@ pub(super) async fn backup_with_permits(
     {
         return Err("Choose a .zip backup file.".into());
     }
-    crate::file_grants::save_target_parent_exists(&path)?;
+    if scheduled_output.is_none() {
+        crate::file_grants::save_target_parent_exists(&path)?;
+    }
     let app_data = app.path().app_data_dir().map_err(failure)?;
     let reference_root = app_data.join("reference-documents");
-    let records = tempfile::tempdir_in(&app_data).map_err(failure)?;
+    let stage_root = app_data.clone();
+    let records =
+        tokio::task::spawn_blocking(move || records::SnapshotFiles::temporary(&stage_root))
+            .await
+            .map_err(failure)??;
+    let (output, control) = match scheduled_output {
+        Some((output, control)) => (Some(output), Some(control)),
+        None => (None, None),
+    };
     let state = app
         .try_state::<AppState>()
         .ok_or("Open the meeting library first.")?;
-    let (mut manifest, folders) = snapshot_current(state.db_manager.pool(), records.path()).await?;
+    let (mut manifest, folders) =
+        snapshot_for_backup(state.db_manager.pool(), &records, control.as_deref()).await?;
     tokio::task::spawn_blocking(move || {
-        let _permits = permits;
-        archive_exports::capture(&mut manifest, &app_data)?;
-        manifest.portable.capture_files(&app_data)?;
-        write_archive_impl(
-            &path,
+        let mut permits = permits;
+        backup_checkpoint(control.as_deref())?;
+        archive_exports::capture_for_backup(&mut manifest, &app_data, control.as_deref())?;
+        backup_checkpoint(control.as_deref())?;
+        let skipped_template_items = manifest.portable.capture_files(&app_data)?;
+        let output = match output {
+            Some(output) => output,
+            None => archive_tempfile(&path)?,
+        };
+        let mut prepared = prepare_archive(
+            output,
             manifest,
             folders,
             Some(&reference_root),
-            Some(records.path()),
-            exclusive,
-        )
+            Some(&records),
+            control.as_deref(),
+        )?;
+        prepared.report.skipped_template_items = skipped_template_items;
+        drop(records);
+        if let Some(control) = &control {
+            permits.finish_reading_for_schedule(control)?;
+        }
+        prepared.publish(&path, control.is_some())
     })
     .await
     .map_err(failure)?
@@ -1842,10 +2232,128 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn scheduled_archive_defers_between_local_summary_requests() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let summary =
+            crate::summary::SummaryService::register_job("backup-summary", "builtin-ai").unwrap();
+        let control = Arc::new(ScheduledBackup::default());
+        assert!(
+            matches!(claim_scheduled_archive(&control), Err(message) if message == BACKUP_DEFERRED)
+        );
+        drop(summary);
+        assert!(claim_scheduled_archive(&control).is_ok());
+    }
+
+    #[tokio::test]
+    async fn scheduled_archive_yields_to_recording_during_audio_copy() {
+        use crate::audio::inference::{claim_recording_for_test, GLOBAL_JOB_TEST_LOCK};
+        use std::time::{Duration, Instant};
+
+        let _serial = GLOBAL_JOB_TEST_LOCK.lock().await;
+        let temp = tempfile::tempdir().unwrap();
+        let saved = temp.path().join("recording");
+        std::fs::create_dir(&saved).unwrap();
+        let audio = File::create(saved.join("audio.wav")).unwrap();
+        audio.set_len(64 * 1024 * 1024).unwrap();
+        drop(audio);
+        let source = crate::database::transcript_edits::tests::fixture().await;
+        let records = tempfile::tempdir().unwrap();
+        let (manifest, _) = snapshot_current(&source, records.path()).await.unwrap();
+        assert_eq!(manifest.tables["meetings"].len(), 1);
+        let previous = temp.path().join("previous.zip");
+        std::fs::write(&previous, b"previous good backup").unwrap();
+        let destination = temp.path().join("next.zip");
+        let staging = tempfile::NamedTempFile::new_in(temp.path()).unwrap();
+        let stage_path = staging.path().to_owned();
+        let (entered, copying) = tokio::sync::oneshot::channel();
+        let (unblock, blocked) = std::sync::mpsc::channel();
+        let mut control = ScheduledBackup::default();
+        *control.pause_copy.get_mut().unwrap() = Some((entered, blocked));
+        let control = std::sync::Arc::new(control);
+        let permits = claim_scheduled_archive(&control).unwrap();
+        let worker_destination = destination.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            let mut permits = permits;
+            let prepared = prepare_archive(
+                staging,
+                manifest,
+                vec![Some(saved)],
+                None,
+                None,
+                Some(&control),
+            )?;
+            permits.finish_reading_for_schedule(&control)?;
+            prepared.publish(&worker_destination, true)
+        });
+        tokio::time::timeout(Duration::from_secs(5), copying)
+            .await
+            .expect("audio copy started")
+            .unwrap();
+        assert!(stage_path.metadata().unwrap().len() > 64 * 1024);
+        assert!(!destination.exists());
+        assert!(claim_archive().is_err());
+
+        let start = Instant::now();
+        let recording = claim_recording_for_test(|| {
+            let _ = unblock.send(());
+        })
+        .await
+        .unwrap();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let result = worker.await.unwrap();
+        assert_eq!(result.err().as_deref(), Some(BACKUP_DEFERRED));
+        assert!(!stage_path.exists());
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(previous).unwrap(), b"previous good backup");
+        assert!(claim_archive().is_err());
+        drop(recording);
+
+        let restore = claim_archive().unwrap();
+        assert!(claim_recording_for_test(|| {}).await.is_err());
+        drop(restore);
+        assert!(claim_scheduled_archive(&Default::default()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn scheduled_archive_releases_recording_slot_before_final_disk_flush() {
+        use crate::audio::inference::{claim_recording_for_test, GLOBAL_JOB_TEST_LOCK};
+        let _serial = GLOBAL_JOB_TEST_LOCK.lock().await;
+        let control = Arc::new(ScheduledBackup::default());
+        let mut flushing = claim_scheduled_archive(&control).unwrap();
+        flushing.finish_reading_for_schedule(&control).unwrap();
+        assert!(!control.defer());
+        let recording = claim_recording_for_test(|| panic!("already finished reading"))
+            .await
+            .unwrap();
+        assert!(claim_archive().is_err());
+        drop(recording);
+        assert!(claim_archive().is_err());
+        drop(flushing);
+        assert!(claim_archive().is_ok());
+    }
+
+    #[tokio::test]
+    async fn scheduled_backup_counts_staging_against_free_space_on_shared_volume() {
+        use crate::audio::disk_space::START_FLOOR_BYTES;
+        let temp = tempfile::tempdir().unwrap();
+        let source = crate::database::transcript_edits::tests::fixture().await;
+        let files = records::SnapshotFiles::temporary(temp.path()).unwrap();
+        let volume = PathBuf::from("test-volume");
+        let control = ScheduledBackup::new(
+            Some((volume.clone(), START_FLOOR_BYTES + 1)),
+            Some((volume, START_FLOOR_BYTES + 1)),
+        );
+        let result = snapshot_for_backup(&source, &files, Some(&control)).await;
+        assert_eq!(result.err().as_deref(), Some(NO_SPACE));
+        assert_eq!(control.archive_budget(1), Some(0));
+        drop(files);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
     async fn archive_policy_accounts_for_every_database_table() {
         // Every new table must be explicitly portable or profile-local.
         let excluded = [
-            "approved_series_notes",
             "knowledge_chunks",
             "knowledge_document_fts",
             "knowledge_document_permissions",
@@ -1863,9 +2371,9 @@ mod tests {
             "recording_calendar_drafts",
             "recording_library_deletions",
             "recording_summary_bookmarks",
-            "recurring_meeting_preferences",
             "retranscription_notes_retry",
-            "saved_live_answers",
+            "saved_live_answer_attachment_instances",
+            "saved_live_answer_dependencies",
             "settings",
             "transcript_settings",
         ];
@@ -1878,6 +2386,7 @@ mod tests {
             .map(String::as_str)
             .chain(manifest.table_records.keys().map(String::as_str))
             .chain(["calendar_series_templates"]) // only series linked by an archived meeting
+            .chain(archive_follow_through::TABLES.iter().copied())
             .chain(excluded)
             .collect::<std::collections::BTreeSet<_>>();
         let actual: Vec<String> = sqlx::query_scalar(
@@ -3171,6 +3680,109 @@ mod tests {
                 assert!(history
                     .iter()
                     .any(|message| message.content == "21 September [K1]."));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn version_three_compares_skipped_conversation_transcripts_from_the_zip() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        use crate::knowledge::conversations;
+
+        let (source, request) = conversation_fixture().await;
+        let temp = tempfile::tempdir().unwrap();
+        let records = tempfile::tempdir_in(temp.path()).unwrap();
+        for (case, source_empty, destination_change, matches) in [
+            ("same", false, "", true),
+            (
+                "changed",
+                false,
+                "UPDATE transcripts SET transcript='Different' WHERE id='archive-second'",
+                false,
+            ),
+            ("destination-empty", false, "DELETE FROM transcripts", false),
+            ("archive-empty", true, "", false),
+            ("both-empty", true, "DELETE FROM transcripts", true),
+        ] {
+            let target = empty_conversation_destination().await;
+            // Use independent transcripts so a restore has to compare rather than
+            // relying on the origin of the destination's data or revision number.
+            sqlx::raw_sql(
+                "INSERT INTO meetings(id,title,created_at,updated_at)
+                 VALUES ('archive-source','Public archive fixture','2026-09-01','2026-11-21');
+                 INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES
+                 ('archive-second','archive-source','Budget unchanged.','2026-09-01'),
+                 ('archive-first','archive-source','Approved: 21 September.','2026-09-01');",
+            )
+            .execute(&target)
+            .await
+            .unwrap();
+            if !destination_change.is_empty() {
+                sqlx::query(destination_change)
+                    .execute(&target)
+                    .await
+                    .unwrap();
+            }
+            let transcript = || async {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT id,transcript FROM transcripts ORDER BY id",
+                )
+                .fetch_all(&target)
+                .await
+                .unwrap()
+            };
+            let before = transcript().await;
+            if source_empty {
+                sqlx::query("DELETE FROM transcripts")
+                    .execute(&source)
+                    .await
+                    .unwrap();
+            }
+            let archive = temp.path().join(format!("{case}.zip"));
+            let (manifest, folders) = snapshot_current(&source, records.path()).await.unwrap();
+            assert!(!manifest.tables.contains_key("transcripts"));
+            assert_eq!(
+                manifest.table_records["transcripts"],
+                if source_empty { 0 } else { 2 }
+            );
+            write_archive_impl(
+                &archive,
+                manifest,
+                folders,
+                Some(temp.path()),
+                Some(records.path()),
+                false,
+            )
+            .unwrap();
+            let (manifest, stage) = unpack(
+                &archive,
+                temp.path(),
+                &HashSet::from(["archive-source".into()]),
+            )
+            .unwrap();
+            let report = import_manifest_with_documents(&target, manifest, stage, temp.path())
+                .await
+                .unwrap();
+            assert_eq!((report.meetings, report.skipped), (0, 1), "{case}");
+            assert_eq!(transcript().await, before, "{case}");
+
+            let history = conversations::history(&target, &request.owner)
+                .await
+                .unwrap();
+            assert_eq!(history.len(), 2, "{case}");
+            if matches {
+                assert_eq!(history[0].content, "What was approved?", "{case}");
+                assert_eq!(history[1].content, "21 September [K1].", "{case}");
+                let reply = history[1].reply.as_ref().unwrap();
+                assert_eq!(reply.cited_tags, vec![1], "{case}");
+                assert!(reply.evidence[0].historical, "{case}");
+            } else {
+                assert!(
+                    history.iter().all(|message| message.status == "invalidated"
+                        && message.content.is_empty()
+                        && message.reply.is_none()),
+                    "{case}"
+                );
             }
         }
     }

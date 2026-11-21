@@ -282,7 +282,9 @@ bundled Codex app-server path, plus **Claude Code** using your own installation.
 Enable **Summarize automatically** in Summary settings to generate local notes
 with Built-in AI or loopback Ollama after saving a recording. External providers
 with a known destination require a review in Summary settings. A changed provider,
-model, or destination requires fresh approval. If a recording has a capture gap,
+model, destination, or expansion of the meeting data sent requires fresh approval.
+Review existing external approvals again to include the local meeting date and
+weekday, duration when known, and title when permitted. If a recording has a capture gap,
 notes can still use its saved transcript. Transcribing an audio-only recording
 also starts approved automatic notes once the transcript is saved. For audio
 imports, you can review and use the selected provider for that file. Reopen the
@@ -370,17 +372,21 @@ See [call detection](docs/teams-detection.md).
 - **Follow-up email** lets you edit a draft, select confirmed attendees, and
   open the draft in your default email client.
 - **OneDrive or SharePoint** saves Word and optional PDF files. Repeating a
-  partial export reuses confirmed files and retries unfinished steps.
+  partial export reuses confirmed files and retries unfinished steps. Edited
+  drafts get dated filenames.
 - **Confluence** copies nested lists, code, quotes, and checklist status into a
   browser draft, or publishes through a configured self-hosted REST endpoint.
+  If the page is already published, use **Open** to apply reviewed edits in
+  Confluence.
 - **OpenClaw** can send saved meeting transcripts to a configured destination.
   Each meeting shows its delivery result. You can review failed deliveries
   and confirm uncertain ones before retrying.
 
 **Export history** shows Microsoft and Confluence results from the meeting and
-travels with portable backups. If an export has an unknown outcome, inspect the
-destination and use **Resolve outcome** to link the existing item or confirm that
-it is missing before retrying. See [export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
+travels with portable backups. Inspect the original destination and choose
+**Resolve outcome** for an interrupted export or **Review link** for a saved
+item. ClawScribe checks the item and destination before saving the link.
+See [export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
 
 Private-network HTTP for OpenClaw, custom OpenAI endpoints, and Confluence requires
 an explicit unencrypted-HTTP opt-in in Settings. Existing private HTTP setups
@@ -416,14 +422,19 @@ can read notes, transcripts, and recording paths. Both use local standard
 input and output and start off. [Local assistant access](docs/local-library.md#local-assistant-access)
 
 **Backup and restore** saves a portable archive of meeting data, transcript history,
-recordings, custom templates, vocabulary, and linked calendar series preferences.
-Restore adds missing meetings and keeps existing IDs and preferences. Backups
-continue when recording folders are missing and report affected meetings,
-excluded recovery files, and unavailable audio. Archives exclude credentials and
-models and are not encrypted.
+recordings, custom templates, vocabulary, approved series notes, and linked
+calendar series preferences. It includes explicitly saved live answers when their
+recording supplied all the source material. Restore adds missing meetings and
+keeps existing meetings and preferences. Backups continue when recording
+folders are missing and report affected meetings,
+excluded recovery files, unavailable audio, skipped custom template items, and
+excluded saved live answers.
+Archives exclude credentials and models and are not encrypted.
 Daily backups are optional and keep three recent copies in a chosen local folder.
+Recordings take priority over scheduled backups, which retry when the library is idle.
 If the database fails to open, a separate recovery library can import one of
-these archives while preserving the original files.
+these archives while preserving the original files. From recovery, select
+**Return to original library**, then quit and reopen ClawScribe to try it again.
 Saved knowledge conversations, attached reference originals and extracted blocks,
 and their original citation labels are included. Reference sharing permissions
 are excluded and remain off after restore.
@@ -434,9 +445,15 @@ Meeting deletion can also remove its recording folder, including audio,
 transcript copies, metadata, recovery originals, and generated documents. The
 option is on by default. Folders outside supported storage locations, shared
 with another meeting, or failing ownership checks are kept. Review retained
-files and retry cleanup in **Meetings → Archive → Storage**.
+files and retry cleanup in **Meetings → Archive → Storage**. Staged cleanup
+stays pending while its storage location is unavailable.
 Pre-migration database snapshots and separate backup archives can retain deleted
 meetings. See [local library tools](docs/local-library.md#deleting-meetings).
+
+The recordings folder picker saves the verified target of a link or junction.
+For an older linked setting, choose the folder again in **Settings → Recording**.
+If a recovery scan cannot verify a recording location, reconnect it and choose
+**Retry scan** to check the retained draft and audio together.
 
 ## Update Preferences
 

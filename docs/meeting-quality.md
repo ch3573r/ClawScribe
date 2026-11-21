@@ -447,10 +447,12 @@ discards old summary and transcript loading results. Title-only saves leave note
 unchanged, and save failures retain drafts for retry; edits made during a write
 remain available for the next save.
 
-Manual edits keep the structured action list supplied by the summary provider.
-**Add summary suggestions** brings those follow-ups into **Meeting actions**
-for review. Saving an action with an available transcript reference keeps that
-passage reference with the action, including after summary regeneration. The
+Manual edits keep structured follow-ups supplied by the summary provider and
+remove any corresponding actions deleted from the notes. **Add summary
+suggestions** brings the remaining follow-ups into **Meeting actions** for review.
+Removing a suggestion and saving the actions keeps it dismissed. Saving an
+action with an available transcript reference keeps that passage reference with
+the action, including after summary regeneration. The
 app flags passages that changed and reports when their transcript was replaced.
 
 The shared summary processor now advances chunks from their actual emitted
@@ -463,14 +465,11 @@ The shared, compatible-API, and bundled Codex routes all reduce long inputs
 before their final prompt and reject incomplete reductions. Budgets reserve
 output and prompt overhead, use UTF-8 bytes conservatively, and limit reduction
 to eight passes. Built-in AI and Ollama context is capped at 16,384 tokens.
-Cloud limits depend on the model; unknown cloud models use 32,768. Custom and
-OpenClaw endpoints use their configured context, or 8,192 when unspecified;
-GPT-5/6 and o1/o3/o4 names instead default to 128,000. Those reasoning names use
-16,000 output tokens and up to 8,000 extraction tokens before context-based
-limits. Codex keeps its separate 32,768-token context budget.
-Default output is capped at one quarter of context for contexts of at least
-4,096 tokens; smaller contexts use a 1,024-token cap. An explicitly configured
-output limit overrides that default. See the [budget table](architecture.md#summary-context-budgets).
+Direct cloud providers use model-specific budgets. Unknown cloud models default
+to 32,768 tokens. OpenClaw and compatible endpoints default to 8,192 and honor
+a configured context size. The bundled Codex route uses 500,000 tokens for
+GPT-6.1 Sol and 32,768 for other models. The architecture guide lists default
+output budgets and how much input each stage can use. [Summary context budgets](architecture.md#summary-context-budgets).
 These limits may increase reduction requests; they do not prove factual accuracy.
 
 Summary HTTP providers make at most three attempts for transient connection or

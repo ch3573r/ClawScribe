@@ -32,10 +32,39 @@ pub struct ReviewedAction {
     source: Option<SummarySource>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DismissedSuggestion {
+    id: String,
+    legacy_action: LegacyAction,
+}
+
+#[derive(Default)]
+pub(super) struct SavedActions {
+    pub actions: Vec<ReviewedAction>,
+    pub dismissed: Vec<DismissedSuggestion>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum StoredAction {
+    Reviewed(ReviewedAction),
+    Dismissed(DismissedSuggestion),
+}
+
 pub(super) async fn load(
     pool: &SqlitePool,
     meeting_id: &str,
 ) -> Result<Option<Vec<ReviewedAction>>, String> {
+    Ok(load_saved(pool, meeting_id)
+        .await?
+        .map(|saved| saved.actions))
+}
+
+pub(super) async fn load_saved(
+    pool: &SqlitePool,
+    meeting_id: &str,
+) -> Result<Option<SavedActions>, String> {
     let raw: Option<Option<String>> =
         sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = ?")
             .bind(meeting_id)
@@ -43,14 +72,47 @@ pub(super) async fn load(
             .await
             .map_err(|_| "Could not load meeting actions.")?;
     raw.ok_or("Meeting no longer exists.")?
-        .map(|raw| decode(&raw))
+        .map(|raw| decode_saved(&raw))
         .transpose()
 }
 
 pub(crate) fn decode(raw: &str) -> Result<Vec<ReviewedAction>, String> {
-    let mut actions = serde_json::from_str(raw).map_err(|_| "Invalid saved meeting actions.")?;
-    validate(&mut actions)?;
-    Ok(actions)
+    Ok(decode_saved(raw)?.actions)
+}
+
+fn decode_saved(raw: &str) -> Result<SavedActions, String> {
+    let stored: Vec<StoredAction> =
+        serde_json::from_str(raw).map_err(|_| "Invalid saved meeting actions.")?;
+    let mut saved = SavedActions::default();
+    for row in stored {
+        match row {
+            StoredAction::Reviewed(action) => saved.actions.push(action),
+            StoredAction::Dismissed(dismissed) => saved.dismissed.push(dismissed),
+        }
+    }
+    validate(&mut saved.actions)?;
+    validate_dismissals(&saved.dismissed)?;
+    Ok(saved)
+}
+
+fn valid_suggestion(reference: &LegacyAction) -> bool {
+    super::ledger::is_positional_action_id(&reference.id)
+        && reference.title_hash.len() == 16
+        && reference.title_hash.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn validate_dismissals(dismissed: &[DismissedSuggestion]) -> Result<(), String> {
+    let mut ids = HashSet::new();
+    if dismissed.len() > 4096
+        || dismissed.iter().any(|row| {
+            uuid::Uuid::parse_str(&row.id).is_err()
+                || !ids.insert(&row.id)
+                || !valid_suggestion(&row.legacy_action)
+        })
+    {
+        return Err("Invalid saved suggestion dismissals.".into());
+    }
+    Ok(())
 }
 
 fn validate(actions: &mut Vec<ReviewedAction>) -> Result<(), String> {
@@ -92,11 +154,11 @@ fn validate(actions: &mut Vec<ReviewedAction>) -> Result<(), String> {
         }) {
             return Err("Invalid action source reference.".into());
         }
-        if action.legacy_action.as_ref().is_some_and(|legacy| {
-            !super::ledger::is_positional_action_id(&legacy.id)
-                || legacy.title_hash.len() != 16
-                || !legacy.title_hash.bytes().all(|b| b.is_ascii_hexdigit())
-        }) {
+        if action
+            .legacy_action
+            .as_ref()
+            .is_some_and(|legacy| !valid_suggestion(legacy))
+        {
             return Err("Invalid action suggestion reference.".into());
         }
         if action.source.as_ref().is_some_and(|source| {
@@ -151,6 +213,7 @@ pub(crate) async fn get_reviewed_action_editor(
 pub(super) fn remaining_suggestions(
     suggestions: Vec<ActionSuggestion>,
     reviewed: &[ReviewedAction],
+    dismissed: &[DismissedSuggestion],
 ) -> Vec<ReviewedAction> {
     // Positions can move on regeneration. Consume each original title once so
     // a renamed or completed action stays reviewed, including repeated titles.
@@ -158,6 +221,7 @@ pub(super) fn remaining_suggestions(
     for legacy in reviewed
         .iter()
         .filter_map(|action| action.legacy_action.as_ref())
+        .chain(dismissed.iter().map(|row| &row.legacy_action))
     {
         *counts.entry(legacy.title_hash.as_str()).or_insert(0usize) += 1;
     }
@@ -212,6 +276,12 @@ pub(super) fn summary_suggestions(
     else {
         return suggestions;
     };
+    let previously_rendered = summary
+        .and_then(|summary| summary.get("markdown"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|previous| *previous != markdown)
+        .map(rendered_action_hashes)
+        .unwrap_or_default();
     for item in actions.iter().take(250) {
         let text = |field| item.get(field).and_then(|value| value.as_str());
         let Some(task) = text("task") else { continue };
@@ -232,7 +302,7 @@ pub(super) fn summary_suggestions(
                 .due_date
                 .take()
                 .or(suggestion.action.due_date);
-        } else if !seen.contains_key(&hash) {
+        } else if !seen.contains_key(&hash) && !previously_rendered.contains(&hash) {
             suggestion.action.local_action_id = format!("action-{}", suggestions.len() + 1);
             suggestions.push(suggestion);
             seen.insert(hash, Vec::new());
@@ -241,17 +311,65 @@ pub(super) fn summary_suggestions(
     suggestions
 }
 
+fn rendered_action_hashes(markdown: &str) -> HashSet<String> {
+    parse_action_suggestions(markdown)
+        .into_iter()
+        .map(|suggestion| super::planner::action_hash(&suggestion.action))
+        .collect()
+}
+
+pub(crate) fn prune_removed_summary_actions(
+    previous: &serde_json::Value,
+    edited: &mut serde_json::Value,
+) {
+    let (Some(before), Some(after)) = (
+        previous.get("markdown").and_then(serde_json::Value::as_str),
+        edited.get("markdown").and_then(serde_json::Value::as_str),
+    ) else {
+        return;
+    };
+    if before == after {
+        return;
+    }
+    let before = rendered_action_hashes(before);
+    let after = rendered_action_hashes(after);
+    if let Some(rows) = edited
+        .pointer_mut("/structured_meeting_output/action_items")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        rows.retain(|row| {
+            row.get("task")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|task| action_suggestion(task, None, None, None))
+                .is_none_or(|suggestion| {
+                    let hash = super::planner::action_hash(&suggestion.action);
+                    !before.contains(&hash) || after.contains(&hash)
+                })
+        });
+    }
+}
+
 #[tauri::command]
 pub async fn suggest_meeting_actions(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     markdown: String,
     reviewed: Option<Vec<ReviewedAction>>,
+    dismissed: Option<Vec<DismissedSuggestion>>,
 ) -> Result<Vec<ReviewedAction>, String> {
-    let summary = sources::saved_result(state.db_manager.pool(), &meeting_id).await?;
+    let pool = state.db_manager.pool();
+    let summary = sources::saved_result(pool, &meeting_id).await?;
+    let mut saved = load_saved(pool, &meeting_id).await?.unwrap_or_default();
+    let dismissed = dismissed.unwrap_or_default();
+    validate_dismissals(&dismissed)?;
+    if let Some(reviewed) = reviewed {
+        merge_dismissals(&mut saved, &reviewed, dismissed);
+        saved.actions = reviewed;
+    }
     Ok(remaining_suggestions(
         summary_suggestions(&markdown, summary.as_ref()),
-        reviewed.as_deref().unwrap_or_default(),
+        &saved.actions,
+        &saved.dismissed,
     ))
 }
 
@@ -294,15 +412,48 @@ pub async fn save_reviewed_meeting_actions(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     actions: Vec<ReviewedAction>,
+    dismissed: Option<Vec<DismissedSuggestion>>,
     expected_revision: Option<String>,
 ) -> Result<(), String> {
     save_checked(
         state.db_manager.pool(),
         &meeting_id,
         actions,
+        dismissed.unwrap_or_default(),
         expected_revision.as_deref(),
     )
     .await
+}
+
+fn merge_dismissals(
+    saved: &mut SavedActions,
+    actions: &[ReviewedAction],
+    dismissed: Vec<DismissedSuggestion>,
+) {
+    let active: HashSet<_> = actions.iter().map(|action| action.id.as_str()).collect();
+    saved
+        .dismissed
+        .retain(|row| !active.contains(row.id.as_str()));
+    let mut known: HashSet<_> = saved.dismissed.iter().map(|row| row.id.clone()).collect();
+    for row in saved
+        .actions
+        .iter()
+        .filter(|row| !active.contains(row.id.as_str()))
+    {
+        if let Some(legacy_action) = &row.legacy_action {
+            if known.insert(row.id.clone()) {
+                saved.dismissed.push(DismissedSuggestion {
+                    id: row.id.clone(),
+                    legacy_action: legacy_action.clone(),
+                });
+            }
+        }
+    }
+    saved.dismissed.extend(
+        dismissed
+            .into_iter()
+            .filter(|row| !active.contains(row.id.as_str()) && known.insert(row.id.clone())),
+    );
 }
 
 #[cfg(test)]
@@ -310,16 +461,19 @@ async fn save(
     pool: &SqlitePool,
     meeting_id: &str,
     actions: Vec<ReviewedAction>,
+    dismissed: Vec<DismissedSuggestion>,
 ) -> Result<(), String> {
-    save_checked(pool, meeting_id, actions, None).await
+    save_checked(pool, meeting_id, actions, dismissed, None).await
 }
 
 async fn save_checked(
     pool: &SqlitePool,
     meeting_id: &str,
     mut actions: Vec<ReviewedAction>,
+    dismissed: Vec<DismissedSuggestion>,
     expected_revision: Option<&str>,
 ) -> Result<(), String> {
+    validate_dismissals(&dismissed)?;
     // Snapshot the existing evidence and the current generation in the same
     // transaction. Fields supplied by the editor never replace saved evidence.
     let mut transaction = pool
@@ -336,11 +490,15 @@ async fn save_checked(
     if expected_revision.is_some_and(|expected| revision(previous.as_deref()) != expected) {
         return Err("Meeting actions changed. Reload the latest actions before saving.".into());
     }
-    let mut previous: HashMap<_, _> = previous
+    let mut saved = previous
         .as_deref()
-        .map(decode)
+        .map(decode_saved)
         .transpose()?
-        .unwrap_or_default()
+        .unwrap_or_default();
+    merge_dismissals(&mut saved, &actions, dismissed);
+    validate_dismissals(&saved.dismissed)?;
+    let mut previous: HashMap<_, _> = saved
+        .actions
         .into_iter()
         .map(|action| (action.id.clone(), action))
         .collect();
@@ -380,7 +538,13 @@ async fn save_checked(
             }
         }
     }
-    let raw = serde_json::to_string(&actions).map_err(|_| "Could not prepare meeting actions.")?;
+    // Keep the existing array shape required by the SQLite column and backups.
+    let stored: Vec<_> = actions
+        .into_iter()
+        .map(StoredAction::Reviewed)
+        .chain(saved.dismissed.into_iter().map(StoredAction::Dismissed))
+        .collect();
+    let raw = serde_json::to_string(&stored).map_err(|_| "Could not prepare meeting actions.")?;
     let result = sqlx::query("UPDATE meetings SET reviewed_actions = ? WHERE id = ?")
         .bind(raw)
         .bind(meeting_id)
@@ -413,7 +577,7 @@ mod tests {
             legacy_action: None,
             source: None,
         };
-        save(&pool, "review-test", vec![action.clone()])
+        save(&pool, "review-test", vec![action.clone()], vec![])
             .await
             .unwrap();
         let raw: String =
@@ -427,16 +591,21 @@ mod tests {
             &pool,
             "review-test",
             vec![action.clone()],
+            vec![],
             Some(&old_revision),
         )
         .await
         .unwrap();
         action.done = false;
-        assert!(
-            save_checked(&pool, "review-test", vec![action], Some(&old_revision))
-                .await
-                .is_err()
-        );
+        assert!(save_checked(
+            &pool,
+            "review-test",
+            vec![action],
+            vec![],
+            Some(&old_revision)
+        )
+        .await
+        .is_err());
         assert!(load(&pool, "review-test").await.unwrap().unwrap()[0].done);
     }
 
@@ -460,13 +629,14 @@ mod tests {
         let rows = remaining_suggestions(
             summary_suggestions("## Decisions\nProceed with the project.", Some(&summary)),
             &[],
+            &[],
         );
         assert_eq!(rows[0].source_key.as_deref(), Some(key));
         assert_eq!(rows[0].owner.as_deref(), Some("Dana"));
         assert_eq!(rows[0].due_date.as_deref(), Some("2026-12-04"));
         assert!(load(&pool, meeting).await.unwrap().is_none());
         let id = rows[0].id.clone();
-        save(&pool, meeting, rows).await.unwrap();
+        save(&pool, meeting, rows, vec![]).await.unwrap();
 
         sqlx::query("UPDATE summary_processes SET result = ? WHERE meeting_id = ?")
             .bind(serde_json::json!({"markdown":"Replacement summary"}).to_string())
@@ -476,7 +646,7 @@ mod tests {
             .unwrap();
         let mut rows = load(&pool, meeting).await.unwrap().unwrap();
         rows[0].title = "Send the reviewed notes".into();
-        save(&pool, meeting, rows).await.unwrap();
+        save(&pool, meeting, rows, vec![]).await.unwrap();
         let passage = resolve_action_source(&pool, meeting, &id, key)
             .await
             .unwrap();
@@ -491,6 +661,7 @@ mod tests {
         let mut reviewed = remaining_suggestions(
             summary_suggestions("## Action items\n- Send report\n- Review plan", None),
             &[],
+            &[],
         );
         assert_eq!(reviewed.len(), 2);
         reviewed[0].title = "Send revised report".into();
@@ -501,9 +672,43 @@ mod tests {
                 None,
             ),
             &reviewed,
+            &[],
         );
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].title, "Confirm budget");
+    }
+
+    #[test]
+    fn edited_notes_do_not_offer_a_removed_rendered_suggestion_before_or_after_saving() {
+        let mut original = serde_json::json!({
+            "markdown":"## Action items\n- Remove this row\n- Keep this row",
+            "structured_meeting_output":{"action_items":[
+                {"task":"Remove this row"}, {"task":"Keep this row", "owner":"Dana"}, {"task":"Structured only"}
+            ]}
+        });
+        let edit = "## Action items\n- Keep this row";
+        for _ in 0..2 {
+            let suggestions = summary_suggestions(edit, Some(&original));
+            assert_eq!(
+                suggestions
+                    .iter()
+                    .map(|row| row.action.task.as_str())
+                    .collect::<Vec<_>>(),
+                ["Keep this row", "Structured only"]
+            );
+            assert_eq!(suggestions[0].action.owner.as_deref(), Some("Dana"));
+            let mut saved = original.clone();
+            saved["markdown"] = edit.into();
+            prune_removed_summary_actions(&original, &mut saved);
+            original = saved;
+        }
+        assert_eq!(
+            original["structured_meeting_output"]["action_items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -534,16 +739,34 @@ mod tests {
                 None,
             ),
             &[],
+            &[],
         );
         assert!(actions[0].done);
         assert_eq!(actions[0].source_key.as_deref(), Some("abc123"));
-        save(&pool, "existing", actions.clone()).await.unwrap();
+        save(&pool, "existing", actions.clone(), vec![])
+            .await
+            .unwrap();
         actions[0].title = "Confirm the revised report".into();
         actions[0].owner = Some("Dana".into());
         actions[0].due_date = Some("2026-11-30".into());
-        save(&pool, "existing", actions.clone()).await.unwrap();
+        save(&pool, "existing", actions.clone(), vec![])
+            .await
+            .unwrap();
         assert_eq!(load(&pool, "existing").await.unwrap(), Some(actions));
-        save(&pool, "existing", vec![]).await.unwrap();
+        save(&pool, "existing", vec![], vec![]).await.unwrap();
         assert_eq!(load(&pool, "existing").await.unwrap(), Some(vec![]));
+        let saved = load_saved(&pool, "existing").await.unwrap().unwrap();
+        let remaining = remaining_suggestions(
+            summary_suggestions("## Aufgaben\n- New action\n- Bericht senden", None),
+            &saved.actions,
+            &saved.dismissed,
+        );
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            ["New action"]
+        );
     }
 }

@@ -58,6 +58,17 @@ from MAI transcription credentials and AI-provider credentials.
 publishing sends the chosen document to the configured Server/Data Center
 endpoint. Review the destination and content before publishing.
 
+**Export history and recovery.** The local meeting history can contain task,
+page, and file names, remote item and destination IDs, service links, status,
+timestamps, and account and export revision fingerprints. It travels with
+portable library backups. Recovery reads the original destination using the
+saved connection to verify an item you choose. The candidate list is displayed
+for review. Saving a resolution records the selected item or confirmed absence
+locally. The OneNote page includes a content marker
+derived from the meeting and revision so the app can identify its own block.
+Dismissed suggestions keep an action ID and title fingerprint with the meeting
+so the app can recognize them when offering suggestions again.
+
 **Downloads and updates.** Model publishers, release hosting, and configured
 provider services receive the network requests required for those operations.
 Automatic update checks are not meeting-content uploads.
