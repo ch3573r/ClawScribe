@@ -1733,10 +1733,10 @@ mod tests {
         super::super::calendar::write(&source, "portable", Some(calendar.clone()), false)
             .await
             .unwrap();
-        let actions = crate::exports::actions::suggest_meeting_actions(
-            "## Aufgaben\n- Bericht senden".into(),
-            None,
-        );
+        let actions = crate::exports::actions::decode(
+            r#"[{"id":"bf6d907c-34d7-4e0a-8482-3eaef7e73a7e","title":"Bericht senden","done":false}]"#,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
         let actions_json = serde_json::to_string(&actions).unwrap();
         sqlx::query("UPDATE meetings SET reviewed_actions = ? WHERE id = 'portable'")
