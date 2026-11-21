@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.64.1
+
+- Windows recording uses the selected microphone and output. Stop shows save progress, and a new start request can wait for the previous save. Concurrent capture warnings stay visible.
+- Summary references survive speaker naming. Chat citations and local search continue to resolve unchanged passages after edits elsewhere. Questions across a large library use bounded evidence.
+- Editing notes preserves their generation details. Regenerated action suggestions and available follow-up emails are accessible from the saved meeting. Archive rows expose tag and delete controls.
+- Browsing speech models keeps the active choice intact. Onboarding reports model progress, file transcription respects cloud opt-in, and hosted providers report rejected keys and catalog failures.
+- [Windows preview notes and acceptance coverage](docs/releases/0.64.1.md).
+
 ## 0.64.0
 
 - Start in audio-only mode without a model download. Recording Stop saves the meeting, calendar context, and live notes together. Recovery preserves partial audio and capture-gap warnings.

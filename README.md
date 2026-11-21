@@ -7,10 +7,9 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-**0.64.0** is a Windows GPU preview. You can start with audio alone, recover an
-interrupted save, jump to a matching transcript passage, and review attendance
-and follow-up tasks before sharing them. See the
-[0.64.0 preview notes](docs/releases/0.64.0.md) and the
+**0.64.1** is a Windows GPU preview. It fixes recording device selection,
+Stop feedback, citation navigation, and saved-note editing. See the
+[0.64.1 preview notes](docs/releases/0.64.1.md) and the
 [latest stable release](https://github.com/ch3573r/ClawScribe/releases/latest).
 Stable is **0.5.58**, published on 2026-11-15 without installed acceptance. Enable
 **Include prereleases** to discover later previews; drafts are excluded from
