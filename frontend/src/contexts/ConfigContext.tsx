@@ -1,5 +1,6 @@
 'use client';
 
+import { UNCONFIGURED_SUMMARY_MODEL, DEFAULT_PARAKEET_MODEL } from '@/constants/modelDefaults';
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode, useRef } from 'react';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
 import {
@@ -59,6 +60,9 @@ interface ConfigContextType {
   transcriptModelConfig: TranscriptModelProps;
   setTranscriptModelConfig: (config: TranscriptModelProps | ((prev: TranscriptModelProps) => TranscriptModelProps)) => void;
 
+  transcriptConfigStatus: 'loading' | 'ready' | 'error';
+  loadTranscriptConfig: () => Promise<void>;
+
   // Device configuration
   selectedDevices: SelectedDevices;
   setSelectedDevices: (devices: SelectedDevices) => void;
@@ -97,19 +101,12 @@ const ConfigContext = createContext<ConfigContextType | undefined>(undefined);
 
 export function ConfigProvider({ children }: { children: ReactNode }) {
   // Model configuration state
-  const [modelConfig, setModelConfig] = useState<ModelConfig>({
-    provider: 'custom-openai',
-    model: 'gpt-4o-mini',
-    whisperModel: 'large-v3',
-    ollamaEndpoint: null,
-    customOpenAIEndpoint: 'https://api.openai.com/v1',
-    customOpenAIModel: 'gpt-4o-mini',
-  });
+  const [modelConfig, setModelConfig] = useState<ModelConfig>(UNCONFIGURED_SUMMARY_MODEL);
 
   // Transcript model configuration state
   const [transcriptModelConfig, setTranscriptModelConfig] = useState<TranscriptModelProps>({
     provider: 'parakeet',
-    model: 'parakeet-tdt-0.6b-v3-int8',
+    model: DEFAULT_PARAKEET_MODEL,
     apiKey: null
   });
 
@@ -192,30 +189,28 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     loadModels();
   }, [modelConfig.provider, modelConfig.ollamaEndpoint]);
 
-  // Load transcript configuration on mount
-  useEffect(() => {
-    const loadTranscriptConfig = async () => {
-      try {
-        const config = await configService.getTranscriptConfig();
-        if (config) {
-          console.log('[ConfigContext] Loaded saved transcript config');
-          setTranscriptModelConfig({
-            // A saved config with a blank provider runs Whisper in the core (the
-            // Settings page reads it the same way); only no saved config means Parakeet.
-            provider: config.provider || 'localWhisper',
-            model: config.model || (config.provider ? 'parakeet-tdt-0.6b-v3-int8' : 'large-v3'),
-            baseUrl: config.baseUrl || null,
-            allowUnencrypted: config.allowUnencrypted ?? false,
-            endpoint: config.endpoint || null,
-            region: config.region || null,
-          });
-        }
-      } catch (error) {
-        console.error('[ConfigContext] Failed to load transcript config:', error);
+  const [transcriptConfigStatus, setTranscriptConfigStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const loadTranscriptConfig = useCallback(async () => {
+    setTranscriptConfigStatus('loading');
+    try {
+      const config = await configService.getTranscriptConfig();
+      if (config) {
+        setTranscriptModelConfig({
+          // A blank provider in a saved legacy row resolves to Whisper in the core.
+          provider: config.provider || 'localWhisper',
+          model: config.model || '',
+          baseUrl: config.baseUrl || null,
+          allowUnencrypted: config.allowUnencrypted ?? false,
+          endpoint: config.endpoint || null,
+          region: config.region || null,
+        });
       }
-    };
-    loadTranscriptConfig();
+      setTranscriptConfigStatus('ready');
+    } catch {
+      setTranscriptConfigStatus('error');
+    }
   }, []);
+  useEffect(() => { void loadTranscriptConfig(); }, [loadTranscriptConfig]);
 
   // Read the language from the core. The first time, the old webview value is
   // handed to the core (which keeps its own if it has one).
@@ -485,6 +480,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     providerKeyStatus,
     refreshProviderKeyStatus,
     transcriptModelConfig,
+    transcriptConfigStatus,
+    loadTranscriptConfig,
     setTranscriptModelConfig,
     selectedDevices,
     setSelectedDevices,
@@ -509,6 +506,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     providerKeyStatus,
     refreshProviderKeyStatus,
     transcriptModelConfig,
+    transcriptConfigStatus,
+    loadTranscriptConfig,
     selectedDevices,
     setSelectedDevices,
     audioDeviceInventory,

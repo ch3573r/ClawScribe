@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import { Loader2, CheckCircle2, Download, X } from 'lucide-react';
+import { recommendedForSpeed, usePcTestResults } from '@/components/settings/pcTestResults';
 import { Button } from '@/components/ui/button';
 
 type ModelStatus =
@@ -22,7 +23,6 @@ interface RawModelInfo {
 interface NemotronModelManagerProps {
   selectedModel?: string;
   onModelSelect?: (modelName: string) => void;
-  autoSave?: boolean;
   className?: string;
 }
 
@@ -44,27 +44,13 @@ function gbLabel(sizeMb: number): string {
 export function NemotronModelManager({
   selectedModel,
   onModelSelect,
-  autoSave = false,
   className = '',
 }: NemotronModelManagerProps) {
   const [models, setModels] = useState<RawModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const onSelectRef = useRef(onModelSelect);
-  const autoSaveRef = useRef(autoSave);
-  useEffect(() => {
-    onSelectRef.current = onModelSelect;
-    autoSaveRef.current = autoSave;
-  }, [onModelSelect, autoSave]);
-
-  const saveSelection = async (name: string) => {
-    try {
-      await invoke('api_save_transcript_config', { provider: 'nemotron', model: name, apiKey: null });
-    } catch (e) {
-      console.error('Failed to save Nemotron selection:', e);
-    }
-  };
+  const speedRecommendations = recommendedForSpeed(models, usePcTestResults());
 
   // Patch one model in the list by name, leaving the others untouched.
   const patchModel = (name: string, patch: Partial<RawModelInfo>) =>
@@ -90,32 +76,21 @@ export function NemotronModelManager({
   }, []);
 
   useEffect(() => {
-    const unlisteners: Array<() => void> = [];
-    (async () => {
-      unlisteners.push(
-        await listen<{ modelName: string; progress: number }>(
-          'nemotron-model-download-progress',
-          (e) => patchModel(e.payload.modelName, { status: { Downloading: { progress: e.payload.progress } } }),
-        ),
-      );
-      unlisteners.push(
-        await listen<{ modelName: string }>('nemotron-model-download-complete', (e) => {
-          patchModel(e.payload.modelName, { status: 'Available' });
-          toast.success('Nemotron ready', { description: 'Model downloaded and ready to use' });
-          if (onSelectRef.current) {
-            onSelectRef.current(e.payload.modelName);
-            if (autoSaveRef.current) saveSelection(e.payload.modelName);
-          }
-        }),
-      );
-      unlisteners.push(
-        await listen<{ modelName: string; error: string }>('nemotron-model-download-error', (e) => {
-          patchModel(e.payload.modelName, { status: { Error: e.payload.error } });
-          toast.error('Failed to download Nemotron', { description: e.payload.error });
-        }),
-      );
-    })();
-    return () => unlisteners.forEach((u) => u());
+    const subscriptions = [
+      listen<{ modelName: string; progress: number }>(
+        'nemotron-model-download-progress',
+        (e) => patchModel(e.payload.modelName, { status: { Downloading: { progress: e.payload.progress } } }),
+      ),
+      listen<{ modelName: string }>('nemotron-model-download-complete', (e) => {
+        patchModel(e.payload.modelName, { status: 'Available' });
+        toast.success('Nemotron ready', { description: 'Model downloaded and ready to use' });
+      }),
+      listen<{ modelName: string; error: string }>('nemotron-model-download-error', (e) => {
+        patchModel(e.payload.modelName, { status: { Error: e.payload.error } });
+        toast.error('Failed to download Nemotron', { description: e.payload.error });
+      }),
+    ];
+    return () => subscriptions.forEach(subscription => void subscription.then(unlisten => unlisten()));
   }, []);
 
   const download = async (model: RawModelInfo) => {
@@ -138,12 +113,6 @@ export function NemotronModelManager({
     } catch (e) {
       console.error('Cancel failed:', e);
     }
-  };
-
-  const select = async (model: RawModelInfo) => {
-    onModelSelect?.(model.name);
-    if (autoSave) await saveSelection(model.name);
-    toast.success(`Switched to Nemotron ${variantTag(model.name)}`);
   };
 
   if (loading) {
@@ -180,8 +149,7 @@ export function NemotronModelManager({
             key={model.name}
             className={`relative rounded-lg border-2 p-4 transition-all ${
               isSelected && isAvailable ? 'border-primary bg-primary/5' : 'border-border bg-card'
-            } ${isAvailable ? 'cursor-pointer' : ''}`}
-            onClick={() => isAvailable && select(model)}
+            }`}
           >
             <div className="flex items-start justify-between gap-4">
               <div className="flex-1">
@@ -194,9 +162,10 @@ export function NemotronModelManager({
                   <span className="rounded-full bg-warning px-2 py-0.5 text-xs font-medium text-warning-foreground">
                     Beta
                   </span>
+                  {speedRecommendations.has(model.name) && <span className="text-xs text-muted-foreground">{speedRecommendations.get(model.name)}</span>}
                   {isSelected && isAvailable && (
                     <span className="flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-xs font-medium text-primary-foreground">
-                      <CheckCircle2 className="h-3 w-3" />
+                      <CheckCircle2 className="h-3 w-3" /> Selected
                     </span>
                   )}
                 </div>
@@ -214,6 +183,7 @@ export function NemotronModelManager({
                     <span className="text-xs font-medium">Ready</span>
                   </div>
                 )}
+                {isAvailable && !isSelected && onModelSelect && <Button variant="outline" size="sm" aria-label={`Use Nemotron ${variantTag(model.name)}`} onClick={() => onModelSelect(model.name)}>Use</Button>}
                 {isMissing && (
                   <Button variant="ghost"
                     onClick={(e) => {

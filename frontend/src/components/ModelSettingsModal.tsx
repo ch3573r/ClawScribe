@@ -753,15 +753,6 @@ export function ModelSettingsModal({
     try {
       const data = await invoke<BuiltInModelInfo[]>('builtin_ai_list_models');
       setBuiltinAiModels(data);
-
-      // Auto-select first available model if none selected
-      if (data.length > 0 && !modelConfig.model) {
-        const firstAvailable = data.find((m) => m.status?.type === 'available');
-        if (firstAvailable) {
-          // The answer can arrive after the user moved to another provider.
-          setModelConfig((prev: ModelConfig) => (prev.provider === 'builtin-ai' && !prev.model ? { ...prev, model: firstAvailable.name } : prev));
-        }
-      }
     } catch (err) {
       console.error('Error loading Built-in AI models:', err);
       toast.error('Failed to load Built-in AI models');
@@ -975,6 +966,7 @@ export function ModelSettingsModal({
     if (modelConfig.model && providerModels.includes(modelConfig.model)) return;
 
     // Try to restore from localStorage cache
+    if (modelConfig.provider === 'builtin-ai' && !modelConfig.model) return;
     const cachedModel = readModelMap()[modelConfig.provider];
     if (cachedModel && providerModels.includes(cachedModel)) {
       setModelConfig((prev: ModelConfig) => ({ ...prev, model: cachedModel }));
@@ -1578,7 +1570,9 @@ export function ModelSettingsModal({
   type ProviderStatus = { tone: StatusTone; text: string; meta?: string };
   const providerStatus = (): ProviderStatus => {
     const provider = modelConfig.provider;
-    if (provider === 'builtin-ai') return { tone: 'ok', text: 'Runs on this PC', meta: 'Offline' };
+    if (provider === 'builtin-ai') return modelConfig.model
+      ? { tone: 'ok', text: 'Runs on this PC', meta: 'Offline' }
+      : { tone: 'neutral', text: 'No summary model selected' };
     if (provider === 'ollama') {
       if (isLoadingOllama) return { tone: 'neutral', text: 'Checking Ollama…' };
       if (ollamaNotInstalled) return { tone: 'error', text: 'Ollama is not installed or not running' };
@@ -1978,6 +1972,7 @@ export function ModelSettingsModal({
     const { rows, advanced } = renderProviderRows();
     const status = providerStatus();
     const providerState = feedback.states.provider;
+    const noSummaryModel = sharedModelConfig.provider === 'builtin-ai' && !sharedModelConfig.model;
     return (
       <>
         <SettingsRow
@@ -2015,10 +2010,12 @@ export function ModelSettingsModal({
         {previewConfig && (
           <SettingsRow
             title="Not in use yet"
-            description={draftProviderMissing() ?? `${summaryProviderLabel(sharedModelConfig.provider)} stays your summary provider until you switch`}
+            description={draftProviderMissing() ?? (noSummaryModel
+              ? 'Choose Use to save your summary provider.'
+              : `${summaryProviderLabel(sharedModelConfig.provider)} stays your summary provider until you switch`)}
           >
             <Button type="button" variant="ghost" size="sm" disabled={feedback.busy} onClick={() => changeProviderAutosave(sharedModelConfig.provider)}>
-              Keep {summaryProviderLabel(sharedModelConfig.provider)}
+              {noSummaryModel ? 'Cancel' : `Keep ${summaryProviderLabel(sharedModelConfig.provider)}`}
             </Button>
             <Button type="button" variant="outline" size="sm" disabled={feedback.busy || draftProviderMissing() !== null} onClick={useDraftProvider}>
               Use {summaryProviderLabel(modelConfig.provider)}

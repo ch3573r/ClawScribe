@@ -340,3 +340,14 @@ export class WhisperAPI {
     await invoke('open_models_folder');
   }
 }
+
+export function getWhisperModelDisplayName(model: string): string {
+  const labels: Record<string, string> = {
+    small: 'Small',
+    'medium-q5_0': 'Medium',
+    'large-v3-q5_0': 'Large V3 compressed',
+    'large-v3-turbo': 'Large V3 turbo',
+    'large-v3': 'Large V3',
+  };
+  return labels[model] || model;
+}

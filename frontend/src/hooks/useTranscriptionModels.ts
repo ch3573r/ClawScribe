@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useCloudTranscription } from '@/hooks/useCloudTranscription';
 
@@ -30,20 +30,13 @@ interface TranscriptModelConfig {
  * @returns Object containing available models, selected model key, loading state, and fetch function
  */
 export function useTranscriptionModels(transcriptModelConfig: TranscriptModelConfig | undefined) {
-  const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
-  const [selectedModelKey, setSelectedModelKey] = useState<string>('');
+  const [localModels, setLocalModels] = useState<ModelOption[]>([]);
+  const [manualSelection, setManualSelection] = useState('');
   const [loadingModels, setLoadingModels] = useState(false);
-  const cloudTranscriptionEnabled = useCloudTranscription();
-  // Track whether the user has manually changed the model selection
-  const userSelectedRef = useRef(false);
-
-  // Wrap setSelectedModelKey to track user-initiated changes
-  const setSelectedModelKeyWithTracking = useCallback((key: string) => {
-    userSelectedRef.current = true;
-    setSelectedModelKey(key);
-  }, []);
-
+  const { enabled, loaded } = useCloudTranscription();
+  const revision = useRef(0);
   const fetchModels = useCallback(async () => {
+    const request = ++revision.current;
     setLoadingModels(true);
     const allModels: ModelOption[] = [];
 
@@ -95,63 +88,35 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       console.error('Failed to fetch Nemotron models:', err);
     }
 
-    if (cloudTranscriptionEnabled) {
-      allModels.push({
-        provider: 'cloud-whisper',
-        name: transcriptModelConfig?.provider === 'cloud-whisper'
-          ? transcriptModelConfig?.model || 'whisper-1'
-          : 'whisper-1',
-        displayName: `☁️ Hosted Whisper: ${transcriptModelConfig?.provider === 'cloud-whisper' ? transcriptModelConfig?.model || 'whisper-1' : 'whisper-1'}`,
-        size_mb: 0,
-      });
-      allModels.push({
-        provider: 'mai-transcribe',
-        name: 'mai-transcribe-1.5',
-        displayName: '☁️ MAI-Transcribe: mai-transcribe-1.5',
-        size_mb: 0,
-      });
+    if (request === revision.current) {
+      setLocalModels(allModels);
+      setLoadingModels(false);
     }
-
-    setAvailableModels(allModels);
-
-    // Set default model based on user's saved configuration
-    const configuredProvider = transcriptModelConfig?.provider || '';
-    const configuredModel = transcriptModelConfig?.model || '';
-
-    // Try to match the configured model
-    // Note: 'localWhisper' in config maps to 'whisper' provider in model list
-    const configuredMatch = allModels.find(
-      (m) =>
-        (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
-        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel) ||
-        (configuredProvider === 'nemotron' && m.provider === 'nemotron' && m.name === configuredModel) ||
-        (configuredProvider === 'cloud-whisper' && m.provider === 'cloud-whisper' && m.name === configuredModel) ||
-        (configuredProvider === 'mai-transcribe' && m.provider === 'mai-transcribe' && m.name === configuredModel)
-    );
-
-    // Only set default model if user hasn't manually selected one
-    if (!userSelectedRef.current) {
-      if (configuredMatch) {
-        // Use the configured model if available
-        setSelectedModelKey(`${configuredMatch.provider}:${configuredMatch.name}`);
-      } else if (allModels.length > 0) {
-        // Fall back to first available model
-        setSelectedModelKey(`${allModels[0].provider}:${allModels[0].name}`);
-      }
-    }
-
-    setLoadingModels(false);
-  }, [transcriptModelConfig, cloudTranscriptionEnabled]);
-
-  // Reset user selection tracking (call when dialog opens fresh)
-  const resetSelection = useCallback(() => {
-    userSelectedRef.current = false;
   }, []);
 
+  const provider = transcriptModelConfig?.provider;
+  const model = transcriptModelConfig?.model;
+  const availableModels = useMemo(() => {
+    if (!loaded || !enabled) return localModels;
+    const hostedWhisper = provider === 'cloud-whisper' && model ? model : 'whisper-1';
+    const mai = provider === 'mai-transcribe' && model ? model : 'mai-transcribe-1.5';
+    return [
+      ...localModels,
+      { provider: 'cloud-whisper' as const, name: hostedWhisper, displayName: `Hosted Whisper · ${hostedWhisper}`, size_mb: 0 },
+      { provider: 'mai-transcribe' as const, name: mai, displayName: `MAI-Transcribe · ${mai}`, size_mb: 0 },
+    ];
+  }, [localModels, loaded, enabled, provider, model]);
+
+  const keyOf = (option: ModelOption) => `${option.provider}:${option.name}`;
+  const preferred = availableModels.find(option =>
+    option.provider === (provider === 'localWhisper' ? 'whisper' : provider) && option.name === model);
+  const selected = availableModels.find(option => keyOf(option) === manualSelection) ?? preferred ?? localModels[0];
+  const selectedModelKey = selected ? keyOf(selected) : '';
+  const resetSelection = useCallback(() => setManualSelection(''), []);
   return {
     availableModels,
     selectedModelKey,
-    setSelectedModelKey: setSelectedModelKeyWithTracking,
+    setSelectedModelKey: setManualSelection,
     loadingModels,
     fetchModels,
     resetSelection,

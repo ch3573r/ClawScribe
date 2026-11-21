@@ -46,6 +46,7 @@ export function useTranscriptionPcTest({ provider, model }: { provider: string; 
   const [result, setResult] = useState<PcTestResult | null>(null);
   const [error, setError] = useState("");
   const pending = useRef(false);
+  const revision = useRef(0);
   const cloud = provider === "cloud-whisper" || provider === "mai-transcribe";
   const testProvider = cloud ? "parakeet" : provider;
   const testModel = cloud ? DEFAULT_PARAKEET_MODEL : model;
@@ -57,20 +58,22 @@ export function useTranscriptionPcTest({ provider, model }: { provider: string; 
   useEffect(() => {
     setResult(null);
     setError("");
+    return () => { revision.current += 1; };
   }, [provider, model]);
 
   async function run() {
     if (pending.current || !supported || recordingBusy) return;
+    const request = revision.current;
     pending.current = true;
     setRunning(true);
     setResult(null);
     setError("");
     try {
       const measured = await invoke<PcTestResult>("run_transcription_pc_test", { provider: testProvider, model: testModel });
-      setResult(measured);
-      savePcTestResult(testModel, measured);
+      savePcTestResult(measured.model, measured);
+      if (request === revision.current) setResult(measured);
     } catch (problem) {
-      setError(typeof problem === "string" ? problem : "Could not complete the test. Check that the selected model is installed and try again.");
+      if (request === revision.current) setError(typeof problem === "string" ? problem : "Could not complete the test. Check that the selected model is installed and try again.");
     } finally {
       pending.current = false;
       setRunning(false);
@@ -99,6 +102,7 @@ export function PcTestAction({ test }: { test: PcTest }) {
 export function PcTestReport({ test }: { test: PcTest }) {
   const { recording, running, result, error, supported, recordingBusy } = test;
   const missedSpeech = result?.samples.some(sample => !sample.recognized);
+  const complete = result?.samples.length === 2;
   const behind = result && result.realtimeFactor > 1;
   const notes = !supported || recordingBusy || running || error || result;
   if (!notes) return null;
@@ -110,7 +114,8 @@ export function PcTestReport({ test }: { test: PcTest }) {
       {error && <p role="alert" className="text-destructive">{error}</p>}
       {result && <div className="space-y-2" role="status">
         <p className="font-medium">
-          {behind ? "The model fell behind on these samples." : !missedSpeech && "The model kept up with these samples."}
+          {behind ? "The model fell behind on these samples." : complete && !missedSpeech && "The model kept up with these samples."}
+          {!complete && !missedSpeech && " Speech recognition could not be confirmed for both samples."}
           {missedSpeech && (behind ? " It missed speech on at least one sample." : "The model missed speech on at least one sample.")}
         </p>
         <p>
@@ -141,7 +146,7 @@ export function TranscriptionPcTest({ provider, model }: { provider: string; mod
   return (
     <SettingsCard title="Transcription speed" description="Time your local model on about 30 seconds of German and English speech" actions={<div className="flex items-center gap-3"><PcTestAction test={test} /></div>}>
       {test.supported && <SettingsRow
-        title={test.cloud ? "Local model used for live recording" : "Selected model"}
+        title={test.cloud ? "Local Parakeet test model" : "Selected model"}
         description={modelLabel(test.testProvider, test.testModel)}>
         {test.stored
           ? <Meta>{formatSpeed(speedOf(test.stored))}</Meta>

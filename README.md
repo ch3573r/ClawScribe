@@ -131,11 +131,14 @@ are pinned to specific revisions and SHA-256-verified before use. Damaged or
 incomplete files require re-download; unchanged verified files reuse their
 integrity checks.
 
-In **Settings → Transcription**, choose **Test this PC** to time an installed
+In **Settings → Transcription**, **Browse engines** shows the available models.
+Choose **Use** to switch to an installed model. **Test this PC** times the selected
 Whisper, Parakeet or Nemotron model on two built-in speech samples in German and English.
 The result shows the model, runtime backend, and processing time for each
-sample. If the model falls behind, you can switch to **Record now, transcribe
-later**. The test runs locally and leaves the microphone free.
+sample. When two or more installed models of an engine recognized both samples
+on the same backend, the fastest measured variant is marked. If the model falls
+behind, you can switch to **Record now, transcribe later**. The test runs locally
+and leaves the microphone free.
 
 Whisper preserves recognized repetitions and short answers instead of removing
 them through phrase matching. Nemotron's **Auto** language follows the system

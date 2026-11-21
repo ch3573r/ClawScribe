@@ -8,7 +8,7 @@ import { Progress } from "@/components/ui/progress";
 import { Meta, SettingsCard, SettingsFooter, SettingsRow, SettingsTag, StatusText } from "@/components/ui/settings-layout";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatFileSize, formatModelSize, getModelDisplayInfo, type ParakeetModelInfo } from "@/lib/parakeet";
-import { fastestSpeed, formatMeasuredAt, formatSpeed, speedFraction, speedOf, type PcTestRecord } from "@/components/settings/pcTestResults";
+import { recommendedForSpeed, fastestSpeed, formatMeasuredAt, formatSpeed, speedFraction, speedOf, type PcTestRecord } from "@/components/settings/pcTestResults";
 
 interface ParakeetModelTableProps {
   models: ParakeetModelInfo[];
@@ -138,12 +138,13 @@ export function ParakeetModelTable({
   const recommended = models.filter(model => getModelDisplayInfo(model.name)?.recommended);
   const ordered = [...recommended, ...models.filter(model => !recommended.includes(model))];
   const fastest = fastestSpeed(ordered.flatMap(model => (results[model.name] ? [results[model.name]] : [])));
+  const speedRecommendations = recommendedForSpeed(models, results);
   const selectedSupported = !selectedModel || models.some(model => model.name === selectedModel);
 
   return (
     <SettingsCard
       title="Models"
-      description="Speed is measured on this PC with 30 seconds of German and English speech"
+      description="Measured on this PC with German and English speech. Speed recommendations compare models that recognized both samples on the same backend."
       aria-busy={loading}
       actions={testAction ? <div className="flex shrink-0 items-center gap-3">{testAction}</div> : undefined}
     >
@@ -183,6 +184,7 @@ export function ParakeetModelTable({
                     <td className="relative px-4 py-3.5 pl-5">
                       {inUse && <span aria-hidden="true" className="absolute inset-y-0 left-0 w-[3px] bg-primary" />}
                       <span className="whitespace-nowrap text-foreground">{name}</span>
+                      {speedRecommendations.has(model.name) && <SettingsTag>{speedRecommendations.get(model.name)}</SettingsTag>}
                       {info?.badge && <SettingsTag>{info.badge}</SettingsTag>}
                       <span className="block text-[13px] text-muted-foreground min-[1500px]:hidden">{bestFor} · {formatModelSize(model.size_mb)}</span>
                     </td>

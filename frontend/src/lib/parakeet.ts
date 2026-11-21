@@ -34,7 +34,7 @@ export interface ModelDisplayInfo {
   /** Short "Best for" text shown in the model table. */
   bestFor: string;
   /** Quiet tag shown next to the name. */
-  badge?: 'Recommended' | 'Experimental';
+  badge?: 'Default' | 'Experimental';
   recommended?: boolean;
   tier: 'fastest' | 'balanced' | 'precise';
 }
@@ -42,8 +42,8 @@ export interface ModelDisplayInfo {
 export const MODEL_DISPLAY_CONFIG: Record<string, ModelDisplayInfo> = {
   'parakeet-tdt-0.6b-v3-int8': {
     friendlyName: 'Lightning',
-    bestFor: 'Everyday meetings, fastest',
-    badge: 'Recommended',
+    bestFor: 'Everyday meetings',
+    badge: 'Default',
     recommended: true,
     tier: 'fastest'
   },

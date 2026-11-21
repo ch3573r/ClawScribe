@@ -56,8 +56,6 @@ export function BuiltInModelManager({
   const [downloadProgressInfo, setDownloadProgressInfo] = useState<Record<string, DownloadProgressInfo>>({});
   const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
 
-  const selection = useRef({ selectedModel, onModelSelect });
-  useEffect(() => { selection.current = { selectedModel, onModelSelect }; }, [selectedModel, onModelSelect]);
   const fetchRevision = useRef(0);
   const fetchModels = useCallback(async () => {
     const revision = ++fetchRevision.current;
@@ -66,14 +64,6 @@ export function BuiltInModelManager({
       const data = await invoke<BuiltInModelInfo[]>('builtin_ai_list_models');
       if (revision !== fetchRevision.current) return;
       setModels(data);
-
-      // Auto-select first available model if none selected
-      if (data.length > 0 && !selection.current.selectedModel) {
-        const firstAvailable = data.find((m) => m.status.type === 'available');
-        if (firstAvailable) {
-          selection.current.onModelSelect(firstAvailable.name);
-        }
-      }
     } catch (error) {
       if (revision !== fetchRevision.current) return;
       console.error('Failed to fetch built-in AI models:', error);

@@ -15,8 +15,8 @@ export interface PcTestRecord {
   measuredAt: number;
   /** Backend the model ran on, for example CPU or DirectML. */
   backend: string;
-  /** True when a built-in sample produced no recognized speech. */
-  missedSpeech: boolean;
+  /** False only for a complete pass, undefined when speech evidence is missing. */
+  missedSpeech?: boolean;
 }
 
 export interface PcTestMeasurement {
@@ -48,7 +48,7 @@ export function readPcTestResults(): Record<string, PcTestRecord> {
           realtimeFactor: value.realtimeFactor,
           measuredAt: value.measuredAt,
           backend: typeof value.backend === "string" ? value.backend : "",
-          missedSpeech: value.missedSpeech === true,
+          missedSpeech: typeof value.missedSpeech === "boolean" ? value.missedSpeech : undefined,
         };
       }
     }
@@ -63,13 +63,15 @@ export function savePcTestResult(modelId: string, measurement: PcTestMeasurement
   if (typeof window === "undefined" || !modelId) return false;
   if (!Number.isFinite(measurement.realtimeFactor) || measurement.realtimeFactor <= 0) return false;
   try {
+    const missed = measurement.samples.some(sample => sample.recognized === false);
+    const complete = measurement.samples.length === 2 && measurement.samples.every(sample => sample.recognized === true);
     const next = {
       ...readPcTestResults(),
       [modelId]: {
         realtimeFactor: measurement.realtimeFactor,
         measuredAt: now,
         backend: measurement.backend,
-        missedSpeech: measurement.samples.some(sample => !sample.recognized),
+        missedSpeech: missed || complete ? missed : undefined,
       },
     };
     window.localStorage.setItem(PC_TEST_STORAGE_KEY, JSON.stringify(next));
@@ -97,6 +99,30 @@ export function speedFraction(speed: number, fastest: number): number {
 
 export function fastestSpeed(records: PcTestRecord[]): number {
   return records.reduce((best, record) => Math.max(best, speedOf(record)), 0);
+}
+
+/** Compare installed variants of one engine that recognized both built-in samples on the same backend. */
+export function recommendedForSpeed(
+  models: { name: string; status: unknown }[],
+  results: Record<string, PcTestRecord>,
+): Map<string, string> {
+  const groups = new Map<string, { name: string; factor: number }[]>();
+  for (const model of models) {
+    const record = results[model.name];
+    if (model.status !== "Available" || record?.missedSpeech !== false) continue;
+    if (!record.backend.trim() || /unconfirmed|unknown|\//i.test(record.backend)) continue;
+    const group = groups.get(record.backend) ?? [];
+    group.push({ name: model.name, factor: record.realtimeFactor });
+    groups.set(record.backend, group);
+  }
+  const recommendations = new Map<string, string>();
+  for (const [backend, group] of groups) {
+    group.sort((a, b) => a.factor - b.factor);
+    if (group.length >= 2 && group[0].factor < group[1].factor) {
+      recommendations.set(group[0].name, `Fastest of ${group.length} tested on ${backend}`);
+    }
+  }
+  return recommendations;
 }
 
 const pad = (value: number) => String(value).padStart(2, "0");

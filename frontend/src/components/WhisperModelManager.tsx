@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import {
   ModelInfo,
   ModelStatus,
   getModelIcon,
+  getWhisperModelDisplayName,
   formatFileSize,
   getModelPerformanceBadge,
   isQuantizedModel,
@@ -14,6 +14,8 @@ import {
   speedLabel,
   WhisperAPI
 } from '../lib/whisper';
+import { DEFAULT_WHISPER_MODEL } from '@/constants/modelDefaults';
+import { recommendedForSpeed, usePcTestResults } from '@/components/settings/pcTestResults';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Button } from '@/components/ui/button';
 
@@ -23,14 +25,12 @@ interface ModelManagerProps {
   selectedModel?: string;
   onModelSelect?: (modelName: string) => void;
   className?: string;
-  autoSave?: boolean;
 }
 
 export function ModelManager({
   selectedModel,
   onModelSelect,
-  className = '',
-  autoSave = false
+  className = ''
 }: ModelManagerProps) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -38,19 +38,12 @@ export function ModelManager({
   const [initialized, setInitialized] = useState(false);
   const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
 
-  // Refs for stable callbacks
-  const onModelSelectRef = useRef(onModelSelect);
-  const autoSaveRef = useRef(autoSave);
   const retryDownload = useRef<((name: string) => Promise<void>) | null>(null);
+
+  const pcResults = usePcTestResults();
 
   // Progress throttle map to prevent rapid updates
   const progressThrottleRef = useRef<Map<string, { progress: number; timestamp: number }>>(new Map());
-
-  // Update refs when props change
-  useEffect(() => {
-    onModelSelectRef.current = onModelSelect;
-    autoSaveRef.current = autoSave;
-  }, [onModelSelect, autoSave]);
 
   // Load persisted downloading state from localStorage
   const getPersistedDownloadingModels = (): Set<string> => {
@@ -159,7 +152,7 @@ export function ModelManager({
         'model-download-complete',
         (event) => {
           const { modelName } = event.payload;
-          const displayName = getDisplayName(modelName);
+          const displayName = getWhisperModelDisplayName(modelName);
 
           setModels(prevModels =>
             prevModels.map(model =>
@@ -182,14 +175,6 @@ export function ModelManager({
             description: 'Model downloaded and ready to use',
             duration: 4000
           });
-
-          // Auto-select after download using stable refs
-          if (onModelSelectRef.current) {
-            onModelSelectRef.current(modelName);
-            if (autoSaveRef.current) {
-              saveModelSelection(modelName);
-            }
-          }
         }
       ),
 
@@ -198,7 +183,7 @@ export function ModelManager({
         'model-download-error',
         (event) => {
           const { modelName, error } = event.payload;
-          const displayName = getDisplayName(modelName);
+          const displayName = getWhisperModelDisplayName(modelName);
 
           setModels(prevModels =>
             prevModels.map(model =>
@@ -235,20 +220,8 @@ export function ModelManager({
     };
   }, []); // Empty dependency array - listeners use refs for stable callbacks
 
-  const saveModelSelection = async (modelName: string) => {
-    try {
-      await invoke('api_save_transcript_config', {
-        provider: 'localWhisper',
-        model: modelName,
-        apiKey: null
-      });
-    } catch (error) {
-      console.error('Failed to save model selection:', error);
-    }
-  };
-
   const cancelDownload = async (modelName: string) => {
-    const displayName = getDisplayName(modelName);
+    const displayName = getWhisperModelDisplayName(modelName);
 
     try {
       await WhisperAPI.cancelDownload(modelName);
@@ -285,7 +258,7 @@ export function ModelManager({
   const downloadModel = async (modelName: string) => {
     if (downloadingModels.has(modelName)) return;
 
-    const displayName = getDisplayName(modelName);
+    const displayName = getWhisperModelDisplayName(modelName);
 
     try {
       updateDownloadingModels(prev => new Set([...prev, modelName]));
@@ -323,23 +296,8 @@ export function ModelManager({
 
   useEffect(() => { retryDownload.current = downloadModel; });
 
-  const selectModel = async (modelName: string) => {
-    if (onModelSelect) {
-      onModelSelect(modelName);
-    }
-
-    if (autoSave) {
-      await saveModelSelection(modelName);
-    }
-
-    const displayName = getDisplayName(modelName);
-    toast.success(`Switched to ${displayName}`, {
-      duration: 3000
-    });
-  };
-
   const deleteModel = async (modelName: string) => {
-    const displayName = getDisplayName(modelName);
+    const displayName = getWhisperModelDisplayName(modelName);
 
     try {
       await WhisperAPI.deleteCorruptedModel(modelName);
@@ -353,10 +311,6 @@ export function ModelManager({
         duration: 3000
       });
 
-      // If deleted model was selected, clear selection
-      if (selectedModel === modelName && onModelSelect) {
-        onModelSelect('');
-      }
     } catch (err) {
       console.error('Failed to delete model:', err);
       toast.error(`Failed to delete ${displayName}`, {
@@ -364,22 +318,6 @@ export function ModelManager({
         duration: 4000
       });
     }
-  };
-
-  const getDisplayName = (modelName: string): string => {
-    const modelNameMapping: { [key: string]: string } = {
-      "small": "Small",
-      "medium-q5_0": "Medium",
-      "large-v3-q5_0": "Large V3 compressed",
-      "large-v3-turbo": "Large V3 turbo",
-      "large-v3": "Large V3"
-    };
-
-    const basicModelNames = ["small", "medium-q5_0", "large-v3-q5_0", "large-v3-turbo", "large-v3"];
-    if (basicModelNames.includes(modelName)) {
-      return modelNameMapping[modelName] || modelName;
-    }
-    return `Whisper ${modelName}`;
   };
 
   if (loading) {
@@ -406,32 +344,26 @@ export function ModelManager({
   const basicModelNames = ["small", "medium-q5_0", "large-v3-q5_0", "large-v3-turbo", "large-v3"];
   const basicModels = models.filter(m => basicModelNames.includes(m.name))
     .sort((a, b) => basicModelNames.indexOf(a.name) - basicModelNames.indexOf(b.name));
+  const speedRecommendations = recommendedForSpeed(models, pcResults);
   const advancedModels = models.filter(m => !basicModelNames.includes(m.name));
 
   return (
     <div className={`space-y-3 ${className}`}>
       {/* Basic Models */}
       <div className="space-y-3">
-        {basicModels.map((model) => {
-          const isRecommended = model.name === 'base';
-          return (
-            <ModelCard
-              key={model.name}
-              model={model}
-              isSelected={selectedModel === model.name}
-              isRecommended={isRecommended}
-              onSelect={() => {
-                if (model.status === 'Available') {
-                  selectModel(model.name);
-                }
-              }}
-              onDownload={() => downloadModel(model.name)}
-              onCancel={() => cancelDownload(model.name)}
-              onDelete={() => deleteModel(model.name)}
-              displayName={getDisplayName(model.name)}
-            />
-          );
-        })}
+        {basicModels.map((model) => (
+          <ModelCard
+            key={model.name}
+            model={model}
+            isSelected={selectedModel === model.name}
+            recommendation={speedRecommendations.get(model.name) ?? (model.name === DEFAULT_WHISPER_MODEL ? 'Recommended starting model' : undefined)}
+            onSelect={onModelSelect ? () => onModelSelect(model.name) : undefined}
+            onDownload={() => downloadModel(model.name)}
+            onCancel={() => cancelDownload(model.name)}
+            onDelete={() => deleteModel(model.name)}
+            displayName={getWhisperModelDisplayName(model.name)}
+          />
+        ))}
       </div>
 
       {/* Advanced Models */}
@@ -448,33 +380,18 @@ export function ModelManager({
                     key={model.name}
                     model={model}
                     isSelected={selectedModel === model.name}
-                    isRecommended={false}
-                    onSelect={() => {
-                      if (model.status === 'Available') {
-                        selectModel(model.name);
-                      }
-                    }}
+                    recommendation={speedRecommendations.get(model.name)}
+                    onSelect={onModelSelect ? () => onModelSelect(model.name) : undefined}
                     onDownload={() => downloadModel(model.name)}
                     onCancel={() => cancelDownload(model.name)}
                     onDelete={() => deleteModel(model.name)}
-                    displayName={getDisplayName(model.name)}
+                    displayName={getWhisperModelDisplayName(model.name)}
                   />
                 ))}
               </div>
             </AccordionContent>
           </AccordionItem>
         </Accordion>
-      )}
-
-      {/* Helper text */}
-      {selectedModel && (
-        <motion.div
-          initial={{ opacity: 0, y: -5 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="text-xs text-muted-foreground text-center pt-2"
-        >
-          Using {getDisplayName(selectedModel)} for transcription
-        </motion.div>
       )}
     </div>
   );
@@ -484,8 +401,8 @@ export function ModelManager({
 interface ModelCardProps {
   model: ModelInfo;
   isSelected: boolean;
-  isRecommended: boolean;
-  onSelect: () => void;
+  recommendation?: string;
+  onSelect?: () => void;
   onDownload: () => void;
   onCancel: () => void;
   onDelete: () => void;
@@ -495,7 +412,7 @@ interface ModelCardProps {
 function ModelCard({
   model,
   isSelected,
-  isRecommended,
+  recommendation,
   onSelect,
   onDownload,
   onCancel,
@@ -521,23 +438,19 @@ function ModelCard({
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       className={`
-        relative rounded-lg border-2 transition-all cursor-pointer
+        relative rounded-lg border-2 transition-all
         ${isSelected && isAvailable
           ? 'border-primary bg-primary/10'
           : isAvailable
             ? 'border-border hover:border-border bg-card'
             : 'border-border bg-muted'
         }
-        ${isAvailable ? '' : 'cursor-default'}
       `}
-      onClick={() => {
-        if (isAvailable) onSelect();
-      }}
     >
       {/* Recommended Badge */}
-      {isRecommended && (
+      {recommendation && (
         <div className="absolute -top-2 -right-2 bg-primary text-primary-foreground text-xs px-2 py-0.5 rounded-full font-medium">
-          Recommended
+          {recommendation}
         </div>
       )}
 
@@ -556,7 +469,7 @@ function ModelCard({
                   animate={{ scale: 1 }}
                   className="bg-primary text-primary-foreground px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1"
                 >
-                  ✓
+                  Selected
                 </motion.span>
               )}
               {isQuantizedModel(model.name) && (
@@ -596,6 +509,7 @@ function ModelCard({
                   <div className="w-2 h-2 bg-success-foreground rounded-full"></div>
                   <span className="text-xs font-medium">Ready</span>
                 </div>
+                {!isSelected && onSelect && <Button variant="outline" size="sm" aria-label={`Use ${displayName}`} onClick={onSelect}>Use</Button>}
                 <AnimatePresence>
                   {isHovered && (
                     <MotionButton variant="ghost"

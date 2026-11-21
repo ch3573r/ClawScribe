@@ -285,7 +285,9 @@ retains a capture-gap warning even when the missing source reconnects.
 On first launch, **Record audio now** opens Home in audio-only mode without
 starting a download. Live transcription setup requires an available speech
 model. Local notes use a separate download action and save a local summary
-provider only after the chosen model is available. Completing setup with a
+provider only after the chosen model is available. Setup shows download progress
+for each requested model when the engine reports a total size, and otherwise
+shows a preparation message until the readiness check finishes. Completing setup with a
 model deferred does not mark it downloaded. Completed installations keep
 their existing mode and provider preferences.
 

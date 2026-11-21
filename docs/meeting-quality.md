@@ -38,11 +38,17 @@ that a segment is correct or incorrect.
 ## Testing local transcription speed
 
 In **Settings → Transcription**, select an installed Whisper, Parakeet or Nemotron model
-and choose **Test this PC**. When a hosted transcription provider is selected,
-the test uses the local Parakeet model used for live recording. The benchmark
+with **Use**, then choose **Test this PC**. With a hosted file-transcription
+provider selected, the test targets the local Parakeet Lightning model. The benchmark
 shares the recording and transcription job gate. Run it while those jobs are
 idle. It uses two synthetic, local speech samples (German and English) and
 reports inference time separately from model loading.
+
+The model list marks the fastest tested variant when at least two installed
+models of that engine recognized speech in both samples on the same confirmed
+backend. Tied results have no winner. A speed comparison does not measure
+word accuracy. Whisper's recommended starting model is Large V3 turbo, its
+catalog default.
 
 Compare processing time with the sample duration. Taking longer than the
 audio means a stream of similar speech would accumulate a backlog. The result
