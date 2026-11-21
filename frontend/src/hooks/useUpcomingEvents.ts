@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useICalendar } from "@/hooks/useICalendar";
-import { usePendingCalendar } from "@/hooks/usePendingCalendar";
+import { useNextCalendarChoice } from "@/hooks/usePendingCalendar";
 import {
   calendarLinkFromEvent, MICROSOFT_CALENDAR_CLEARED, microsoftCalendarRevision,
   sameCalendarEvent, setPendingCalendar,
@@ -32,7 +32,7 @@ export function useUpcomingEvents(limit = 5, timedOnly = false) {
   const [microsoftEvents, setMicrosoftEvents] = useState<CalendarEvent[]>([]);
   const [microsoftAvailable, setMicrosoftAvailable] = useState(false);
   const ical = useICalendar();
-  const pending = usePendingCalendar();
+  const choice = useNextCalendarChoice();
   const readVersion = useRef(0);
   const selectionRevision = microsoftCalendarRevision;
 
@@ -101,15 +101,15 @@ export function useUpcomingEvents(limit = 5, timedOnly = false) {
     .slice(0, limit);
 
   const isSelected = (entry: UpcomingEntry) =>
-    sameCalendarEvent(pending, calendarLinkFromEvent({ ...entry.event, sourceId: entry.sourceId }));
+    sameCalendarEvent(choice.link, calendarLinkFromEvent({ ...entry.event, sourceId: entry.sourceId }));
 
   /** Use this event's title and invitees for the next recording. */
   const select = (entry: UpcomingEntry) => {
     const { event, sourceId } = entry;
     if (!sourceId && selectionRevision !== microsoftCalendarRevision) return;
-    const saved = setPendingCalendar(calendarLinkFromEvent({ ...event, sourceId }));
+    const saved = setPendingCalendar(calendarLinkFromEvent({ ...event, sourceId }), false, event.end);
     if (!saved) toast.error("Could not save the calendar selection on this device.");
   };
 
-  return { entries, isSelected, select, hasCalendars: microsoftAvailable || ical.sources.length > 0 };
+  return { entries, choice, isSelected, select, hasCalendars: microsoftAvailable || ical.sources.length > 0 };
 }

@@ -18,7 +18,7 @@ import {
 } from '@/lib/start-error';
 import { openStorageDialog } from '@/lib/storage-dialog-controller';
 
-type StartSource = 'home_page' | 'sidebar_auto' | 'sidebar_direct' | 'detected_call' | 'remote_request';
+type StartSource = 'home_page' | 'sidebar_auto' | 'sidebar_direct' | 'detected_call' | 'calendar_call' | 'remote_request';
 let startInProgress = false;
 
 export const DEVICE_PREFERENCES_UNAVAILABLE = 'recording_device_preferences_unavailable';
@@ -74,15 +74,16 @@ export function useStartRecordingSession() {
     if (devicePreferencesStatus !== 'ready') throw DEVICE_PREFERENCES_UNAVAILABLE;
     startInProgress = true;
     const now = Date.now();
-    const choice = getNextCalendarChoice();
+    // A join claim already owns its invitation in the core. Manual choices stay available.
+    const choice = source === 'calendar_call' ? null : getNextCalendarChoice();
     const microsoftRevision = microsoftCalendarRevision;
     setStatus(RecordingStatus.STARTING, 'Initializing recording…');
     try {
       const sessionId = await recordingService.startRecordingWithDevices(
-        selectedDevices.micDevice, selectedDevices.systemDevice, meetingTitleAt(now), choice.link, requestId,
+        selectedDevices.micDevice, selectedDevices.systemDevice, meetingTitleAt(now), choice?.link, requestId,
         readPinnedSummaryLanguageDefault(),
       );
-      consumeNextCalendarChoice(choice);
+      if (choice) consumeNextCalendarChoice(choice);
       setIsMeetingActive(true);
       Analytics.trackButtonClick('start_recording', source);
       void showRecordingNotification();
@@ -94,7 +95,7 @@ export function useStartRecordingSession() {
         if (previous && previous.revision > draft.revision) return;
         const initial = previous?.revision === draft.revision
           ? { ...previous, startedAt: now } : { sessionId, startedAt: now, ...draft, status: 'none' as const, matches: [] };
-        if (setActiveRecordingCalendar(initial) && !choice.link && !choice.skip && draft.revision === 0) {
+        if (setActiveRecordingCalendar(initial) && choice && !choice.link && !choice.skip && draft.revision === 0) {
           return resolveRecordingCalendar(initial, now, microsoftRevision);
         }
       }).catch(() => {});

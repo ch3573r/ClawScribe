@@ -373,7 +373,11 @@ pub fn queue_recording_after_save(session_id: String, enabled: bool) -> bool {
 }
 
 pub(crate) fn same_recording_epoch(epoch: u64) -> bool {
-    RECORDING_EPOCH.load(Ordering::Acquire) == epoch
+    recording_epoch() == epoch
+}
+
+pub(crate) fn recording_epoch() -> u64 {
+    RECORDING_EPOCH.load(Ordering::Acquire)
 }
 
 #[cfg(test)]
@@ -647,6 +651,8 @@ fn activate_recording<R: Runtime>(
     IS_RECORDING.store(true, Ordering::SeqCst);
     *task =
         transcribes.then(|| transcription::start_transcription_task(app.clone(), receiver, sink));
+    drop(task);
+    crate::teams_detection::monitor::join::cancel_pending(app);
 }
 
 // ============================================================================
@@ -1090,6 +1096,9 @@ pub(crate) async fn start_selected_session<R: Runtime>(
                         .await
                         {
                             Ok(id) => *staged_id = id,
+                            Err(_) if request.is_some_and(|claim| claim.calendar().is_some()) => {
+                                anyhow::bail!("Could not link the selected calendar event.");
+                            }
                             Err(_) => {
                                 let _ = app.emit(
                                     "recording-warning",
@@ -1098,7 +1107,7 @@ pub(crate) async fn start_selected_session<R: Runtime>(
                             }
                         }
                         if let Some(request) = request {
-                            request.check_call().map_err(anyhow::Error::msg)?;
+                            request.admit(app).map_err(anyhow::Error::msg)?;
                         }
                         Ok(())
                     }

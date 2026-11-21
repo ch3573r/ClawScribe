@@ -15,7 +15,7 @@ const graphSeries = 'graph:v1:5b910e68a596c61027e658aaf8baa621706d748d0af2b1e2ea
 test('a fresh invitation and a legacy checked invitee both require attendance review', t => {
   const before = globalThis.window;
   const data = new Map([['clawscribe.pendingCalendar', JSON.stringify({
-    eventId: 'previous', subject: null,
+    eventId: 'previous', subject: null, start: new Date().toISOString(),
     attendees: [{ name: 'Checked by default', included: true }, { name: 'Excluded', included: false }],
   })]]);
   globalThis.window = { sessionStorage: {
@@ -157,7 +157,7 @@ test('sign-out clears cached Microsoft series events and ignores an in-flight Ho
     react: hooks.react, sonner: {},
     '@/lib/meetingCalendar': links,
     '@/hooks/useICalendar': { useICalendar: () => ({ events: [imported], sources: [{ id: 'file', name: 'File' }] }) },
-    '@/hooks/usePendingCalendar': { usePendingCalendar: links.getPendingCalendar },
+    '@/hooks/usePendingCalendar': { useNextCalendarChoice: links.getNextCalendarChoice },
     '@/services/microsoftExportService': { microsoftExportService: {
       connectionStatus: async () => ({ state: 'connected' }),
       listCalendarEvents: async () => (++reads === 1 ? [graphEvent] : delayed.promise),
@@ -197,6 +197,57 @@ test('starting one recording preserves an explicit choice made for the next reco
   assert.equal(skip.skip, true);
   links.consumeNextCalendarChoice(skip);
   assert.equal(links.getNextCalendarChoice().skip, false);
+});
+
+test('a selection left in Upcoming cannot name a later tray or call recording', t => {
+  const links = withStorage(t);
+  const selected = links.calendarLinkFromEvent(event('earlier-meeting'));
+  links.setPendingCalendar(selected, false, end);
+  assert.equal(links.getNextCalendarChoice(Date.parse(end) + 60_000).link.eventId, 'earlier-meeting');
+  assert.equal(links.getNextCalendarChoice(Date.parse(end) + 6 * 60_000).link, null);
+  // A pending selection written by 0.64.1 only contained the link, without an end or expiry.
+  window.sessionStorage.setItem('clawscribe.pendingCalendar', JSON.stringify(selected));
+  assert.equal(links.getNextCalendarChoice(Date.parse(end) + 86_400_000).link, null);
+  // An explicit opt-out carries no event data and still applies once across an upgrade.
+  window.sessionStorage.setItem('clawscribe.pendingCalendar', '"skip"');
+  const skip = links.getNextCalendarChoice();
+  assert.equal(skip.skip, true);
+  links.consumeNextCalendarChoice(skip);
+  assert.equal(links.getNextCalendarChoice().skip, false);
+});
+
+test('a joined call keeps the saved devices and leaves a separate manual calendar choice for the next start', async t => {
+  const links = withStorage(t);
+  links.setPendingCalendar(links.calendarLinkFromEvent(event('manual-choice')));
+  const joined = links.calendarLinkFromEvent(event('joined-event'));
+  const calls = [];
+  const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
+  const noop = () => {};
+  const { useStartRecordingSession } = loadTsModule('src/hooks/useRecordingStart.ts', {
+    react: hooks.react, '@/lib/meetingCalendar': links,
+    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ setIsMeetingActive: noop }) },
+    '@/contexts/ConfigContext': { useConfig: () => ({
+      selectedDevices: { micDevice: 'Chosen input', systemDevice: 'Chosen output' }, devicePreferencesStatus: 'ready',
+    }) },
+    '@/contexts/RecordingStateContext': { useRecordingState: () => ({ setStatus: noop }), RecordingStatus: { STARTING: 'starting' } },
+    '@/services/recordingService': { recordingService: {
+      startRecordingWithDevices: async (...args) => { calls.push(args); return 'bound-session'; },
+    } },
+    '@/services/recordingCalendarService': {
+      readRecordingCalendar: async () => ({ link: joined, revision: 1 }),
+      resolveRecordingCalendar: () => assert.fail('A joined call already has its own invitation'),
+    },
+    '@/lib/recordingNotification': { showRecordingNotification: noop },
+    '@/lib/analytics': { __esModule: true, default: { trackButtonClick: noop } },
+  });
+  await hooks.render(useStartRecordingSession)('calendar_call', 'native-claim');
+  await flush();
+  assert.deepEqual(calls[0].slice(0, 2), ['Chosen input', 'Chosen output']);
+  assert.equal(calls[0][3], undefined);
+  assert.equal(calls[0][4], 'native-claim');
+  assert.equal(links.getActiveRecordingCalendar('bound-session').link.eventId, 'joined-event');
+  assert.equal(links.getPendingCalendar().eventId, 'manual-choice');
 });
 
 function legacyStore(t, outcomes, onCall = () => {}) {

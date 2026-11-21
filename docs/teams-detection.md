@@ -40,6 +40,30 @@ help.
 The settings are kept by the core as well as the window. The first time, the
 ones saved by earlier versions are handed to the core, which then keeps its own.
 
+## Joining a Teams invitation from Upcoming
+
+On Home, **Join** opens the meeting link. **Join and record** opens a supported
+Teams link from Microsoft 365 and watches for that invitation, including when
+call detection is off. The request lasts five minutes or until the event ends,
+whichever comes first. Use **Cancel recording request** on Home to withdraw it.
+Microsoft sign-out or starting a separate recording also clears the request.
+
+ClawScribe checks for active Teams calls before opening the link. An already
+active call window is ineligible. A new browser call with the same Teams room
+can start automatically when the invitation is in progress or starts within
+five minutes. If the meeting is further away or Teams only exposes call
+controls, confirm the event shown on Home, in the recording prompt or in the
+tray. A different identified room or several detected calls cannot start the
+requested recording. If the initial check cannot finish, Teams still opens
+and ClawScribe offers manual recording.
+
+The native recorder rechecks the call and saves the selected invitation with
+that session before opening the audio streams. It uses the saved audio devices
+and recording mode. A separate **Use for next recording** choice stays available
+for an ordinary start. Invitees remain unchecked until you review attendance.
+With continuous Teams detection off, stop the recording yourself. The usual
+automatic stop applies when continuous Teams detection and automatic stop are on.
+
 ## When the call ends
 
 **Stop and save when the detected call ends** applies to a recording started

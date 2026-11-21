@@ -3,10 +3,10 @@
 import { openExternal } from '@/lib/openExternal';
 import { Button } from "@/components/ui/button";
 import { useUpcomingEvents } from "@/hooks/useUpcomingEvents";
+import { supportsJoinRecording, useJoinRecording } from "@/hooks/useJoinRecording";
 import { CalendarClock, Video } from "lucide-react";
-import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { getNextCalendarChoice, PENDING_CALENDAR_CHANGED, setPendingCalendar } from "@/lib/meetingCalendar";
+import { setPendingCalendar } from "@/lib/meetingCalendar";
 
 function formatWhen(iso: string | null, allDay: boolean): string {
   if (!iso) return "";
@@ -21,20 +21,19 @@ function formatWhen(iso: string | null, allDay: boolean): string {
   return `${d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} · ${time}`;
 }
 
-function NextRecordingCalendar({ hasCalendars }: { hasCalendars: boolean }) {
-  const [choice, setChoice] = useState(getNextCalendarChoice);
-  useEffect(() => {
-    const sync = () => setChoice(getNextCalendarChoice());
-    window.addEventListener(PENDING_CALENDAR_CHANGED, sync);
-    sync();
-    return () => window.removeEventListener(PENDING_CALENDAR_CHANGED, sync);
-  }, []);
+function NextRecordingCalendar({ hasCalendars, choice }: {
+  hasCalendars: boolean;
+  choice: ReturnType<typeof useUpcomingEvents>["choice"];
+}) {
   if (!hasCalendars && !choice.link && !choice.skip) return null;
   const label = choice.link ? `Next recording · ${choice.link.subject || "Untitled event"}`
     : choice.skip ? "Next recording will start without a calendar event" : "";
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 px-6 py-2">
       {label && <span role="status" className="min-w-0 break-words text-sm text-muted-foreground">{label}</span>}
+      {choice.link && <Button size="sm" variant="ghost" onClick={() => {
+        if (!setPendingCalendar(null)) toast.error("Could not clear the calendar selection.");
+      }}>Clear selection</Button>}
       <Button size="sm" variant="ghost" onClick={() => {
         if (!setPendingCalendar(null, !choice.skip)) toast.error("Could not change the calendar selection.");
       }}>
@@ -45,8 +44,9 @@ function NextRecordingCalendar({ hasCalendars }: { hasCalendars: boolean }) {
 }
 
 export function UpcomingMeetings() {
-  const { entries: events, isSelected, select, hasCalendars } = useUpcomingEvents(5);
-  if (!events.length && !hasCalendars) return null;
+  const { entries: events, choice, isSelected, select, hasCalendars } = useUpcomingEvents(5);
+  const recording = useJoinRecording();
+  if (!events.length && !hasCalendars && !recording.pending && !choice.link && !choice.skip) return null;
 
   return (
     <section className="rounded-lg border border-border bg-card shadow-sm">
@@ -69,24 +69,36 @@ export function UpcomingMeetings() {
                   {formatWhen(ev.start, allDay)} · {label}
                 </div>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Button size="sm" variant="ghost" onClick={() => select(entry)} disabled={selected}>
                   {selected ? "Selected for next recording" : "Use for next recording"}
                 </Button>
                 {ev.joinUrl && (
-                  <a href={ev.joinUrl}
-                    onClick={event => { event.preventDefault(); void openExternal(event.currentTarget.href); }}
-                    rel="noreferrer"
-                    className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-muted px-3 py-1.5 text-xs font-medium text-foreground transition hover:border-primary/30 hover:bg-primary/10 hover:text-primary">
+                  <Button size="sm" variant="outline" onClick={() => void openExternal(ev.joinUrl!)}>
                     <Video className="h-3.5 w-3.5" />Join
-                  </a>
+                  </Button>
+                )}
+                {recording.windows && supportsJoinRecording(entry) && (
+                  <Button size="sm" variant="outline" disabled={recording.busy || Boolean(recording.pending)}
+                    onClick={() => void recording.join(entry)}>Join and record</Button>
                 )}
               </div>
             </div>
           );
         })}
       </div>
-      <NextRecordingCalendar hasCalendars={hasCalendars} />
+      {recording.pending && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-border px-6 py-2">
+          <span role="status" className="min-w-0 flex-1 break-words text-sm text-muted-foreground">
+            {recording.pending.opening ? `Opening “${recording.pending.subject}”…`
+              : recording.pending.promptKey ? `Is this Teams call “${recording.pending.subject}”?`
+              : `Waiting for the Teams call for “${recording.pending.subject}”.`}
+          </span>
+          {recording.pending.promptKey && <Button size="sm" disabled={recording.busy} onClick={recording.confirm}>Record this call</Button>}
+          <Button size="sm" variant="ghost" onClick={recording.cancel}>Cancel recording request</Button>
+        </div>
+      )}
+      <NextRecordingCalendar hasCalendars={hasCalendars} choice={choice} />
     </section>
   );
 }

@@ -308,7 +308,10 @@ completion status, and any available source reference. This works offline.
 
 **Settings → Calendars** lets you import an `.ics` file or add a read-only
 subscription from a calendar provider. Upcoming meetings appear on Home, and
-the sidebar shows the next one. Choose **Use for next recording** or let
+the sidebar shows the next one. On Windows, **Join and record** opens a supported
+Teams invitation and watches for that meeting for up to five minutes. If Teams
+doesn't expose its meeting link, confirm the event before capture starts.
+Choose **Use for next recording** to select an event for a manual start or let
 ClawScribe link a single timed event in progress. For early joins, choose an event
 starting in the next five minutes. Review attendance while
 recording or from the saved meeting. Summaries receive only calendar names you

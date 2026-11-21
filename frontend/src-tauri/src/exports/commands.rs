@@ -246,15 +246,16 @@ pub async fn microsoft_cancel_sign_in<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn microsoft_sign_out(
+pub async fn microsoft_sign_out<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, MicrosoftAuthState>,
     app_state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<(), String> {
-    state
-        .inner
-        .write()
-        .await
-        .end_session(token_store::delete_token)?;
+    {
+        let mut session = state.inner.write().await;
+        crate::teams_detection::monitor::join::cancel_pending(&app);
+        session.end_session(token_store::delete_token)?;
+    }
     crate::library::calendar::clear_microsoft(app_state.db_manager.pool()).await
 }
 

@@ -26,6 +26,7 @@ export interface UpcomingEvent {
   id: string;
   subject: string | null;
   start: string | null;
+  end: string | null;
   allDay: boolean;
   attendees: { name: string | null; email: string | null }[];
 }
@@ -145,7 +146,7 @@ export function UseEventButton({ event, pending }: { event: UpcomingEvent; pendi
       aria-label={selected ? `Selected ${title} for next recording` : `Use ${title} for next recording`}
       onClick={() => {
         if (link.source === "microsoft" && selectionRevision !== microsoftCalendarRevision) return;
-        if (!setPendingCalendar(link)) toast.error("Could not save the meeting selection on this device.");
+        if (!setPendingCalendar(link, false, event.end)) toast.error("Could not save the meeting selection on this device.");
       }}>
       {selected ? "Selected" : "Use"}
     </Button>

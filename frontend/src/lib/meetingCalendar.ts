@@ -104,6 +104,8 @@ export const ACTIVE_CALENDAR_CHANGED = "clawscribe-active-calendar-changed";
 export const MICROSOFT_CALENDAR_CLEARED = "clawscribe-microsoft-calendar-cleared";
 const PENDING_KEY = "clawscribe.pendingCalendar";
 const SKIP_VALUE = '"skip"';
+const CHOICE_GRACE_MS = 5 * 60_000;
+const CHOICE_FALLBACK_MS = 60 * 60_000;
 
 type LegacyLink = Omit<MeetingCalendarLink, "source" | "attendees"> & {
   source?: MeetingCalendarLink["source"];
@@ -144,23 +146,42 @@ let selectionVersion = 0;
 export let microsoftCalendarRevision = 0;
 
 export function getPendingCalendar(): MeetingCalendarLink | null {
-  return parseCalendarLink(sessionValue(PENDING_KEY));
+  return getNextCalendarChoice().link;
+}
+
+export function getNextCalendarChoice(now = Date.now()) {
+  const empty = { link: null, skip: false, version: selectionVersion, expiresAt: 0 };
+  const raw = sessionValue(PENDING_KEY);
+  if (!raw) return empty;
+  if (raw === SKIP_VALUE) return { ...empty, skip: true };
+  try {
+    const stored = JSON.parse(raw);
+    const link = parseCalendarLink(raw);
+    // Old choices lacked an end time. Only a dated invitation can still be current.
+    const expiresAt = stored?.expiresAt ?? (Date.parse(link?.start ?? "") + CHOICE_FALLBACK_MS);
+    if (!link || typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || now >= expiresAt) {
+      window.sessionStorage.removeItem(PENDING_KEY);
+      return empty;
+    }
+    return { link, skip: false, version: selectionVersion, expiresAt };
+  } catch { return empty; }
 }
 
 export function isNextCalendarSkipped(): boolean {
-  return sessionValue(PENDING_KEY) === SKIP_VALUE;
+  return getNextCalendarChoice().skip;
 }
 
-export function getNextCalendarChoice() {
-  return { link: getPendingCalendar(), skip: isNextCalendarSkipped(), version: selectionVersion };
-}
-
-export function setPendingCalendar(link: MeetingCalendarLink | null, skip = false): boolean {
+export function setPendingCalendar(link: MeetingCalendarLink | null, skip = false, end?: string | null): boolean {
   try {
     const store = window.sessionStorage;
     if (skip) store.setItem(PENDING_KEY, SKIP_VALUE);
-    else if (link) store.setItem(PENDING_KEY, JSON.stringify(link));
-    else store.removeItem(PENDING_KEY);
+    else if (link) {
+      const endTime = Date.parse(end ?? "");
+      const startTime = Date.parse(link.start ?? "");
+      const expiresAt = Number.isFinite(endTime) ? endTime + CHOICE_GRACE_MS
+        : (Number.isFinite(startTime) ? startTime : Date.now()) + CHOICE_FALLBACK_MS;
+      store.setItem(PENDING_KEY, JSON.stringify({ ...link, expiresAt }));
+    } else store.removeItem(PENDING_KEY);
   } catch {
     return false;
   }

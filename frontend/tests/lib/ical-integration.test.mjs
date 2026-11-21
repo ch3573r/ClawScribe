@@ -146,7 +146,7 @@ test('Home offers an imported event for the next recording with Microsoft discon
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {}, sonner: { toast: { error() {} } },
     '@/components/ui/button': { Button: 'button' }, '@/lib/openExternal': {},
     '@/hooks/useICalendar': { useICalendar: () => ({ events: [event], sources: [calendar] }) },
-    '@/hooks/usePendingCalendar': { usePendingCalendar: () => null },
+    '@/hooks/usePendingCalendar': { useNextCalendarChoice: () => ({ link: null }) },
     '@/lib/meetingCalendar': { ...loadTsModule('src/lib/meetingCalendar.ts'), setPendingCalendar: link => selected.push(link) },
     '@/services/microsoftExportService': { microsoftExportService: { connectionStatus: async () => ({ state: 'not_connected' }) } },
   });

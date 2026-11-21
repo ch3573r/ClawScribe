@@ -1,0 +1,416 @@
+//! A single Upcoming invitation, held only in memory from the click to admission.
+use super::{sync_prompt, tracker, Mode, Tracker};
+use crate::audio::recording_commands::{capture_active, is_starting, recording_epoch};
+use crate::exports::ms_auth_state::MicrosoftAuthState;
+use crate::library::calendar::{CalendarLink, CalendarSource};
+use crate::teams_detection::calls::{scan, teams_room, CallScan, CallWindow, Provider};
+use chrono::Utc;
+use serde::Serialize;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+
+const WAIT_MS: i64 = 5 * 60_000;
+const EXPIRED: &str = "The invitation to record is no longer active.";
+
+pub(super) struct Invitation {
+    pub(super) id: String,
+    pub(super) link: CalendarLink,
+    room: [u8; 32],
+    deadline: Instant,
+    expires_at: i64,
+    epoch: u64,
+    near_start: bool,
+    // None until the pre-launch scan finishes and the launcher succeeds.
+    active_before: Option<Vec<String>>,
+    // Dropping the invitation also wakes and releases its timeout worker.
+    timeout: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Invitation {
+    fn new(link: CalendarLink, room: [u8; 32], end: &str) -> Result<Self, String> {
+        let now = Utc::now().timestamp_millis();
+        let start = link
+            .start_time()
+            .ok_or("The event start time is unavailable.")?;
+        let end = chrono::DateTime::parse_from_rfc3339(end)
+            .map_err(|_| "The event end time is unavailable.")?
+            .timestamp_millis();
+        if end <= now
+            || start >= end
+            || link.source() != CalendarSource::Microsoft
+            || link.is_reviewed()
+        {
+            return Err("Choose a current Teams invitation from Upcoming.".into());
+        }
+        let wait = (end - now).min(WAIT_MS);
+        Ok(Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            link,
+            room,
+            expires_at: now + wait,
+            deadline: Instant::now() + Duration::from_millis(wait as u64),
+            epoch: recording_epoch(),
+            near_start: start <= now + WAIT_MS,
+            active_before: None,
+            timeout: None,
+        })
+    }
+
+    pub(super) fn current(&self) -> bool {
+        Instant::now() < self.deadline
+            && Utc::now().timestamp_millis() < self.expires_at
+            && self.epoch == recording_epoch()
+    }
+
+    pub(super) fn mode(&self, call: &CallWindow) -> Mode {
+        let Some(before) = &self.active_before else {
+            return Mode::Off;
+        };
+        if !self.current() || call.provider != Provider::Teams || before.contains(&call.window) {
+            return Mode::Off;
+        }
+        match call.teams_room {
+            Some(room) if room != self.room => Mode::Off,
+            Some(_) if self.near_start => Mode::Auto,
+            _ => Mode::Prompt,
+        }
+    }
+
+    fn launch(
+        &mut self,
+        scan: Option<&CallScan>,
+        open: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if !self.current() || self.active_before.is_some() {
+            return Err(EXPIRED.into());
+        }
+        open()?;
+        let scan = scan.filter(|s| s.supported && s.complete).ok_or(
+            "Teams opened. ClawScribe could not check existing calls. Start recording manually.",
+        )?;
+        self.active_before = Some(scan.active.iter().map(|call| call.window.clone()).collect());
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinView {
+    id: String,
+    subject: String,
+    opening: bool,
+    prompt_key: Option<String>,
+}
+
+impl Tracker {
+    fn reserve_join(&mut self, join: Invitation) -> Result<(), String> {
+        if self.join.as_ref().is_some_and(Invitation::current) {
+            return Err("Cancel the pending recording before joining another meeting.".into());
+        }
+        if !join.current() {
+            return Err(EXPIRED.into());
+        }
+        self.prompt = None;
+        self.join = Some(join);
+        self.revision += 1;
+        Ok(())
+    }
+
+    fn launch_join(
+        &mut self,
+        id: &str,
+        baseline: Option<&CallScan>,
+        open: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let join = self
+            .join
+            .as_mut()
+            .filter(|join| join.id == id)
+            .ok_or(EXPIRED)?;
+        let result = join.launch(baseline, open);
+        self.revision += 1; // Reject any tick begun before the launch completed.
+        result
+    }
+
+    pub(super) fn clear_join(&mut self, id: &str) -> bool {
+        if self.join.as_ref().is_none_or(|join| join.id != id) {
+            return false;
+        }
+        self.join = None;
+        self.prompt = None;
+        self.revision += 1;
+        true
+    }
+}
+
+#[tauri::command]
+pub fn get_join_recording() -> Option<JoinView> {
+    let tracker = tracker();
+    let join = tracker.join.as_ref().filter(|join| join.current())?;
+    Some(JoinView {
+        id: join.id.clone(),
+        subject: join.link.subject().unwrap_or("Untitled event").into(),
+        opening: join.active_before.is_none(),
+        prompt_key: tracker.prompt.as_ref().map(|p| p.key.clone()),
+    })
+}
+
+#[tauri::command]
+pub fn cancel_join_recording<R: Runtime>(app: AppHandle<R>, id: String) -> bool {
+    cancel(&app, &id)
+}
+
+pub(super) fn cancel<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
+    let before = {
+        let mut tracker = tracker();
+        let before = tracker.prompt_view();
+        if !tracker.clear_join(id) {
+            return false;
+        }
+        before
+    };
+    sync_prompt(app, before, None);
+    let _ = app.emit("join-recording-changed", ());
+    true
+}
+
+pub(crate) fn cancel_pending<R: Runtime>(app: &AppHandle<R>) {
+    let id = tracker().join.as_ref().map(|j| j.id.clone());
+    if let Some(id) = id {
+        cancel(app, &id);
+    }
+}
+
+#[tauri::command]
+pub async fn join_and_record<R: Runtime>(
+    app: AppHandle<R>,
+    url: String,
+    link: CalendarLink,
+    end: String,
+) -> Result<(), String> {
+    let url = url::Url::parse(&url).map_err(|_| "Invalid Teams meeting link.")?;
+    let room = teams_room(&url).ok_or("Unsupported Teams meeting link.")?;
+    let mut join = Invitation::new(link.normalized()?, room, &end)?;
+    let id = join.id.clone();
+    let deadline = join.deadline;
+    let (timeout, removed) = tokio::sync::oneshot::channel();
+    join.timeout = Some(timeout);
+    if !cfg!(windows) {
+        return Err("Join and record requires Windows.".into());
+    }
+    let before = {
+        let auth = app.state::<MicrosoftAuthState>();
+        let session = auth.inner.read().await;
+        if session.current_token.is_none() {
+            return Err("Microsoft calendar is disconnected.".into());
+        }
+        let mut tracker = tracker();
+        if capture_active() || is_starting() || crate::start_request::is_pending() {
+            return Err("Join and record requires an idle recorder.".into());
+        }
+        let before = tracker.prompt_view();
+        tracker.reserve_join(join)?;
+        before
+    };
+    sync_prompt(&app, before, None);
+    let _ = app.emit("join-recording-changed", ());
+    let timer_app = app.clone();
+    let timer_id = id.clone();
+    tauri::async_runtime::spawn(async move {
+        if tokio::time::timeout_at(deadline.into(), removed)
+            .await
+            .is_err()
+            && cancel(&timer_app, &timer_id)
+        {
+            let _ = timer_app.emit(
+                "recording-start-feedback",
+                "The request to record the Teams meeting expired.",
+            );
+        }
+    });
+    if !crate::tray::check_can_record(&app).await {
+        cancel(&app, &id);
+        return Err("Complete recording setup before using Join and record.".into());
+    }
+    let baseline = scan(vec![Provider::Teams], vec![]).await.ok();
+    let launched = {
+        let mut tracker = tracker();
+        // Cancellation and sign-out serialize with the actual OS launch.
+        if capture_active() || is_starting() || crate::start_request::is_pending() {
+            Err(EXPIRED.into())
+        } else {
+            tracker.launch_join(&id, baseline.as_ref(), || {
+                crate::external_url::open_url_in_default_browser(url.as_str())
+            })
+        }
+    };
+    if launched.is_err() {
+        cancel(&app, &id);
+    } else {
+        let _ = app.emit("join-recording-changed", ());
+    }
+    launched
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{CallSettings, Context, Decision};
+    use super::*;
+
+    const IDLE: Context = Context {
+        idle: true,
+        recording: false,
+    };
+
+    fn invitation() -> Invitation {
+        let now = Utc::now();
+        let link = serde_json::from_value(serde_json::json!({
+            "eventId": "selected", "subject": "Planning", "start": now.to_rfc3339(),
+            "attendees": [{ "name": "Invitee" }]
+        }))
+        .unwrap();
+        Invitation::new(
+            link,
+            [1; 32],
+            &(now + chrono::Duration::hours(1)).to_rfc3339(),
+        )
+        .unwrap()
+    }
+
+    fn call(window: &str, room: Option<[u8; 32]>) -> CallWindow {
+        CallWindow {
+            provider: Provider::Teams,
+            key: window.into(),
+            window: window.into(),
+            teams_room: room,
+        }
+    }
+
+    fn snapshot(active: Vec<CallWindow>) -> CallScan {
+        CallScan {
+            supported: true,
+            complete: true,
+            active,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_a_fresh_matching_call_can_auto_start_with_monitoring_off() {
+        let mut tracker = Tracker::new(CallSettings::default());
+        let old = call("already active", Some([1; 32]));
+        let exact = call("new browser", Some([1; 32]));
+        let wrong = call("another room", Some([2; 32]));
+        let before = tracker.revision();
+        let join = invitation();
+        let id = join.id.clone();
+        tracker.reserve_join(join).unwrap();
+        let opening = tracker.revision();
+        let one = snapshot(vec![exact.clone()]);
+        assert_eq!(
+            tracker.observe(opening, Some(&one), IDLE),
+            Decision::Nothing
+        );
+        tracker
+            .launch_join(&id, Some(&snapshot(vec![old.clone()])), || Ok(()))
+            .unwrap();
+        let armed = tracker.revision();
+        for revision in [before, opening] {
+            assert_eq!(
+                tracker.observe(revision, Some(&one), IDLE),
+                Decision::Nothing
+            );
+        }
+        for scan in [
+            snapshot(vec![old]),
+            snapshot(vec![wrong.clone()]),
+            snapshot(vec![exact.clone(), wrong]),
+            CallScan {
+                complete: false,
+                ..one.clone()
+            },
+        ] {
+            assert_eq!(tracker.observe(armed, Some(&scan), IDLE), Decision::Nothing);
+        }
+        let Decision::Start { serial, .. } = tracker.observe(armed, Some(&one), IDLE) else {
+            panic!("missing exact match")
+        };
+        assert!(tracker.may_begin(&exact, serial, armed, true, false));
+        assert_eq!(tracker.observe(armed, Some(&one), IDLE), Decision::Nothing);
+        assert!(tracker.clear_join(&id));
+        assert!(!tracker.may_begin(&exact, serial, armed, true, false));
+        assert!(!tracker.watching());
+        assert_eq!(tracker.settings(), &CallSettings::default());
+    }
+
+    #[test]
+    fn ambiguous_identity_needs_confirmation_bound_to_this_observation_and_invitation() {
+        let mut tracker = Tracker::new(CallSettings {
+            mode: Mode::Auto,
+            ..Default::default()
+        });
+        let joined = invitation();
+        let id = joined.id.clone();
+        let unknown = call("desktop", None);
+        let scan = snapshot(vec![unknown.clone()]);
+        tracker.reserve_join(joined).unwrap();
+        tracker
+            .launch_join(&id, Some(&snapshot(vec![])), || Ok(()))
+            .unwrap();
+        let revision = tracker.revision();
+        assert_eq!(
+            tracker.observe(revision, Some(&scan), IDLE),
+            Decision::Prompt
+        );
+        let old = tracker.prompt_view().unwrap();
+        assert_eq!(old.event_title.as_deref(), Some("Planning"));
+        tracker.observe(revision, None, IDLE);
+        assert!(tracker.confirm(&old.key).is_none());
+        assert_eq!(
+            tracker.observe(revision, Some(&scan), IDLE),
+            Decision::Prompt
+        );
+        assert!(tracker.confirm(&old.key).is_none());
+        let key = tracker.prompt_view().unwrap().key;
+        let (call, serial, revision) = tracker.confirm(&key).unwrap();
+        assert!(!tracker.may_begin(&call, serial, revision, true, false));
+        assert!(tracker.may_begin(&call, serial, revision, true, true));
+        tracker.join.as_mut().unwrap().deadline = Instant::now();
+        assert!(!tracker.may_begin(&call, serial, revision, true, true));
+        assert!(tracker.clear_join(&id));
+        tracker.reserve_join(invitation()).unwrap();
+        assert!(!tracker.may_begin(&call, serial, revision, true, true));
+    }
+
+    #[test]
+    fn repeated_click_stale_timer_cancellation_and_launcher_failures_cannot_arm_another_event() {
+        let mut tracker = Tracker::new(CallSettings::default());
+        let first = invitation();
+        let id = first.id.clone();
+        tracker.reserve_join(first).unwrap();
+        assert!(tracker.reserve_join(invitation()).is_err());
+        assert!(tracker.clear_join(&id));
+        let replacement = invitation();
+        let next = replacement.id.clone();
+        tracker.reserve_join(replacement).unwrap();
+        assert!(!tracker.clear_join(&id));
+        let baseline = snapshot(vec![]);
+        assert!(tracker
+            .launch_join(&id, Some(&baseline), || panic!("stale launch"))
+            .is_err());
+        assert!(tracker
+            .launch_join(
+                &next,
+                Some(&baseline),
+                || Err("launcher unavailable".into())
+            )
+            .is_err());
+        assert!(tracker.join.as_ref().unwrap().active_before.is_none());
+        assert!(tracker.launch_join(&next, None, || Ok(())).is_err());
+        assert!(tracker.join.as_ref().unwrap().active_before.is_none());
+        tracker.join.as_mut().unwrap().deadline = Instant::now();
+        assert!(tracker
+            .launch_join(&next, Some(&baseline), || panic!("expired launch"))
+            .is_err());
+    }
+}

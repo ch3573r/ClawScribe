@@ -442,7 +442,11 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
             meeting_name,
             audio::recording_commands::SelectedStart {
                 use_default_microphone: use_default_microphone.unwrap_or(false),
-                calendar_link,
+                calendar_link: request
+                    .as_ref()
+                    .and_then(|claim| claim.calendar())
+                    .cloned()
+                    .or(calendar_link),
                 summary_language,
                 request: request.as_ref(),
             },
@@ -940,6 +944,9 @@ pub fn run() {
             teams_detection::monitor::set_call_detection_settings,
             teams_detection::monitor::get_pending_call_prompt,
             teams_detection::monitor::confirm_call_detection_prompt,
+            teams_detection::monitor::join::join_and_record,
+            teams_detection::monitor::join::cancel_join_recording,
+            teams_detection::monitor::join::get_join_recording,
             start_request::finish_recording_start,
             start_request::get_pending_start_request,
             audio::recording_commands::queue_recording_after_save,

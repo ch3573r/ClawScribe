@@ -16,6 +16,8 @@
 //! * A prompt stays pending until the call is over or the user answers. It is
 //!   shown by the window and by the tray menu, so it can be answered while the
 //!   window is hidden.
+pub mod join;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -25,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
 
 use super::calls::{CallScan, CallWindow, Provider};
+use crate::library::calendar::CalendarLink;
 use crate::start_request::{self, StartOutcome, StartSource};
 
 /// How often the core looks for calls while detection is on.
@@ -184,6 +187,7 @@ pub struct Owner {
 pub struct Prompt {
     pub call: CallWindow,
     serial: u64,
+    key: String,
     /// True when an automatic start failed and the user may try again.
     pub retry: bool,
 }
@@ -213,6 +217,7 @@ pub enum Decision {
 
 pub struct Tracker {
     settings: CallSettings,
+    join: Option<join::Invitation>,
     /// Counts settings changes, so work begun under old settings can tell.
     revision: u64,
     seen: ObservedCalls,
@@ -224,6 +229,7 @@ impl Tracker {
     pub fn new(settings: CallSettings) -> Self {
         Self {
             settings,
+            join: None,
             revision: 0,
             seen: ObservedCalls::default(),
             owner: None,
@@ -240,7 +246,33 @@ impl Tracker {
     }
 
     pub fn watching(&self) -> bool {
-        self.settings.watching()
+        self.join.is_some() || self.settings.watching()
+    }
+
+    fn providers(&self) -> Vec<Provider> {
+        if self.join.is_none() {
+            return self.settings.providers.clone();
+        }
+        let mut providers = if self.settings.watching() {
+            self.settings.providers.clone()
+        } else {
+            vec![]
+        };
+        if !providers.contains(&Provider::Teams) {
+            providers.push(Provider::Teams);
+        }
+        providers
+    }
+
+    fn mode_for(&self, call: &CallWindow) -> Mode {
+        if let Some(join) = &self.join {
+            return join.mode(call);
+        }
+        if self.settings.providers.contains(&call.provider) {
+            self.settings.mode
+        } else {
+            Mode::Off
+        }
     }
 
     pub fn prompt(&self) -> Option<&Prompt> {
@@ -255,8 +287,13 @@ impl Tracker {
     /// the old ones, and relinquish automatic stopping that is no longer
     /// allowed for the running recording.
     pub fn apply_settings(&mut self, next: CallSettings) {
+        if self.settings == next {
+            return;
+        }
         self.revision += 1;
-        self.prompt = None;
+        if self.join.is_none() {
+            self.prompt = None;
+        }
         self.seen.interrupted();
         self.settings = next;
         let keep = self.owner.as_ref().is_some_and(|owner| {
@@ -272,21 +309,20 @@ impl Tracker {
     /// One finished scan. `scan` is `None` when the scan itself failed, and
     /// `revision` is the one the scan began under.
     pub fn observe(&mut self, revision: u64, scan: Option<&CallScan>, ctx: Context) -> Decision {
-        if revision != self.revision || !self.settings.watching() {
+        if revision != self.revision || !self.watching() {
             return Decision::Nothing;
         }
         let Some(scan) = scan.filter(|scan| scan.supported && scan.complete) else {
             // Unknown observation: it neither ends a call nor starts one.
             self.seen.interrupted();
-            self.prompt = None;
+            self.drop_prompt();
             return Decision::Nothing;
         };
-        let prompt_gone = self
-            .prompt
-            .as_ref()
-            .is_some_and(|prompt| !scan.active.iter().any(|call| call.key == prompt.call.key));
+        let prompt_gone = self.prompt.as_ref().is_some_and(|prompt| {
+            !scan.active.contains(&prompt.call) || (self.join.is_some() && scan.active.len() != 1)
+        });
         if prompt_gone {
-            self.prompt = None;
+            self.drop_prompt();
         }
         let ended = self.seen.update(scan);
         let owner_ended = self
@@ -306,7 +342,8 @@ impl Tracker {
             return Decision::Nothing;
         }
         let call = &scan.active[0];
-        if self.seen.has(&call.key) {
+        let mode = self.mode_for(call);
+        if mode == Mode::Off || self.seen.has(&call.key) {
             return Decision::Nothing;
         }
         if !ctx.idle {
@@ -319,7 +356,7 @@ impl Tracker {
             return Decision::Nothing;
         }
         let serial = self.seen.remember(call);
-        match self.settings.mode {
+        match mode {
             Mode::Auto => Decision::Start {
                 call: call.clone(),
                 serial,
@@ -328,12 +365,27 @@ impl Tracker {
                 self.prompt = Some(Prompt {
                     call: call.clone(),
                     serial,
+                    key: self.prompt_key(call, serial),
                     retry: false,
                 });
                 Decision::Prompt
             }
             Mode::Off => Decision::Nothing,
         }
+    }
+
+    fn drop_prompt(&mut self) {
+        if let Some(prompt) = self.prompt.take() {
+            if self.join.is_some() {
+                self.seen.forget(&prompt.call.key);
+            }
+        }
+    }
+
+    fn prompt_key(&self, call: &CallWindow, serial: u64) -> String {
+        self.join
+            .as_ref()
+            .map_or_else(|| call.key.clone(), |join| format!("{}-{serial}", join.id))
     }
 
     /// Whether a start decided earlier may still go ahead. An automatic start
@@ -347,28 +399,28 @@ impl Tracker {
         idle: bool,
         confirmed: bool,
     ) -> bool {
-        let mode_allows = if confirmed {
-            self.settings.mode != Mode::Off
-        } else {
-            self.settings.mode == Mode::Auto
-        };
+        let mode = self.mode_for(call);
+        let mode_allows = mode == Mode::Auto || (confirmed && mode == Mode::Prompt);
         revision == self.revision
             && idle
             && mode_allows
-            && self.settings.providers.contains(&call.provider)
             && self.seen.serial(&call.key) == Some(serial)
     }
 
     /// The user accepted the prompt for `key`. Returns what a start needs.
     pub fn confirm(&mut self, key: &str) -> Option<(CallWindow, u64, u64)> {
-        let prompt = self.prompt.take_if(|prompt| prompt.call.key == key)?;
+        let prompt = self.prompt.take_if(|prompt| prompt.key == key)?;
         Some((prompt.call, prompt.serial, self.revision))
     }
 
     /// The recording this call started is running; remember it for stopping.
     pub fn started(&mut self, call: &CallWindow, session: Option<String>, revision: u64) {
         if let Some(session) = session {
-            if revision == self.revision && self.settings.auto_stop {
+            if revision == self.revision
+                && self.settings.auto_stop
+                && self.settings.watching()
+                && self.settings.providers.contains(&call.provider)
+            {
                 self.owner = Some(Owner {
                     call: call.clone(),
                     session,
@@ -390,6 +442,7 @@ impl Tracker {
             self.prompt = Some(Prompt {
                 call: call.clone(),
                 serial,
+                key: self.prompt_key(call, serial),
                 retry: true,
             });
         }
@@ -445,20 +498,26 @@ pub struct PromptView {
     pub key: String,
     pub provider: Provider,
     pub retry: bool,
+    pub event_title: Option<String>,
 }
 
-fn view_of(prompt: Option<&Prompt>) -> Option<PromptView> {
-    prompt.map(|prompt| PromptView {
-        key: prompt.call.key.clone(),
-        provider: prompt.call.provider,
-        retry: prompt.retry,
-    })
+impl Tracker {
+    fn prompt_view(&self) -> Option<PromptView> {
+        self.prompt().map(|prompt| PromptView {
+            key: prompt.key.clone(),
+            provider: prompt.call.provider,
+            retry: prompt.retry,
+            event_title: self
+                .join
+                .as_ref()
+                .map(|join| join.link.subject().unwrap_or("Untitled event").into()),
+        })
+    }
 }
 
 /// The prompt waiting for an answer, if any.
 pub fn pending_prompt() -> Option<PromptView> {
-    let view = view_of(tracker().prompt());
-    view
+    tracker().prompt_view()
 }
 
 /// Tells the window and the tray when the pending prompt changed.
@@ -469,6 +528,11 @@ fn sync_prompt<R: Runtime>(
 ) {
     if before == after {
         return;
+    }
+    if before.as_ref().is_some_and(|p| p.event_title.is_some())
+        || after.as_ref().is_some_and(|p| p.event_title.is_some())
+    {
+        let _ = app.emit("join-recording-changed", ());
     }
     match &after {
         Some(view) => {
@@ -490,7 +554,9 @@ fn notify<R: Runtime>(app: &AppHandle<R>, kind: &str, provider: Provider) {
 
 async fn context() -> Context {
     let recording = crate::audio::recording_commands::is_recording().await;
-    let busy = crate::audio::recording_commands::capture_active() || start_request::is_pending();
+    let busy = crate::audio::recording_commands::capture_active()
+        || crate::audio::recording_commands::is_starting()
+        || start_request::is_pending();
     Context {
         idle: !busy,
         recording: recording && !crate::audio::recording_commands::is_stopping(),
@@ -517,22 +583,35 @@ async fn begin<R: Runtime>(
     }
     // Even a click on a prompt that is still visible, or a retry, needs fresh
     // evidence that this call is the only active one.
-    let providers = { tracker().settings().providers.clone() };
+    let providers = tracker().providers();
     let scan = super::calls::scan(providers, vec![call.window.clone()])
         .await
         .ok();
     let same_call = scan.as_ref().is_some_and(|scan| {
-        scan.supported && scan.complete && scan.active.len() == 1 && scan.active[0].key == call.key
+        scan.supported && scan.complete && scan.active.as_slice() == std::slice::from_ref(&call)
     });
     let ctx = context().await;
-    let allowed = {
-        let tracker = tracker();
-        tracker.may_begin(&call, serial, revision, ctx.idle, confirmed)
+    let invitation = {
+        let mut tracker = tracker();
+        if !same_call
+            || ctx.recording
+            || !tracker.may_begin(&call, serial, revision, ctx.idle, confirmed)
+        {
+            tracker.start_deferred(&call, serial);
+            return;
+        }
+        tracker
+            .join
+            .as_ref()
+            .map(|j| (j.id.clone(), j.link.clone()))
     };
-    if !same_call || ctx.recording || !allowed {
-        tracker().start_deferred(&call, serial);
-        return;
-    }
+    let (join_id, calendar) = invitation.unzip();
+    // Admitting a calendar start consumes its invitation and advances the revision once.
+    let admitted_revision = if calendar.is_some() {
+        revision + 1
+    } else {
+        revision
+    };
 
     let evidence = CallStartEvidence {
         call: call.clone(),
@@ -540,6 +619,7 @@ async fn begin<R: Runtime>(
         revision,
         confirmed,
         observed: std::time::Instant::now(),
+        calendar,
     };
     let Some(outcome) =
         start_request::request_and_wait(app, StartSource::Call(call.provider), Some(evidence))
@@ -551,14 +631,20 @@ async fn begin<R: Runtime>(
     };
     match outcome {
         StartOutcome::Started { session_id } => {
-            tracker().started(&call, session_id, revision);
+            tracker().started(&call, session_id, admitted_revision);
             notify(app, "started", call.provider);
         }
         StartOutcome::Busy => {
             tracker().start_deferred(&call, serial);
         }
         StartOutcome::Failed { retryable } => {
-            offer_retry(app, &call, serial, revision, retryable);
+            if !retryable {
+                if let Some(id) = join_id {
+                    join::cancel(app, &id);
+                }
+            } else {
+                offer_retry(app, &call, serial, revision, true);
+            }
         }
         StartOutcome::TimedOut => {
             log::warn!("The window did not answer the call recording request in time");
@@ -573,6 +659,7 @@ pub(crate) struct CallStartEvidence {
     revision: u64,
     confirmed: bool,
     observed: std::time::Instant,
+    pub(crate) calendar: Option<CalendarLink>,
 }
 
 impl CallStartEvidence {
@@ -585,15 +672,36 @@ impl CallStartEvidence {
         if !self.is_current() {
             return false;
         }
-        let providers = tracker().settings().providers.clone();
+        let providers = tracker().providers();
         let scan = super::calls::scan(providers, vec![self.call.window.clone()]).await;
         self.is_current()
             && scan.is_ok_and(|scan| {
                 scan.supported
                     && scan.complete
-                    && scan.active.len() == 1
-                    && scan.active[0].key == self.call.key
+                    && scan.active.as_slice() == std::slice::from_ref(&self.call)
             })
+    }
+
+    /// Linearization point for cancellation, expiry and recording admission.
+    pub(crate) fn admit<R: Runtime>(&self, app: &AppHandle<R>) -> Result<(), String> {
+        let mut tracker = tracker();
+        if self.observed.elapsed() >= Duration::from_secs(10)
+            || !tracker.may_begin(&self.call, self.serial, self.revision, true, self.confirmed)
+        {
+            return Err(start_request::EXPIRED.into());
+        }
+        if self.calendar.is_some() {
+            let id = tracker
+                .join
+                .as_ref()
+                .ok_or(start_request::EXPIRED)?
+                .id
+                .clone();
+            tracker.clear_join(&id);
+            drop(tracker);
+            let _ = app.emit("join-recording-changed", ());
+        }
+        Ok(())
     }
 }
 
@@ -606,9 +714,9 @@ fn offer_retry<R: Runtime>(
 ) {
     let (before, after) = {
         let mut tracker = tracker();
-        let before = view_of(tracker.prompt());
+        let before = tracker.prompt_view();
         tracker.start_failed(call, serial, revision, retryable);
-        (before, view_of(tracker.prompt()))
+        (before, tracker.prompt_view())
     };
     sync_prompt(app, before, after);
 }
@@ -639,7 +747,7 @@ async fn tick<R: Runtime>(app: AppHandle<R>) {
             return;
         }
         (
-            tracker.settings().providers.clone(),
+            tracker.providers(),
             tracker.watched_windows(),
             tracker.revision(),
         )
@@ -651,9 +759,9 @@ async fn tick<R: Runtime>(app: AppHandle<R>) {
     let ctx = context().await;
     let (before, decision, after) = {
         let mut tracker = tracker();
-        let before = view_of(tracker.prompt());
+        let before = tracker.prompt_view();
         let decision = tracker.observe(revision, scan.as_ref(), ctx);
-        (before, decision, view_of(tracker.prompt()))
+        (before, decision, tracker.prompt_view())
     };
     sync_prompt(&app, before, after);
     match decision {
@@ -680,7 +788,7 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
 pub(crate) async fn confirm_prompt<R: Runtime>(app: &AppHandle<R>, key: &str) {
     let (before, taken) = {
         let mut tracker = tracker();
-        let before = view_of(tracker.prompt());
+        let before = tracker.prompt_view();
         let taken = tracker.confirm(key);
         (before, taken)
     };
@@ -689,14 +797,6 @@ pub(crate) async fn confirm_prompt<R: Runtime>(app: &AppHandle<R>, key: &str) {
     };
     sync_prompt(app, before, None);
     begin(app, call, serial, revision, true).await;
-}
-
-/// The tray answers whatever prompt is pending.
-pub(crate) async fn confirm_pending_prompt<R: Runtime>(app: &AppHandle<R>) {
-    let key = pending_prompt().map(|view| view.key);
-    if let Some(key) = key {
-        confirm_prompt(app, &key).await;
-    }
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────
@@ -717,9 +817,9 @@ pub fn set_call_detection_settings<R: Runtime>(
     save_settings(&settings)?;
     let (before, after) = {
         let mut tracker = tracker();
-        let before = view_of(tracker.prompt());
+        let before = tracker.prompt_view();
         tracker.apply_settings(settings);
-        (before, view_of(tracker.prompt()))
+        (before, tracker.prompt_view())
     };
     sync_prompt(&app, before, after);
     Ok(())
@@ -748,6 +848,7 @@ mod tests {
             provider,
             window: window.to_string(),
             key: key.to_string(),
+            teams_room: None,
         }
     }
 

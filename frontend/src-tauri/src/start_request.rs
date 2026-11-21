@@ -91,6 +91,18 @@ pub(crate) struct ClaimedStart {
 pub(crate) const EXPIRED: &str = "recording_request_expired";
 
 impl ClaimedStart {
+    pub(crate) fn calendar(&self) -> Option<&crate::library::calendar::CalendarLink> {
+        self.call.as_ref()?.calendar.as_ref()
+    }
+
+    pub(crate) fn admit<R: Runtime>(&self, app: &AppHandle<R>) -> Result<(), String> {
+        if let Some(call) = &self.call {
+            call.admit(app)
+        } else {
+            self.check_call()
+        }
+    }
+
     pub(crate) fn is_call(&self) -> bool {
         matches!(self.source, StartSource::Call(_))
     }
@@ -170,7 +182,11 @@ async fn issue<R: Runtime>(
     let (reply, receiver) = oneshot::channel();
     let view = StartRequestView {
         request_id: uuid::Uuid::new_v4().to_string(),
-        source: source.name(),
+        source: if call.as_ref().is_some_and(|call| call.calendar.is_some()) {
+            "calendar_call"
+        } else {
+            source.name()
+        },
         provider: source.provider(),
     };
     {
