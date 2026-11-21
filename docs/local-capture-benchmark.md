@@ -25,7 +25,8 @@ synthetic replies.
 The fixture feeds paired 10 ms blocks into the production capture callbacks.
 It uses the microphone high-pass filter and EBU R128 normalizer, the real
 mixer and disk queues, the live Silero VAD, and the same Parakeet decoder and
-blank retry used for local transcription. It runs a second decode from the
+blank retry used for local transcription. Direct decoder calls exclude startup
+and IPC overhead from the production transcription worker. It runs a second decode from the
 captured AAC using the saved-meeting audio preparation path.
 
 The fixture covers quiet background and simulated bleed, isolated German and
@@ -62,8 +63,9 @@ next baseline run. Each run creates fresh temporary outputs.
 
 ## Portable fixture observations
 
-An unpaced Linux CPU run using the ClawScribe audio sources, Parakeet v3 int8,
-and the built-in fictional passages produced these comparisons. It used
+The following observations come from a single unpaced Linux CPU comparison
+on 21 November 2026 with the audio code in `628b67f7`, Parakeet v3 int8
+and the built-in fictional passages. It used
 synthetic callback injection with desktop/device services substituted.
 
 - Capping gain reduced startup background RMS from 0.07074 to 0.01122.
@@ -73,7 +75,7 @@ synthetic callback injection with desktop/device services substituted.
   pass had zero exact matches and the saved pass matched one. The 192 kb/s
   targeted pilot matched two of the replies with the silence lead. Shortening
   speech confirmation in the forced-cut run left the live exact count at zero.
-  The 2 s cap produced 23 contiguous boundaries and increased narration errors.
+  The 2 s cap produced 23 contiguous boundaries.
 - The mixer produced 180.890 s of PCM from 179.377 s of paired input.
   A ready source can trigger a window while the other source is one callback
   behind, so repeated zero padding can accumulate on this schedule. The short
@@ -91,6 +93,10 @@ The comparison switches apply to the fixture benchmark. Live Parakeet uses a
 12 s cap and 250 ms speech confirmation, and the default AAC bitrate is 192 kb/s.
 The [installed capture smoke](installed-capture-smoke.md) covers actual
 microphone and system audio, saved playback, Stop, and a second recording.
+For quiet-microphone acceptance, record a known passage at a low input level
+with Whisper and Nemotron. Check that speech triggers detection, the saved mic
+track is audible in the mix, and the transcript contains the quiet replies.
+Report the input level and engine with each result.
 
 ## Pilot guardrails
 

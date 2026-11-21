@@ -261,6 +261,27 @@ mod loudness_tests {
     use super::LoudnessNormalizer;
 
     #[test]
+    fn normalizer_boosts_quiet_speech_and_attenuates_loud_speech() {
+        let speech = include_bytes!("pc_test_samples/de.s16le");
+        for (level, quiet) in [(0.015, true), (3.0, false)] {
+            let input: Vec<f32> = speech
+                .chunks_exact(2)
+                .map(|bytes| {
+                    let sample = i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0;
+                    (sample * level).clamp(-1.0, 1.0)
+                })
+                .collect();
+            let mut normalizer = LoudnessNormalizer::new(1, 16_000).unwrap();
+            normalizer.normalize_loudness(&input);
+            if quiet {
+                assert!((normalizer.gain_linear - 8.0).abs() < 0.01);
+            } else {
+                assert!(normalizer.gain_linear > 0.0 && normalizer.gain_linear < 1.0);
+            }
+        }
+    }
+
+    #[test]
     fn faint_background_does_not_drive_unbounded_microphone_gain() {
         let rate = 48_000;
         let amplitude = 0.002;

@@ -331,7 +331,8 @@ impl ContinuousVadProcessor {
         Ok(completed_segments)
     }
 
-    /// Flush any remaining audio and return final speech segments
+    /// Finish the stream and return final speech segments. Start the next stream
+    /// with a new processor so it has its own sample clock and model state.
     pub fn flush(&mut self) -> Result<Vec<SpeechSegment>> {
         debug!("VAD flush: in_speech={}, current_speech_len={}, buffer_len={}, speech_segments_queued={}",
               self.in_speech, self.current_speech.len(), self.buffer.len(), self.speech_segments.len());
@@ -509,7 +510,7 @@ impl ContinuousVadProcessor {
         if self.in_speech {
             self.current_speech.extend_from_slice(chunk);
             self.emit_forced_segments_if_needed();
-        } else {
+        } else if !self.session.is_speaking() {
             // take_until drains PCM without resetting Silero's model state or
             // clock. Directly trimming to the pre-roll would lose the start of
             // a candidate that hasn't emitted SpeechStart yet.
