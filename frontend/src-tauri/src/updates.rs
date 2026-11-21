@@ -148,7 +148,14 @@ pub async fn download_app_update<R: Runtime>(
     let _flight = DOWNLOAD_FLIGHT
         .try_lock()
         .map_err(|_| "An update download is already running. Wait for it to finish.")?;
-    let generation = staged().invalidate();
+    // A temporarily busy install can be retried against the same checked release.
+    let generation = {
+        let mut stage = staged();
+        if stage.installer.as_ref().is_some_and(|item| item.rid == rid) {
+            return Ok(());
+        }
+        stage.invalidate()
+    };
     // Fail early instead of downloading a large installer that cannot be used.
     drop(UpdateInstallPermit::acquire()?);
     let update = webview
@@ -206,12 +213,12 @@ pub async fn install_app_update(
     rid: ResourceId,
     edits: tauri::State<'_, crate::summary::edit_exit::SummaryEditsState>,
 ) -> Result<(), String> {
+    let permit = UpdateInstallPermit::acquire()?;
+    edits.ensure_saved_for_update()?;
     let staged = staged()
         .installer
         .take_if(|installer| installer.rid == rid)
         .ok_or("The downloaded update is no longer available. Check for updates again.")?;
-    let permit = UpdateInstallPermit::acquire()?;
-    edits.ensure_saved_for_update()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
         staged

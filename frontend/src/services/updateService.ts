@@ -182,6 +182,7 @@ export class UpdateService {
     }
     const candidate = this.candidate;
     let staged = false;
+    let handingOff = false;
     this.publish({ isInstalling: true, error: null });
     try {
       const assertRecordingIdle = async () => {
@@ -208,12 +209,20 @@ export class UpdateService {
       try {
         await flushMeetingDrafts();
       } catch {
-        throw new Error('Could not save meeting edits. Your edits are still available. Save them before trying the update again.');
+        throw new Error('Could not save meeting edits. Try saving again. If saving keeps failing, copy the edits you want to keep, then quit and confirm that you want to discard the unsaved edits.');
       }
       onProgress({ downloaded, total, percentage: 100, phase: 'installing' });
+      handingOff = true;
       await invoke('install_app_update', { rid: candidate.rid });
+      handingOff = false;
       await relaunch();
     } catch (error) {
+      if (handingOff) {
+        // The native gate leaves verified bytes staged when other work is busy.
+        // Retry with the same resource. Native code also handles cache expiry.
+        this.publish({ error: updateErrorMessage(error) });
+        throw error;
+      }
       // Cleanup must never replace the error the user needs to see.
       if (staged) await invoke('discard_app_update', { rid: candidate.rid }).catch(() => {});
       await this.closeCandidate().catch(() => {});

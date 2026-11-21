@@ -57,7 +57,7 @@ export function UpdateDialog({ open, onOpenChange }: { open: boolean; onOpenChan
         </div>
         <DialogFooter>
           <Button variant="outline" disabled={isInstalling} onClick={() => onOpenChange(false)}>{updateInfo?.available ? 'Later' : 'Close'}</Button>
-          {error || !updateInfo ? <Button disabled={busy} onClick={() => void checkForUpdates(true)}>Try again</Button> : updateInfo.available && <Button disabled={busy || !canInstall} onClick={() => void install()}><Download className="mr-2 h-4 w-4" />Download &amp; install</Button>}
+          {updateInfo?.available ? <Button disabled={busy || !canInstall} onClick={() => void install()}><Download className="mr-2 h-4 w-4" />{error ? 'Retry installation' : 'Download & install'}</Button> : (error || !updateInfo) && <Button disabled={busy} onClick={() => void checkForUpdates(true)}>Try again</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

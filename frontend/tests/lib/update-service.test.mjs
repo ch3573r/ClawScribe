@@ -44,15 +44,18 @@ function fixture(channel = 'stable') {
         return;
       }
       if (command === 'download_app_update') {
+        if (control.stagedRid === args.rid) return;
         if (control.backgroundJob) throw new Error('Finish the active job before installing.');
         calls.downloads.push(args.rid);
         args.onEvent.onmessage({ event: 'Started', data: { contentLength: 200 } });
         args.onEvent.onmessage({ event: 'Progress', data: { chunkLength: 200 } });
         if (control.download) await control.download();
+        control.stagedRid = args.rid;
         return;
       }
       if (command === 'install_app_update') {
         if (control.backgroundJob) throw new Error('Finish the active job before installing.');
+        control.stagedRid = null;
         if (control.installError) throw control.installError;
         calls.installs.push(args.rid);
         return;
@@ -233,9 +236,15 @@ test('an active background job before or during download preserves work and perm
     assert.equal(f.calls.relaunches, 0);
     f.control.backgroundJob = false;
     f.control.download = null;
-    const retry = await f.service.checkForUpdates(true);
+    const retry = await f.service.checkForUpdates();
+    if (timing === 'during') {
+      assert.equal(retry, info);
+      assert.deepEqual(f.calls.discarded, []);
+      assert.deepEqual(f.calls.closed, []);
+    }
     await f.service.downloadAndInstall(retry, () => {}, () => true);
     assert.equal(f.calls.relaunches, 1);
+    assert.equal(f.calls.downloads.length, 1);
   }
 });
 
