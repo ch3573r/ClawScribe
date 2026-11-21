@@ -68,6 +68,12 @@ test('words in the folder path do not turn the refusal into a device message', (
   assert.notEqual(describeStartError(REFUSAL).title, 'System audio not available');
 });
 
+test('a recording folder refusal preserves the settings guidance on Home', () => {
+  const message = 'The recordings folder uses a link, a junction, or an unsupported location. Choose the actual folder in Settings → Recording.';
+  const shown = describeStartError(`Failed to start recording: ${message}`);
+  assert.deepEqual(plain(shown), { title: 'Recordings folder unavailable', message });
+});
+
 test('other start errors map to their guidance, in the Windows wording', () => {
   assert.deepEqual(plain(describeStartError('Failed to open the microphone')), MICROPHONE);
   assert.deepEqual(plain(describeStartError('no output device')), SYSTEM_AUDIO);

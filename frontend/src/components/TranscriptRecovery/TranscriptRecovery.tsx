@@ -137,7 +137,7 @@ export function TranscriptRecovery({
   const deleteTarget = recoverableMeetings.find(m => m.meetingId === deleteTargetId);
   const deleteBlocked = !!selectedMeeting?.disk?.registeredMeetingId;
 
-  if (isScanning || scanFailed || recoverableMeetings.length === 0) {
+  if (isScanning || recoverableMeetings.length === 0) {
     return (
       <Dialog open={isOpen} onOpenChange={open => { if (!open) onClose(); }}>
         <DialogContent>
@@ -145,7 +145,7 @@ export function TranscriptRecovery({
             <DialogTitle>Interrupted recordings</DialogTitle>
             <DialogDescription role={scanFailed && !isScanning ? 'alert' : 'status'}>
               {isScanning ? 'Checking for interrupted recordings…' : scanFailed
-                ? 'Could not check for interrupted recordings. Your recovery data is still available.'
+                ? 'Some recordings could not be checked. Reconnect the recordings location if needed, then retry. Your drafts are kept.'
                 : 'No interrupted recordings found.'}
             </DialogDescription>
           </DialogHeader>
@@ -166,6 +166,14 @@ export function TranscriptRecovery({
           <DialogDescription>
             We found {recoverableMeetings.length} meeting{recoverableMeetings.length !== 1 ? 's' : ''} that {recoverableMeetings.length !== 1 ? 'were' : 'was'} interrupted. Select a meeting to preview and recover it.
           </DialogDescription>
+          {scanFailed && (
+            <div className="flex items-center justify-between gap-3">
+              <p role="alert" className="text-sm text-muted-foreground">
+                Some recordings could not be checked. Reconnect the recordings location if needed, then retry. Your drafts are kept.
+              </p>
+              <Button variant="outline" size="sm" onClick={onRetryScan} disabled={isRecovering || isDeleting}>Retry scan</Button>
+            </div>
+          )}
         </DialogHeader>
 
         <div className="flex-1 flex gap-4 px-6 pb-6 overflow-hidden">

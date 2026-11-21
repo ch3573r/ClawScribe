@@ -438,9 +438,15 @@ Meeting deletion can also remove its recording folder, including audio,
 transcript copies, metadata, recovery originals, and generated documents. The
 option is on by default. Folders outside supported storage locations, shared
 with another meeting, or failing ownership checks are kept. Review retained
-files and retry cleanup in **Meetings → Archive → Storage**.
+files and retry cleanup in **Meetings → Archive → Storage**. Staged cleanup
+stays pending while its storage location is unavailable.
 Pre-migration database snapshots and separate backup archives can retain deleted
 meetings. See [local library tools](docs/local-library.md#deleting-meetings).
+
+The recordings folder picker saves the verified target of a link or junction.
+For an older linked setting, choose the folder again in **Settings → Recording**.
+If a recovery scan cannot verify a recording location, reconnect it and choose
+**Retry scan** to check the retained draft and audio together.
 
 ## Update Preferences
 

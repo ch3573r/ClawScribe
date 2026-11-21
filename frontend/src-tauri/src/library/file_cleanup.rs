@@ -141,7 +141,7 @@ pub(crate) async fn list_pending_meeting_file_cleanup<R: Runtime>(
                 if let Ok(original) = locations.original(entry) {
                     let location = Stage::for_entry(&locations, entry)
                         .ok()
-                        .filter(|stage| entry.staged || stage.holder_exists().unwrap_or(false))
+                        .filter(|stage| entry.staged || stage.holder_exists(false).unwrap_or(false))
                         .map_or(original, |stage| stage.payload);
                     entry.location = Some(location.to_string_lossy().into_owned());
                 }
@@ -267,10 +267,11 @@ async fn stage_pending(
             match status {
                 Ok(StageStatus::Ready) => (tx, Ok(Some(stage))),
                 Ok(StageStatus::Gone) => (tx, Ok(None)),
-                Ok(StageStatus::Fresh) => {
+                Ok(status @ (StageStatus::Fresh | StageStatus::EmptyRecording)) => {
                     match prepare(&mut tx, locations, &pending, initial_recording_job).await {
                         Ok(prepared) => tokio::task::spawn_blocking(move || {
-                            let result = prepared.stage(stage);
+                            let result = prepared
+                                .stage(stage, matches!(status, StageStatus::EmptyRecording));
                             (tx, result)
                         })
                         .await
@@ -316,7 +317,7 @@ enum CleanupTarget {
 }
 
 impl CleanupTarget {
-    fn stage(self, stage: Stage) -> Result<Option<Stage>, &'static str> {
+    fn stage(self, stage: Stage, reset_empty: bool) -> Result<Option<Stage>, &'static str> {
         // Keep the specialized recording/export guard through the rename.
         #[cfg(windows)]
         let _parents =
@@ -338,7 +339,7 @@ impl CleanupTarget {
                 meeting_id,
                 roots,
                 other_folders,
-                *exact_marker,
+                *exact_marker || reset_empty,
             )?
             .is_some(),
             Self::AppData {
@@ -348,7 +349,19 @@ impl CleanupTarget {
             } => checked_entry(path, *directory)?,
         };
         if !exists {
-            return Ok(None);
+            return if reset_empty {
+                Err(STAGE_UNCERTAIN)
+            } else {
+                Ok(None)
+            };
+        }
+        if reset_empty {
+            // Only a freshly verified recording can restart an incomplete
+            // reservation. A non-empty holder is left for manual review.
+            if !stage.holder_exists(true)? {
+                return Err(STAGE_UNCERTAIN);
+            }
+            fs::remove_dir(&stage.holder).map_err(|_| STAGE_UNCERTAIN)?;
         }
         stage.move_original()?;
         Ok(Some(stage))
@@ -483,6 +496,7 @@ struct Stage {
 
 enum StageStatus {
     Fresh,
+    EmptyRecording,
     Ready,
     Gone,
 }
@@ -514,28 +528,68 @@ impl Stage {
         })
     }
 
-    fn holder_exists(&self) -> Result<bool, &'static str> {
+    fn holder_exists(&self, staged: bool) -> Result<bool, &'static str> {
+        let parent = self.holder.parent().ok_or(UNSAFE_PATH)?;
         if let Some(roots) = &self.recording_roots {
             // The original may have been reused or replaced since the move.
             // Inspect only the reserved sibling, under a still-trusted root.
             if !crate::trusted_roots::text_allowed(&self.holder.to_string_lossy(), roots) {
                 return Err(UNSAFE_PATH);
             }
-            if checked_entry(&self.holder, true)? {
-                let canonical = self.holder.canonicalize().map_err(|_| UNAVAILABLE)?;
-                if !roots
-                    .iter()
-                    .filter(|root| meeting_files::directory_chain(root).is_ok())
-                    .filter_map(|root| root.canonicalize().ok())
-                    .any(|root| canonical != root && canonical.starts_with(root))
-                {
-                    return Err(UNSAFE_PATH);
-                }
-                return Ok(true);
-            }
-            return Ok(false);
         }
-        checked_entry(&self.holder, true)
+        match meeting_files::directory_chain(parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::InvalidInput => return Err(UNSAFE_PATH),
+            Err(error)
+                if error.kind() == ErrorKind::NotFound
+                    && !staged
+                    && self.recording_roots.is_none() =>
+            {
+                // App-managed subdirectories may never have been created.
+                // Verify the volume/share is reachable before treating them as absent.
+                let volume = parent
+                    .ancestors()
+                    .filter(|part| part.has_root())
+                    .last()
+                    .ok_or(UNSAFE_PATH)?;
+                meeting_files::directory_chain(volume).map_err(|_| UNAVAILABLE)?;
+                return Ok(false);
+            }
+            Err(_) => return Err(UNAVAILABLE),
+        }
+
+        let canonical_parent = if let Some(roots) = &self.recording_roots {
+            let canonical = parent.canonicalize().map_err(|_| UNAVAILABLE)?;
+            if !roots
+                .iter()
+                .filter(|root| meeting_files::directory_chain(root).is_ok())
+                .filter_map(|root| root.canonicalize().ok())
+                .any(|root| canonical.starts_with(root))
+            {
+                return Err(UNSAFE_PATH);
+            }
+            Some(canonical)
+        } else {
+            None
+        };
+        match fs::symlink_metadata(&self.holder) {
+            Ok(meta) if meta.is_dir() && !meeting_files::is_link(&self.holder, &meta) => {
+                if let Some(parent) = canonical_parent {
+                    let holder = self.holder.canonicalize().map_err(|_| UNAVAILABLE)?;
+                    if holder.parent() != Some(parent.as_path()) {
+                        return Err(UNSAFE_PATH);
+                    }
+                }
+                Ok(true)
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                // A drive can disconnect between checking its parent and the leaf.
+                meeting_files::directory_chain(parent).map_err(|_| UNAVAILABLE)?;
+                Ok(false)
+            }
+            Err(error) if error.kind() != ErrorKind::InvalidInput => Err(UNAVAILABLE),
+            _ => Err(UNSAFE_PATH),
+        }
     }
 
     fn payload_exists(&self) -> Result<bool, &'static str> {
@@ -543,7 +597,7 @@ impl Stage {
     }
 
     fn inspect(&self, staged: bool) -> Result<StageStatus, &'static str> {
-        if !self.holder_exists()? {
+        if !self.holder_exists(staged)? {
             return Ok(if staged {
                 StageStatus::Gone
             } else {
@@ -553,9 +607,20 @@ impl Stage {
         if self.payload_exists()? || staged {
             return Ok(StageStatus::Ready);
         }
-        // An empty holder before the rename was committed is ambiguous after
-        // a crash. Never retry against a possible replacement source.
-        Err(STAGE_UNCERTAIN)
+        // A crash before publishing the rename can leave only the reservation.
+        // If the original is absent, a non-recursive removal can clear an empty
+        // holder without touching a possible replacement at the original path.
+        let parent = self.holder.parent().ok_or(UNSAFE_PATH)?;
+        #[cfg(windows)]
+        let _parents = meeting_files::pin_directory_chain(parent).map_err(|_| UNAVAILABLE)?;
+        match fs::symlink_metadata(&self.original) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Ok(_) if self.recording_roots.is_some() => return Ok(StageStatus::EmptyRecording),
+            _ => return Err(STAGE_UNCERTAIN),
+        }
+        meeting_files::directory_chain(parent).map_err(|_| UNAVAILABLE)?;
+        fs::remove_dir(&self.holder).map_err(|_| STAGE_UNCERTAIN)?;
+        Ok(StageStatus::Gone)
     }
 
     fn move_original(&self) -> Result<(), &'static str> {
@@ -570,9 +635,24 @@ impl Stage {
     }
 
     fn remove(self) -> Result<(), &'static str> {
-        if !self.holder_exists()? {
+        if !self.holder_exists(true)? {
             return Ok(());
         }
+        #[cfg(windows)]
+        let _parents = {
+            let parent = self.holder.parent().ok_or(UNSAFE_PATH)?;
+            let parents = meeting_files::pin_directory_chain(parent).map_err(|error| {
+                if error.kind() == ErrorKind::InvalidInput {
+                    UNSAFE_PATH
+                } else {
+                    UNAVAILABLE
+                }
+            })?;
+            if !self.holder_exists(true)? {
+                return Ok(());
+            }
+            parents
+        };
         #[cfg(windows)]
         let parents = meeting_files::pin_directory_chain(&self.holder).map_err(|_| UNSAFE_PATH)?;
         if self.payload_exists()? {
@@ -610,6 +690,75 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn retry_keeps_a_staged_row_when_the_parent_disappears() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let locations = locations(root.path());
+        let original = locations.target("outputs", "review-test", "").unwrap();
+        fs::create_dir_all(&original).unwrap();
+        fs::write(original.join("old.txt"), b"Old output").unwrap();
+        MeetingsRepository::delete_from_library(&pool, "review-test", false)
+            .await
+            .unwrap()
+            .unwrap();
+        let id = entry(&pool, "outputs").await.id;
+        let stage = stage_pending(&pool, &locations, id, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let parent = stage.holder.parent().unwrap().to_path_buf();
+        let offline = parent.with_file_name("offline-storage");
+        fs::rename(&parent, &offline).unwrap();
+
+        assert_eq!(
+            attempt(&pool, &locations, id, None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(UNAVAILABLE)
+        );
+        assert!(entry(&pool, "outputs").await.staged);
+        assert_eq!(stage.remove(), Err(UNAVAILABLE));
+
+        fs::rename(&offline, &parent).unwrap();
+        assert_eq!(attempt(&pool, &locations, id, None).await.unwrap(), None);
+        assert!(sqlx::query_scalar::<_, bool>(
+            "SELECT NOT EXISTS(SELECT 1 FROM pending_meeting_file_cleanup WHERE id=?)"
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap());
+    }
+
+    #[test]
+    fn empty_uncommitted_stage_can_only_finish_with_a_verified_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let locations = locations(root.path());
+        let parent = &locations.recording_roots[0];
+        let stage = Stage {
+            original: parent.join("meeting"),
+            holder: parent.join(".clawscribe-cleanup~empty"),
+            payload: parent.join(".clawscribe-cleanup~empty/files"),
+            directory: true,
+            recording_roots: Some(locations.recording_roots.clone()),
+        };
+        assert!(matches!(stage.inspect(true), Err(UNAVAILABLE)));
+        fs::create_dir_all(&stage.holder).unwrap();
+        fs::create_dir(&stage.original).unwrap();
+        assert!(matches!(
+            stage.inspect(false),
+            Ok(StageStatus::EmptyRecording)
+        ));
+        assert!(stage.holder.is_dir());
+        fs::remove_dir(&stage.original).unwrap();
+        assert!(matches!(stage.inspect(false), Ok(StageStatus::Gone)));
+        assert!(!stage.holder.exists());
+        assert!(matches!(stage.inspect(true), Ok(StageStatus::Gone)));
     }
 
     #[tokio::test]
@@ -845,6 +994,14 @@ mod tests {
             entry(&pool, "recording").await.location.as_deref(),
             Some(folder_text)
         );
+        sqlx::query("UPDATE pending_meeting_file_cleanup SET stage_token=? WHERE id=?")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stage = Stage::for_entry(&locations, &entry(&pool, "recording").await).unwrap();
+        fs::create_dir(&stage.holder).unwrap();
 
         marker("other-meeting");
         assert!(attempt(&pool, &locations, id, None)
@@ -874,7 +1031,19 @@ mod tests {
         );
         assert!(folder.join("audio.wav").is_file());
         drop(busy);
+        let unexpected = stage.holder.join("unexpected.txt");
+        fs::write(&unexpected, b"Do not remove").unwrap();
+        assert_eq!(
+            attempt(&pool, &locations, id, None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(STAGE_UNCERTAIN)
+        );
+        assert!(folder.join("audio.wav").is_file() && unexpected.is_file());
+        fs::remove_file(unexpected).unwrap();
         assert_eq!(attempt(&pool, &locations, id, None).await.unwrap(), None);
         assert!(!folder.exists());
+        assert!(!stage.holder.exists());
     }
 }

@@ -13,6 +13,7 @@ import { storageService } from '@/services/storageService';
 import { applyPinnedSummaryLanguageToMeeting } from '@/lib/summary-language-preferences';
 import {
   EMPTY_DISK_SCAN,
+  folderKey,
   mergeRecoveryCandidates,
   readDiskScan,
   type DiskScan,
@@ -61,6 +62,8 @@ export async function fetchRecoveryCandidates(
   }
   const resolvedCacheIds = new Set(scan.resolvedCacheIds);
   const detachedCacheIds = new Set(scan.detachedCacheIds);
+  const unverifiedCacheIds = new Set(scan.unverifiedCacheIds);
+  const unverifiedFolders = new Set<string>();
   const pendingMeetings = eligibleMeetings.filter(meeting =>
     (!scan.recordingActive || !!scan.activeCacheId) &&
     meeting.meetingId !== scan.activeCacheId && !resolvedCacheIds.has(meeting.meetingId));
@@ -68,6 +71,10 @@ export async function fetchRecoveryCandidates(
   // Verify audio checkpoint availability for each pending meeting.
   const meetingsWithAudioStatus = await Promise.all(
     pendingMeetings.map(async (meeting) => {
+      if (unverifiedCacheIds.has(meeting.meetingId)) {
+        unverifiedFolders.add(folderKey(meeting.folderPath));
+        return null;
+      }
       if (detachedCacheIds.has(meeting.meetingId)) return { ...meeting, folderPath: undefined };
       if (meeting.folderPath) {
         try {
@@ -84,20 +91,23 @@ export async function fetchRecoveryCandidates(
           };
         } catch (error) {
           console.warn('Failed to check audio for meeting:', error);
-          // On error, assume no audio to be safe
-          return { ...meeting, recordingFolder: meeting.folderPath, folderPath: undefined };
+          unverifiedFolders.add(folderKey(meeting.folderPath));
+          return null;
         }
       }
       return meeting;
     })
   );
 
-  const merged = mergeRecoveryCandidates(meetingsWithAudioStatus, scan.recordings);
+  const merged = mergeRecoveryCandidates(
+    meetingsWithAudioStatus.filter(meeting => meeting !== null),
+    scan.recordings.filter(recording => !unverifiedFolders.has(folderKey(recording.folder))),
+  );
   // A recording the user asked not to be asked about again is left out, and
   // counted, so Settings can still offer to show it.
   const keptCount = merged.filter(candidate => candidate.disk?.kept).length;
   const candidates = options.includeKept ? merged : merged.filter(candidate => !candidate.disk?.kept);
-  return { candidates, scan, scanFailed: false, keptCount };
+  return { candidates, scan, scanFailed: unverifiedFolders.size > 0, keptCount };
 }
 
 export interface UseTranscriptRecoveryReturn {
@@ -348,6 +358,9 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       // first, and keep IndexedDB plus all originals if nothing was recovered.
       const audioRecovered = Boolean(audioRecoveryStatus?.audio_file_path) &&
         (audioRecoveryStatus?.status === 'success' || audioRecoveryStatus?.status === 'partial');
+      if (folderPath && !audioRecovered && (candidate.folderPath || candidate.disk?.hasAudio || audioRecoveryStatus?.status === 'failed')) {
+        throw new Error('No audio could be recovered yet. Reconnect the recordings folder if needed, then retry. Your draft and original files were kept.');
+      }
       if (transcripts.length === 0 && !audioRecovered) {
         throw new Error('No audio could be recovered yet. Keep the recording folder and retry recovery; a transcript is not required.');
       }

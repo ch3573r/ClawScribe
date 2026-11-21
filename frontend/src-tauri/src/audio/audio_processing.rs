@@ -10,6 +10,12 @@ use rubato::{
 use std::path::PathBuf;
 
 use super::encode::encode_single_audio; // Correct path to encode module
+use crate::database::meeting_files;
+
+const RECORDINGS_FOLDER_UNAVAILABLE: &str =
+    "The recordings folder is unavailable. Reconnect it or choose another folder in Settings → Recording.";
+const RECORDINGS_FOLDER_UNSAFE: &str =
+    "The recordings folder uses a link, a junction, or an unsupported location. Choose the actual folder in Settings → Recording.";
 
 /// Sanitize a filename to be safe for filesystem use
 pub fn sanitize_filename(name: &str) -> String {
@@ -33,8 +39,30 @@ pub fn sanitize_filename(name: &str) -> String {
 pub fn create_meeting_folder(base_path: &PathBuf, meeting_name: &str) -> Result<PathBuf> {
     let timestamp = Utc::now().format("%Y-%m-%d_%H-%M").to_string();
     let sanitized_name = sanitize_filename(meeting_name);
-    let folder_name = format!("{}_{}", sanitized_name, timestamp);
-    std::fs::create_dir_all(base_path)?;
+    let mut folder_name = format!("{}_{}", sanitized_name, timestamp);
+    if meeting_files::is_cleanup_path(std::path::Path::new(&folder_name)) {
+        folder_name.insert_str(0, "Meeting_");
+    }
+    let folder_error = |error: std::io::Error| {
+        anyhow::Error::msg(if error.kind() == std::io::ErrorKind::InvalidInput {
+            RECORDINGS_FOLDER_UNSAFE
+        } else {
+            RECORDINGS_FOLDER_UNAVAILABLE
+        })
+    };
+    if meeting_files::is_cleanup_path(base_path) {
+        anyhow::bail!(RECORDINGS_FOLDER_UNSAFE);
+    }
+    match meeting_files::directory_chain(base_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(base_path).map_err(folder_error)?;
+            meeting_files::directory_chain(base_path).map_err(folder_error)?;
+        }
+        Err(error) => return Err(folder_error(error)),
+    }
+    #[cfg(windows)]
+    let _base = meeting_files::pin_directory_chain(base_path).map_err(folder_error)?;
     let mut meeting_folder = base_path.join(&folder_name);
     // A restart within the same minute must not reuse or clean up a previous
     // session's folder. Successfully creating the directory establishes ownership.
@@ -42,10 +70,12 @@ pub fn create_meeting_folder(base_path: &PathBuf, meeting_name: &str) -> Result<
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             meeting_folder = base_path.join(format!("{folder_name}_{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir(&meeting_folder)?;
+            std::fs::create_dir(&meeting_folder).map_err(folder_error)?;
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(folder_error(error)),
     }
+    meeting_files::resolve_recording_folder(&meeting_folder, std::slice::from_ref(base_path))
+        .map_err(|_| anyhow::Error::msg(RECORDINGS_FOLDER_UNSAFE))?;
 
     log::info!("Created meeting folder");
     // The core made this folder: a later save may attach it to a meeting.
