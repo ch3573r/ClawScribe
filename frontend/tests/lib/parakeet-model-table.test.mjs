@@ -51,12 +51,12 @@ function table(overrides = {}) {
 const rowFor = (rows, name) => rows.find(row => text(row).includes(name));
 const button = (row, label) => nodes(row).find(node => node.type === 'Button' && node.props['aria-label'] === label);
 
-test('one table, the recommended model first, tags beside the name and no emoji', () => {
+test('one table, the default model first, tags beside the name and no emoji', () => {
   const { rows, tree } = table();
   const order = ['Lightning', 'Parakeet Ultra', 'SmoothQuant', 'Parakeet Ultra fp16', 'Compact'];
   rows.forEach((row, index) => assert.ok(text(nodes(row).find(n => n.type === 'td')).startsWith(order[index]), `row ${index} is ${order[index]}`));
   assert.equal(rows.length, 5);
-  assert.match(text(rowFor(rows, 'Lightning')), /Recommended/);
+  assert.match(text(rowFor(rows, 'Lightning')), /Default/);
   assert.match(text(rowFor(rows, 'SmoothQuant')), /Experimental/);
   assert.equal(nodes(tree).find(node => node.type === 'SettingsCard').props.title, 'Models');
   assert.doesNotMatch(text(tree), /[\u{1F300}-\u{1FAFF}☀-➿]/u);
@@ -137,7 +137,7 @@ test('loading, failure, empty and unsupported-selection states', () => {
   assert.doesNotMatch(text(table().tree), /no longer supported/);
 });
 
-test('the manager loads models, selects with auto-save, and clears the selection when it is deleted', async t => {
+test('only Use selects a model; downloads and deletion preserve the saved preference', async t => {
   const hooks = createHookHarness();
   const calls = [], selected = [];
   let models = [model('parakeet-tdt-0.6b-v3-int8', 'Available'), model('parakeet-tdt-0.6b-ultra-int8', 'Available')];
@@ -161,7 +161,7 @@ test('the manager loads models, selects with auto-save, and clears the selection
   });
   t.after(() => hooks.unmount());
   const render = () => hooks.render(() => ParakeetModelManager({
-    selectedModel: 'parakeet-tdt-0.6b-ultra-int8', autoSave: true, onModelSelect: name => selected.push(name),
+    selectedModel: 'parakeet-tdt-0.6b-ultra-int8', onModelSelect: name => selected.push(name),
     pcTest: { provider: 'parakeet', model: 'parakeet-tdt-0.6b-ultra-int8' },
   }));
   render();
@@ -173,10 +173,11 @@ test('the manager loads models, selects with auto-save, and clears the selection
 
   await element.props.onSelect('parakeet-tdt-0.6b-v3-int8');
   assert.deepEqual(selected, ['parakeet-tdt-0.6b-v3-int8']);
-  assert.deepEqual(calls.at(-1), ['api_save_transcript_config', { provider: 'parakeet', model: 'parakeet-tdt-0.6b-v3-int8', apiKey: null }]);
+  listeners.get('parakeet-model-download-complete')({ payload: { modelName: 'parakeet-tdt-0.6b-ultra-int8' } });
+  assert.deepEqual(selected, ['parakeet-tdt-0.6b-v3-int8']);
 
   await element.props.onDelete('parakeet-tdt-0.6b-ultra-int8');
   await flush();
-  assert.deepEqual(selected.at(-1), '', 'deleting the model in use clears the selection');
+  assert.deepEqual(selected, ['parakeet-tdt-0.6b-v3-int8']);
   assert.equal(render().props.children.props.models.length, 1);
 });

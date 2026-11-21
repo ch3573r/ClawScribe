@@ -247,3 +247,28 @@ test("the notice does not depend on the engine-settings hand-over, which can be 
   assert.match(source, /readNoticePreference\(\)/);
   assert.doesNotMatch(source, /loadBehaviorSettings/);
 });
+
+test('file transcription pickers follow opt-in and only default to an explicitly configured hosted model', async t => {
+  const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
+  let permission = { loaded: false, enabled: false }, config;
+  const { useTranscriptionModels } = loadTsModule('src/hooks/useTranscriptionModels', {
+    react: hooks.react,
+    '@/hooks/useCloudTranscription': { useCloudTranscription: () => permission },
+    '@tauri-apps/api/core': { invoke: async () => [] },
+  });
+  const render = () => hooks.render(() => useTranscriptionModels(config));
+  await render().fetchModels();
+  assert.equal(render().availableModels.length, 0);
+  permission = { loaded: true, enabled: true };
+  assert.equal(render().availableModels.length, 2);
+  assert.equal(render().selectedModelKey, '', 'enabling cloud does not select a hosted model');
+  config = { provider: 'mai-transcribe', model: 'saved-model' };
+  assert.equal(render().selectedModelKey, 'mai-transcribe:saved-model');
+  render().setSelectedModelKey('cloud-whisper:whisper-1');
+  assert.equal(render().selectedModelKey, 'cloud-whisper:whisper-1');
+  permission = { loaded: true, enabled: false };
+  assert.equal(render().availableModels.length, 0);
+  assert.equal(render().selectedModelKey, '');
+  assert.equal(config.provider, 'mai-transcribe', 'the hosted preference is retained while disabled');
+});

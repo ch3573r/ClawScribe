@@ -16,7 +16,6 @@ import {
   Activity,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { configService } from "@/services/configService";
 import { cn } from "@/lib/utils";
 import { ConfluenceIcon, Microsoft365Icon } from "@/components/IntegrationIcons";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
@@ -34,7 +33,6 @@ import { AssistantAccessSettings } from "@/components/settings/AssistantAccessSe
 import { DiagnosticsSettings } from "@/components/settings/DiagnosticsSettings";
 import { resolveSettingsTab } from "@/components/settings/settings-tabs";
 import { StatusDot, type StatusTone } from "@/components/ui/settings-layout";
-import { useConfig } from "@/contexts/ConfigContext";
 import { useMicrosoftExport } from "@/hooks/useMicrosoftExport";
 import { getICalendarServerSnapshot, getICalendarSnapshot, subscribeToICalendars } from "@/services/icalService";
 
@@ -89,31 +87,9 @@ type NavDot = { tone: StatusTone; label: string };
 
 export default function SettingsPage() {
   const router = useRouter();
-  const { setTranscriptModelConfig } = useConfig();
   const [activeTab, setActiveTab] = useState("general");
   const microsoft = useMicrosoftExport();
   const calendars = useSyncExternalStore(subscribeToICalendars, getICalendarSnapshot, getICalendarServerSnapshot);
-
-  useEffect(() => {
-    const loadTranscriptConfig = async () => {
-      try {
-        const config = await configService.getTranscriptConfig();
-        if (config) {
-          setTranscriptModelConfig({
-            provider: config.provider || "localWhisper",
-            model: config.model || "large-v3",
-            baseUrl: config.baseUrl || null,
-            allowUnencrypted: config.allowUnencrypted ?? false,
-            endpoint: config.endpoint || null,
-            region: config.region || null,
-          });
-        }
-      } catch (error) {
-        console.error("Failed to load transcript config:", error);
-      }
-    };
-    loadTranscriptConfig();
-  }, [setTranscriptModelConfig]);
 
   // Deep-link support: ?tab=… on load, and the sidebar's open-settings-tab event
   // while already mounted.

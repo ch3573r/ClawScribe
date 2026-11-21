@@ -23,3 +23,10 @@ export const MODEL_DEFAULTS = {
   localWhisper: DEFAULT_WHISPER_MODEL,
   parakeet: DEFAULT_PARAKEET_MODEL,
 } as const;
+
+/** Opening settings starts with a local draft until the core returns a saved notes model. */
+export const UNCONFIGURED_SUMMARY_MODEL = {
+  provider: 'builtin-ai',
+  model: '',
+  whisperModel: 'large-v3',
+} as const;

@@ -71,3 +71,24 @@ test('the results hook follows a test that finishes elsewhere in the app', t => 
   m.savePcTestResult('model-a', measurement, 1);
   assert.deepEqual([...Object.keys(render())], ['model-a']);
 });
+
+test('a speed recommendation requires two installed models recognizing both samples on the same known backend', t => {
+  const m = setup(t);
+  const ids = ['quick', 'other', 'missed', 'deleted', 'untested', 'gpu', 'incomplete', 'legacy'];
+  const models = ids.map(name => ({ name, status: name === 'deleted' ? 'Missing' : 'Available' }));
+  const recommend = () => [...m.recommendedForSpeed(models, m.readPcTestResults())];
+  m.savePcTestResult('quick', measurement);
+  m.savePcTestResult('missed', { ...measurement, realtimeFactor: 0.01, samples: [{ recognized: false }, { recognized: true }] });
+  m.savePcTestResult('deleted', measurement);
+  m.savePcTestResult('gpu', { ...measurement, backend: 'DirectML + CPU' });
+  m.savePcTestResult('incomplete', { ...measurement, samples: [] });
+  assert.deepEqual(recommend(), []);
+  m.savePcTestResult('other', measurement);
+  assert.deepEqual(recommend(), [], 'a tie has no single winner');
+  m.savePcTestResult('other', { ...measurement, realtimeFactor: 0.2 });
+  assert.deepEqual(structuredClone(recommend()), [['quick', 'Fastest of 2 tested on CPU']]);
+  for (const backend of ['Unconfirmed', 'CPU / Vulkan', '']) {
+    for (const id of ['quick', 'other']) m.savePcTestResult(id, { ...measurement, backend, realtimeFactor: id === 'quick' ? 0.1 : 0.2 });
+    assert.deepEqual(recommend(), []);
+  }
+});

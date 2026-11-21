@@ -1,5 +1,6 @@
 'use client';
 
+import { UNCONFIGURED_SUMMARY_MODEL } from '@/constants/modelDefaults';
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
@@ -13,15 +14,7 @@ interface SummaryModelSettingsProps {
 }
 
 export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsProps) {
-  const [modelConfig, setModelConfig] = useState<ModelConfig>({
-    provider: 'custom-openai',
-    model: 'gpt-4o-mini',
-    whisperModel: 'large-v3',
-    apiKey: null,
-    ollamaEndpoint: null,
-    customOpenAIEndpoint: 'https://api.openai.com/v1',
-    customOpenAIModel: 'gpt-4o-mini',
-  });
+  const [modelConfig, setModelConfig] = useState<ModelConfig>(UNCONFIGURED_SUMMARY_MODEL);
 
   // Reusable fetch function
   const fetchModelConfig = useCallback(async () => {

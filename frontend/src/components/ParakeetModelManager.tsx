@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import {
   ParakeetModelInfo,
@@ -17,7 +16,6 @@ interface ParakeetModelManagerProps {
   selectedModel?: string;
   onModelSelect?: (modelName: string) => void;
   className?: string;
-  autoSave?: boolean;
   /** Engine and model that "Test this PC" measures. Leave out to hide the test control. */
   pcTest?: { provider: string; model: string };
 }
@@ -26,7 +24,6 @@ export function ParakeetModelManager({
   selectedModel,
   onModelSelect,
   className = '',
-  autoSave = false,
   pcTest
 }: ParakeetModelManagerProps) {
   const [models, setModels] = useState<ParakeetModelInfo[]>([]);
@@ -38,19 +35,10 @@ export function ParakeetModelManager({
   // Unused (and unsupported, so disabled) when no test target is given.
   const test = useTranscriptionPcTest(pcTest ?? { provider: 'none', model: '' });
 
-  // Refs for stable callbacks
-  const onModelSelectRef = useRef(onModelSelect);
-  const autoSaveRef = useRef(autoSave);
   const retryDownload = useRef<((name: string) => Promise<void>) | null>(null);
 
   // Progress throttle map to prevent rapid updates
   const progressThrottleRef = useRef<Map<string, { progress: number; timestamp: number }>>(new Map());
-
-  // Update refs when props change
-  useEffect(() => {
-    onModelSelectRef.current = onModelSelect;
-    autoSaveRef.current = autoSave;
-  }, [onModelSelect, autoSave]);
 
   const loadModels = useCallback(async () => {
     try {
@@ -135,14 +123,6 @@ export function ParakeetModelManager({
             description: 'Model downloaded and ready to use',
             duration: 4000
           });
-
-          // Auto-select after download using stable refs
-          if (onModelSelectRef.current) {
-            onModelSelectRef.current(modelName);
-            if (autoSaveRef.current) {
-              saveModelSelection(modelName);
-            }
-          }
         }
       ),
 
@@ -188,18 +168,6 @@ export function ParakeetModelManager({
       }
     };
   }, []); // Empty dependency array - listeners use refs for stable callbacks
-
-  const saveModelSelection = async (modelName: string) => {
-    try {
-      await invoke('api_save_transcript_config', {
-        provider: 'parakeet',
-        model: modelName,
-        apiKey: null
-      });
-    } catch (error) {
-      console.error('Failed to save model selection:', error);
-    }
-  };
 
   const cancelDownload = async (modelName: string) => {
     const displayInfo = getModelDisplayInfo(modelName);
@@ -279,22 +247,6 @@ export function ParakeetModelManager({
 
   useEffect(() => { retryDownload.current = downloadModel; });
 
-  const selectModel = async (modelName: string) => {
-    if (onModelSelect) {
-      onModelSelect(modelName);
-    }
-
-    if (autoSave) {
-      await saveModelSelection(modelName);
-    }
-
-    const displayInfo = getModelDisplayInfo(modelName);
-    const displayName = displayInfo?.friendlyName || modelName;
-    toast.success(`Switched to ${displayName}`, {
-      duration: 3000
-    });
-  };
-
   const deleteModel = async (modelName: string) => {
     const displayInfo = getModelDisplayInfo(modelName);
     const displayName = displayInfo?.friendlyName || modelName;
@@ -311,10 +263,6 @@ export function ParakeetModelManager({
         duration: 3000
       });
 
-      // If deleted model was selected, clear selection
-      if (selectedModel === modelName && onModelSelect) {
-        onModelSelect('');
-      }
     } catch (err) {
       console.error('Failed to delete model:', err);
       toast.error(`Failed to delete ${displayName}`, {
@@ -334,11 +282,7 @@ export function ParakeetModelManager({
         results={pcResults}
         testAction={pcTest ? <PcTestAction test={test} /> : undefined}
         testReport={pcTest ? <PcTestReport test={test} /> : undefined}
-        onSelect={onModelSelect ? modelName => {
-          if (models.find(model => model.name === modelName)?.status === 'Available') {
-            void selectModel(modelName);
-          }
-        } : undefined}
+        onSelect={onModelSelect}
         onDownload={modelName => void downloadModel(modelName)}
         onCancel={modelName => void cancelDownload(modelName)}
         onDelete={modelName => void deleteModel(modelName)}

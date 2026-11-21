@@ -360,3 +360,15 @@ test('the same component keeps its explicit Save button and draft behaviour for 
   assert.equal(nodes(tree).some(node => node.type === 'select' && node.props.value === 'claude'), true, 'the provider select is the original one');
   app.hooks.unmount();
 });
+
+test('a fresh summary setup shows the local draft without claiming a selected model or saving a provider', async () => {
+  const { UNCONFIGURED_SUMMARY_MODEL } = loadTsModule('src/constants/modelDefaults');
+  const app = modalHarness(UNCONFIGURED_SUMMARY_MODEL);
+  app.render();
+  await flush();
+  assert.match(text(app.render()), /No summary model selected/);
+  assert.equal(app.context.modelConfig.provider, 'builtin-ai');
+  assert.equal(app.context.modelConfig.model, '');
+  assert.equal(app.saves.length, 0);
+  app.hooks.unmount();
+});

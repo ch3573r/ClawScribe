@@ -122,7 +122,7 @@ for (const enabled of [true, false]) {
     for (let i = 0; i < 3; i++) {
       const tree = render();
       assert.equal(nodes(tree).find(node => node.type === 'Select').props.value, 'mai-transcribe');
-      assert.match(text(tree), /Live recordings always transcribe on this device with Parakeet \(parakeet-tdt-0.6b-v3-int8\)/);
+      assert.match(text(tree), /Live transcription uses an installed Parakeet model/);
       assert.equal(text(tree).includes('Cloud transcription is off'), !enabled);
       assert.equal(nodes(tree).some(node => node.type === 'SelectItem' && node.props.value === 'mai-transcribe'), true);
     }
@@ -138,13 +138,55 @@ for (const enabled of [true, false]) {
     render();
     const repair = render();
     const manager = nodes(repair).find(node => node.type === 'ParakeetModelManager');
-    assert.equal(manager.props.autoSave, false);
     assert.equal(manager.props.onModelSelect, undefined);
     assert.match(text(repair), /keeps your hosted file-transcription preference/);
     assert.equal(saves.length, 0);
     hooks.unmount();
   });
 }
+
+test('browsing an engine preserves the selected model until Use saves successfully', async t => {
+  const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
+  const writes = [], errors = [];
+  let fail = true;
+  const { TranscriptSettings } = loadTsModule('src/components/TranscriptSettings.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    'next/navigation': { useRouter: () => ({}) },
+    './ui/select': names('Select SelectContent SelectGroup SelectItem SelectLabel SelectTrigger SelectValue'),
+    './ui/input': names('Input'), './ui/button': names('Button'),
+    './UnencryptedHttpOptIn': names('UnencryptedHttpOptIn'), './TranscriptionPcTest': names('TranscriptionPcTest'),
+    '@/components/settings/SecretKeyControl': names('SecretKeyRow'),
+    './WhisperModelManager': names('ModelManager'), './ParakeetModelManager': names('ParakeetModelManager'),
+    './NemotronModelManager': names('NemotronModelManager'), './WhisperAccelerationStatus': names('WhisperAccelerationStatus'),
+    '@/components/ui/settings-layout': names('SettingsCard SettingsFooter SettingsRow'),
+    '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ enabled: false, loaded: true }) },
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      writes.push([command, args]);
+      if (fail) throw new Error('save failed');
+    } },
+    sonner: { toast: { error: message => errors.push(message) } },
+  });
+  let config = { provider: 'parakeet', model: 'parakeet-tdt-0.6b-v3-int8' };
+  const render = () => hooks.render(() => TranscriptSettings({
+    transcriptModelConfig: config, setTranscriptModelConfig: value => { config = value; },
+  }));
+  nodes(render()).find(node => node.type === 'Select').props.onValueChange('localWhisper');
+  assert.match(text(render()), /Browse engines/);
+  assert.match(text(render()), /Parakeet · Lightning/);
+  assert.equal(writes.length, 0);
+  const useWhisper = () => nodes(render()).find(node => node.type === 'ModelManager').props.onModelSelect('small');
+  await useWhisper();
+  assert.match(text(render()), /Parakeet · Lightning/);
+  assert.equal(errors.length, 1);
+  fail = false;
+  const save = useWhisper();
+  assert.equal(nodes(render()).find(node => node.type === 'Select').props.disabled, true);
+  await save;
+  assert.equal(writes.at(-1)[0], 'api_save_transcript_config');
+  assert.equal(writes.at(-1)[1].provider, 'localWhisper');
+  assert.match(text(render()), /Whisper · Small/);
+});
 
 test('"Open options" scrolls to the Options card on the Transcription page instead of navigating', t => {
   const hooks = createHookHarness(), routes = [], moves = [];
