@@ -487,6 +487,13 @@ impl RecordingManager {
         self.recording_saver.recording_id()
     }
 
+    pub(super) fn recording_provenance(&self) -> super::provenance::RecordingProvenance {
+        super::provenance::RecordingProvenance::recording(
+            self.get_active_recording_duration(),
+            self.recording_saver.started_at(),
+        )
+    }
+
     pub(crate) fn library_transcripts(&self) -> Vec<crate::api::TranscriptSegment> {
         self.recording_saver
             .get_transcript_segments()

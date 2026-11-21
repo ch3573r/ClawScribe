@@ -3,13 +3,17 @@
 pub(crate) struct RecordingProvenance {
     pub source: Option<&'static str>,
     pub duration_seconds: Option<f64>,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl RecordingProvenance {
-    pub fn recording(duration_seconds: Option<f64>) -> Self {
+    pub fn recording(duration_seconds: Option<f64>, marker_created_at: Option<&str>) -> Self {
         Self {
             source: Some("recording"),
             duration_seconds: measured_duration(duration_seconds),
+            started_at: marker_created_at
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|started| started.to_utc()),
         }
     }
 
@@ -17,6 +21,7 @@ impl RecordingProvenance {
         Self {
             source: Some("import"),
             duration_seconds: measured_duration(duration_seconds),
+            started_at: None,
         }
     }
 }

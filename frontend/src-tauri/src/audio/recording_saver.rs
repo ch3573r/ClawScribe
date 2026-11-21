@@ -685,6 +685,10 @@ impl RecordingSaver {
         self.metadata.as_ref()?.recording_id.as_deref()
     }
 
+    pub(super) fn started_at(&self) -> Option<&str> {
+        Some(&self.metadata.as_ref()?.created_at)
+    }
+
     /// Get accumulated transcript segments (for reload sync)
     pub fn get_transcript_segments(&self) -> Vec<TranscriptSegment> {
         self.transcripts

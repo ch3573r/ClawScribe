@@ -5,6 +5,9 @@
 Open **Meetings → Archive** to see transcript and summary status alongside
 titles, dates, and project tags. The archive shows whether audio was recorded or
 imported and its measured duration when available, including audio-only recordings.
+New recordings use the time capture began, including when Stop or recovery saves
+the meeting on another day. A legacy recording without a readable start time
+uses its save time. Imports keep the date selected during import.
 Older meetings may have no duration or source. **Meetings that need attention** puts saved
 meetings with recording warnings, missing transcripts, or failed or cancelled
 summary jobs before the rest of the archive. Select **Needs attention** to show

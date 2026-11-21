@@ -1706,9 +1706,7 @@ async fn stop_recording_session<R: Runtime>(
             }
         }
 
-        let provenance = super::provenance::RecordingProvenance::recording(
-            manager.get_active_recording_duration(),
-        );
+        let provenance = manager.recording_provenance();
         let handoff = manager
             .recording_id()
             .map(|id| (id.to_owned(), manager.library_transcripts(), provenance));

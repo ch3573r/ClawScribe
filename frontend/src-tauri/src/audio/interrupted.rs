@@ -220,7 +220,7 @@ pub(crate) fn recovered_provenance(
     if imported {
         RecordingProvenance::import(duration)
     } else {
-        RecordingProvenance::recording(duration)
+        RecordingProvenance::recording(duration, marker["created_at"].as_str())
     }
 }
 
@@ -1682,7 +1682,7 @@ mod tests {
         .await
         .unwrap();
 
-        let provenance = RecordingProvenance::recording(Some(5.0));
+        let provenance = RecordingProvenance::recording(Some(5.0), None);
         assert!(
             commit_repaired_audio(&pool, "repair", path, path, provenance, false)
                 .await
