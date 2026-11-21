@@ -361,7 +361,11 @@ async fn run_if_due(app: &AppHandle) -> Result<(), String> {
         .map_err(|_| SETTINGS_ERROR)??;
         let _ = app.emit(CHANGED, ());
     }
-    if !schedule.due(now) || schedule.staging.is_some() || !inference::job_slot_idle() {
+    if !schedule.due(now)
+        || schedule.staging.is_some()
+        || !inference::job_slot_idle()
+        || backup::scheduled_backup_should_yield()
+    {
         return Ok(());
     }
     RUNNING.store(true, Ordering::Release);

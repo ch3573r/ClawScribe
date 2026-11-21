@@ -2028,11 +2028,17 @@ fn claim_archive() -> Result<ArchivePermits, String> {
     })
 }
 
+pub(super) fn scheduled_backup_should_yield() -> bool {
+    // A local summary releases its inference permit between model requests.
+    crate::summary::SummaryService::has_active_local_summary()
+        || crate::knowledge::scheduler::foreground_waiting()
+}
+
 fn claim_scheduled_archive(control: &Arc<ScheduledBackup>) -> Result<ArchivePermits, String> {
     let control = control.clone();
     claim_archive_with(|| {
         use crate::audio::inference::{claim_batch_job_without_preemption, BatchJob};
-        if crate::knowledge::scheduler::foreground_waiting() {
+        if scheduled_backup_should_yield() {
             return Err(BACKUP_DEFERRED.into());
         }
         let permit = claim_batch_job_without_preemption(
@@ -2193,6 +2199,19 @@ async fn restore_library_locked(app: AppHandle, path: PathBuf) -> Result<BackupR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scheduled_archive_defers_between_local_summary_requests() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let summary =
+            crate::summary::SummaryService::register_job("backup-summary", "builtin-ai").unwrap();
+        let control = Arc::new(ScheduledBackup::default());
+        assert!(
+            matches!(claim_scheduled_archive(&control), Err(message) if message == BACKUP_DEFERRED)
+        );
+        drop(summary);
+        assert!(claim_scheduled_archive(&control).is_ok());
+    }
 
     #[tokio::test]
     async fn scheduled_archive_yields_to_recording_during_audio_copy() {

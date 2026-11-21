@@ -470,8 +470,8 @@ local templates and deletions. An archive that contains an invalid template is r
 In **Backup and restore**, choose a local folder to enable daily backups. The
 first backup runs when the app is open and the library is idle. Later backups
 run at least 24 hours after the last successful one. ClawScribe checks once a
-minute and defers while recording, transcription, an export, or an archive
-operation is active. Starting a recording interrupts a scheduled backup that
+minute and defers while recording, transcription, Built-in AI notes, an export,
+or an archive operation is active. Starting a recording interrupts a scheduled backup that
 is still reading the library. ClawScribe discards the partial ZIP and retries
 when the library is idle. A completed ZIP can finish saving during recording.
 If ClawScribe can measure free space, it budgets the ZIP and temporary
