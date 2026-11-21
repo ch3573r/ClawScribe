@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.66.0
+
+- Recover interrupted transcripts when recording storage is offline. Recordings retain their identity through device reconnection, and saved meetings report audio gaps.
+- Queue audio imports and schedule portable backups. Restore templates, reviewed series notes and eligible saved live answers with their meetings.
+- Find and play matching transcript passages, review open actions across meetings and retry partial exports at their original destination.
+- Keep saved notes during regeneration, retry a failed translation from the English draft and review expanded automatic-note sharing before it resumes.
+- [Windows release notes](docs/releases/0.66.0.md).
+
 ## 0.65.1
 
 - Floating controls open automatically when recording starts. Turn this off under **Settings → Recording → Capture**, or close the window for a single recording.

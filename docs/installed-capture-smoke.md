@@ -60,14 +60,14 @@ output. The checkout must contain the release commit. Run the asset/signature
 checks described in [Windows releases](windows-release.md) for staged releases.
 
 ```powershell
-$version = '0.65.1'
+$version = '0.66.0'
 $assets = '<local artifact directory>'
 $routes = '<private route JSON path>'
 $commit = '<40-character release commit>'
 $digest = '<verified 64-character NSIS SHA-256>'
 $setup = Join-Path $assets "ClawScribe_${version}_x64-setup.exe"
 $metadata = Join-Path $assets 'BUILD-METADATA.txt'
-python -B frontend/scripts/installed_capture/run.py --install --upgrade-from 0.64.1 `
+python -B frontend/scripts/installed_capture/run.py --install --upgrade-from 0.65.1 `
     --version $version --commit $commit --installer-sha256 $digest `
     --installer $setup --metadata $metadata --config $routes --stop-seconds 20
 if ($LASTEXITCODE -ne 0) { throw 'Installed dual-source capture failed.' }
@@ -75,7 +75,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Installed dual-source capture failed.' }
 
 Use the actual artifact paths for a nested build bundle. Pass `--seven-zip`
 with the full path to `7z.exe` if it is outside PATH. For a repeat on the
-already-installed candidate, omit `--install --upgrade-from 0.64.1`.
+already-installed candidate, omit `--install --upgrade-from 0.65.1`.
 `--install` runs the current-user installer silently and leaves that version
 installed. `--upgrade-from` also checks the registered starting version and
 the retention of all previously saved meeting IDs and folder bindings.
