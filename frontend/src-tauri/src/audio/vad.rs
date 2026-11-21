@@ -9,6 +9,14 @@ use std::time::Duration;
 
 /// Silero VAD requires 16 kHz mono.
 const VAD_SAMPLE_RATE: u32 = 16000;
+const VAD_FRAME_MS: u64 = 30;
+const PRE_SPEECH_PAD_MS: u64 = 300;
+const MIN_SPEECH_TIME_MS: u64 = 250;
+// Silero enters the speech state before it emits SpeechStart. Keep enough for
+// that pending utterance as well as the pre-roll, including frame rounding.
+const IDLE_HISTORY: Duration =
+    Duration::from_millis(PRE_SPEECH_PAD_MS + MIN_SPEECH_TIME_MS + 2 * VAD_FRAME_MS);
+const IDLE_TRIM_INTERVAL: Duration = Duration::from_secs(1);
 /// Fixed input frame size for the rubato resampler (variable input is buffered
 /// up to this size, like the recording pipeline's resampler).
 const VAD_RESAMPLE_CHUNK: usize = 512;
@@ -252,22 +260,22 @@ impl ContinuousVadProcessor {
         // Use the caller-provided pause bridge. Live recording keeps this short
         // for responsiveness; batch import can pass a longer value.
         config.redemption_time = Duration::from_millis(redemption_time_ms as u64);
-        config.pre_speech_pad = Duration::from_millis(300); // Pre-speech padding for context
+        config.pre_speech_pad = Duration::from_millis(PRE_SPEECH_PAD_MS);
         config.post_speech_pad = Duration::from_millis(400); // Increased: more context at end
 
         // CRITICAL FIX: Increased min_speech_time to prevent tiny 40ms fragments
         // Previous: 100ms allowed too-short segments that Whisper rejects
         // New: 250ms ensures segments are substantial enough for Whisper (>100ms requirement)
-        config.min_speech_time = Duration::from_millis(250); // Prevent tiny fragments
+        config.min_speech_time = Duration::from_millis(MIN_SPEECH_TIME_MS);
 
         debug!("Creating VAD session with: sample_rate={}Hz, redemption={}ms, min_speech={}ms, input_rate={}Hz",
-               VAD_SAMPLE_RATE, redemption_time_ms, 250, input_sample_rate);
+               VAD_SAMPLE_RATE, redemption_time_ms, MIN_SPEECH_TIME_MS, input_sample_rate);
 
         let session = VadSession::new(config)
             .map_err(|e| anyhow!("Failed to create VAD session: {:?}", e))?;
 
         // VAD uses 30ms chunks at 16kHz (480 samples)
-        let vad_chunk_size = (VAD_SAMPLE_RATE as f32 * 0.03) as usize; // 480 samples
+        let vad_chunk_size = ms_to_samples(VAD_FRAME_MS as usize);
         let max_segment_samples = max_segment_duration_ms
             .map(|ms| ((ms as usize * VAD_SAMPLE_RATE as usize) / 1000).max(vad_chunk_size));
 
@@ -292,6 +300,12 @@ impl ContinuousVadProcessor {
             // Initialize state tracking
             last_logged_state: false,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_min_speech_for_benchmark(&mut self, millis: u64) {
+        assert!(millis <= MIN_SPEECH_TIME_MS);
+        self.session.config_mut().min_speech_time = Duration::from_millis(millis);
     }
 
     /// Process incoming audio samples and return any complete speech segments
@@ -495,6 +509,14 @@ impl ContinuousVadProcessor {
         if self.in_speech {
             self.current_speech.extend_from_slice(chunk);
             self.emit_forced_segments_if_needed();
+        } else {
+            // take_until drains PCM without resetting Silero's model state or
+            // clock. Directly trimming to the pre-roll would lose the start of
+            // a candidate that hasn't emitted SpeechStart yet.
+            let (start, end) = self.session.current_buffer_range();
+            if end - start >= IDLE_HISTORY + IDLE_TRIM_INTERVAL {
+                self.session.take_until(end - IDLE_HISTORY);
+            }
         }
 
         self.processed_samples += chunk.len();
@@ -819,6 +841,73 @@ mod tests {
         assert_eq!(segment.start_timestamp_ms, 1500.0);
         assert_eq!(segment.end_timestamp_ms, 1750.0);
         assert_eq!(segment.confidence, 0.85);
+    }
+
+    #[test]
+    fn sustained_silence_keeps_bounded_history_and_preserves_following_speech() {
+        for silence_frames in [2, 50, 4_000] {
+            check_speech_after_silence(silence_frames);
+        }
+    }
+
+    fn check_speech_after_silence(silence_frames: usize) {
+        let mut processor = ContinuousVadProcessor::new_with_max_segment_duration(
+            VAD_SAMPLE_RATE,
+            400,
+            Some(1_000),
+        )
+        .unwrap();
+        let silence_frame = [0.0; 480];
+        for _ in 0..silence_frames {
+            assert!(processor.process_audio(&silence_frame).unwrap().is_empty());
+            assert!(processor.session.session_audio_samples() <= ms_to_samples(1_610));
+        }
+        let silence_samples = silence_frames * silence_frame.len();
+        assert_eq!(processor.processed_samples, silence_samples);
+
+        // Compare absolute segment boundaries and PCM against the pinned session
+        // with the same model state and no history trimming or forced cuts.
+        let mut reference = VadSession::new(*processor.session.config_mut()).unwrap();
+        for _ in 0..silence_frames {
+            reference.process(&silence_frame).unwrap();
+        }
+        let mut speech: Vec<_> = include_bytes!("pc_test_samples/de.s16le")
+            .chunks_exact(2)
+            .take(ms_to_samples(2_400))
+            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0)
+            .collect();
+        speech.resize(ms_to_samples(3_900), 0.0);
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for frame in speech.chunks_exact(480) {
+            actual.extend(processor.process_audio(frame).unwrap());
+            for transition in reference.process(frame).unwrap() {
+                if let VadTransition::SpeechEnd {
+                    start_timestamp_ms,
+                    end_timestamp_ms,
+                    samples,
+                } = transition
+                {
+                    expected.push((start_timestamp_ms, end_timestamp_ms, samples));
+                }
+            }
+        }
+        assert!(processor.flush().unwrap().is_empty());
+        assert_eq!(expected.len(), 1, "expected one reference utterance");
+        let (start, end, samples) = &expected[0];
+        assert_eq!(actual.first().unwrap().start_timestamp_ms, *start as f64);
+        assert_eq!(actual.last().unwrap().end_timestamp_ms, *end as f64);
+        assert!(actual.iter().any(|segment| segment.confidence == 0.85));
+        for pair in actual.windows(2) {
+            assert_eq!(pair[0].end_timestamp_ms, pair[1].start_timestamp_ms);
+        }
+        assert_eq!(
+            actual
+                .into_iter()
+                .flat_map(|segment| segment.samples)
+                .collect::<Vec<_>>(),
+            *samples
+        );
     }
 
     /// Six seconds of tone with silence from `gap_start_ms` for `gap_ms`.

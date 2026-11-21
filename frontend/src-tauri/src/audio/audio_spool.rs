@@ -106,6 +106,14 @@ pub(super) fn encode_capture(
     folder: &Path,
     output: &std::path::PathBuf,
 ) -> anyhow::Result<(bool, bool)> {
+    encode_capture_at_bitrate(folder, output, super::encode::RECORDING_AAC_KBPS)
+}
+
+pub(super) fn encode_capture_at_bitrate(
+    folder: &Path,
+    output: &std::path::PathBuf,
+    bitrate_kbps: u32,
+) -> anyhow::Result<(bool, bool)> {
     let spool = folder.join(".audio-spool");
     let (paths, temporary_gaps, mut all_encoded) = capture_paths(&spool)?;
     let first = paths
@@ -125,34 +133,43 @@ pub(super) fn encode_capture(
         .sum();
     let timeout = encode_timeout(samples as f64 / sample_rate as f64);
     let mut gaps = temporary_gaps || spool.join(".incomplete").exists();
-    super::encode::encode_pcm_stream(sample_rate, 1, output, timeout, |writer| {
-        let mut written = false;
-        for (index, path) in paths.iter().enumerate() {
-            gaps |= path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .and_then(|stem| stem.parse::<usize>().ok())
-                != Some(index);
-            let chunk = match read_chunk(path) {
-                Ok(chunk) if chunk.sample_rate == sample_rate && !chunk.data.is_empty() => chunk,
-                Err(_) if path.extension().is_some_and(|ext| ext == "tmp") => {
-                    gaps = true;
-                    continue;
-                }
-                _ => {
-                    gaps = true;
-                    all_encoded = false;
-                    continue;
-                }
-            };
-            writer.write_all(bytemuck::cast_slice(&chunk.data))?;
-            written = true;
-        }
-        if !written {
-            return Err(std::io::Error::other("No readable captured audio"));
-        }
-        Ok(())
-    })?;
+    super::encode::encode_pcm_stream_at_bitrate(
+        sample_rate,
+        1,
+        output,
+        timeout,
+        bitrate_kbps,
+        |writer| {
+            let mut written = false;
+            for (index, path) in paths.iter().enumerate() {
+                gaps |= path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .and_then(|stem| stem.parse::<usize>().ok())
+                    != Some(index);
+                let chunk = match read_chunk(path) {
+                    Ok(chunk) if chunk.sample_rate == sample_rate && !chunk.data.is_empty() => {
+                        chunk
+                    }
+                    Err(_) if path.extension().is_some_and(|ext| ext == "tmp") => {
+                        gaps = true;
+                        continue;
+                    }
+                    _ => {
+                        gaps = true;
+                        all_encoded = false;
+                        continue;
+                    }
+                };
+                writer.write_all(bytemuck::cast_slice(&chunk.data))?;
+                written = true;
+            }
+            if !written {
+                return Err(std::io::Error::other("No readable captured audio"));
+            }
+            Ok(())
+        },
+    )?;
     Ok((gaps, all_encoded))
 }
 

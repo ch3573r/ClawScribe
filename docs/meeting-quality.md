@@ -39,6 +39,11 @@ language/model selection. Playback is the reference when a name, number, short
 answer, or overlapping utterance needs review. A confidence value is not proof
 that a segment is correct or incorrect.
 
+Microphone loudness normalization limits positive gain to about 18 dB so quiet
+room noise or far-end bleed cannot drive large amplification. During long quiet
+periods, speech detection retains only the recent audio needed to recognize the
+next voice and include its pre-roll.
+
 ## Testing local transcription speed
 
 In **Settings → Transcription**, select an installed Whisper, Parakeet or Nemotron model
@@ -60,6 +65,10 @@ also identifies samples that produced no text. For slow results, try a
 smaller installed model or select **Record now, transcribe later**. Short
 sample timing measures model speed. Meeting duration, other apps, audio
 capture, language and overlapping speakers affect live performance.
+
+For development, the [two-source capture benchmark](local-capture-benchmark.md)
+measures capture processing, transcript quality and saved audio on the same
+fictional meeting timeline.
 
 ## Live Transcript Behavior
 

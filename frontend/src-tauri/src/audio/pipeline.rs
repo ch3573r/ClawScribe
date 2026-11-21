@@ -16,9 +16,14 @@ use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState}
 use super::transcription::queue::{BufferedSpool, TranscriptionQueueSender};
 use super::vad::ContinuousVadProcessor;
 
+#[cfg(test)]
+#[path = "capture_bench.rs"]
+mod capture_bench;
+
 /// Live VAD max-segment cap (ms). Set per active transcription provider at
 /// recording start; the pipeline reads it when creating the VAD. Default 6s.
 static LIVE_MAX_SEGMENT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(6_000);
+const LIVE_VAD_REDEMPTION_MS: u32 = 400;
 const TRANSCRIPTION_QUEUE_WARNING_THRESHOLD: u32 = 3;
 const MICROPHONE_STREAM_WARNING: &str =
     "Microphone samples stopped arriving. Check the microphone connection and recording devices.";
@@ -1016,7 +1021,6 @@ impl AudioPipeline {
         // This bridges natural pauses without excessive fragmentation
         // For mac os core audio, 900ms, for windows 400ms seems good
 
-        let redemption_time = if cfg!(target_os = "macos") { 400 } else { 400 };
         // Per-provider live cap, set at recording start (shorter for Nemotron).
         let live_max_segment_ms = LIVE_MAX_SEGMENT_MS.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -1024,7 +1028,7 @@ impl AudioPipeline {
             Some(
                 match ContinuousVadProcessor::new_with_max_segment_duration(
                     sample_rate,
-                    redemption_time,
+                    LIVE_VAD_REDEMPTION_MS,
                     Some(live_max_segment_ms),
                 ) {
                     Ok(processor) => {

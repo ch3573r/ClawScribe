@@ -168,6 +168,7 @@ pub struct LoudnessNormalizer {
     gain_linear: f32,
     loudness_buffer: Vec<f32>,
     true_peak_limit: f32,
+    max_gain: f32,
 }
 
 impl LoudnessNormalizer {
@@ -195,7 +196,15 @@ impl LoudnessNormalizer {
             gain_linear: 1.0,
             loudness_buffer: Vec::with_capacity(ANALYZE_CHUNK_SIZE),
             true_peak_limit,
+            // Bound amplification to about +18 dB. Integrated loudness can
+            // include a quiet microphone's background and far-end bleed.
+            max_gain: 8.0,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn use_uncapped_gain_for_benchmark(&mut self) {
+        self.max_gain = f32::INFINITY;
     }
 
     /// Normalize loudness using EBU R128 standard with true peak limiting
@@ -228,7 +237,8 @@ impl LoudnessNormalizer {
                     if let Ok(current_lufs) = self.ebur128.loudness_global() {
                         if current_lufs.is_finite() && current_lufs < 0.0 {
                             let gain_db = TARGET_LUFS - current_lufs;
-                            self.gain_linear = 10_f32.powf(gain_db as f32 / 20.0);
+                            self.gain_linear =
+                                10_f32.powf(gain_db as f32 / 20.0).min(self.max_gain);
                         }
                     }
                 }
@@ -243,6 +253,29 @@ impl LoudnessNormalizer {
         }
 
         normalized_samples
+    }
+}
+
+#[cfg(test)]
+mod loudness_tests {
+    use super::LoudnessNormalizer;
+
+    #[test]
+    fn faint_background_does_not_drive_unbounded_microphone_gain() {
+        let rate = 48_000;
+        let amplitude = 0.002;
+        let background: Vec<_> = (0..rate * 2)
+            .map(|index| {
+                amplitude * (std::f32::consts::TAU * 1_000.0 * index as f32 / rate as f32).sin()
+            })
+            .collect();
+        let mut normalizer = LoudnessNormalizer::new(1, rate).unwrap();
+        let output = normalizer.normalize_loudness(&background);
+        let peak = output[rate as usize..]
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0, f32::max);
+        assert!(peak <= amplitude * 8.0, "quiet input peak grew to {peak}");
     }
 }
 

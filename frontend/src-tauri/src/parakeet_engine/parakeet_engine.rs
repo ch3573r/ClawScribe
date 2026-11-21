@@ -285,7 +285,7 @@ impl ParakeetEngine {
                 661,
                 QuantizationType::Int8,
                 "Fast (v2)",
-                "Previous version with int8 quantization, good balance of speed and accuracy",
+                "English-only v2 int8 with a smaller download.",
             ),
         ];
 
