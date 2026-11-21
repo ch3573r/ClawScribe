@@ -163,14 +163,15 @@ pub(crate) const IMPORT_OWNER_FILE: &str = ".clawscribe-import-owner";
 const COPY_BUFFER_BYTES: usize = 256 * 1024;
 
 pub(crate) fn owns_import_folder(folder: &Path, meeting_id: &str) -> bool {
+    if meeting_id.is_empty() || crate::database::meeting_files::directory_chain(folder).is_err() {
+        return false;
+    }
     let marker = folder.join(IMPORT_OWNER_FILE);
-    crate::database::meeting_files::directory_chain(folder).is_ok()
-        && std::fs::symlink_metadata(&marker).is_ok_and(|meta| {
-            meta.is_file()
-                && !crate::database::meeting_files::is_link(&marker, &meta)
-                && meta.len() == meeting_id.len() as u64
-        })
-        && std::fs::read_to_string(&marker).is_ok_and(|id| id == meeting_id)
+    std::fs::symlink_metadata(&marker).is_ok_and(|meta| {
+        meta.is_file()
+            && !crate::database::meeting_files::is_link(&marker, &meta)
+            && meta.len() == meeting_id.len() as u64
+    }) && std::fs::read_to_string(&marker).is_ok_and(|id| id == meeting_id)
 }
 
 fn copy_audio_chunks(
@@ -295,6 +296,7 @@ pub struct ImportResult {
     pub title: String,
     pub segments_count: usize,
     pub duration_seconds: f64,
+    #[serde(default)]
     pub files_pending: bool,
     #[serde(default)]
     pub transcription_provider: Option<String>,

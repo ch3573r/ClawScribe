@@ -9,6 +9,7 @@ test('complete settings do not imply successful delivery', () => {
   assert.equal(openClawDeliveryLabel(configured).text, 'No confirmed delivery');
   assert.equal(openClawDeliveryLabel({ ...configured, delivery_state: 'failed' }).text, 'Delivery failed');
   assert.equal(openClawDeliveryLabel({ ...configured, delivery_state: 'unknown' }).text, 'Delivery uncertain');
+  assert.equal(openClawDeliveryLabel({ ...configured, delivery_state: 'deferred' }).text, 'Handoff needs review');
   assert.equal(openClawDeliveryLabel({ ...configured, delivery_state: 'submitted' }).text, 'Last handoff accepted');
 });
 

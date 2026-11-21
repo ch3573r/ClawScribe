@@ -35,6 +35,7 @@ export interface ImportQueueItem {
 export function useImportQueue(open: boolean) {
   const [items, setItems] = useState<ImportQueueItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -50,9 +51,10 @@ export function useImportQueue(open: boolean) {
       }
       fetching = true;
       try {
-        const snapshot = await invoke<ImportQueueItem[]>('import_queue_snapshot');
+        const snapshot = await invoke<{ items: ImportQueueItem[]; recovery_notice: string | null }>('import_queue_snapshot');
         if (active) {
-          setItems(snapshot);
+          setItems(snapshot.items);
+          setRecoveryNotice(snapshot.recovery_notice);
           setError(null);
         }
       } catch (caught) {
@@ -77,5 +79,5 @@ export function useImportQueue(open: boolean) {
     };
   }, [open]);
 
-  return { items, error, loading };
+  return { items, error, recoveryNotice, loading };
 }

@@ -379,7 +379,8 @@ See [call detection](docs/teams-detection.md).
   Confluence.
 - **OpenClaw** can send saved meeting transcripts to a configured destination.
   Each meeting shows its delivery result. You can review failed deliveries
-  and confirm uncertain ones before retrying.
+  and confirm uncertain ones at the original destination before retrying.
+  When recording files need repair, the handoff waits for your review.
 
 **Export history** shows Microsoft and Confluence results from the meeting and
 travels with portable backups. Inspect the original destination and choose

@@ -2,8 +2,10 @@
 
 ClawScribe can send saved meeting transcripts and details to the configured
 OpenClaw ingest endpoint. Automatic handoff runs after a live recording saves
-its library entry and recording-folder files. Open a saved meeting to review
-its handoff status or submit it manually.
+its library entry and recording-folder files. If file repair is needed,
+ClawScribe shows that the automatic handoff was paused. After repair, open
+**Review handoff** to approve the current destination and send the transcript.
+Repair itself does not send any data to OpenClaw.
 
 ## Configuration
 
@@ -118,9 +120,11 @@ connection failure. If delivery is uncertain after a timeout, interruption, or
 ambiguous reply, choose **Review delivery**. Wait for processing to settle at
 the original destination and verify whether it received that meeting. Record
 **Confirmed received** to close the handoff or **Confirmed absent** to unlock a
-reviewed retry to the original destination. A retry after an uncertain result
-must match the saved payload hash when one is available. There is no automatic
-resend on restart or after an uncertain result. The local delivery history is
+reviewed retry to the original destination. The retry uses the current saved
+title and transcript. Identical content reuses the prior request key and
+changed content gets a new key. ClawScribe never automatically replays a
+handoff after restart or an uncertain result. An in-flight handoff blocks update
+installation until its result is recorded. The local delivery history is
 outside portable backups.
 
 The Tauri commands use saved meeting IDs to look up verified folder artifacts.
@@ -128,11 +132,13 @@ The Tauri commands use saved meeting IDs to look up verified folder artifacts.
 - `get_openclaw_config_status` returns configuration readiness in `ready` and
   the latest delivery state in `delivery_state` and `last_submission`.
 - `get_openclaw_submission_status` takes `meetingId` and returns the saved
-  result, available actions and a `review_token` for the current destination.
+  result, available actions, a `review_token` for the current destination and
+  a `reconciliation_token` for any uncertain attempt that can be reviewed.
 - `submit_meeting_folder_to_openclaw` takes `meetingId` and `reviewToken` after
   the user approves the displayed destination. It returns the meeting status.
-- `reconcile_openclaw_handoff` takes `meetingId` and `received` after the user
-  verifies the uncertain outcome at OpenClaw. It records the result locally.
+- `reconcile_openclaw_handoff` takes `meetingId`, `received` and the
+  `reconciliationToken` for the original attempt after the user verifies the
+  outcome at that destination. It records the result locally.
 
 The companion Windows tray/agent is no longer needed for the happy path once
 this fork is used as the recorder. It can remain as a diagnostic/manual

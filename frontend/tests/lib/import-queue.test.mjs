@@ -35,21 +35,23 @@ test('closing the queue leaves the native job alone and reopening reloads its sa
     handlers.get('import-queue-changed')();
     [...timers.values()][0]();
     assert.equal(requested.length, 1, 'updates coalesce during a slow snapshot');
-    requests[0].resolve([{ id: 'meeting-a', status: 'running' }]);
+    requests[0].resolve({ items: [{ id: 'meeting-a', status: 'running' }], recovery_notice: null });
     await flush();
     assert.equal(render(true).items[0].status, 'running');
     assert.equal(requested.length, 2);
 
     render(false);
-    requests[1].resolve([{ id: 'meeting-a', status: 'failed' }]);
+    requests[1].resolve({ items: [{ id: 'meeting-a', status: 'failed' }], recovery_notice: null });
     await flush();
     assert.equal(handlers.size, 0);
     assert.equal(timers.size, 0);
     assert.equal(render(false).items[0].status, 'running', 'closed dialog ignores late updates');
     render(true);
-    requests[2].resolve([{ id: 'meeting-a', status: 'saved', result: { meeting_id: 'meeting-a', files_pending: true } }]);
+    const notice = 'The unreadable import queue was preserved. You can choose files again.';
+    requests[2].resolve({ items: [{ id: 'meeting-a', status: 'saved', result: { meeting_id: 'meeting-a', files_pending: true } }], recovery_notice: notice });
     await flush();
     assert.equal(render(true).items[0].result.files_pending, true);
+    assert.equal(render(true).recoveryNotice, notice);
     assert.ok(requested.every(command => command === 'import_queue_snapshot'));
   } finally {
     harness.unmount();

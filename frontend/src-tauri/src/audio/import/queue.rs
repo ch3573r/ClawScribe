@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 const MAX_ITEMS: usize = 32;
 const CHANGED: &str = "import-queue-changed";
+const RECOVERED_QUEUE: &str =
+    "The unreadable import queue was preserved. You can choose files again.";
 static QUEUE: tokio::sync::Mutex<Option<Queue>> = tokio::sync::Mutex::const_new(None);
 static PROGRESS: std::sync::Mutex<Option<ImportProgress>> = std::sync::Mutex::new(None);
 
@@ -22,8 +24,8 @@ enum Status {
     Saved,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct QueueOptions {
     language: Option<String>,
     model: Option<String>,
@@ -46,6 +48,7 @@ struct Item {
     message: Option<String>,
     result: Option<ImportResult>,
     elapsed_seconds: Option<f64>,
+    #[serde(default)]
     options: QueueOptions,
 }
 
@@ -76,6 +79,7 @@ struct Queue {
     items: Vec<Item>,
     sources: HashMap<String, Taken>,
     worker_running: bool,
+    recovery_notice: Option<&'static str>,
 }
 
 impl Queue {
@@ -118,6 +122,12 @@ impl Queue {
     }
 }
 
+#[derive(Serialize)]
+pub struct QueueSnapshot {
+    items: Vec<QueueItem>,
+    recovery_notice: Option<&'static str>,
+}
+
 pub(super) fn set_progress(progress: ImportProgress) {
     *PROGRESS.lock().unwrap_or_else(|error| error.into_inner()) = Some(progress);
 }
@@ -130,41 +140,106 @@ async fn load<R: Runtime>(app: &AppHandle<R>, slot: &mut Option<Queue>) -> Resul
     if slot.is_some() {
         return Ok(());
     }
+    let _work = crate::updates::admit_work()?;
     let dir = app
         .path()
         .app_config_dir()
         .map_err(|_| "Could not find import settings")?;
     std::fs::create_dir_all(&dir).map_err(|_| "Could not open import settings")?;
     let file = dir.join("import-queue.json");
-    let items = match std::fs::read(&file) {
-        Ok(content) => serde_json::from_slice::<Vec<Item>>(&content)
-            .map_err(|_| "The import queue could not be read")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(_) => return Err("The import queue could not be opened".into()),
-    };
-    let mut queue = Queue {
-        file,
-        items,
-        sources: HashMap::new(),
-        worker_running: false,
-    };
-    if queue.items.iter().any(|item| interrupted(item.status)) {
+    let mut queue = read_queue(file)?;
+    if !queue.items.is_empty() {
         let state = app
             .try_state::<AppState>()
             .ok_or("Meeting storage is unavailable")?;
-        let pool = state.db_manager.pool();
-        for item in queue
-            .items
-            .iter_mut()
-            .filter(|item| interrupted(item.status))
-        {
-            let saved = find_saved(pool, item).await?;
-            recover_item(item, saved);
-        }
-        queue.save()?;
+        recover_queue(state.db_manager.pool(), &mut queue).await?;
     }
     *slot = Some(queue);
     Ok(())
+}
+
+fn read_queue(file: PathBuf) -> Result<Queue, String> {
+    const UNAVAILABLE: &str = "The import queue could not be opened.";
+    let content = match std::fs::symlink_metadata(&file) {
+        Ok(meta) if meta.is_file() && !crate::local_path::is_link(&meta) => {
+            Some(std::fs::read(&file).map_err(|_| UNAVAILABLE)?)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        _ => return Err(UNAVAILABLE.into()),
+    };
+    let (items, recovery_notice) = match content.as_deref().map(serde_json::from_slice).transpose()
+    {
+        Ok(items) => (items.unwrap_or_default(), None),
+        Err(_) => {
+            let backup = file.with_file_name(format!(
+                "import-queue.unreadable-{}.json",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::rename(&file, backup)
+                .map_err(|_| "The unreadable import queue could not be preserved. Check access to the app settings folder.")?;
+            (Vec::new(), Some(RECOVERED_QUEUE))
+        }
+    };
+    Ok(Queue {
+        file,
+        items,
+        recovery_notice,
+        sources: HashMap::new(),
+        worker_running: false,
+    })
+}
+
+async fn recover_queue(pool: &sqlx::SqlitePool, queue: &mut Queue) -> Result<(), String> {
+    let mut changed = false;
+    let mut recovered = Vec::with_capacity(queue.items.len());
+    for mut item in queue.items.drain(..) {
+        if meeting_deleted(pool, &item.id).await? {
+            changed = true;
+            continue;
+        }
+        if interrupted(item.status) {
+            let saved = find_saved(pool, &item).await?;
+            recover_item(&mut item, saved);
+            changed = true;
+        }
+        recovered.push(item);
+    }
+    queue.items = recovered;
+    if changed {
+        queue.save()?;
+    }
+    Ok(())
+}
+
+async fn meeting_deleted(pool: &sqlx::SqlitePool, id: &str) -> Result<bool, String> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM recording_library_deletions WHERE meeting_id = ?1)
+        AND NOT EXISTS(SELECT 1 FROM meetings WHERE id = ?1)",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| "Could not review deleted imports".into())
+}
+
+pub(crate) async fn forget_deleted_meeting<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    let mut slot = QUEUE.lock().await;
+    if load(app, &mut slot).await.is_err() {
+        warn!("Could not review saved import history after meeting deletion");
+        return;
+    }
+    let queue = slot.as_mut().unwrap();
+    let before = queue.items.len();
+    queue.items.retain(|item| {
+        item.id != id || matches!(item.status, Status::Running | Status::Cancelling)
+    });
+    if queue.items.len() != before {
+        queue.sources.remove(id);
+        if queue.save().is_err() {
+            warn!("Could not remove deleted meeting from saved import history");
+        }
+        notify(app);
+    }
 }
 
 fn interrupted(status: Status) -> bool {
@@ -175,14 +250,14 @@ fn interrupted(status: Status) -> bool {
 }
 
 fn recover_item(item: &mut Item, saved: Option<ImportResult>) {
-    item.status = if saved.is_some() {
-        Status::Saved
-    } else {
-        Status::NeedsSource
+    (item.status, item.message) = match (&saved, item.status) {
+        (Some(_), _) => (Status::Saved, None),
+        (None, Status::Cancelling) => (Status::Cancelled, Some("Import cancelled.".into())),
+        (None, _) => (
+            Status::NeedsSource,
+            Some("Choose the original file to resume after restart.".into()),
+        ),
     };
-    item.message = saved
-        .is_none()
-        .then(|| "Choose the original file to resume after restart.".into());
     item.result = saved;
 }
 
@@ -215,11 +290,15 @@ fn notify<R: Runtime>(app: &AppHandle<R>) {
     let _ = app.emit(CHANGED, ());
 }
 
-fn kick<R: Runtime>(app: &AppHandle<R>, queue: &mut Queue) {
+fn kick<R: Runtime>(
+    app: &AppHandle<R>,
+    queue: &mut Queue,
+    work: tokio::sync::RwLockReadGuard<'static, ()>,
+) {
     if !queue.worker_running && queue.next().is_some() {
         queue.worker_running = true;
         let app = app.clone();
-        tauri::async_runtime::spawn(async move { worker(app).await });
+        tauri::async_runtime::spawn(async move { worker(app, work).await });
     }
     notify(app);
 }
@@ -231,7 +310,9 @@ fn recording_has_priority() -> bool {
         || crate::exit_guard::exit_in_progress()
 }
 
-async fn worker<R: Runtime>(app: AppHandle<R>) {
+async fn worker<R: Runtime>(app: AppHandle<R>, _work: tokio::sync::RwLockReadGuard<'static, ()>) {
+    // Keep restart admission through the final queue save, including gaps in
+    // which the native slot is free for recording or another foreground job.
     loop {
         let selection = {
             let mut slot = QUEUE.lock().await;
@@ -273,17 +354,25 @@ async fn worker<R: Runtime>(app: AppHandle<R>) {
         };
         let mut slot = QUEUE.lock().await;
         let queue = slot.as_mut().expect("worker owns the active item");
-        let entry = queue
+        let index = queue
             .items
-            .iter_mut()
-            .find(|entry| entry.id == item.id)
+            .iter()
+            .position(|entry| entry.id == item.id)
             .expect("running items cannot be removed");
+        let entry = &mut queue.items[index];
         entry.elapsed_seconds = Some(started.elapsed().as_secs_f64());
         match outcome {
             Ok(result) => {
                 entry.status = Status::Saved;
                 entry.result = Some(result);
                 queue.sources.remove(&item.id);
+                // A library-only deletion can run after the database commit
+                // and before the worker publishes the finished queue entry.
+                if let Some(state) = app.try_state::<AppState>() {
+                    if meeting_deleted(state.db_manager.pool(), &item.id).await == Ok(true) {
+                        queue.items.remove(index);
+                    }
+                }
                 let _ = app.emit("library-changed", ());
             }
             Err(error) if IMPORT_CANCELLED.load(Ordering::Acquire) => {
@@ -305,6 +394,10 @@ async fn worker<R: Runtime>(app: AppHandle<R>) {
             warn!("Could not persist an import queue outcome");
         }
         notify(&app);
+        if queue.next().is_none() {
+            queue.worker_running = false;
+            return;
+        }
         drop(slot);
         // Let a waiting recording acquire the exclusive slot between files.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -398,12 +491,12 @@ async fn prepare_options<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn import_queue_snapshot<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<Vec<QueueItem>, String> {
+pub async fn import_queue_snapshot<R: Runtime>(app: AppHandle<R>) -> Result<QueueSnapshot, String> {
     let mut slot = QUEUE.lock().await;
     load(&app, &mut slot).await?;
-    let mut items = slot.as_ref().unwrap().snapshots();
+    let queue = slot.as_ref().unwrap();
+    let mut items = queue.snapshots();
+    let recovery_notice = queue.recovery_notice;
     drop(slot);
     if let Some(state) = app.try_state::<AppState>() {
         let pool = state.db_manager.pool();
@@ -416,7 +509,10 @@ pub async fn import_queue_snapshot<R: Runtime>(
             }
         }
     }
-    Ok(items)
+    Ok(QueueSnapshot {
+        items,
+        recovery_notice,
+    })
 }
 
 #[tauri::command]
@@ -439,6 +535,7 @@ pub async fn enqueue_imports<R: Runtime>(
     files: Vec<ImportFile>,
     mut options: QueueOptions,
 ) -> Result<(), String> {
+    let work = crate::updates::admit_work()?;
     if files.is_empty() || files.len() > MAX_ITEMS {
         return Err("Choose between 1 and 32 files".into());
     }
@@ -512,7 +609,7 @@ pub async fn enqueue_imports<R: Runtime>(
     }
     result?;
     *queue = next;
-    kick(&app, queue);
+    kick(&app, queue, work);
     Ok(())
 }
 
@@ -536,6 +633,7 @@ fn source_filename(source: &Taken) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn cancel_import_item<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), String> {
+    let _work = crate::updates::admit_work()?;
     let mut slot = QUEUE.lock().await;
     load(&app, &mut slot).await?;
     let queue = slot.as_mut().unwrap();
@@ -573,6 +671,7 @@ pub async fn retry_import_item<R: Runtime>(
     source_path: Option<String>,
     cloud_destination: Option<String>,
 ) -> Result<(), String> {
+    let work = crate::updates::admit_work()?;
     let mut slot = QUEUE.lock().await;
     load(&app, &mut slot).await?;
     let queue = slot.as_mut().unwrap();
@@ -624,12 +723,13 @@ pub async fn retry_import_item<R: Runtime>(
         return Err(error);
     }
     *queue = next;
-    kick(&app, queue);
+    kick(&app, queue, work);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn clear_finished_imports<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let _work = crate::updates::admit_work()?;
     let mut slot = QUEUE.lock().await;
     load(&app, &mut slot).await?;
     let queue = slot.as_mut().unwrap();
@@ -682,7 +782,7 @@ mod tests {
         recover_item(&mut interrupted_item, uncommitted);
         assert_eq!(created.status, Status::Saved);
         assert_eq!(created.result.unwrap().meeting_id, "meeting-imported");
-        assert_eq!(interrupted_item.status, Status::NeedsSource);
+        assert_eq!(interrupted_item.status, Status::Cancelled);
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("queue.json");
         let source = dir.path().join("chosen.wav");
@@ -693,11 +793,79 @@ mod tests {
             items: vec![interrupted_item],
             sources: HashMap::from([("meeting-interrupted".into(), grant)]),
             worker_running: false,
+            recovery_notice: None,
         };
         assert!(queue.next().is_none());
         queue.save().unwrap();
         assert!(!std::fs::read_to_string(file)
             .unwrap()
             .contains("chosen.wav"));
+    }
+
+    #[test]
+    fn an_unreadable_queue_is_preserved_before_accepting_new_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("import-queue.json");
+        let damaged = b"[{\"id\":\"meeting-imported\"";
+        std::fs::write(&file, damaged).unwrap();
+        let mut recovered = read_queue(file.clone()).unwrap();
+        assert!(recovered.items.is_empty());
+        assert!(recovered.recovery_notice.is_some());
+        recovered.items.push(queued("meeting-new"));
+        recovered.save().unwrap();
+        let backup = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("import-queue.unreadable-")
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(backup.path()).unwrap().as_slice(), damaged);
+        assert_eq!(read_queue(file).unwrap().items[0].id, "meeting-new");
+    }
+
+    #[test]
+    fn older_queue_options_do_not_enable_uploads_or_automatic_notes() {
+        for options in [None, Some(serde_json::json!({}))] {
+            let mut item = serde_json::json!({
+                "id": "meeting-old", "filename": "old.wav", "title": "Old meeting", "status": "queued"
+            });
+            if let Some(options) = options {
+                item["options"] = options;
+            }
+            let item: Item = serde_json::from_value(item).unwrap();
+            assert!(!item.options.use_file_date);
+            assert!(!item.options.summarize);
+            assert!(!item.options.summary_use_automatic_preference);
+            assert!(item.options.cloud_destination.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deleted_meeting_does_not_reappear_in_queue_history_after_restart() {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO recording_library_deletions (meeting_id) VALUES ('meeting-deleted')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("import-queue.json");
+        let mut queue = read_queue(file.clone()).unwrap();
+        let mut saved = queued("meeting-deleted");
+        saved.status = Status::Saved;
+        queue.items.push(saved);
+        queue.items.push(queued("meeting-interrupted"));
+        queue.save().unwrap();
+        recover_queue(&pool, &mut queue).await.unwrap();
+        let items = read_queue(file).unwrap().items;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "meeting-interrupted");
+        assert_eq!(items[0].status, Status::NeedsSource);
     }
 }

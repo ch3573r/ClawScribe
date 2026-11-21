@@ -332,10 +332,10 @@ fn clear_bearer_at(path: &Path, forget_old: impl FnOnce(&str)) -> Result<(), Str
 pub(crate) fn submit_completed_recording<R: Runtime>(
     app: AppHandle<R>,
     meeting_id: String,
-    empty: bool,
+    files_needed_repair: bool,
 ) {
     tauri::async_runtime::spawn(async move {
-        if handoff::submit_automatic(&app, &meeting_id, empty)
+        if handoff::submit_automatic(&app, &meeting_id, files_needed_repair)
             .await
             .is_err()
         {

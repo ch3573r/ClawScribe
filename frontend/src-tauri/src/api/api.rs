@@ -1026,6 +1026,7 @@ pub async fn api_delete_meeting<R: Runtime>(
         .map_err(|_| "Could not delete the meeting from the library.")?
         .ok_or("The meeting was not found or was already deleted.")?;
     let _ = app.emit("library-meeting-deleted", &meeting_id);
+    crate::audio::import::queue::forget_deleted_meeting(&app, &meeting_id).await;
 
     let locations = crate::library::file_cleanup::CleanupLocations::for_app(&app).await;
     let mut cleanup_pending = false;

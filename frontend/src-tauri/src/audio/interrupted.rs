@@ -1011,6 +1011,13 @@ pub struct RepairedRecording {
     pub audio_path: Option<String>,
 }
 
+fn import_owner_waiting_for_metadata(folder: &Path, meeting_id: &str, roots: &[PathBuf]) -> bool {
+    meeting_files::resolve_recording_folder(folder, roots).is_ok_and(|canonical| {
+        !meeting_files::contains_recording_root(&canonical, roots)
+            && meeting_files::has_unpublished_import_owner(folder, meeting_id)
+    })
+}
+
 /// Repairs the library meeting a folder already belongs to: the unfinished
 /// capture in its folder becomes its audio file, the capture is released, and
 /// the meeting's recovery status is updated. It never creates another meeting.
@@ -1026,10 +1033,19 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
     let roots = super::recording_preferences::recording_roots(&app).await;
     let rows = registered_rows(state.db_manager.pool()).await?;
     let active = super::recording_commands::active_recording_folder();
+    let repair_roots = roots.clone();
     let (authorised, meeting_id, registered_path, marker) =
         tokio::task::spawn_blocking(move || {
+            let roots = repair_roots;
+            let requested = Path::new(&folder);
             let authorised =
-                crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
+                meeting_files::authorize_new_meeting_folder(&folder, &roots).or_else(|_| {
+                    meeting_files::resolve_recording_folder(requested, &roots).map(|canonical| {
+                        meeting_files::plain_path(&canonical)
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                })?;
             if active.protects(Path::new(&authorised)) {
                 return Err("A recording is running. Try again when it has stopped.".into());
             }
@@ -1052,18 +1068,40 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
                 .find_map(|(id, path)| (id == meeting).then_some(path))
                 .ok_or("The recording is no longer saved in your library.")?;
             let marker = crate::database::meeting_files::read_marker(Path::new(&authorised));
-            if marker.as_ref().is_none_or(|marker| {
-                meeting_files::has_invalid_marker_id(marker)
-                    || meeting_files::stamped_meeting_id(marker)
-                        .or_else(|| meeting_files::recording_id(marker))
-                        .is_some_and(|id| id != meeting)
-            }) {
+            let owns_folder = match marker.as_ref() {
+                Some(marker) => {
+                    !meeting_files::has_invalid_marker_id(marker)
+                        && meeting_files::stamped_meeting_id(marker)
+                            .or_else(|| meeting_files::recording_id(marker))
+                            .is_none_or(|id| id == meeting)
+                }
+                None => import_owner_waiting_for_metadata(Path::new(&authorised), &meeting, &roots),
+            };
+            if !owns_folder {
                 return Err("This folder belongs to a different recording.".into());
             }
             Ok::<_, String>((authorised, meeting, registered_path, marker))
         })
         .await
         .map_err(|_| "Could not repair the recording".to_string())??;
+
+    use crate::database::transcript_edits;
+    let pool = state.db_manager.pool();
+    if transcript_edits::import_file_stage(pool, &meeting_id)
+        .await?
+        .is_some()
+    {
+        transcript_edits::sync_file_with_profile(pool, &meeting_id, &roots, |_| Ok(None)).await?;
+        transcript_edits::notify_file_sync(&app, &meeting_id);
+        return Ok(RepairedRecording {
+            meeting_id,
+            audio_status: "none".into(),
+            audio_path: None,
+        });
+    }
+    if marker.is_none() {
+        return Err("There is no pending import file repair for this folder.".into());
+    }
 
     let status = super::incremental_saver::recover_audio_in_folder(authorised.clone()).await?;
     let recovered =
@@ -1247,6 +1285,25 @@ pub(crate) fn discard_folder(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unpublished_import_repair_requires_matching_owner_inside_a_recording_root() {
+        let base = tempfile::tempdir().unwrap();
+        let folder = base.path().join("import");
+        let roots = [base.path().to_path_buf()];
+        std::fs::create_dir(&folder).unwrap();
+        let id = "meeting-4f7b980e-b123-4ca9-82e7-927204456483";
+        std::fs::write(folder.join(super::super::import::IMPORT_OWNER_FILE), id).unwrap();
+        assert!(import_owner_waiting_for_metadata(&folder, id, &roots));
+        assert!(!import_owner_waiting_for_metadata(&folder, "other", &roots));
+        assert!(!import_owner_waiting_for_metadata(
+            &folder,
+            id,
+            &[folder.clone()]
+        ));
+        std::fs::write(folder.join("metadata.json"), b"unverified metadata").unwrap();
+        assert!(!import_owner_waiting_for_metadata(&folder, id, &roots));
+    }
 
     #[tokio::test]
     async fn cached_legacy_ids_resolve_by_folder_and_saved_or_deleted_provenance() {
