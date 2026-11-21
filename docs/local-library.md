@@ -57,6 +57,10 @@ to other saved meetings or documents display only while the original references
 still verify. Deleting a source meeting or reference document also removes any
 saved live answer that used it, including answers without a citation. Detaching
 a shared document from a meeting removes answers that used it through that meeting.
+Early development builds saved answers without a complete record of their
+sources. Deleting any source meeting or document, or detaching any document,
+removes all of those older answers. Editing or retranscribing a source keeps
+the saved answer, but citations to changed passages may no longer display.
 Choose **Remove** to delete a saved answer from the meeting.
 Unselected live chat clears at Stop. Saved answers attach to that specific
 recording at Stop or during local recovery and can be removed from **Manage
