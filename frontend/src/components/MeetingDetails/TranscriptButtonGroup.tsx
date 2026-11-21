@@ -21,6 +21,7 @@ import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { canDetectSpeakers } from '@/lib/speaker-attribution';
+import { DEFAULT_PLAYER_BINDINGS, playerKeycaps, type PlayerBindings } from '@/lib/player-bindings';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import {
   SpeakerDiarizationDialog,
@@ -34,6 +35,7 @@ interface SpeakerDiarizationError {
 }
 
 interface TranscriptButtonGroupProps {
+  bindings?: PlayerBindings;
   onFindReplace?: () => void; onAddBookmark?: () => void;
   correctionActions?: { busy: boolean; canUndo: boolean; canRestore: boolean; undo: () => void; restore: () => void };
   transcriptCount: number;
@@ -48,6 +50,7 @@ interface TranscriptButtonGroupProps {
 }
 
 export function TranscriptButtonGroup({
+  bindings = DEFAULT_PLAYER_BINDINGS,
   onFindReplace, onAddBookmark, correctionActions,
   transcriptCount,
   transcribeOpen,
@@ -255,8 +258,8 @@ export function TranscriptButtonGroup({
             <TooltipContent>No recording folder is attached to this meeting.</TooltipContent>
           </Tooltip>}
           {meetingId && meetingFolderPath && <DropdownMenuItem title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'} onClick={() => { Analytics.trackButtonClick('enhance_transcript', 'meeting_details'); onTranscribeOpenChange(true); }}>{transcriptCount === 0 ? 'Transcribe saved audio' : 'Enhance or retranscribe'}</DropdownMenuItem>}
-          {onFind && <DropdownMenuItem disabled={transcriptCount === 0} onSelect={onFind}>Find in transcript<DropdownMenuShortcut>Ctrl+F</DropdownMenuShortcut></DropdownMenuItem>}
-          {onAddBookmark && <DropdownMenuItem onSelect={onAddBookmark}>Add bookmark<DropdownMenuShortcut>B</DropdownMenuShortcut></DropdownMenuItem>}
+          {onFind && <DropdownMenuItem disabled={transcriptCount === 0} onSelect={onFind}>Find in transcript<DropdownMenuShortcut>{playerKeycaps(bindings.find).join('+')}</DropdownMenuShortcut></DropdownMenuItem>}
+          {onAddBookmark && <DropdownMenuItem onSelect={onAddBookmark}>Add bookmark<DropdownMenuShortcut>{playerKeycaps(bindings.bookmark).join('+')}</DropdownMenuShortcut></DropdownMenuItem>}
           {correctionActions?.canUndo && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.undo}>Undo last correction</DropdownMenuItem>}
           {correctionActions?.canRestore && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.restore}>Restore previous transcript</DropdownMenuItem>}
           {meetingId && canDetectSpeakers(hasRecordingFolder, transcriptCount) && <>

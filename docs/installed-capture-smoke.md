@@ -107,6 +107,26 @@ short installed dual-source recordings. Track in-app player controls, physical
 device reconnect, sleep/wake, updater discovery and long-meeting performance
 separately.
 
+## Recording controls and player preferences
+
+Use the isolated test profile and a saved synthetic recording with playable
+audio for these checks.
+
+1. Start a recording with the default settings. Confirm the floating controls
+   appear without taking keyboard focus. Close them, keep recording, and reopen
+   them from the recording bar. Stop from the floating window and play the
+   saved audio.
+2. In **Settings → Recording → Capture**, turn off **Open floating controls
+   when recording starts**. Restart the app and start a second recording from
+   the tray or command line. Confirm the controls stay closed and can still
+   be opened manually. Turn the switch back on and check the next start.
+3. In **Settings → Shortcuts**, assign a different key to **Play or pause**.
+   Restart the app and open the saved meeting. Check that the player help
+   shows the new key, the new key operates playback, and the old key no
+   longer does. Type the new key into transcript Find and confirm it enters
+   text without changing playback. Reset the player shortcuts and verify
+   that Space works again.
+
 ## Interrupted or failed checks
 
 The harness refuses an occupied app session, an untrusted or nonempty

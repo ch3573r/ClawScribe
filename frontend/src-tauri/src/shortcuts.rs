@@ -7,12 +7,15 @@
 
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::ipc::{Channel, JavaScriptChannelId};
+use tauri::{AppHandle, Manager, Runtime, Webview};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ShortcutAction {
     StartStop,
     PauseResume,
@@ -67,6 +70,110 @@ pub struct ShortcutApplyResult {
 // Currently-registered (Shortcut -> Action) pairs, consulted by the handler.
 static REGISTERED: Mutex<Vec<(Shortcut, ShortcutAction)>> = Mutex::new(Vec::new());
 
+// Windows delivers already registered hotkeys to the native handler before the
+// WebView can record them. Route them back to the focused shortcut editor.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+static CAPTURE: Mutex<Option<(Instant, Channel<ShortcutAction>)>> = Mutex::new(None);
+
+#[cfg(windows)]
+fn owns_foreground(main: isize, foreground: isize, root: isize) -> bool {
+    main != 0 && foreground != 0 && (foreground == main || root == main)
+}
+
+#[cfg(windows)]
+fn main_is_foreground<R: Runtime>(app: &AppHandle<R>) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT};
+    let Some(main) = app.get_webview_window("main").and_then(|w| w.hwnd().ok()) else {
+        return false;
+    };
+    // The focused WebView2 child and Tao's top-level window can disagree about
+    // keyboard focus. Compare the foreground window tree, even for child HWNDs.
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let root = GetAncestor(foreground, GA_ROOT);
+        owns_foreground(main.0 as isize, foreground.0, root.0)
+    }
+}
+
+#[cfg(not(windows))]
+fn main_is_foreground<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.get_webview_window("main")
+        .is_some_and(|window| window.is_focused().unwrap_or(false))
+}
+
+fn capture_channel<R: Runtime>(app: &AppHandle<R>) -> Option<Channel<ShortcutAction>> {
+    let (started, channel) = CAPTURE.lock().unwrap().clone()?;
+    if started.elapsed() < CAPTURE_TIMEOUT && main_is_foreground(app) {
+        return Some(channel);
+    }
+    let mut capture = CAPTURE.lock().unwrap();
+    if capture.as_ref().is_some_and(|(time, _)| *time == started) {
+        *capture = None;
+    }
+    None
+}
+
+/// Resolve global virtual keys on the main window's keyboard layout before a
+/// reset. For example Shift+Comma produces "<" on US keyboards.
+#[tauri::command]
+pub fn shortcut_key_characters<R: Runtime>(
+    _window: tauri::WebviewWindow<R>,
+    keys: Vec<(u8, bool, bool)>,
+) -> Result<Vec<Option<String>>, String> {
+    if keys.len() > 4 || _window.label() != "main" {
+        return Err("Expected the main window's four global shortcuts.".into());
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::{
+            Foundation::HWND,
+            UI::{
+                Input::KeyboardAndMouse::{
+                    GetKeyboardLayout, MapVirtualKeyExW, ToUnicodeEx, MAPVK_VK_TO_VSC, VK_CONTROL,
+                    VK_MENU, VK_SHIFT,
+                },
+                WindowsAndMessaging::GetWindowThreadProcessId,
+            },
+        };
+        let hwnd = _window.hwnd().map_err(|e| e.to_string())?;
+        // These APIs read the layout of the main HWND's input thread. Flag 4
+        // keeps ToUnicodeEx from changing the user's pending dead-key state.
+        unsafe {
+            let thread = GetWindowThreadProcessId(HWND(hwnd.0 as isize), None);
+            let layout = GetKeyboardLayout(thread);
+            Ok(keys
+                .into_iter()
+                .map(|(vk, shift, alt_graph)| {
+                    let mut state = [0u8; 256];
+                    state[VK_SHIFT.0 as usize] = if shift { 0x80 } else { 0 };
+                    if alt_graph {
+                        state[VK_CONTROL.0 as usize] = 0x80;
+                        state[VK_MENU.0 as usize] = 0x80;
+                    }
+                    let mut text = [0u16; 8];
+                    let scan = MapVirtualKeyExW(vk.into(), MAPVK_VK_TO_VSC, layout);
+                    let count = ToUnicodeEx(vk.into(), scan, &state, &mut text, 4, layout);
+                    (count > 0).then(|| String::from_utf16_lossy(&text[..count as usize]))
+                })
+                .collect())
+        }
+    }
+    #[cfg(not(windows))]
+    Ok(vec![None; keys.len()])
+}
+
+#[tauri::command]
+pub fn set_shortcut_capture<R: Runtime>(
+    webview: Webview<R>,
+    channel: Option<JavaScriptChannelId>,
+) -> Result<u32, String> {
+    if webview.label() != "main" {
+        return Err("Open shortcut settings in the main window.".into());
+    }
+    *CAPTURE.lock().unwrap() = channel.map(|id| (Instant::now(), id.channel_on(webview)));
+    Ok(CAPTURE_TIMEOUT.as_millis() as u32)
+}
+
 fn config_path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|d| d.join("ClawScribe").join("shortcuts.json"))
 }
@@ -102,6 +209,10 @@ pub fn on_shortcut<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, state: S
             .map(|(_, a)| *a)
     };
     let Some(action) = action else { return };
+    if let Some(channel) = capture_channel(app) {
+        let _ = channel.send(action);
+        return;
+    }
 
     match action {
         ShortcutAction::BookmarkRecording => crate::library::bookmark_active_recording(app),
@@ -221,4 +332,18 @@ pub fn set_shortcuts<R: Runtime>(
     // showing their intent; conflicting ones simply aren't active.
     save_bindings(&bindings);
     result
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_accepts_the_main_foreground_root_only() {
+        assert!(owns_foreground(100, 100, 100));
+        assert!(owns_foreground(100, 101, 100));
+        assert!(!owns_foreground(100, 200, 200));
+        assert!(!owns_foreground(100, 0, 0));
+        assert!(!owns_foreground(0, 0, 0));
+    }
 }

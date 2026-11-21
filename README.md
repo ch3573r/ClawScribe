@@ -66,9 +66,13 @@ is not brought to the front. See
 ## Capture And Transcription
 
 - Microphone and system-audio capture from the local Windows session.
-- Choose **Open floating controls** on the recording bar or tray menu to keep
-  elapsed time, audio levels, timestamped notes, and Stop above other windows.
-  Closing the controls leaves recording running.
+- Floating controls open when recording starts. The window shows elapsed time,
+  both audio levels, timestamped notes, and Stop. Close it to dismiss it for the
+  current recording. To keep it closed on future starts, turn off **Open floating
+  controls when recording starts** in **Settings → Recording → Capture**.
+  **Open floating controls** on the recording bar or tray can reopen it at any time during capture.
+- Customize saved-meeting playback keys in **Settings → Shortcuts**. The
+  player's shortcut help shows your current bindings.
 - Live transcription, audio/video import, and retranscription with a different
   model or language selection.
 - **Record now, transcribe later:** choose **Record audio now** on first launch

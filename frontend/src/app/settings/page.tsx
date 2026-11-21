@@ -53,7 +53,7 @@ const GROUPS: { label: string; items: SectionItem[] }[] = [
       { value: "privacy", label: "Privacy", icon: ShieldCheck, desc: "What stays on this PC and what leaves it" },
       { value: "appearance", label: "Appearance", icon: Palette, desc: "Theme, accent colour and interface font" },
       { value: "recording", label: "Recording", icon: Mic, desc: "Capture, audio devices and call detection" },
-      { value: "shortcuts", label: "Shortcuts", icon: Keyboard, desc: "These work from any app, also when ClawScribe is in the background" },
+      { value: "shortcuts", label: "Shortcuts", icon: Keyboard, desc: "Choose keys for recording controls and saved meeting playback" },
     ],
   },
   {
