@@ -21,6 +21,30 @@
 //! remote cannot be told apart.
 use std::path::{Component, Path, Prefix};
 
+pub(crate) fn is_link(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+pub(crate) fn require_unlinked_directory(path: &Path) -> Result<(), String> {
+    for directory in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        let metadata =
+            std::fs::symlink_metadata(directory).map_err(|_| "The folder is unavailable.")?;
+        if !metadata.is_dir() || is_link(&metadata) {
+            return Err("Choose a folder without links or junctions.".into());
+        }
+    }
+    Ok(())
+}
+
 /// Whether a drive letter is a network drive (a mapped share). Asking the
 /// mount table does not contact the server, so it is safe before any file call.
 /// An unknown or unmapped letter is not reported as remote.

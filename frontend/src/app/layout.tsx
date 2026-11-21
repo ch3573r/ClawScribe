@@ -133,6 +133,7 @@ export default function RootLayout({
 }) {
   const router = useRouter()
   const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null)
+  const [recoveryLibrary, setRecoveryLibrary] = useState(false)
 
   useEffect(() => {
     const close = listen('summary-flush-on-close', () => { void flushMeetingDrafts().catch(() => {}); });
@@ -174,8 +175,13 @@ export default function RootLayout({
   }, [])
 
   useEffect(() => {
-    // Check onboarding status first
-    invoke<{ completed: boolean } | null>('get_onboarding_status')
+    invoke<boolean>('startup_recovery_active')
+      .catch(() => false)
+      .then(active => {
+        setRecoveryLibrary(active)
+        if (active) return { completed: true }
+        return invoke<{ completed: boolean } | null>('get_onboarding_status')
+      })
       .then((status) => {
         const isComplete = status?.completed ?? false
         setShowOnboarding(!isComplete)
@@ -389,7 +395,7 @@ export default function RootLayout({
                               ) : showOnboarding === false ? (
                                 <div className="flex pt-[var(--titlebar-height)]">
                                   <Sidebar />
-                                  <MainContent>{children}</MainContent>
+                                  <MainContent recoveryLibrary={recoveryLibrary}>{children}</MainContent>
                                 </div>
                               ) : null}
                               {/* Import audio overlay and dialog */}

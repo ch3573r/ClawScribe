@@ -1,6 +1,7 @@
 //! Local meeting organization and document export. No provider connection required.
 pub(crate) mod archive;
 pub mod backup;
+pub(crate) mod backup_schedule;
 pub mod calendar;
 pub mod context;
 pub(crate) mod file_cleanup;

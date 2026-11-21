@@ -7,7 +7,7 @@ pub fn apply_custom_words(text: &str, words: &[String], threshold: f64) -> Strin
     Vocabulary::new(words.to_vec()).correct(text, threshold).0
 }
 
-pub(super) fn normalize_custom_words(words: Vec<String>) -> Result<Vec<String>, String> {
+pub(crate) fn normalize_custom_words(words: Vec<String>) -> Result<Vec<String>, String> {
     let mut seen = std::collections::HashSet::new();
     let mut normalized = Vec::new();
     for word in words {

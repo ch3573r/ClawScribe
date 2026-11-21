@@ -101,10 +101,16 @@ fn platform_recordings_folder(folder_name: &str) -> PathBuf {
 
 /// Get the default recordings folder based on platform.
 pub fn get_default_recordings_folder() -> PathBuf {
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return root.join("recordings");
+    }
     platform_recordings_folder(DEFAULT_RECORDINGS_FOLDER_NAME)
 }
 
 pub(crate) fn get_legacy_default_recordings_folder() -> PathBuf {
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return root.join("legacy-recordings");
+    }
     platform_recordings_folder(LEGACY_RECORDINGS_FOLDER_NAME)
 }
 

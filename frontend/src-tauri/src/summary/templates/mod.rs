@@ -45,11 +45,13 @@ mod storage;
 mod types;
 
 // Re-export public API
+pub(crate) use loader::custom_template_dirs;
 pub use loader::{
     get_template, list_templates, set_bundled_templates_dir, validate_and_parse_template,
     TemplateInfo,
 };
 pub use storage::{remove_template, resolve_default, save_template};
+pub(crate) use storage::{validate_id, REMOVED_TEMPLATE};
 pub use types::{Template, TemplateSection};
 
 #[cfg(test)]

@@ -1,12 +1,18 @@
 use super::common::estimate_word_timestamps;
 use super::vocabulary::{normalize_custom_words, Vocabulary, DEFAULT_THRESHOLD};
 use crate::api::{TranscriptSegment, TranscriptWord, TranscriptWordTimestampSource};
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, Runtime};
 
 static PREFERENCE_LOCK: Mutex<()> = Mutex::new(());
 const STORE: &str = "custom_vocabulary.json";
+pub(crate) const MAX_STORE_BYTES: u64 = 256 * 1024;
+
+pub(crate) fn portable_path(app_data: &Path) -> PathBuf {
+    app_data.join(STORE)
+}
 
 fn preference_guard(lock: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
     // The mutex protects file operations, not in-memory preference data.
@@ -16,12 +22,21 @@ fn preference_guard(lock: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
 
 // Keep the existing Tauri-store JSON shape, but read without registering an
 // exit-time auto-save. Recovery must never rewrite the file merely by reading.
-fn read_saved_words(path: &Path) -> (Vec<String>, bool) {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+pub(crate) fn read_saved_words(path: &Path) -> (Vec<String>, bool) {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), false),
         Err(_) => return (Vec::new(), true),
     };
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_STORE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 > MAX_STORE_BYTES
+    {
+        return (Vec::new(), true);
+    }
     let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
         Ok(serde_json::Value::Object(value)) => value,
         _ => return (Vec::new(), true),
@@ -96,6 +111,9 @@ pub fn set_custom_vocabulary<R: Runtime>(
     app: AppHandle<R>,
     words: Vec<String>,
 ) -> Result<Vec<String>, String> {
+    let _archive = crate::library::backup::PORTABLE_SETTINGS_LOCK
+        .try_lock()
+        .map_err(|_| "Wait for the library restore to finish.")?;
     let words = normalize_custom_words(words)?;
     let _guard = preference_guard(&PREFERENCE_LOCK);
     let directory = app

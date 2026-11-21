@@ -28,11 +28,27 @@ pub fn set_bundled_templates_dir(path: PathBuf) {
 }
 
 pub(super) fn get_custom_templates_dir() -> Option<PathBuf> {
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return Some(root.join("templates"));
+    }
     Some(dirs::data_dir()?.join("ClawScribe").join("templates"))
 }
 
 pub(super) fn get_legacy_custom_templates_dir() -> Option<PathBuf> {
+    if crate::database::recovery::data_dir().is_some() {
+        return None;
+    }
     Some(dirs::data_dir()?.join("Meetily").join("templates"))
+}
+
+pub(crate) fn custom_template_dirs() -> Vec<PathBuf> {
+    [
+        get_custom_templates_dir(),
+        get_legacy_custom_templates_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn bundled_dir() -> Option<PathBuf> {

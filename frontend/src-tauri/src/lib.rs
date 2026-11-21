@@ -581,6 +581,8 @@ fn set_native_theme(app: AppHandle, theme: String, accent: Option<String>) -> Re
 pub fn run() {
     log::set_max_level(log::LevelFilter::Info);
 
+    let mut context = tauri::generate_context!();
+    database::recovery::configure(&mut context);
     let mut builder = tauri::Builder::default();
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
@@ -655,7 +657,7 @@ pub fn run() {
             // The database comes first. If it cannot be opened, nothing else is
             // set up: no tray, no global shortcuts and no engine start-up, so
             // nothing can show the window or start a recording behind the
-            // error dialog. Closing the dialog exits with code 1.
+            // recovery dialog.
             if let Err(error) = tauri::async_runtime::block_on(async {
                 database::setup::initialize_database_on_startup(&_app.handle()).await
             }) {
@@ -663,6 +665,7 @@ pub fn run() {
                 return Ok(());
             }
             log::info!("Application setup complete");
+            library::backup_schedule::start(_app.handle().clone());
             #[cfg(windows)]
             windows_lifecycle::install(_app.handle());
 
@@ -839,6 +842,10 @@ pub fn run() {
             library::export_local_word,
             library::backup::backup_library,
             library::backup::restore_library,
+            library::backup_schedule::scheduled_backup_status,
+            library::backup_schedule::choose_scheduled_backup_folder,
+            library::backup_schedule::set_scheduled_backups,
+            database::recovery::startup_recovery_active,
             library::archive::list_archive_rows,
             library::archive::storage::measure_archive_storage,
             library::file_cleanup::list_pending_meeting_file_cleanup,
@@ -1199,7 +1206,7 @@ pub fn run() {
             exports::confluence::confluence_connection_status,
             exports::confluence::confluence_export_page,
         ]))
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             match event {

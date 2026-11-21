@@ -329,8 +329,15 @@ saved OneNote sections in the new profile. Existing meetings keep their own
 history. Older archives restore the export history they contain.
 If an archived calendar link cannot be read, restore keeps the meeting and
 reports how many links it left unset.
-Provider settings, credentials, model downloads, UI preferences, and unfinished
-recording recovery spools are excluded. Missing
+Backups also carry custom summary templates, custom vocabulary, and template
+choices for calendar series linked to an archived meeting. Restore adds missing
+custom templates by ID and installs the vocabulary only if the destination has
+no vocabulary file. It adds a missing series preference when restoring a meeting
+linked to that series. An existing template, vocabulary list, or series
+preference takes precedence. Restored iCalendar series still use their original
+source IDs. Calendar subscriptions, account and provider approvals, provider
+settings, credentials, models, UI preferences, backup schedules, and unfinished
+recording recovery spools stay with the source profile. Missing
 recording folders are reported by meeting title without blocking the backup;
 their meeting data is included, and restore leaves their recording folder unset.
 Unreadable folders and folder links still stop backup with a named error.
@@ -371,24 +378,63 @@ or enter a future answer prompt, even when a destination revision number happens
 to match. New questions establish fresh canonical evidence. Semantic indexes
 and model downloads are excluded; restored sources are queued for indexing.
 
+Version 3 archives put transcript segments, chunks, revisions and correction
+batches in separate streams of newline-delimited JSON records. Each record is
+limited to 128 MiB. The manifest holds the record counts, meeting roster,
+remaining metadata, and file references. This lets accumulated transcript
+history exceed the 128 MiB manifest limit while export and restore process one
+record at a time. Archives still have a 100 GiB total data limit and can contain
+up to 100,000 recording and reference files.
+
 Version 2 archives add reference metadata, extracted blocks, attachment relations
 and original files with verified hashes. Reference sharing permissions are not
 included and remain off after restore. Original conflicts are remapped without
 overwriting existing files. The same hash/format with differing extracted content
 requires restoration into a separate library, preserving existing canonical text.
-Version 1 archives with a JSON manifest and explicitly listed recording files
-remain readable.
+Versions 1 and 2 remain readable.
 Only saved-library database tables and known media/metadata files are included.
 The meetings table is required; missing known child tables are treated as empty
 so adding optional tables does not invalidate older version-1 backups.
 The optional `incomplete_audio` manifest field records omissions by meeting index;
 older archives without it remain readable.
 Restore rejects unknown tables/columns, unsafe paths, duplicate files, links,
-unsupported versions, and missing or extra archive entries. Limits are 128 MiB of
-manifest data, 100 GiB of file data, and 100,000 recording files. File copying runs
-on a blocking worker and streams audio instead of loading recordings into RAM.
+unsupported versions, invalid record counts, and missing or extra archive
+entries. The manifest remains limited to 128 MiB. File copying runs on a blocking
+worker and streams audio. Transcript records are staged on disk, so the app data
+volume needs temporary space for those records during backup and restore.
 This is a saved-library archive, not a replacement for crash recovery or a system
 backup. Test restoring a backup before relying on it as your only copy.
+
+### Scheduled backups
+
+In **Backup and restore**, choose a local folder to enable daily backups. The
+first backup runs when the app is open and the library is idle. Later backups
+run at least 24 hours after the last successful one. ClawScribe checks once a
+minute and defers while recording, transcription, an export, or an archive
+operation is active. The dialog shows the current destination, last successful
+backup, incomplete audio count, and any recent error.
+
+ClawScribe creates a dedicated folder in the location you choose. After a new
+backup is saved, retention keeps the three newest tracked archives. It removes
+an older ZIP only when its file identity still matches the saved copy. Manual
+copies, unrelated or replaced files, and archives in earlier destinations
+remain on disk. Turning off daily backups leaves your archives available.
+
+### If the library fails to open
+
+At the startup error dialog, choose **Open recovery library** to create an empty
+library in a separate app data folder. ClawScribe restarts and shows the active
+recovery library. Open **Meetings → Backup and restore** to import a ZIP.
+The original database, WAL, and recordings remain in their original locations.
+The recovery profile has its own recording and reference folders, settings,
+and sign-ins.
+
+The recovery choice persists between restarts. After the original library has
+been repaired, close ClawScribe and move the file ending in
+`.active-recovery-library` beside the original app data folder. The next
+launch opens the original library.
+Keep the marker and corresponding recovery folder if you want to reopen the
+recovery library later.
 
 ## Deleting meetings
 

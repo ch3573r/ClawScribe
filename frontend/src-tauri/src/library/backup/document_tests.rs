@@ -287,7 +287,7 @@ fn unpack_error(path: &Path, destination: &Path) -> String {
 }
 
 #[tokio::test]
-async fn backup_v2_excludes_orphans_and_restores_attached_documents() {
+async fn backup_v3_excludes_orphans_and_restores_attached_documents() {
     let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
     let (source, _, originals) = document_fixture().await;
     let orphan = "00000000-0000-4000-8000-000000000065";
@@ -306,7 +306,8 @@ async fn backup_v2_excludes_orphans_and_restores_attached_documents() {
         .execute(&source)
         .await
         .unwrap();
-    let (mut manifest, folders) = snapshot_with_documents(&source).await.unwrap();
+    let records = tempfile::tempdir().unwrap();
+    let (mut manifest, folders) = snapshot_current(&source, records.path()).await.unwrap();
     assert_eq!(manifest.tables["knowledge_documents"].len(), 4);
     assert!(manifest.tables["knowledge_documents"]
         .iter()
@@ -323,7 +324,15 @@ async fn backup_v2_excludes_orphans_and_restores_attached_documents() {
     archive_documents::validate(&manifest).unwrap();
     let target = tempfile::tempdir().unwrap();
     let archive = target.path().join("references.zip");
-    write_archive_with_documents(&archive, manifest, folders, originals.path()).unwrap();
+    write_archive_impl(
+        &archive,
+        manifest,
+        folders,
+        Some(originals.path()),
+        Some(records.path()),
+        false,
+    )
+    .unwrap();
     let mut zip = zip::ZipArchive::new(File::open(&archive).unwrap()).unwrap();
     assert!(zip
         .by_name(&format!("reference-documents/{orphan}.txt"))

@@ -26,6 +26,7 @@ for (const restore of [false, true]) {
     const { LibraryBackup } = loadTsModule('src/components/LibraryBackup.tsx', {
       react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
       '@/components/ui/button': { Button: 'button' },
+      '@/components/ScheduledBackups': { ScheduledBackups: 'ScheduledBackups' },
       '@/components/ui/dialog': Object.fromEntries(['Dialog', 'DialogContent', 'DialogHeader', 'DialogTitle', 'DialogDescription'].map(name => [name, name])),
       '@/contexts/RecordingStateContext': { useRecordingState: () => ({}) },
       '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ refetchMeetings: async () => { refreshes++; }, refreshProjectTags: async () => { refreshes++; } }) },

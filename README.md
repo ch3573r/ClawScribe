@@ -381,11 +381,15 @@ to your assistant. It can search meetings, read their notes and transcripts,
 and locate saved recordings. The connection uses local standard input and
 output. Access is off by default. See [local assistant access](docs/local-library.md#local-assistant-access).
 
-**Backup and restore** saves a portable archive of meeting data, summary context,
-and recordings. Restore adds missing meetings and skips existing IDs. Backups
+**Backup and restore** saves a portable archive of meeting data, transcript history,
+recordings, custom templates, vocabulary, and linked calendar series preferences.
+Restore adds missing meetings and keeps existing IDs and preferences. Backups
 continue when recording folders are missing and report affected meetings,
 excluded recovery files, and unavailable audio. Archives exclude credentials and
 models and are not encrypted.
+Daily backups are optional and keep three recent copies in a chosen local folder.
+If the database fails to open, a separate recovery library can import one of
+these archives while preserving the original files.
 Saved knowledge conversations, attached reference originals and extracted blocks,
 and their original citation labels are included. Reference sharing permissions
 are excluded and remain off after restore.

@@ -2220,6 +2220,9 @@ pub async fn pick_codex_home_folder<R: Runtime>(
 }
 
 fn default_isolated_codex_home() -> PathBuf {
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return root.join("codex");
+    }
     dirs::data_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .join("ClawScribe")
