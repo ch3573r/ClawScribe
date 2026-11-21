@@ -13,6 +13,7 @@ interface ScheduleStatus {
   last_success: number | null;
   last_error: string | null;
   incomplete_meetings: number;
+  skipped_template_items: number;
 }
 
 export function ScheduledBackups({ disabled }: { disabled: boolean }) {
@@ -84,6 +85,7 @@ export function ScheduledBackups({ disabled }: { disabled: boolean }) {
             ? (status.enabled ? 'Waiting for the first backup.' : 'No scheduled backups saved yet.')
             : `Last saved ${new Date(status.last_success * 1000).toLocaleString()}.`}
           {!status.running && status.incomplete_meetings > 0 && ` Incomplete audio in ${status.incomplete_meetings} meetings.`}
+          {!status.running && status.skipped_template_items > 0 && ` Skipped ${status.skipped_template_items} template ${status.skipped_template_items === 1 ? 'item' : 'items'}.`}
         </p>
       </>}
       {(status || error) && <Button variant="outline" size="sm" disabled={unavailable} onClick={() => void change()}>

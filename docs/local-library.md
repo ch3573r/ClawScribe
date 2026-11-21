@@ -420,8 +420,10 @@ Archives also retain saved knowledge conversations, including independent
 library threads and the original citation labels. Existing conversation-owner
 IDs are skipped without overwriting their history. A dependent turn is redacted
 when an archived source is unavailable or conflicts with a skipped destination
-meeting. Interrupted answer requests remain interrupted and require an explicit
-retry. Restored citations are historical and cannot navigate as current evidence
+meeting. Restore compares the archived and saved current transcripts even when
+the archive stores them as separate streams. A matching source keeps the saved
+question, answer, and citation labels. Interrupted answer requests remain
+interrupted and require an explicit retry. Restored citations are historical and cannot navigate as current evidence
 or enter a future answer prompt, even when a destination revision number happens
 to match. New questions establish fresh canonical evidence. Semantic indexes
 and model downloads are excluded; restored sources are queued for indexing.
@@ -453,6 +455,10 @@ volume needs temporary space for those records during backup and restore.
 This is a saved-library archive, not a replacement for crash recovery or a system
 backup. Test restoring a backup before relying on it as your only copy.
 
+Invalid, oversized, and unavailable local template files or locations are skipped.
+The operation reports the number of skipped template items. Restore preserves
+local templates and deletions. An archive that contains an invalid template is rejected.
+
 ### Scheduled backups
 
 In **Backup and restore**, choose a local folder to enable daily backups. The
@@ -460,7 +466,7 @@ first backup runs when the app is open and the library is idle. Later backups
 run at least 24 hours after the last successful one. ClawScribe checks once a
 minute and defers while recording, transcription, an export, or an archive
 operation is active. The dialog shows the current destination, last successful
-backup, incomplete audio count, and any recent error.
+backup, incomplete audio and skipped template counts, and any recent error.
 
 ClawScribe creates a dedicated folder in the location you choose. After a new
 backup is saved, retention keeps the three newest tracked archives. It removes
@@ -470,19 +476,17 @@ remain on disk. Turning off daily backups leaves your archives available.
 
 ### If the library fails to open
 
-At the startup error dialog, choose **Open recovery library** to create an empty
-library in a separate app data folder. ClawScribe restarts and shows the active
-recovery library. Open **Meetings → Backup and restore** to import a ZIP.
+At the startup error dialog, choose **Open recovery library** to open a separate
+app data folder. ClawScribe restarts and shows the active recovery library.
+Open **Meetings → Backup and restore** to import a ZIP.
 The original database, WAL, and recordings remain in their original locations.
 The recovery profile has its own recording and reference folders, settings,
 and sign-ins.
 
-The recovery choice persists between restarts. After the original library has
-been repaired, close ClawScribe and move the file ending in
-`.active-recovery-library` beside the original app data folder. The next
-launch opens the original library.
-Keep the marker and corresponding recovery folder if you want to reopen the
-recovery library later.
+The recovery choice persists between restarts. After repairing the original
+library, choose **Return to original library**, then quit and reopen ClawScribe.
+The recovery workspace stays on disk. If the original library still fails to
+open, **Open recovery library** reopens the previous workspace when available.
 
 ## Deleting meetings
 

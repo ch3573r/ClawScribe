@@ -418,11 +418,12 @@ input and output and start off. [Local assistant access](docs/local-library.md#l
 recordings, custom templates, vocabulary, and linked calendar series preferences.
 Restore adds missing meetings and keeps existing IDs and preferences. Backups
 continue when recording folders are missing and report affected meetings,
-excluded recovery files, and unavailable audio. Archives exclude credentials and
-models and are not encrypted.
+excluded recovery files, unavailable audio, and skipped custom template items.
+Archives exclude credentials and models and are not encrypted.
 Daily backups are optional and keep three recent copies in a chosen local folder.
 If the database fails to open, a separate recovery library can import one of
-these archives while preserving the original files.
+these archives while preserving the original files. From recovery, select
+**Return to original library**, then quit and reopen ClawScribe to try it again.
 Saved knowledge conversations, attached reference originals and extracted blocks,
 and their original citation labels are included. Reference sharing permissions
 are excluded and remain off after restore.
