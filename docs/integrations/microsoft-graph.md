@@ -197,10 +197,12 @@ a saved ID is checked the first time the task is re-exported.
 
 OneDrive saves the Word file, PDF, and optional organization links independently.
 Repeating the same content checks the confirmed files in the original folder and
-uses the Word file for unfinished PDF conversion. Edited drafts get a dated
-filename. The Word and PDF files share the same name before the extension, and
-retries keep that name. Legacy entries may require reopening the original export
-with the same destination and content to restore the recorded folder reference.
+uses the Word file for unfinished PDF conversion. If you link a file manually,
+the review shows which file a repeat export will use for conversion and sharing.
+New Word and PDF uploads use the same name before the extension, and retries keep
+that name. Edited drafts get a dated filename. Legacy entries may require
+reopening the original export with the same destination and content to restore
+the recorded folder reference.
 
 Unreadable or invalid history blocks export. A history write failure stops the
 batch; it never silently disables duplicate protection. Restore access to the
@@ -227,8 +229,11 @@ Confluence identifies the PAT account before publishing. History records a
 fingerprint of the account and draft. Repeating a publish offers **Open** for
 the existing page. If the local draft changed, review and apply those edits in
 Confluence. A previously linked page might be hidden by a permissions change.
-Use the browser draft to review replacement of a deleted page. Legacy entries
-can be linked to an existing page after verifying it in the original destination.
+For an uncertain publish with a saved title, **Allow retry** verifies the space
+and parent and searches the space for that title. A possible match or incomplete
+search keeps the retry blocked. For older entries without a saved title, link
+the page if you find it or review a browser draft before publishing manually.
+Use the browser draft to review replacement of a deleted page as well.
 
 Older Planner and To Do exports identified summary suggestions by title and
 position. When a title matches several past tasks, or several suggestions match

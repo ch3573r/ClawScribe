@@ -322,7 +322,10 @@ export default function PageContent({
   }, [seek]);
 
   const playPassage = useCallback((seconds: number) => {
-    void seek(seconds).then(() => play()).catch(() => toast.error('Could not play that part of the recording.'));
+    const reportFailure = () => toast.error('Could not play that part of the recording.');
+    void seek(seconds).then(() => play()).then(played => {
+      if (played === false) reportFailure();
+    }, reportFailure);
   }, [seek, play]);
 
   const handleTimelinePlayPause = useCallback(() => {

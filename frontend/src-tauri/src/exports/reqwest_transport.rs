@@ -13,7 +13,15 @@ pub struct ReqwestGraphTransport {
 
 impl ReqwestGraphTransport {
     pub fn new() -> Self {
-        let client = reqwest::ClientBuilder::new()
+        Self::with_builder(reqwest::Client::builder())
+    }
+
+    pub(super) fn without_redirects() -> Self {
+        Self::with_builder(reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()))
+    }
+
+    fn with_builder(builder: reqwest::ClientBuilder) -> Self {
+        let client = builder
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to create reqwest client");

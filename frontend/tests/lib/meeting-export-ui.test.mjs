@@ -309,3 +309,39 @@ test('export history can review a confirmed link using candidates from the recor
     { kind: 'reconcile', args: ['meeting', 'opaque-key', 'chosen-id', null] },
   ]);
 });
+
+test('OneDrive recovery shows what a manually linked file will be used for', async () => {
+  for (const [destination, title, uses] of [
+    ['OneDrive Word document', 'Revised notes.docx', 'unfinished PDF conversion and Word sharing'],
+    ['OneDrive PDF', 'Revised notes.pdf', 'PDF sharing'],
+  ]) {
+    const view = await setup({
+      history: [{ entryKey: 'opaque-key', destination, status: 'succeeded', at: null, webUrl: null, canResolve: true, canConfirmAbsence: true }],
+      candidates: [{ id: 'chosen-id', title, createdAt: null, webUrl: null }],
+    });
+    await find(view.render(), 'DropdownMenuItem', 'Export history').props.onClick();
+    await flush();
+    find(view.render(), 'Button', 'Review link').props.onClick();
+    nodes(view.render()).find(node => node.type === 'Select' && node.props.value === '').props.onValueChange('exists');
+    view.render();
+    await flush();
+    nodes(view.render()).find(node => node.type === 'Select' && node.props.value === '').props.onValueChange('chosen-id');
+    const form = find(view.render(), 'form');
+    assert.ok(text(form).includes(`A repeat export of this draft will use “${title}” for ${uses}, if requested.`));
+    assert.equal(view.calls.filter(call => call.kind === 'reconcile').length, 0);
+  }
+});
+
+test('unnamed Confluence history offers a manual recovery path', async () => {
+  const view = await setup({ history: [
+    { entryKey: 'opaque-key', destination: 'Confluence', status: 'unknown_after_submit', at: null, webUrl: null, canResolve: true, canConfirmAbsence: false },
+  ] });
+  await find(view.render(), 'DropdownMenuItem', 'Export history').props.onClick();
+  await flush();
+  find(view.render(), 'Button', 'Resolve outcome').props.onClick();
+  const form = find(view.render(), 'form');
+  assert.ok(text(form).includes('This export has no saved page title.'));
+  assert.ok(text(form).includes('review a browser draft before publishing manually'));
+  assert.ok(find(form, 'SelectItem', 'I found the exported item'));
+  assert.equal(find(form, 'SelectItem', 'I confirmed the item is missing'), undefined);
+});

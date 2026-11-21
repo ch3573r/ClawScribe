@@ -11,7 +11,6 @@ use super::exporter::{
 use super::ledger::{
     artifact_key_hash, microsoft_web_url, valid_remote_id, DriveBinding, ExportLedger,
 };
-use super::model::ExportStatus;
 use super::transport::GraphTransport;
 
 pub(super) fn drive_binding(
@@ -247,6 +246,12 @@ pub(super) async fn candidates<T: GraphTransport, S: Sleeper>(
     let (target, _) = Target::recorded(ledger, key, account)?;
     let list = target.list_url();
     let endpoint = url::Url::parse(&list).expect("Graph collection URL");
+    // Graph may return the same /me collection under the signed-in profile ID.
+    let signed_in_user_path = endpoint
+        .path()
+        .strip_prefix("/v1.0/me/")
+        .filter(|_| valid_remote_id(account.user_id))
+        .map(|collection| format!("/v1.0/users/{}/{collection}", account.user_id));
     let mut next = Some(list);
     let mut items = Vec::new();
     for _ in 0..8 {
@@ -268,7 +273,8 @@ pub(super) async fn candidates<T: GraphTransport, S: Sleeper>(
                 let url = url::Url::parse(link)
                     .map_err(|_| "Microsoft returned an invalid next page.")?;
                 if url.origin() != endpoint.origin()
-                    || url.path() != endpoint.path()
+                    || (url.path() != endpoint.path()
+                        && signed_in_user_path.as_deref() != Some(url.path()))
                     || !url.username().is_empty()
                     || url.password().is_some()
                     || url.fragment().is_some()
@@ -476,14 +482,14 @@ pub(super) async fn check_saved_drive_item<T: GraphTransport, S: Sleeper>(
     binding: &DriveBinding,
     id: &str,
     kind: &str,
-) -> Result<(), String> {
-    check_item(client, account, Target::Drive { binding, kind }, id)
+) -> Result<String, String> {
+    let item = check_item(client, account, Target::Drive { binding, kind }, id)
         .await?
         .ok_or_else(|| {
             "The saved OneDrive item is missing or has moved. Review its link in Export history."
                 .to_owned()
         })?;
-    Ok(())
+    Ok(item.title)
 }
 
 #[cfg(test)]
@@ -491,6 +497,7 @@ mod tests {
     use super::*;
     use crate::exports::client::{RetryPolicy, TokioSleeper};
     use crate::exports::ledger::task_key;
+    use crate::exports::model::ExportStatus;
     use crate::exports::transport::{GraphResponse, MockGraphTransport};
 
     fn account(user: &str) -> ExportContext<'_> {
@@ -510,6 +517,82 @@ mod tests {
                 ..RetryPolicy::default()
             },
         )
+    }
+
+    #[tokio::test]
+    async fn candidate_paging_accepts_the_authenticated_user_alias_for_the_same_collection() {
+        let key = "todo:tenant:user:list:v2:meeting:action";
+        let mut ledger = ExportLedger::new("meeting");
+        ledger.record_failure(key, ExportStatus::UnknownAfterSubmit, None, None);
+        let transport = MockGraphTransport::new();
+        let list = graph_url(&["me", "todo", "lists", "list", "tasks"]);
+        let next = format!(
+            "{}?$skiptoken=A%2BB%3D",
+            graph_url(&["users", "user", "todo", "lists", "list", "tasks"])
+        );
+        transport.queue_for_url(
+            &list,
+            [GraphResponse::success(
+                200,
+                serde_json::json!({"value": [], "@odata.nextLink": next}).to_string(),
+            )],
+        );
+        transport.queue_for_url(
+            &next,
+            [GraphResponse::success(
+                200,
+                r#"{"value":[{"id":"task","title":"Review notes"}]}"#,
+            )],
+        );
+        let client = client(transport);
+        let choices = candidates(&client, &ledger, key, &account("user"))
+            .await
+            .unwrap();
+        assert_eq!(choices.items[0].id, "task");
+        assert!(!choices.truncated);
+        assert_eq!(client.transport().calls_for(&next), 1);
+    }
+
+    #[tokio::test]
+    async fn candidate_paging_never_requests_a_link_outside_the_recorded_collection() {
+        let key = "onenote:tenant:user:section:revision";
+        let mut ledger = ExportLedger::new("meeting");
+        ledger.record_failure(key, ExportStatus::UnknownAfterSubmit, None, None);
+        let list = graph_url(&["me", "onenote", "sections", "section", "pages"]);
+        let alias = "/v1.0/users/user/onenote/sections/section/pages";
+        for next in [
+            format!("https://other.example.com{alias}?$skip=20"),
+            format!("http://graph.microsoft.com{alias}?$skip=20"),
+            format!("https://graph.microsoft.com:444{alias}?$skip=20"),
+            format!("https://login@graph.microsoft.com{alias}?$skip=20"),
+            format!("https://graph.microsoft.com{alias}?$skip=20#fragment"),
+            "https://graph.microsoft.com/v1.0/users/other/onenote/sections/section/pages".into(),
+            "https://graph.microsoft.com/v1.0/users/user/onenote/sections/other/pages".into(),
+            "https://graph.microsoft.com/beta/users/user/onenote/sections/section/pages".into(),
+        ] {
+            let transport = MockGraphTransport::new();
+            transport.queue_for_url(
+                &list,
+                [GraphResponse::success(
+                    200,
+                    serde_json::json!({"value": [], "@odata.nextLink": next}).to_string(),
+                )],
+            );
+            let client = client(transport);
+            let wrong_tenant = ExportContext {
+                tenant_id: "other",
+                ..account("user")
+            };
+            assert!(candidates(&client, &ledger, key, &wrong_tenant)
+                .await
+                .is_err());
+            assert!(client.transport().recorded().is_empty());
+            assert!(candidates(&client, &ledger, key, &account("user"))
+                .await
+                .unwrap_err()
+                .contains("outside the export destination"));
+            assert_eq!(client.transport().recorded().len(), 1);
+        }
     }
 
     #[tokio::test]

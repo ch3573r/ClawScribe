@@ -731,7 +731,12 @@ pub async fn get_meeting_export_history<R: Runtime>(
             let can_resolve = item.can_resolve() && !key.ends_with("-link");
             let can_confirm_absence = can_resolve
                 && (destination != "Confluence"
-                    || (item.confluence.is_some() && item.resource_id.is_none()));
+                    || (item.confluence.is_some()
+                        && item.resource_id.is_none()
+                        && item
+                            .display_name
+                            .as_deref()
+                            .is_some_and(|name| !name.trim().is_empty())));
             Some(MeetingExportHistory {
                 action_id: if matches!(destination, "Planner" | "Microsoft To Do") {
                     key.rsplit(':')
@@ -800,7 +805,7 @@ pub async fn list_export_recovery_candidates<R: Runtime>(
     };
     let ledger = load_ledger(&app, &meeting_id).await?;
     let client = GraphClient::new(
-        ReqwestGraphTransport::new(),
+        ReqwestGraphTransport::without_redirects(),
         TokioSleeper,
         RetryPolicy::default(),
     );
@@ -837,7 +842,7 @@ pub async fn reconcile_meeting_export<R: Runtime>(
         bearer_token: &token,
     };
     let client = GraphClient::new(
-        ReqwestGraphTransport::new(),
+        ReqwestGraphTransport::without_redirects(),
         TokioSleeper,
         RetryPolicy::default(),
     );

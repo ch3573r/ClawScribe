@@ -1538,6 +1538,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebinding_tasks_preserves_existing_provider_details_on_repeat_export() {
+        let mut ledger = ExportLedger::new("meeting");
+        let mut meeting = meeting();
+        meeting.action_items.truncate(1);
+        let action = &mut meeting.action_items[0];
+        action.due_date = Some("2026-07-01".into());
+        let planner = PlannerDestination {
+            plan_id: "plan-1".into(),
+            bucket_id: "bucket-1".into(),
+        };
+        let todo = ToDoDestination {
+            list_id: "list-1".into(),
+        };
+        let planner_key = planner::dedupe_key(
+            "tenant",
+            "user",
+            &planner,
+            &meeting,
+            &meeting.action_items[0],
+        );
+        let todo_key =
+            todo::dedupe_key("tenant", "user", &todo, &meeting, &meeting.action_items[0]);
+        for key in [&planner_key, &todo_key] {
+            ledger.record_success(key, Some("old-task".into()), None, None);
+            ledger.record_task_enrichment(key, TaskEnrichment::default(), None);
+        }
+        let client = client(MockGraphTransport::new());
+        let planner_item = format!("{}/replacement", planner_url());
+        let planner_details = format!("{planner_item}/details");
+        let todo_item = todo_task_url("list-1", "replacement");
+        client.transport().queue_for_url(
+            &planner_item,
+            std::iter::repeat(GraphResponse::success(
+                200,
+                r#"{"id":"replacement","title":"Reviewed","planId":"plan-1","bucketId":"bucket-1"}"#,
+            )).take(2),
+        );
+        client.transport().queue_for_url(
+            &planner_details,
+            [GraphResponse::success(
+                200,
+                r#"{"description":"Existing notes","checklist":{"item":{"title":"Existing work"}}}"#,
+            )],
+        );
+        client.transport().queue_for_url(
+            &todo_item,
+            std::iter::repeat(GraphResponse::success(
+                200,
+                r#"{"id":"replacement","title":"Reviewed","body":{"content":"Existing notes"},"dueDateTime":{"dateTime":"2026-07-02T00:00:00"}}"#,
+            )).take(2),
+        );
+        let account = ctx();
+        for key in [&planner_key, &todo_key] {
+            super::super::resolution::reconcile(
+                &client,
+                &mut ledger,
+                key,
+                &account,
+                Some("replacement"),
+            )
+            .await
+            .unwrap();
+            assert!(ledger.entry(key).unwrap().task_enrichment.is_none());
+        }
+        let planner_report =
+            export_planner(&client, &mut ledger, &meeting, &planner, &account, None)
+                .await
+                .unwrap();
+        let todo_report = export_todo(&client, &mut ledger, &meeting, &todo, &account, None)
+            .await
+            .unwrap();
+        for report in [planner_report, todo_report] {
+            assert_eq!(report.overall, ExportStatus::Succeeded);
+            assert_eq!(report.items[0].resource_id.as_deref(), Some("replacement"));
+        }
+        let calls = client.transport().recorded();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| (call.method.as_str(), call.url.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("GET", planner_item.as_str()),
+                ("GET", todo_item.as_str()),
+                ("GET", planner_item.as_str()),
+                ("GET", planner_details.as_str()),
+                ("GET", todo_item.as_str()),
+            ],
+        );
+    }
+
+    #[tokio::test]
     async fn planner_repairs_missing_details_after_restart_without_recreating_task() {
         let dir = tempfile::tempdir().unwrap();
         let mut ledger = ExportLedger::load_or_new(dir.path(), "m").unwrap();

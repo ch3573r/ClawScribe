@@ -548,22 +548,8 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
         issues: Vec::new(),
     };
     let docx_name = format!("{stem}.docx");
-    let docx = match saved_file(ledger, &docx_key, &report.destination, &docx_name) {
-        Ok(Some(file)) => {
-            if let Err(issue) = super::resolution::check_saved_drive_item(
-                client,
-                account,
-                &binding,
-                &file.item_id,
-                "docx",
-            )
-            .await
-            {
-                report.issues.push(format!("Word document: {issue}"));
-                return Ok(report);
-            }
-            file
-        }
+    let docx = match saved_file(client, ledger, &docx_key, account, &binding, "docx").await {
+        Ok(Some(file)) => file,
         Ok(None) => {
             let bytes = build_meeting_docx(
                 &request.meeting_title,
@@ -600,17 +586,8 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
     // or prevent attempting the other requested format.
     let pdf = if request.include_pdf {
         let pdf_name = format!("{stem}.pdf");
-        let outcome = match saved_file(ledger, &pdf_key, &report.destination, &pdf_name) {
-            Ok(Some(file)) => super::resolution::check_saved_drive_item(
-                client,
-                account,
-                &binding,
-                &file.item_id,
-                "pdf",
-            )
-            .await
-            .map(|()| file)
-            .map_err(FileExportFailure::Remote),
+        let outcome = match saved_file(client, ledger, &pdf_key, account, &binding, "pdf").await {
+            Ok(Some(file)) => Ok(file),
             Ok(None) => match convert_docx_to_pdf(client, token, &docx).await {
                 Ok(bytes) => {
                     export_file(
@@ -828,11 +805,13 @@ async fn export_folder<T: GraphTransport, S: Sleeper>(
     outcome.map_err(|_| "Could not create the OneDrive folder. Check export history.".into())
 }
 
-fn saved_file(
+async fn saved_file<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
     ledger: &ExportLedger,
     key: &str,
-    destination: &DriveDestination,
-    name: &str,
+    account: &ExportContext<'_>,
+    binding: &DriveBinding,
+    kind: &str,
 ) -> Result<Option<DriveFile>, String> {
     if let Some(entry) = ledger.already_succeeded(key) {
         let item_id = entry
@@ -840,10 +819,13 @@ fn saved_file(
             .clone()
             .filter(|id| valid_remote_id(id))
             .ok_or("The saved file ID is missing.")?;
+        let name =
+            super::resolution::check_saved_drive_item(client, account, binding, &item_id, kind)
+                .await?;
         return Ok(Some(DriveFile {
-            drive_id: destination.drive_id.clone(),
+            drive_id: binding.drive_id.clone(),
             item_id,
-            name: name.into(),
+            name,
             web_url: entry.web_url.clone(),
         }));
     }
@@ -1246,18 +1228,27 @@ mod tests {
         .await
         .unwrap();
         let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
-        let confirmed = export_meeting_files(&client, &mut ledger, &account, request)
-            .await
-            .unwrap();
+        let confirmed = export_meeting_files(
+            &client,
+            &mut ledger,
+            &account,
+            OneDriveExportRequest {
+                include_pdf: true,
+                create_organization_link: true,
+                ..request
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(confirmed.files[0].item_id, "uploaded-word");
-        assert_eq!(
-            client
-                .transport()
-                .recorded()
-                .iter()
-                .filter(|call| call.method == "PUT")
-                .count(),
-            1
-        );
+        assert_eq!(confirmed.files[0].name, "Notes.docx");
+        let calls = client.transport().recorded();
+        assert!(calls.iter().any(|call| {
+            call.method == "GET" && call.url.ends_with("/uploaded-word/content?format=pdf")
+        }));
+        assert!(calls.iter().any(|call| {
+            call.method == "POST" && call.url.ends_with("/uploaded-word/createLink")
+        }));
+        assert_eq!(calls.iter().filter(|call| call.method == "PUT").count(), 1);
     }
 }

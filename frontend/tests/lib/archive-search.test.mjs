@@ -35,31 +35,109 @@ test('search highlights translate UTF-8 offsets without splitting umlauts or emo
   ]);
 });
 
-test('a timed search result reveals its text before the player is ready and plays the verified offset', async () => {
+function timedEvidenceRoute(t, { onReveal, resolve } = {}) {
   const navigation = loadTsModule('src/lib/knowledge-navigation.ts');
   const reference = { locator: { kind: 'transcript', meeting_id: 'fixture' }, chunk_id: 'late-match' };
   const token = new URL(navigation.transcriptPassageUrl(reference, true, true), 'https://example.com').searchParams.get('evidence');
   const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
   const actions = [];
+  const verified = { status: 'current', passage: {},
+    navigation: { meeting_id: 'fixture', transcript_id: 'late', transcript_index: 221, start_seconds: 724 },
+  };
   const jsx = (type, props) => ({ type, props });
   const { EvidenceRoute } = loadTsModule('src/components/Knowledge/EvidenceRoute.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/lib/knowledge-navigation': navigation, '@/components/ui/button': { Button: 'button' },
-    '@/services/knowledgeService': { knowledgeService: { resolve: async () => ({
-      status: 'current', passage: {},
-      navigation: { meeting_id: 'fixture', transcript_id: 'late', transcript_index: 221, start_seconds: 724 },
-    }) } },
+    '@/services/knowledgeService': { knowledgeService: { resolve: async () => resolve ? resolve(verified) : verified } },
   });
-  const onReveal = async (id, index) => actions.push(['reveal', id, index]);
+  const reveal = async (id, index, current) => {
+    actions.push(['reveal', id, index]);
+    if (onReveal) {
+      await onReveal(id);
+      if (current()) actions.push(['focus', id]);
+    }
+  };
   const onPlay = async seconds => actions.push(['play', seconds]);
-  const render = audioReady => hooks.render(() => EvidenceRoute({ token, meetingId: 'fixture', audioReady, audioStatus: 'found', audioError: null, onReveal, onPlay }));
+  const render = (audioReady, routeToken = token) => hooks.render(() => EvidenceRoute({ token: routeToken, meetingId: 'fixture', audioReady, audioStatus: 'found', audioError: null, onReveal: reveal, onPlay }));
+  return { actions, render };
+}
+
+test('a timed search result reveals its text before the player is ready and plays the verified offset', async t => {
+  const { actions, render } = timedEvidenceRoute(t);
   render(false);
   await flush();
   assert.deepEqual(actions, [['reveal', 'late', 221]]);
   render(true);
   await flush();
   assert.deepEqual(actions, [['reveal', 'late', 221], ['play', 724]]);
-  hooks.unmount();
+});
+
+test('audio readiness rechecks the source and awaits the same pending reveal before playback', async t => {
+  const pending = deferred();
+  let reads = 0;
+  const { actions, render } = timedEvidenceRoute(t, {
+    onReveal: () => pending.promise,
+    resolve: verified => { reads++; return verified; },
+  });
+  render(false);
+  await flush();
+  render(true);
+  await flush();
+  assert.equal(reads, 2);
+  assert.deepEqual(actions, [['reveal', 'late', 221]]);
+
+  pending.resolve();
+  await flush();
+  assert.deepEqual(actions, [['reveal', 'late', 221], ['focus', 'late'], ['play', 724]]);
+});
+
+test('audio readiness reveals a newly verified position and cancels the older pending reveal', async t => {
+  const pending = deferred();
+  let reads = 0;
+  const { actions, render } = timedEvidenceRoute(t, {
+    onReveal: id => id === 'late' ? pending.promise : undefined,
+    resolve: verified => ++reads === 1 ? verified : {
+      ...verified, navigation: { ...verified.navigation, transcript_id: 'updated', transcript_index: 222, start_seconds: 725 },
+    },
+  });
+  render(false);
+  await flush();
+  render(true);
+  await flush();
+  pending.resolve();
+  await flush();
+  assert.deepEqual(actions, [['reveal', 'late', 221], ['reveal', 'updated', 222], ['focus', 'updated'], ['play', 725]]);
+});
+
+test('audio readiness blocks pending focus and playback when source verification fails', async t => {
+  const pending = deferred();
+  let reads = 0;
+  const { actions, render } = timedEvidenceRoute(t, {
+    onReveal: () => pending.promise,
+    resolve: verified => ++reads === 1 ? verified : { status: 'stale' },
+  });
+  render(false);
+  await flush();
+  render(true);
+  await flush();
+  pending.resolve();
+  await flush();
+  assert.deepEqual(actions, [['reveal', 'late', 221]]);
+  assert.match(JSON.stringify(render(true)), /Retry opening passage/);
+});
+
+test('leaving a pending route cancels focus and playback after audio becomes ready', async t => {
+  const pending = deferred();
+  const { actions, render } = timedEvidenceRoute(t, { onReveal: () => pending.promise });
+  render(false);
+  await flush();
+  render(true);
+  await flush();
+  render(true, null);
+  pending.resolve();
+  await flush();
+  assert.deepEqual(actions, [['reveal', 'late', 221]]);
 });
 
 test('only a current source in the intended meeting can open after verification', async () => {
@@ -125,6 +203,17 @@ test('only individually checked, visible note revisions cross the handoff as loc
     assert.doesNotMatch(JSON.stringify(transferred),/Private fixture|outside/);
     assert.equal(render('new query').references([bookmark]).length,0);
   } finally { hooks.unmount(); }
+});
+
+test('personal excerpts accept known endpoints and legacy aliases case-insensitively', () => {
+  const { supportsPersonalExcerpts } = loadTsModule('src/lib/archive-search.ts');
+  for (const provider of ['OpenAI', 'CLAUDE', 'Groq', 'Ollama', 'OpenRouter', 'BuiltIn-AI',
+    'Local-Llama', 'LocalLlama', 'OpenAI-Compatible', 'API-Key', 'Custom-OpenAI', 'OpenClaw', 'OpenClaw-Managed']) {
+    assert.equal(supportsPersonalExcerpts(provider), true, provider);
+  }
+  for (const provider of ['Claude-Code', 'Codex', 'Codex-Login', 'Codex-ChatGPT', 'unknown', 'openai-other', '', null, undefined]) {
+    assert.equal(supportsPersonalExcerpts(provider), false, provider);
+  }
 });
 
 test('switching to an account-managed provider discards checked personal excerpts', () => {
