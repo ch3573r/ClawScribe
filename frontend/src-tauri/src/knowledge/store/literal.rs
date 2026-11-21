@@ -36,15 +36,15 @@ impl LiteralQuery {
         let mut patterns = Vec::new();
         while let Some(first) = text.chars().next() {
             let (term, rest) = if archive {
-                let quote = match first {
-                    '"' => Some('"'),
-                    '„' => Some('“'),
-                    '“' => Some('”'),
-                    _ => None,
+                let closers: &[char] = match first {
+                    '"' => &['"'],
+                    '„' => &['“', '”', '"'],
+                    '“' => &['”', '"'],
+                    _ => &[],
                 };
-                if let Some(end) = quote {
+                if !closers.is_empty() {
                     let after_open = &text[first.len_utf8()..];
-                    let Some(phrase) = after_open.split_once(end) else {
+                    let Some(phrase) = after_open.split_once(closers) else {
                         text = after_open.trim_start();
                         continue;
                     };

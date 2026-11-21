@@ -449,12 +449,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(highlights, ["Äpfel", "Straße", "50%_"]);
 
-        let results = search_archive(&pool, "„Äpfel auf der Straße“ 50%_", None, false)
-            .await
-            .unwrap();
-        assert_eq!(results.titles.len(), 1);
-        assert_eq!(results.passages.len(), 1);
-        assert!(results.saved.is_empty());
+        for query in [
+            "„Äpfel auf der Straße“ 50%_",
+            "„Äpfel auf der Straße” 50%_",
+            "„Äpfel auf der Straße\" 50%_",
+        ] {
+            let results = search_archive(&pool, query, None, false).await.unwrap();
+            assert_eq!(results.titles.len(), 1, "{query}");
+            assert_eq!(results.passages.len(), 1, "{query}");
+            assert!(results.saved.is_empty(), "{query}");
+        }
 
         for query in [
             "\"50%_ Straße Äpfel",
