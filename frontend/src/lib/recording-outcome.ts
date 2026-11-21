@@ -21,20 +21,19 @@ export function recordingBlocksAutoSummary(value?: Partial<RecordingOutcome> | n
 }
 
 export function recordingRecoveryMessage(value: RecordingOutcome): string | null {
-  if (value.recovery_files_elsewhere) {
-    return 'Audio could not be fully saved on the computer where this meeting was recorded. Its recovery files were not included in this backup. Recover the audio on that computer, then back it up again.';
-  }
   const messages: string[] = [];
-  if (value.audio_save_failed) {
+  if (value.recovery_files_elsewhere) {
+    messages.push('Audio could not be fully saved on the computer where this meeting was recorded. Its recovery files were not included in this backup. Recover the audio on that computer, then back it up again.');
+  } else if (value.audio_save_failed) {
     messages.push('Audio could not be fully saved. Check disk space and use Retranscribe to recover the available audio. Keep the meeting recovery files.');
   }
   if (value.capture_incomplete) {
-    messages.push('Some audio was lost during capture. Review the saved audio and transcript; retranscription cannot restore missing sound.');
+    messages.push('Some audio was lost during capture. Notes can cover only the saved transcript. Retranscription cannot restore missing sound.');
   }
-  if (value.transcription_incomplete) {
+  if (value.transcription_incomplete && !value.recovery_files_elsewhere) {
     messages.push('The live transcript is incomplete. Use Retranscribe to process the saved audio before relying on notes or exports.');
   }
-  if (value.recording_files_incomplete) {
+  if (value.recording_files_incomplete && !value.recovery_files_elsewhere) {
     messages.push('Some recording details or transcript backup files could not be saved. Review the library transcript and keep the meeting folder.');
   }
   return messages.length ? messages.join(' ') : null;

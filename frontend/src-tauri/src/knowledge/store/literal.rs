@@ -36,6 +36,48 @@ impl Budget {
     }
 }
 
+/// The read-only meeting-list tool pages in meeting order and shares the
+/// desktop matcher, including its Unicode folding and incremental blob reads.
+pub(crate) struct MeetingMatcher {
+    pattern: [String; 1],
+    context: ReadContext,
+    rows_left: usize,
+}
+
+impl MeetingMatcher {
+    pub(crate) fn new(query: &str) -> Self {
+        Self {
+            pattern: [literal_fold(query)],
+            context: ReadContext {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                background: false,
+                literal_budget: Some(Budget {
+                    deadline: Instant::now() + Duration::from_secs(10),
+                    remaining: Cell::new(SCAN_BYTES),
+                }),
+            },
+            rows_left: MAX_ROWS,
+        }
+    }
+
+    pub(crate) fn matches(
+        &mut self,
+        handle: &mut sqlx::sqlite::LockedSqliteHandle<'_>,
+        rowid: i64,
+        title: bool,
+    ) -> Result<bool, KnowledgeError> {
+        self.rows_left = self.rows_left.checked_sub(1).ok_or(KnowledgeError::Busy)?;
+        self.context.literal_budget.as_ref().unwrap().charge(0)?;
+        let (table, column) = if title {
+            (c"meetings", c"title")
+        } else {
+            (c"transcripts", c"transcript")
+        };
+        let blob = TextBlob::open(handle, table, column, rowid)?;
+        Ok(scan_patterns(&blob, &self.pattern, &self.context)?.is_some())
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct TitleHit {
     pub id: String,
@@ -103,6 +145,17 @@ fn indexed_anchor(folded: &str) -> Option<String> {
         .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
 }
 
+pub(crate) async fn available_anchor(
+    conn: &mut SqliteConnection,
+    query: &str,
+) -> Result<Option<String>, KnowledgeError> {
+    let anchor = indexed_anchor(&literal_fold(query));
+    if anchor.is_some() && !sqlx::query_scalar::<_, bool>(
+        "SELECT count(*)=2 FROM sqlite_schema WHERE type='table' AND name IN ('knowledge_title_literal','knowledge_transcript_literal')"
+    ).fetch_one(conn).await? { return Ok(None); }
+    Ok(anchor)
+}
+
 pub(crate) async fn search(
     conn: &mut SqliteConnection,
     query: &str,
@@ -122,10 +175,7 @@ pub(crate) async fn search(
     let pattern = [literal_fold(text)];
     let mut tx = conn.begin().await?;
     // The standalone read-only tool can open a library before desktop migration.
-    let mut anchor = indexed_anchor(&pattern[0]);
-    if anchor.is_some() && !sqlx::query_scalar::<_, bool>(
-        "SELECT count(*)=2 FROM sqlite_schema WHERE type='table' AND name IN ('knowledge_title_literal','knowledge_transcript_literal')"
-    ).fetch_one(&mut *tx).await? { anchor = None; }
+    let anchor = available_anchor(&mut tx, text).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     let allowed = match scope {
         Some(scope) => match tokio::time::timeout_at(

@@ -12,10 +12,10 @@ import { Button } from "@/components/ui/button";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { listen } from '@tauri-apps/api/event';
 import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
-import { RecordingOutcome, recordingRecoveryMessage } from '@/lib/recording-outcome';
+import { RecordingOutcome, recordingBlocksAutoSummary, recordingRecoveryMessage } from '@/lib/recording-outcome';
 
 function MeetingDetailsContent() {
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams() ?? new URLSearchParams();
   const meetingId = searchParams.get('id');
   const evidenceToken = searchParams.get('evidence');
   const fromArchive = searchParams.get('from') === 'archive';
@@ -34,7 +34,12 @@ function MeetingDetailsContent() {
       if (!meetingId) return;
       try {
         const outcome = await invoke<RecordingOutcome | null>('get_recording_outcome', { meetingId });
-        if (active) setRecoveryMessage(outcome ? recordingRecoveryMessage(outcome) : null);
+        if (active) {
+          const warning = outcome && recordingRecoveryMessage(outcome);
+          setRecoveryMessage(warning && recordingBlocksAutoSummary(outcome)
+            ? `${warning} Automatic notes are paused.`
+            : warning);
+        }
       } catch {
         if (active) setRecoveryMessage('Recording status could not be checked. Check the transcript before generating notes.');
       }
@@ -219,12 +224,13 @@ function MeetingDetailsContent() {
 
   return <div className="flex h-full min-h-0 flex-col">
     {recoveryMessage && <div role="alert" className="shrink-0 border-b border-warning-border/40 bg-warning px-4 py-3 text-sm text-foreground">
-      <strong>Meeting needs review. </strong>{recoveryMessage} Automatic notes are paused.
+      <strong>Meeting needs review. </strong>{recoveryMessage}
     </div>}
     <div className="min-h-0 flex-1"><PageContent
     key={meetingDetails.id}
     meeting={meetingDetails}
     evidenceToken={evidenceToken}
+    savedSourceToken={searchParams.get('savedSource')}
     fromArchive={fromArchive}
     archiveAction={archiveAction}
     summaryData={meetingSummary}

@@ -135,6 +135,16 @@ test('a detected call passes its request ID for native validation', async () => 
   window_.hooks.unmount();
 });
 
+test('a calendar call uses the invitation bound to the native claim and names the event for confirmation', async () => {
+  const view = app();
+  await flush();
+  await view.emit('call-detection-prompt', { key: 'join-1', provider: 'teams', eventTitle: 'Planning', retry: false });
+  assert.match(view.toasts.at(-1).description, /Planning/);
+  await view.emit('recording-start-requested', request('calendar_call', 'selected-start', 'teams'));
+  assert.deepEqual(view.starts, [['calendar_call', 'selected-start']]);
+  view.hooks.unmount();
+});
+
 test('an early failure is answered as retryable except a full disk', async () => {
   const failing = app({ start: async () => { throw new Error('device missing'); } });
   await flush();

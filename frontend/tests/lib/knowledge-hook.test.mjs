@@ -39,6 +39,46 @@ test('empty selected meetings never broaden through a project filter and cancell
 });
 
 const libraryScope={kind:'library',filter:{all_meetings:false,meeting_ids:['one'],tags:[],tag_mode:'any',untagged:false,from:null,to:null}};
+test('one-question note review gates the hosted call, never falls back, and uses a fresh identity on retry', async () => {
+  const references = [{ source: 'note', meeting_id: 'one', id: 'one', start: 0, end: 4, fingerprint: 'fixture' }];
+  const previews = [], sent = [], discarded = [], ordinary = [];
+  let decision, stillCurrent = true;
+  const app = view({
+    previewNotes: async (request, refs) => {
+      assert.deepEqual(refs, references);
+      const value = { token: request.request_id, question: request.search.query, excerpts: [{source:'note', text:'Äpfel'}], destination: { provider:'fixture', endpoint:'https://model.example', model:'example' } };
+      previews.push(value);
+      return value;
+    },
+    askWithNotes: async (request, refs, token) => { sent.push({request,refs,token}); if (sent.length === 1) throw 'Synthetic provider unavailable'; },
+    ask: async request => { ordinary.push(request); },
+    discardNoteReview: async token => { discarded.push(token); },
+  }, { scope: libraryScope, owner: { kind:'library', id:'fixture' } });
+  const start = () => {
+    decision = deferred();
+    return app.render().ask('What should I remember?', 'keyword', {
+      references, current: () => stillCurrent,
+      confirm: async preview => { assert.equal(preview, previews.at(-1)); return decision.promise; },
+    });
+  };
+  try {
+    app.render(); await flush();
+    assert.deepEqual(previews, []);
+    let run = start(); await flush();
+    assert.deepEqual(sent, []); decision.resolve(false); await run;
+    run = start(); await flush(); stillCurrent = false; decision.resolve(true); await run;
+    assert.deepEqual(sent, []);
+    stillCurrent = true;
+    run = start(); await flush(); decision.resolve(true); await run;
+    assert.equal(sent.length, 1);
+    run = start(); await flush(); assert.equal(sent.length, 1); decision.resolve(true); await run;
+    assert.equal(sent.length, 2);
+    assert.equal(new Set(previews.map(p => p.token)).size, 4);
+    assert.deepEqual(discarded, previews.map(p => p.token));
+    assert.deepEqual(ordinary, []);
+    assert.ok(sent.every(call => call.request.request_id === call.token && call.refs === references));
+  } finally { app.unmount(); }
+});
 test('first library question creates one durable owner and reconciles one answer despite repeated submission',async()=>{
   const creation=deferred(),answer=deferred();let creates=0;const requests=[];
   const owner={kind:'library',id:'saved-first'};

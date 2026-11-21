@@ -67,6 +67,7 @@ pub mod whisper_engine;
 #[cfg(windows)]
 mod windows_lifecycle;
 
+use audio::recording_commands::floating;
 use audio::{list_audio_devices, trigger_audio_permission, AudioDevice};
 use log::{error as log_error, info as log_info};
 use notifications::commands::NotificationManagerState;
@@ -441,7 +442,11 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
             meeting_name,
             audio::recording_commands::SelectedStart {
                 use_default_microphone: use_default_microphone.unwrap_or(false),
-                calendar_link,
+                calendar_link: request
+                    .as_ref()
+                    .and_then(|claim| claim.calendar())
+                    .cloned()
+                    .or(calendar_link),
                 summary_language,
                 request: request.as_ref(),
             },
@@ -553,7 +558,7 @@ pub fn get_language_preference_internal() -> Option<String> {
 }
 
 #[tauri::command]
-fn set_native_theme(app: AppHandle, theme: String) -> Result<(), String> {
+fn set_native_theme(app: AppHandle, theme: String, accent: Option<String>) -> Result<(), String> {
     let native_theme = match theme.as_str() {
         "light" => Some(Theme::Light),
         "dark" => Some(Theme::Dark),
@@ -561,6 +566,7 @@ fn set_native_theme(app: AppHandle, theme: String) -> Result<(), String> {
         other => return Err(format!("Unknown native theme preference: {}", other)),
     };
 
+    floating::set_appearance(theme, accent);
     app.set_theme(native_theme);
 
     if let Some(window) = app.get_webview_window("main") {
@@ -808,7 +814,12 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(floating::restrict_commands(tauri::generate_handler![
+            floating::open_floating_controls,
+            floating::floating_status,
+            floating::floating_note,
+            floating::floating_stop,
+            floating::dismiss_floating_controls,
             library::context::get_meeting_context,
             library::context::set_meeting_context,
             library::calendar::get_meeting_calendar,
@@ -933,6 +944,9 @@ pub fn run() {
             teams_detection::monitor::set_call_detection_settings,
             teams_detection::monitor::get_pending_call_prompt,
             teams_detection::monitor::confirm_call_detection_prompt,
+            teams_detection::monitor::join::join_and_record,
+            teams_detection::monitor::join::cancel_join_recording,
+            teams_detection::monitor::join::get_join_recording,
             start_request::finish_recording_start,
             start_request::get_pending_start_request,
             audio::recording_commands::queue_recording_after_save,
@@ -977,6 +991,8 @@ pub fn run() {
             api::api_get_meetings,
             api::api_search_transcripts,
             api::api_search_library,
+            knowledge::store::saved_search::search_saved_meetings,
+            knowledge::store::saved_search::resolve_saved_search_hit,
             api::api_get_model_config,
             api::api_save_model_config,
             api::api_get_api_key_status,
@@ -1079,6 +1095,9 @@ pub fn run() {
             database::commands::import_legacy_database_if_present,
             knowledge::indexer::knowledge_search,
             knowledge::commands::knowledge_ask,
+            knowledge::note_review::knowledge_preview_notes,
+            knowledge::note_review::knowledge_discard_note_review,
+            knowledge::note_review::knowledge_ask_with_notes,
             knowledge::commands::knowledge_live_snapshot,
             knowledge::commands::knowledge_live_sharing,
             knowledge::commands::knowledge_set_live_sharing,
@@ -1174,7 +1193,7 @@ pub fn run() {
             exports::confluence::confluence_settings_status,
             exports::confluence::confluence_connection_status,
             exports::confluence::confluence_export_page,
-        ])
+        ]))
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app_handle, event| {

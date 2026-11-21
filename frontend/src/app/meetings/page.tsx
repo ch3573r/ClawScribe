@@ -19,13 +19,15 @@ import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { LibraryBackup } from "@/components/LibraryBackup";
-import { ArchiveMeetingRows } from "@/components/Archive/ArchiveMeetingRows";
+import { ArchiveMeetingRows, useArchiveMetadata } from "@/components/Archive/ArchiveMeetingRows";
 import { ArchiveStorageButton } from "@/components/Archive/ArchiveStorageButton";
-import { formatArchiveDate } from "@/lib/archive-review";
+import { archiveReview, formatArchiveDate } from "@/lib/archive-review";
+import { receiveMatchScope, savedPassageUrl, sourceLabel, type MatchScope } from "@/lib/archive-search";
 import { KnowledgeArchive } from "@/components/Knowledge/KnowledgeArchive";
 import { bookmarkTime, matchesProjectFilter, type ProjectFilter } from "@/lib/library";
 import { libraryScope } from "@/lib/knowledge-state";
 import { transcriptPassageUrl } from "@/lib/knowledge-navigation";
+import { useResultNotes } from "@/hooks/useResultNotes";
 import { useLibrarySearch } from "@/hooks/useLibrarySearch";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -56,7 +58,7 @@ import {
 type SortMode = "newest" | "oldest" | "title";
 const noProjectFilter: ProjectFilter = { tags: [], untagged: false, mode: "any" };
 // Keep this view's filters in memory when a meeting route replaces it.
-let archiveView = { tab: "archive" as "archive" | "memory", memoryProject: noProjectFilter, query: "", from: "", to: "", sortMode: "newest" as SortMode, projectFilter: noProjectFilter };
+let archiveView = { tab: "archive" as "archive" | "memory", memoryProject: noProjectFilter, query: "", from: "", to: "", attentionOnly: false, sortMode: "newest" as SortMode, projectFilter: noProjectFilter };
 
 function timeValue(value?: string): number {
   if (!value) return 0;
@@ -88,20 +90,33 @@ export default function MeetingsPage() {
   const [sortMode, setSortMode] = useState(archiveView.sortMode);
   const [projectFilter, setProjectFilter] = useState(archiveView.projectFilter);
   const [memoryProject, setMemoryProject] = useState(archiveView.memoryProject);
-  useEffect(() => { archiveView = { query, from, to, sortMode, projectFilter, tab, memoryProject }; }, [query, from, to, sortMode, projectFilter, tab, memoryProject]);
+  const [attentionOnly, setAttentionOnly] = useState(archiveView.attentionOnly);
+  const [matchSession, setMatchSession] = useState<{ scope: MatchScope; key: number } | null>(null);
+  const askAboutMatches = useCallback((scope: MatchScope) => {
+    if (!scope.ids.length) return;
+    setMemoryProject(scope.project);
+    setMatchSession(last => ({ scope, key: (last?.key ?? 0) + 1 }));
+    setTab("memory");
+  }, []);
+  useEffect(() => receiveMatchScope(askAboutMatches), [askAboutMatches]);
+  useEffect(() => { archiveView = { query, from, to, sortMode, attentionOnly, projectFilter, tab, memoryProject }; }, [query, from, to, sortMode, attentionOnly, projectFilter, tab, memoryProject]);
   const [archiveRevision, setArchiveRevision] = useState(0);
+  const archiveStatus = useArchiveMetadata(tab === "archive", archiveRevision, meetings.length);
+  const attentionIds = useMemo(() => new Set(Array.from(archiveStatus.metadata?.values() ?? [])
+    .filter(row => archiveReview(row).needsAttention).map(row => row.id)), [archiveStatus.metadata]);
   const tagOptions = useMemo(() => [...new Map(projectTags.map(row => [row.tag.toLowerCase(), row.tag])).values()].sort((a, b) => a.localeCompare(b)), [projectTags]);
 
   const hasQuery = !!query.trim();
-  const hasScope = !!(from || to || projectFilter.untagged || projectFilter.tags.length);
+  const hasScope = !!(attentionOnly || from || to || projectFilter.untagged || projectFilter.tags.length);
   const invalidDates = !!from && !!to && from > to;
-  const scope = hasScope ? libraryScope([], true, projectFilter, from, to) : undefined;
-  const { results, searching, error: searchError } = useLibrarySearch(query, tab === "archive" && !invalidDates, scope, false, meetings);
+  const scope = hasScope ? libraryScope(attentionOnly ? [...attentionIds] : [], !attentionOnly, projectFilter, from, to) : undefined;
+  const { results, searching, error: searchError } = useLibrarySearch(query, tab === "archive" && !invalidDates && (!attentionOnly || attentionIds.size > 0), scope, false, meetings);
+  const noteSelection = useResultNotes(JSON.stringify({ query, projectFilter, attentionOnly, from, to }));
   const titleIds = useMemo(() => new Set(results?.titles.map(hit => hit.id)), [results]);
 
   const sortedMeetings = useMemo(() => {
     const next = meetings.filter(meeting => {
-      if (invalidDates || !matchesProjectFilter(meeting.id, projectFilter, projectTags)) return false;
+      if (invalidDates || (attentionOnly && !attentionIds.has(meeting.id)) || !matchesProjectFilter(meeting.id, projectFilter, projectTags)) return false;
       const date = meeting.created_at?.slice(0, 10);
       return (!from || (!!date && date >= from)) && (!to || (!!date && date <= to));
     });
@@ -117,7 +132,7 @@ export default function MeetingsPage() {
       return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
     });
     return next;
-  }, [meetings, sortMode, projectFilter, projectTags, from, to, invalidDates]);
+  }, [meetings, sortMode, projectFilter, projectTags, from, to, invalidDates, attentionOnly, attentionIds]);
   const memoryMeetings = useMemo(() => meetings.filter(meeting => matchesProjectFilter(meeting.id, memoryProject, projectTags)), [meetings, memoryProject, projectTags]);
   const visibleMeetings = hasQuery ? sortedMeetings.filter(meeting => titleIds.has(meeting.id)) : sortedMeetings;
   const passages = useMemo(() => {
@@ -126,6 +141,12 @@ export default function MeetingsPage() {
       (positions.get(a.meeting_id)! - positions.get(b.meeting_id)!) ||
       (a.start_seconds ?? -1) - (b.start_seconds ?? -1));
   }, [results, sortedMeetings]);
+  const saved = useMemo(() => {
+    const positions = new Map(sortedMeetings.map((meeting, index) => [meeting.id, index]));
+    return (results?.saved ?? []).filter(hit => positions.has(hit.reference.meeting_id))
+      .sort((a, b) => positions.get(a.reference.meeting_id)! - positions.get(b.reference.meeting_id)!);
+  }, [results, sortedMeetings]);
+  const matchIds = hasQuery && results ? [...new Set([...visibleMeetings.map(m => m.id), ...passages.map(p => p.meeting_id), ...saved.map(hit => hit.reference.meeting_id)])] : [];
 
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
@@ -138,7 +159,7 @@ export default function MeetingsPage() {
   }, [refetchMeetings]);
 
   const shownCount = visibleMeetings.length;
-  const clearFilters = () => { setQuery(""); setProjectFilter(noProjectFilter); setFrom(""); setTo(""); };
+  const clearFilters = () => { setQuery(""); setProjectFilter(noProjectFilter); setFrom(""); setTo(""); setAttentionOnly(false); };
   const recordingBusy = recording.isRecording || recording.isStarting || recording.isStopping || recording.isProcessing || recording.isSaving;
 
   const projectControl = (projectFilter: ProjectFilter, setProjectFilter: Dispatch<SetStateAction<ProjectFilter>>) => {
@@ -225,7 +246,7 @@ export default function MeetingsPage() {
             <TabsTrigger value="memory" id="meetings-memory-tab" aria-controls="meeting-memory-panel">Meeting memory</TabsTrigger>
           </TabsList>
           <TabsContent value="memory" forceMount id="meeting-memory-panel" hidden={tab !== "memory"} className={tab === "memory" ? "m-0 min-h-0 flex-1" : "hidden"}>
-            <KnowledgeArchive active={tab === "memory"} meetings={memoryMeetings} meetingTitles={meetings} projectFilter={memoryProject} setProjectFilter={setMemoryProject} projectControl={projectControl(memoryProject, setMemoryProject)} />
+            <KnowledgeArchive key={matchSession?.key ?? 0} initialMatches={matchSession?.scope} active={tab === "memory"} meetings={memoryMeetings} meetingTitles={meetings} projectFilter={memoryProject} setProjectFilter={setMemoryProject} projectControl={projectControl(memoryProject, setMemoryProject)} />
           </TabsContent>
           <TabsContent value="archive" forceMount id="meetings-archive-panel" hidden={tab !== "archive"} className={tab === "archive" ? "m-0 min-h-0 flex-1 space-y-4 overflow-y-auto" : "hidden"}>
         {meetings.length > 0 && (
@@ -233,8 +254,8 @@ export default function MeetingsPage() {
             <div hidden={tab !== "archive"}><InputGroup className="rounded-md border-border bg-background text-foreground shadow-none">
               <InputGroupInput
                 id="meetings-search"
-                aria-label="Search titles and transcripts"
-                placeholder="Search titles and transcripts"
+                aria-label="Search titles, transcripts, summaries, notes and bookmarks"
+                placeholder="Search titles, transcripts, summaries and notes"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 className="placeholder:text-muted-foreground"
@@ -253,6 +274,7 @@ export default function MeetingsPage() {
 
             <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
               {projectControl(projectFilter, setProjectFilter)}
+              {(attentionOnly || attentionIds.size > 0) && <Button variant={attentionOnly ? "secondary" : "ghost"} size="sm" aria-pressed={attentionOnly} onClick={() => setAttentionOnly(value => !value)}>Needs attention</Button>}
               <Popover>
                 <PopoverTrigger asChild><Button variant="outline" size="sm">Date range{from || to ? " · active" : ""}</Button></PopoverTrigger>
                 <PopoverContent align="end" className="space-y-3">
@@ -279,8 +301,9 @@ export default function MeetingsPage() {
         )}
 
         <div className="min-h-0">
+          {attentionOnly && archiveStatus.error && <p role="alert" className="text-sm text-destructive">Could not refresh meetings that need attention. <Button variant="ghost" size="sm" onClick={() => void archiveStatus.refresh()}>Retry</Button></p>}
           {invalidDates && <p role="alert" className="text-sm text-destructive">The start date must be on or before the end date.</p>}
-          {searching && <p role="status" className="text-sm text-muted-foreground">Searching saved titles and transcripts…</p>}
+          {searching && <p role="status" className="text-sm text-muted-foreground">Searching saved meetings…</p>}
           {searchError && <p role="alert" className="text-sm text-destructive">{searchError}</p>}
           {results?.limited && <p role="status" className="mb-3 text-sm text-muted-foreground">Search reached its limit. Try more specific text or narrow the filters.</p>}
           {meetingsError && meetings.length > 0 && (
@@ -289,15 +312,14 @@ export default function MeetingsPage() {
               <Button variant="outline" size="sm" disabled={meetingsLoading} onClick={() => void refetchMeetings()}>{meetingsLoading ? "Retrying…" : "Retry"}</Button>
             </div>
           )}
-          {!invalidDates && !searching && !searchError && (!hasQuery || visibleMeetings.length > 0 || (!passages.length && !results?.limited)) && <PageSection className="min-w-0 rounded-lg border border-border bg-card shadow-sm" aria-label={hasQuery ? "Matching titles" : "Saved meetings"}>
+          {hasQuery && results && matchIds.length > 0 && <Button variant="outline" size="sm" className="mb-3" onClick={() => askAboutMatches({ ids: matchIds, project: projectFilter, from, to, notes: noteSelection.references(saved) })}>Ask about these results</Button>}
+          {!invalidDates && !searching && !searchError && (!hasQuery || visibleMeetings.length > 0 || (!passages.length && !saved.length && !results?.limited)) && <PageSection className="min-w-0 rounded-lg border border-border bg-card shadow-sm" aria-label={hasQuery ? "Matching titles" : "Saved meetings"}>
             {hasQuery && visibleMeetings.length > 0 && <h2 className="border-b border-border px-6 py-3 text-sm font-semibold">Matching titles</h2>}
             {visibleMeetings.length > 0 ? (
               <ArchiveMeetingRows
-                active={tab === "archive"}
+                status={archiveStatus}
                 meetings={visibleMeetings}
                 projectTags={projectTags}
-                revision={archiveRevision}
-                librarySize={meetings.length}
                 onOpen={setCurrentMeeting}
               />
             ) : meetingsError && meetings.length === 0 ? (
@@ -349,6 +371,20 @@ export default function MeetingsPage() {
             </ol>
           </PageSection>}
 
+          {saved.length > 0 && <PageSection className="mt-4 min-w-0" aria-label="Matching summaries and notes">
+            <h2 className="border-b border-border px-6 py-3 text-sm font-semibold">Matching summaries and notes</h2>
+            <ol className="divide-y divide-border">{saved.map(hit => <li key={JSON.stringify([hit.reference.source, hit.reference.id])} className="space-y-2 px-6 py-4">
+              <div className="flex items-start justify-between gap-2">
+                <div><h3 className="break-words text-sm font-medium">{hit.title}</h3>
+                  <p className="text-xs text-muted-foreground">{sourceLabel[hit.reference.source]} · {formatArchiveDate(hit.date)}{hit.seconds != null && ` · ${bookmarkTime(hit.seconds)}`}</p></div>
+                <Button variant="outline" size="sm" onClick={() => {
+                  setCurrentMeeting({ id: hit.reference.meeting_id, title: hit.title });
+                  router.push(savedPassageUrl(hit.reference, true));
+                }}>Show {sourceLabel[hit.reference.source].toLowerCase()}</Button>
+              </div><blockquote className="whitespace-pre-wrap break-words text-sm text-muted-foreground">{hit.text}</blockquote>
+              {noteSelection.control(hit)}
+            </li>)}</ol>
+          </PageSection>}
         </div>
           </TabsContent>
         </Tabs>

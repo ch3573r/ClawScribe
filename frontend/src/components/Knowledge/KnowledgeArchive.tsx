@@ -19,26 +19,33 @@ import { EvidencePreview } from "./EvidencePreview";
 import { ReferenceDocuments } from "@/components/MeetingDetails/ReferenceDocuments";
 import { AttachReferenceButton } from "@/components/MeetingDetails/AttachReferenceButton";
 import type { ProjectFilter } from "@/lib/library";
+import type { MatchScope, SavedReference } from "@/lib/archive-search";
+import { classifySummaryProvider } from "@/lib/privacy";
 import type { IndexStatus, MeetingFilter, SearchMode } from "@/types/knowledge";
 
 // Route navigation unmounts the archive; keep only the user's explicit source
 // choices in this window. Document selection and sharing remain owner-scoped.
 let memorySources = { all: false, selected: [] as string[], from: "", to: "" };
 
-export function KnowledgeArchive({ active = true, meetings, meetingTitles = meetings, projectFilter, setProjectFilter, projectControl }: {
+export function KnowledgeArchive({ active = true, initialMatches, meetings, meetingTitles = meetings, projectFilter, setProjectFilter, projectControl }: {
+  initialMatches?: MatchScope;
   active?: boolean; meetings: { id: string; title: string; created_at?: string }[]; meetingTitles?: { id: string; title: string }[]; projectFilter: ProjectFilter; setProjectFilter?: (filter: ProjectFilter) => void; projectControl?: ReactNode;
 }) {
   const { modelConfig } = useConfig();
+  const destination = classifySummaryProvider(modelConfig?.provider, {
+    ollamaEndpoint: modelConfig?.ollamaEndpoint, customEndpoint: modelConfig?.customOpenAIEndpoint,
+  });
   const [query, setQuery] = useState("");
   const [chosenMode, setChosenMode] = useState<SearchMode | null>(null);
   const [index, setIndex] = useState<IndexStatus | null>(null);
   const [indexError, setIndexError] = useState(false);
-  const [all, setAll] = useState(memorySources.all);
-  const [selected, setSelected] = useState(memorySources.selected);
+  const [all, setAll] = useState(initialMatches ? false : memorySources.all);
+  const [selected, setSelected] = useState(initialMatches?.ids ?? memorySources.selected);
+  const [notes, setNotes] = useState<SavedReference[]>(initialMatches?.notes ?? []);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [meetingQuery, setMeetingQuery] = useState("");
-  const [from, setFrom] = useState(memorySources.from);
-  const [to, setTo] = useState(memorySources.to);
+  const [from, setFrom] = useState(initialMatches?.from ?? memorySources.from);
+  const [to, setTo] = useState(initialMatches?.to ?? memorySources.to);
   useEffect(() => { memorySources = { all, selected, from, to }; }, [all, selected, from, to]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -123,6 +130,12 @@ export function KnowledgeArchive({ active = true, meetings, meetingTitles = meet
   return <section className="flex h-full min-h-0 flex-col gap-4 overflow-hidden" aria-label="Meeting memory">
     <fieldset className="shrink-0 space-y-3">
       <legend className="mb-2 text-sm font-medium">Sources</legend>
+      {(all || selected.length > 0) && <p className="text-sm text-muted-foreground">
+        Asking uses {all ? "all meetings in this filter" : `${selected.length} selected meeting${selected.length === 1 ? "" : "s"}`}.
+        {" "}{destination.kind === "none" ? "Choose a summary provider in Settings before asking." :
+          `${notes.length ? "Confirming the preview sends" : "Choosing Ask sends"} your question, transcript evidence and any available summary overviews${state.selectedDocumentIds?.length ? " and selected references" : ""} to ${destination.label}.`}
+        {" "}{notes.length ? `${notes.length} personal excerpt${notes.length === 1 ? "" : "s"} selected for review before sending.` : "Personal notes and bookmarks stay on this device."}
+      </p>}
       <div className="flex flex-wrap items-center gap-3 text-sm [&_button]:text-sm">
         <label className="flex items-center gap-2 text-sm"><Switch checked={all} onCheckedChange={setAll} />Search all saved meetings</label>
         {!all && <Popover open={pickerOpen} onOpenChange={setPickerOpen}><PopoverTrigger asChild><Button variant="outline" size="sm">Choose meetings{selected.length ? ` (${selected.length})` : ""}</Button></PopoverTrigger>
@@ -160,6 +173,9 @@ export function KnowledgeArchive({ active = true, meetings, meetingTitles = meet
       {invalidDates && <p role="alert" className="text-sm text-destructive">The start date must be on or before the end date.</p>}
     </fieldset>
     <div className="min-h-0 flex-1"><KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model} secondary={secondary}
+      selectedNotes={notes} reviewActive={active} destinationRevision={JSON.stringify([modelConfig?.ollamaEndpoint, modelConfig?.customOpenAIEndpoint, modelConfig?.organization, modelConfig?.project])}
+      removeNote={ref => setNotes(current => current.filter(value => value.fingerprint !== ref.fingerprint))}
+      clearNotes={() => setNotes([])}
       emptyState={!state.owner && !all && !selected.length ? <div className="flex flex-col items-center gap-2 text-center">
         <h3 className="text-lg font-semibold">Choose meetings to ask about</h3>
         <p className="text-sm text-muted-foreground">Pick one or more meetings, or search all saved meetings</p>

@@ -5,7 +5,7 @@ use super::common::{
     transcript_words_from_token_timestamps, TranscribedSegment,
 };
 use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
-use crate::database::transcript_edits::RetranscriptionFileUpdate;
+use crate::database::transcript_edits::{RetranscriptionFileUpdate, SyncedFiles};
 use crate::parakeet_engine::ParakeetEngine;
 use crate::state::AppState;
 use crate::whisper_engine::WhisperEngine;
@@ -133,6 +133,8 @@ pub struct RetranscriptionResult {
     pub duration_seconds: f64,
     pub language: Option<String>,
     pub file_warning: bool,
+    #[serde(skip)]
+    published_retranscription: bool,
 }
 
 /// Error during retranscription
@@ -160,7 +162,7 @@ pub async fn start_retranscription<R: Runtime>(
     // the transcript is saved leaves the meeting's transcript untouched: the
     // delete and insert happen in one transaction after the last cancel check.
     let cancel: super::inference::CancelBatchJob = Arc::new(cancel_retranscription_if_possible);
-    let _job = super::inference::claim_batch_job(
+    let job = super::inference::claim_batch_job(
         super::inference::BatchJob::Retranscription,
         cancel,
         "Local summary stopped because retranscription started. Generate it again afterwards.",
@@ -168,10 +170,10 @@ pub async fn start_retranscription<R: Runtime>(
     .await
     .map_err(anyhow::Error::msg)?;
     // Acquire guard - ensures flag is cleared even on panic/early return
-    let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
+    let guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
     // Open the cancellation window after resetting its flag.
-    let _phase = PhaseGuard::open();
+    let phase = PhaseGuard::open();
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
 
     let use_parakeet = provider.as_deref() == Some("parakeet")
@@ -190,12 +192,16 @@ pub async fn start_retranscription<R: Runtime>(
     // Unload the engine after the batch job (success, failure, or cancellation)
     super::common::unload_engine_after_batch_for(use_parakeet, use_nemotron).await;
 
-    // Guard will automatically clear flag on drop
-    // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
-
     match &result {
         Ok(res) => {
             let _ = app.emit("retranscription-complete", res);
+            // A local summary needs the slot this batch held through file publication and engine unload.
+            drop(phase);
+            drop(guard);
+            drop(job);
+            if res.published_retranscription {
+                crate::summary::automatic::publication::wake(&app, meeting_id);
+            }
         }
         Err(e) => {
             let _ = app.emit(
@@ -722,10 +728,14 @@ async fn save_retranscription_transcripts<R: Runtime>(
     .await?;
 
     emit_progress(app, meeting_id, "saving", 90, "Updating recording files...");
-    let file_warning = crate::database::transcript_edits::sync_file(pool, meeting_id, &roots)
-        .await
-        .is_err();
-    if file_warning {
+    let synced = crate::database::transcript_edits::sync_file_with_profile(
+        pool,
+        meeting_id,
+        &roots,
+        |folder| crate::summary::automatic::publication::profile_for_folder(app, folder),
+    )
+    .await;
+    if synced.is_err() {
         warn!("Retranscription saved; recording files need updating");
     }
 
@@ -735,7 +745,8 @@ async fn save_retranscription_transcripts<R: Runtime>(
         segments_count: segments.len(),
         duration_seconds,
         language: publication.source_language,
-        file_warning,
+        file_warning: synced.is_err(),
+        published_retranscription: synced == Ok(SyncedFiles::Retranscription),
     })
 }
 
@@ -844,6 +855,11 @@ async fn update_retranscription_outcome(
 }
 
 fn validate_replacement_transcripts(segments: &[crate::api::TranscriptSegment]) -> Result<()> {
+    if segments.iter().any(|segment| segment.text.contains('\0')) {
+        return Err(anyhow!(
+            "Retranscription produced damaged text. Your existing transcript was preserved."
+        ));
+    }
     if !segments
         .iter()
         .any(|segment| !segment.text.trim().is_empty())
@@ -1240,6 +1256,8 @@ mod tests {
             "recording-outcome.json",
         ] {
             let (pool, folder) = publication_fixture().await;
+            let original = folder.path().join("audio.mp4");
+            std::fs::write(&original, b"synthetic audio bytes").unwrap();
             let segments = create_transcript_segments(&[("new transcript".into(), 0.0, 2000.0)]);
             let blocked_path = folder.path().join(blocked);
             if blocked_path.exists() {
@@ -1268,6 +1286,12 @@ mod tests {
                     .await
                     .unwrap();
             assert!(pending);
+            let retries: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM retranscription_notes_retry")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(retries, 0);
 
             pool.close().await;
             let pool = sqlx::SqlitePool::connect_with(
@@ -1277,8 +1301,30 @@ mod tests {
             .await
             .unwrap();
             std::fs::remove_dir(&blocked_path).unwrap();
-            sync(&pool, "review-test", &[]).await.unwrap();
-            sync(&pool, "review-test", &[]).await.unwrap();
+            assert_eq!(
+                sync(&pool, "review-test", &[]).await.unwrap(),
+                SyncedFiles::Retranscription
+            );
+            // Simulate exit immediately after publication, before the in-memory wake.
+            pool.close().await;
+            let pool = sqlx::SqlitePool::connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(folder.path().join("library.sqlite")),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                sync(&pool, "review-test", &[]).await.unwrap(),
+                SyncedFiles::Other
+            );
+            let owner: String = sqlx::query_scalar(
+                "SELECT profile FROM retranscription_notes_retry WHERE meeting_id='review-test'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(owner, "synthetic-profile");
+            assert_eq!(std::fs::read(&original).unwrap(), b"synthetic audio bytes");
 
             let metadata: serde_json::Value = serde_json::from_slice(
                 &std::fs::read(folder.path().join("metadata.json")).unwrap(),
@@ -1496,8 +1542,12 @@ mod tests {
     #[test]
     fn empty_retranscription_cannot_replace_existing_text() {
         assert!(validate_replacement_transcripts(&[]).is_err());
-        let short_reply = create_transcript_segments(&[("Ja.".into(), 0.0, 300.0)]);
+        let mut short_reply = create_transcript_segments(&[("Ja.".into(), 0.0, 300.0)]);
         assert!(validate_replacement_transcripts(&short_reply).is_ok());
+        short_reply[0].text = " \n\t".into();
+        assert!(validate_replacement_transcripts(&short_reply).is_err());
+        short_reply[0].text = "Ja.\0".into();
+        assert!(validate_replacement_transcripts(&short_reply).is_err());
     }
 
     #[test]

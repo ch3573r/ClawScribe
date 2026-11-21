@@ -55,12 +55,24 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
         "pause_recording" => pause_recording_handler(app),
         "resume_recording" => resume_recording_handler(app),
         "stop_recording" => stop_recording_handler(app),
+        "floating_controls" => {
+            use crate::audio::recording_commands::floating;
+            if let Some(id) = floating::available_session() {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(message) = floating::open_floating_controls(app.clone(), id).await {
+                        start_feedback(&app, &message);
+                    }
+                });
+            }
+        }
         "bookmark_recording" => crate::library::bookmark_active_recording(app),
-        "confirm_call" => {
+        item if item.starts_with("confirm_call:") => {
             // Answers the call prompt without opening the window.
             let app = app.clone();
+            let key = item["confirm_call:".len()..].to_owned();
             tauri::async_runtime::spawn(async move {
-                crate::teams_detection::monitor::confirm_pending_prompt(&app).await;
+                crate::teams_detection::monitor::confirm_prompt(&app, &key).await;
             });
         }
         "open_window" => focus_main_window(app),
@@ -399,8 +411,16 @@ fn build_menu<R: Runtime>(
                 if let Some(prompt) = crate::teams_detection::monitor::pending_prompt() {
                     builder = builder.item(
                         &MenuItemBuilder::with_id(
-                            "confirm_call",
-                            format!("Record this {} call", prompt.provider.label()),
+                            format!("confirm_call:{}", prompt.key),
+                            prompt.event_title.as_ref().map_or_else(
+                                || format!("Record this {} call", prompt.provider.label()),
+                                |title| {
+                                    format!(
+                                        "Record this Teams call as {}",
+                                        clean_title(title).unwrap_or_default().replace('&', "&&")
+                                    )
+                                },
+                            ),
                         )
                         .build(app)?,
                     );
@@ -474,6 +494,15 @@ fn build_menu<R: Runtime>(
                 );
             }
         }
+    }
+
+    if matches!(
+        state,
+        RecordingState::Recording | RecordingState::Paused | RecordingState::Stopping
+    ) {
+        builder = builder.item(
+            &MenuItemBuilder::with_id("floating_controls", "Open floating controls").build(app)?,
+        );
     }
 
     builder
@@ -871,6 +900,7 @@ mod tests {
             key: "k".to_string(),
             provider: Provider::Teams,
             retry: false,
+            event_title: None,
         };
         let mut idle = view(RecordingState::Stopped, None, None);
         idle.prompt = Some(prompt.clone());

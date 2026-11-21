@@ -19,11 +19,22 @@ the file or select it even when automatic notes are off. ClawScribe captures
 the selected provider and destination when you begin the import.
 
 Open the saved meeting to check progress or see why automatic notes were skipped.
-If repair clears the last recording warning, automatic notes can start from
-the saved transcript. When gaps or other warnings remain, review the transcript
-and choose whether to generate notes. ClawScribe can retry an interrupted background job once on
+Capture gaps stay visible in the meeting. Notes can cover the available speech
+when the saved transcript is usable. A failed audio save or incomplete
+transcription pauses automatic notes until repair. You can also review the
+transcript and select **Generate summary** in the meeting.
+
+After you transcribe a recorded meeting, including an audio-only recording,
+ClawScribe checks the automatic setting and destination approval again. If the
+recording-folder update fails, the transcript is saved in the library. Choose
+**Retry file update** to finish publication. ClawScribe keeps existing notes.
+If ClawScribe closes just after saving the recording files, the same profile
+checks the transcript and current destination approval at the next startup.
+Meeting backups exclude this pending check.
+
+ClawScribe can retry an interrupted background job once on
 startup when automatic notes are still enabled and the same destination is
-approved. You can also generate notes yourself from the saved meeting.
+approved.
 
 Summary generation uses a snapshot of the saved transcript. Correcting or
 replacing a passage while generation is in progress prevents publication of

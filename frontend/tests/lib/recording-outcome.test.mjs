@@ -23,6 +23,9 @@ test('capture gaps and backup file failures do not claim playable audio failed t
   const combined = recordingRecoveryMessage(recordingOutcome({ capture_incomplete: true, recording_files_incomplete: true }));
   assert.match(combined, /lost during capture/);
   assert.match(combined, /backup files could not be saved/);
+  const restored = recordingRecoveryMessage(recordingOutcome({ capture_incomplete: true, recovery_files_elsewhere: true }));
+  assert.match(restored, /lost during capture/);
+  assert.match(restored, /Recover the audio on that computer/);
 });
 test('failed audio and incomplete transcription remain distinct actionable states', () => {
   assert.match(recordingRecoveryMessage(recordingOutcome({audio_save_failed: true})), /Audio could not/);

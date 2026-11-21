@@ -647,7 +647,7 @@ pub async fn eligible_history(
     frozen: &retrieval::FrozenScope,
     budget: usize,
 ) -> Result<(String, BTreeMap<String, i64>), String> {
-    let rows=sqlx::query("SELECT id,frozen_ids_json FROM knowledge_requests WHERE owner_id=? AND status='completed' AND restored=0 ORDER BY created_at DESC,id DESC LIMIT 20")
+    let rows=sqlx::query("SELECT id,frozen_ids_json FROM knowledge_requests WHERE owner_id=? AND status='completed' AND restored=0 AND CASE WHEN json_valid(input_json) THEN json_type(input_json,'$.reviewed_notes') IS NULL ELSE 0 END ORDER BY created_at DESC,id DESC LIMIT 20")
         .bind(owner_key(owner)?).fetch_all(pool).await.map_err(failure)?;
     let mut history = Vec::new();
     let mut dependencies = BTreeMap::new();

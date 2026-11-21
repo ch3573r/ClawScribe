@@ -3,6 +3,7 @@ use super::{scheduler::VerificationStatus, types::*};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqlitePool};
 pub(crate) mod literal;
+pub(crate) mod saved_search;
 pub const READ_BYTES: usize = 16 * 1024;
 pub const DISPLAY_BYTES: usize = 1024;
 

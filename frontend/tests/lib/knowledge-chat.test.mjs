@@ -72,6 +72,40 @@ function chatSurface(extra={}) {
   return {...hooks,state,render:()=>hooks.render(()=>KnowledgeChat({state,mode:'keyword',provider:'codex',model:'fixture',...extra}))};
 }
 
+test('personal review displays exact excerpts and destination and invalidates a changed draft', async () => {
+  const ref = { source:'note', meeting_id:'meeting', id:'meeting', start:1, end:12, fingerprint:'fixture' };
+  const options = { selectedNotes:[ref], destinationRevision:'original' };
+  const app = chatSurface(options);
+  const replies = [];
+  app.state.ask = async (question, mode, review) => {
+    const accepted = await review.confirm({ question, token:'one-use', excerpts:[{source:'note',text:'Äpfel\n50%_'}],
+      destination: { provider:'fixture', model:'example', endpoint:'https://model.example/path', organization:'Example team', project:'Sample' } });
+    replies.push(accepted && review.current());
+  };
+  const input = () => nodes(app.render()).find(n => n.type === 'textarea');
+  const dialog = () => nodes(app.render()).find(n => n.props?.confirmLabel === 'Confirm and send');
+  const submit = () => nodes(app.render()).find(n => n.type === 'form').props.onSubmit({ preventDefault(){} });
+  try {
+    assert.equal(dialog(), undefined); assert.deepEqual(replies, []);
+    input().props.onChange({target:{value:'Original question?'}});
+    submit();
+    assert.match(text(dialog()), /Original question\?/);
+    assert.match(text(dialog()), /Äpfel\n50%_/);
+    assert.match(text(dialog()), /https:\/\/model\.example\/path/);
+    assert.match(text(dialog()), /Example team/);
+    assert.deepEqual(replies, []);
+    const stale = dialog().props.onConfirm;
+    input().props.onChange({target:{value:'Edited question?'}});
+    app.render(); stale(); await new Promise(setImmediate);
+    assert.deepEqual(replies, [false]);
+    submit(); options.destinationRevision = 'changed'; app.render();
+    await new Promise(setImmediate);
+    assert.deepEqual(replies, [false,false]);
+    submit(); dialog().props.onConfirm(); await new Promise(setImmediate);
+    assert.deepEqual(replies,[false,false,true]);
+  } finally { app.unmount(); }
+});
+
 test('saved conversation labels use the list metadata when the menu opens', () => {
   const app = chatSurface();
   let listReads = 0;

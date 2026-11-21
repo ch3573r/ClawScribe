@@ -187,9 +187,11 @@ async fn snapshot_tables(
             .map_err(failure)?;
         let args = columns
             .iter()
-            .map(|c| {
+            .filter_map(|c| {
                 let name: String = c.get("name");
-                format!("'{name}', \"{name}\"")
+                // Resume authorization belongs to the source profile.
+                (*table != "summary_processes" || name != "automatic_request_fingerprint")
+                    .then(|| format!("'{name}', \"{name}\""))
             })
             .collect::<Vec<_>>()
             .join(",");
@@ -1641,6 +1643,30 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn pending_retranscription_notes_are_private_to_the_profile() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("INSERT INTO retranscription_notes_retry VALUES ('review-test','synthetic-profile','publication')")
+            .execute(&pool).await.unwrap();
+        assert!(crate::database::repositories::summary::SummaryProcessesRepository::create_automatic_process(
+            &pool, "review-test", "recording", "approved"
+        ).await.unwrap());
+        let (mut manifest, folders) = snapshot(&pool).await.unwrap();
+        assert!(!manifest.tables.contains_key("retranscription_notes_retry"));
+        assert!(
+            !manifest.tables["summary_processes"][0].contains_key("automatic_request_fingerprint")
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("synthetic.zip");
+        manifest
+            .tables
+            .insert("retranscription_notes_retry".into(), vec![]);
+        write_archive(&archive, manifest, folders).unwrap();
+        assert!(
+            matches!(unpack(&archive, temp.path(), &HashSet::new()), Err(error) if error.contains("Unsupported meeting archive"))
+        );
+    }
+
+    #[tokio::test]
     async fn restores_app_data_export_history_and_prevents_duplicate_remote_creates() {
         use crate::exports::{
             client::{GraphClient, RetryPolicy, TokioSleeper},
@@ -2080,10 +2106,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            Summaries::automatic_resume_candidates(&source, fingerprint)
+            Summaries::automatic_resume_candidates(&source, fingerprint, None)
                 .await
                 .unwrap(),
-            vec!["matching"]
+            vec![("matching".to_owned(), fingerprint.to_owned())]
         );
 
         let destination = empty_conversation_destination().await;
@@ -2154,10 +2180,10 @@ mod tests {
             .unwrap();
         assert_eq!(partial.as_deref(), Some("Local partial"));
         assert_eq!(
-            Summaries::automatic_resume_candidates(&destination, fingerprint)
+            Summaries::automatic_resume_candidates(&destination, fingerprint, None)
                 .await
                 .unwrap(),
-            vec!["existing"]
+            vec![("existing".to_owned(), fingerprint.to_owned())]
         );
         assert!(
             !Summaries::claim_automatic_resume(&destination, "matching", fingerprint)

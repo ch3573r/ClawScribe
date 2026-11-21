@@ -124,6 +124,7 @@ pub struct RecordingState {
     warning_cleared_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
     // Called once per recording when the recordings volume runs low.
     disk_space_callback: Mutex<Option<Box<dyn Fn(u64, &std::path::Path) + Send + Sync>>>,
+    latest_levels: Mutex<Option<(Instant, super::recording_levels::RecordingLevels)>>,
     // Called about ten times a second with the live input levels.
     levels_callback:
         Mutex<Option<Box<dyn Fn(&super::recording_levels::RecordingLevels) + Send + Sync>>>,
@@ -161,6 +162,7 @@ impl RecordingState {
             warning_cleared_callback: Mutex::new(None),
             disk_space_callback: Mutex::new(None),
             levels_callback: Mutex::new(None),
+            latest_levels: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
             recording_end: Mutex::new(None),
@@ -171,6 +173,7 @@ impl RecordingState {
 
     // Recording control
     pub fn start_recording(&self) -> Result<()> {
+        *self.latest_levels.lock().unwrap() = None;
         self.capture_incomplete.store(false, Ordering::Release);
         self.is_recording.store(true, Ordering::SeqCst);
         *self.recording_start.lock().unwrap() = Some(Instant::now());
@@ -395,9 +398,24 @@ impl RecordingState {
     }
 
     pub fn report_levels(&self, levels: &super::recording_levels::RecordingLevels) {
+        // Sampled by the optional controls window. Metering must never delay the pipeline.
+        if let Ok(mut latest) = self.latest_levels.try_lock() {
+            *latest = Some((Instant::now(), *levels));
+        }
         if let Some(callback) = self.levels_callback.lock().unwrap().as_ref() {
             callback(levels);
         }
+    }
+
+    pub(crate) fn latest_levels(&self) -> Option<super::recording_levels::RecordingLevels> {
+        let (at, mut levels) = (*self.latest_levels.lock().ok()?)?;
+        if at.elapsed() >= std::time::Duration::from_millis(500) {
+            for source in [&mut levels.mic, &mut levels.system].into_iter().flatten() {
+                source.rms = 0.0;
+                source.peak = 0.0;
+            }
+        }
+        Some(levels)
     }
 
     /// Tell the UI the recordings volume is running low. Does not affect
@@ -602,6 +620,7 @@ impl Default for RecordingState {
             warning_cleared_callback: Mutex::new(None),
             disk_space_callback: Mutex::new(None),
             levels_callback: Mutex::new(None),
+            latest_levels: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
             recording_end: Mutex::new(None),
@@ -625,6 +644,35 @@ impl Clone for RecordingStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controls_levels_expire_without_changing_which_sources_are_captured() {
+        use crate::audio::recording_levels::{RecordingLevels, SourceLevel};
+        let state = RecordingState::new();
+        let levels = RecordingLevels {
+            mic: Some(SourceLevel {
+                rms: 0.2,
+                peak: 0.4,
+            }),
+            system: None,
+        };
+        assert_eq!(state.latest_levels(), None);
+        state.report_levels(&levels);
+        assert_eq!(state.latest_levels(), Some(levels));
+        *state.latest_levels.lock().unwrap() =
+            Some((Instant::now() - std::time::Duration::from_secs(1), levels));
+        let stale = state.latest_levels().unwrap();
+        assert_eq!(
+            stale.mic,
+            Some(SourceLevel {
+                rms: 0.0,
+                peak: 0.0
+            })
+        );
+        assert_eq!(stale.system, None);
+        state.start_recording().unwrap();
+        assert_eq!(state.latest_levels(), None);
+    }
 
     #[tokio::test]
     async fn capture_overrun_preserves_accepted_audio_and_allows_a_new_session() {

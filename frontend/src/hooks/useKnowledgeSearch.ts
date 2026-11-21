@@ -2,7 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { createKnowledgeController, scopeReady } from "@/lib/knowledge-state";
-import { knowledgeService } from "@/services/knowledgeService";
+import type { SavedReference } from "@/lib/archive-search";
+import { knowledgeService, type NotePreview } from "@/services/knowledgeService";
 import type {
   ConversationOwner,
   EvidenceDisplay,
@@ -335,7 +336,11 @@ export function useKnowledgeSearch(
       if (current()) setCreating(false);
     }
   }
-  async function ask(question: string, mode: SearchMode) {
+  async function ask(question: string, mode: SearchMode, review?: {
+    references: SavedReference[];
+    confirm: (preview: NotePreview) => Promise<boolean>;
+    current: () => boolean;
+  }) {
     if (!surfaceActive || scopeSwitchPending.current || !question.trim() || historyLoading) return;
     if (controller.pendingRequest() || createPending.current || sharingPending.current) return;
     if (!scopeReady(scope)) {
@@ -351,9 +356,10 @@ export function useKnowledgeSearch(
     let createdOwner: ConversationOwner | null = null;
     let submissionError = "";
     let submittedId = "";
+    let answered = false;
     try {
       await controller.submit(
-        question.trim(),
+        review ? globalThis.crypto.randomUUID() : question.trim(),
         async (request_id) => {
           submittedId = request_id;
           let requestOwner = owner;
@@ -370,11 +376,26 @@ export function useKnowledgeSearch(
             createdOwner = requestOwner;
           }
           if (!requestOwner || !current()) return null;
-          await knowledgeService.ask({
+          const request = {
             request_id,
             owner: requestOwner,
             search: { scope, query: question.trim(), mode, document_ids: [...selectedDocumentIds] },
-          });
+          };
+          if (review) {
+            if (!review.current()) return null;
+            const preview = await knowledgeService.previewNotes(request, review.references);
+            try {
+              if (!current() || !review.current() || !(await review.confirm(preview)) || !current() || !review.current()) {
+                throw new Error("Question was not sent.");
+              }
+              await knowledgeService.askWithNotes(request, review.references, preview.token);
+              answered = true;
+            } finally {
+              void knowledgeService.discardNoteReview(preview.token).catch(() => {});
+            }
+          } else {
+            await knowledgeService.ask(request);
+          }
           if (!current()) return null;
           const history = await knowledgeService.history(requestOwner);
           if (!current()) return null;
@@ -385,7 +406,7 @@ export function useKnowledgeSearch(
           if (history) setMessages(history);
           adoptedRetry.current = null;
         },
-        () => adoptedRetry.current?.id ?? globalThis.crypto.randomUUID(),
+        () => (!review && adoptedRetry.current?.id) || globalThis.crypto.randomUUID(),
       );
     } catch (e) {
       if (current()) {
@@ -401,7 +422,7 @@ export function useKnowledgeSearch(
           const value: ConversationOwner = createdOwner;
           if (submissionError) {
             adoptionError.current = { ownerId: value.id, error: submissionError };
-            adoptedRetry.current = {
+            if (!review) adoptedRetry.current = {
               identity: JSON.stringify({ scope, owner: value, libraryRevision, answerConfiguration, selectedDocumentIds }),
               question: question.trim(),
               id: submittedId,
@@ -412,6 +433,7 @@ export function useKnowledgeSearch(
         }
       }
     }
+    return answered;
   }
   async function clear() {
     if (!owner) return;

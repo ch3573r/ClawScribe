@@ -62,7 +62,7 @@ export function RecordingRequests({ ready }: { ready: boolean }) {
         void confirmCallPrompt(call.key).catch(() => toast.error("Could not start the recording."));
       };
       const id = toast(call.retry ? `Could not record the ${label} call` : `${label} call detected`, {
-        description: call.retry ? "Try again?" : "Start recording this call?",
+        description: call.eventTitle ? `Is this the call for “${call.eventTitle}”?` : call.retry ? "Try again?" : "Start recording this call?",
         duration: PROMPT_DURATION_MS,
         action: { label: call.retry ? "Try again" : "Record", onClick: answer },
       });
@@ -99,7 +99,8 @@ export function RecordingRequests({ ready }: { ready: boolean }) {
         return;
       }
       try {
-        await current.current.start(request.source === "call" ? "detected_call" : "remote_request", request.requestId);
+        const source = request.source === "calendar_call" ? "calendar_call" : request.source === "call" ? "detected_call" : "remote_request";
+        await current.current.start(source, request.requestId);
       } catch (error) {
         if (!disposed) reportStartFailure(error);
         // An early webview refusal never entered the native start command.

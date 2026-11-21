@@ -120,6 +120,12 @@ fn opaque_id(value: &str, max: usize) -> bool {
 }
 
 impl CalendarLink {
+    pub(crate) fn start_time(&self) -> Option<i64> {
+        chrono::DateTime::parse_from_rfc3339(self.start.as_deref()?)
+            .ok()
+            .map(|time| time.timestamp_millis())
+    }
+
     pub(crate) fn source(&self) -> CalendarSource {
         self.source
     }

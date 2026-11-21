@@ -83,11 +83,12 @@ async fn error_message(
     (message, quota_exhausted)
 }
 
-pub(crate) async fn send<F, Fut>(
+pub(super) async fn send<F, Fut>(
     mut request: F,
     token: Option<&CancellationToken>,
     secret: &str,
     prompts: &[&str],
+    single_attempt: bool,
 ) -> Result<Value, String>
 where
     F: FnMut() -> Fut,
@@ -126,7 +127,7 @@ where
                     (message.to_string(), retryable, None)
                 }
             };
-            if !retryable || attempt == 2 {
+            if single_attempt || !retryable || attempt == 2 {
                 return Err(error);
             }
             let jitter = rand::thread_rng().gen_range(0..250);
@@ -177,10 +178,12 @@ mod tests {
             let (url, count) =
                 server(vec![response(429, "", &body), response(200, "", "{}")]).await;
             let client = reqwest::Client::new();
-            assert!(send(|| async { Ok(client.get(&url)) }, None, "", &[])
-                .await
-                .unwrap_err()
-                .contains("Quota exhausted"));
+            assert!(
+                send(|| async { Ok(client.get(&url)) }, None, "", &[], false)
+                    .await
+                    .unwrap_err()
+                    .contains("Quota exhausted")
+            );
             assert_eq!(count.load(Ordering::SeqCst), 1);
         }
         let (url, count) = server(vec![
@@ -189,7 +192,7 @@ mod tests {
         ])
         .await;
         let client = reqwest::Client::new();
-        let error = send(|| async { Ok(client.get(&url)) }, None, "", &[])
+        let error = send(|| async { Ok(client.get(&url)) }, None, "", &[], false)
             .await
             .unwrap_err();
         assert!(error.contains("60 minutes"));
@@ -205,7 +208,7 @@ mod tests {
         .await;
         let client = reqwest::Client::new();
         let start = std::time::Instant::now();
-        send(|| async { Ok(client.get(&url)) }, None, "", &[])
+        send(|| async { Ok(client.get(&url)) }, None, "", &[], false)
             .await
             .unwrap();
         assert!(start.elapsed() >= Duration::from_secs(1));
@@ -221,9 +224,15 @@ mod tests {
         )])
         .await;
         let client = reqwest::Client::new();
-        let error = send(|| async { Ok(client.get(&url)) }, None, "demo-secret", &[])
-            .await
-            .unwrap_err();
+        let error = send(
+            || async { Ok(client.get(&url)) },
+            None,
+            "demo-secret",
+            &[],
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("Invalid model"));
         assert!(!error.contains("demo-secret") && !error.contains("short-token"));
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -244,7 +253,13 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(1),
-            send(|| async { Ok(client.get(&url)) }, Some(&token), "", &[]),
+            send(
+                || async { Ok(client.get(&url)) },
+                Some(&token),
+                "",
+                &[],
+                false,
+            ),
         )
         .await
         .unwrap();

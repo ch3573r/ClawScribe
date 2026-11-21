@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { PageSection } from "@/components/ui/page-section";
+import type { SavedReference } from "@/lib/archive-search";
+import type { NotePreview } from "@/services/knowledgeService";
 import { ConfirmationModal } from "@/components/ConfirmationModel/confirmation-modal";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -81,10 +83,12 @@ function conversationLabel(question?: string | null, createdAt?: string) {
   const label = question.replace(/\s+/g, " ").trim().slice(0, 60);
   return `${label}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}`;
 }
-export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachments, suggestions, headerMenuExtra, emptyState }: {
+export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachments, suggestions, headerMenuExtra, emptyState, selectedNotes, removeNote, clearNotes, reviewActive = true, destinationRevision }: {
   state: KnowledgeSearchState; mode: SearchMode; provider?: string; model?: string; title?: string; secondary?: ReactNode; compact?: boolean; headerActions?: ReactNode;
   contextBar?: ReactNode; composerStart?: ReactNode; attachments?: ReactNode; suggestions?: readonly string[]; headerMenuExtra?: ReactNode;
   emptyState?: ReactNode;
+  selectedNotes?: SavedReference[]; removeNote?: (reference: SavedReference) => void; clearNotes?: () => void;
+  reviewActive?: boolean; destinationRevision?: string;
 }) {
   const [question, setQuestion] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -97,9 +101,30 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const pending = useRef<{ text: string; scope: string; owner?: string; provider?: string; model?: string; started: boolean; finished: boolean } | null>(null);
   const scope = JSON.stringify({scope:state.scope,documents:state.selectedDocumentIds});
+  const noteKey = JSON.stringify([selectedNotes, question, scope, state.owner?.id, mode, provider, model, destinationRevision, reviewActive]);
+  const currentNoteKey = useRef(noteKey);
+  currentNoteKey.current = noteKey;
+  const mounted = useRef(true);
+  const waiting = useRef<{ token: string; resolve: (answer: boolean) => void } | null>(null);
+  const [review, setReview] = useState<NotePreview | null>(null);
+  const closeReview = (confirmed = false, token?: string) => {
+    const entry = waiting.current;
+    if (token && entry?.token !== token) return;
+    waiting.current = null;
+    setReview(null);
+    entry?.resolve(confirmed);
+  };
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; waiting.current?.resolve(false); waiting.current = null; };
+  }, []);
+  useEffect(() => { closeReview(); }, [noteKey]);
+  const hasNotes = !!selectedNotes?.length;
+  const notesInScope = !hasNotes || (state.scope.kind === "library" && !state.scope.filter.all_meetings
+    && selectedNotes.every(ref => state.scope.kind === "library" && state.scope.filter.meeting_ids.includes(ref.meeting_id)));
   const externalReferences = !!state.selectedDocumentIds?.length && provider !== "builtin-ai";
   const needsSharing = externalReferences && !state.sharingEnabled;
-  const ready = !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
+  const ready = notesInScope && !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
   // Draft keystrokes must not rebuild the Markdown/citation tree for the entire history.
   const messages = useMemo(() => state.messages.map(message => <article key={message.id} className={`rounded-lg p-3 ${message.role === "user" ? "ml-6 bg-primary/10" : "bg-muted"}`}>
     <div className="mb-1 flex items-center justify-between gap-2">
@@ -129,12 +154,30 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const submit = () => {
     if (!question.trim() || !ready || state.sending || pending.current) return;
     const request = { text: question, scope, owner: state.owner?.id, provider, model, started: false, finished: false };
-    pending.current = request; setQuestion("");
-    void state.ask(request.text, mode).catch(() => { if (pending.current === request) setQuestion(current => current || request.text); }).finally(() => {
-      request.finished = true; if (pending.current === request) setSettled(current => current + 1);
+    pending.current = request;
+    const current = () => mounted.current && pending.current === request && currentNoteKey.current === noteKey && reviewActive;
+    const reviewNotes = selectedNotes?.length ? {
+      references: selectedNotes,
+      current,
+      confirm: (preview: NotePreview) => new Promise<boolean>(resolve => {
+        if (!current()) { resolve(false); return; }
+        waiting.current = { token: preview.token, resolve };
+        setReview(preview);
+      }),
+    } : undefined;
+    if (!reviewNotes) setQuestion("");
+    const operation = reviewNotes ? state.ask(request.text, mode, reviewNotes) : state.ask(request.text, mode);
+    void operation.then(answered => {
+      if (reviewNotes && answered && currentNoteKey.current === noteKey) {
+        clearNotes?.();
+        setQuestion(value => value === request.text ? "" : value);
+      }
+    }).catch(() => { if (pending.current === request) setQuestion(current => current || request.text); }).finally(() => {
+      request.finished = true;
+      if (pending.current === request) setSettled(current => current + 1);
     });
   };
-  const questionInput = <Textarea ref={questionRef} id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} onChange={event => setQuestion(event.target.value)} rows={1} placeholder={compact ? "Ask about this meeting…" : "Ask about decisions, action items or what was said"} className={`${compact ? "min-h-10" : "min-h-11"} resize-none`}
+  const questionInput = <Textarea ref={questionRef} id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} disabled={hasNotes && busy} onChange={event => setQuestion(event.target.value)} rows={1} placeholder={compact ? "Ask about this meeting…" : "Ask about decisions, action items or what was said"} className={`${compact ? "min-h-10" : "min-h-11"} resize-none`}
     onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); submit(); } }} />;
   return <PageSection className="flex h-full min-h-0 flex-col overflow-hidden" aria-label={title}>
     <header className={`flex shrink-0 items-center gap-2 border-b border-border py-3 ${compact ? "px-3" : "px-5"}`}>
@@ -166,6 +209,20 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
           void state.clear();
         }}
       />}
+    {review && <ConfirmationModal isOpen title="Review personal excerpts" text="Confirm the exact text and destination for this question."
+      confirmLabel="Confirm and send" confirmVariant="default" onCancel={() => closeReview()} onConfirm={() => closeReview(true, review.token)}>
+      <div className="max-h-[55vh] space-y-3 overflow-y-auto">
+      <p className="whitespace-pre-wrap break-words text-sm"><strong>Question</strong><br />{review.question}</p>
+      <p className="break-all text-sm"><strong>Destination</strong><br />{review.destination.provider} · {review.destination.model}<br />{review.destination.endpoint ?? "Built-in AI on this device"}
+        {review.destination.organization && <> · Organization {review.destination.organization}</>}{review.destination.project && <> · Project {review.destination.project}</>}</p>
+      <ol className="space-y-2">{review.excerpts.map((excerpt, index) => <li key={index} className="rounded border border-border p-2">
+        <div className="flex items-center justify-between gap-2"><strong className="text-xs">{excerpt.source === "note" ? "Saved note" : "Bookmark"}</strong>
+          <Button variant="ghost" size="sm" onClick={() => { closeReview(); const ref = selectedNotes?.[index]; if (ref) removeNote?.(ref); }}>Remove</Button></div>
+        <p className="whitespace-pre-wrap break-words text-sm">{excerpt.text}</p>
+      </li>)}</ol>
+      <p className="text-xs text-muted-foreground">The question also uses transcript evidence, available summary overviews and any selected references from these meetings. Personal excerpts apply only to this question.</p>
+      </div>
+    </ConfirmationModal>}
     {compact && contextBar && <div className="shrink-0 border-b border-border px-3 py-1">{contextBar}</div>}
     <ScrollArea className={`min-h-0 flex-1 ${emptyState ? "[&_[data-radix-scroll-area-viewport]>div]:h-full" : ""}`}>
       <div className={`space-y-4 ${compact ? "p-3" : "p-5"} ${emptyState ? "flex h-full flex-col" : ""}`} aria-live="polite">
@@ -182,12 +239,15 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
         <div ref={end} />
       </div>
     </ScrollArea>
+    {hasNotes && <div className="flex shrink-0 items-center gap-2 px-5 text-xs text-muted-foreground">
+      <span>{notesInScope ? "Review selected excerpts before asking." : "A selected excerpt is outside the current meeting selection."}</span>
+      <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={clearNotes}>Remove all excerpts</Button></div>}
     <form className={`sticky bottom-0 shrink-0 border-t border-border bg-card ${compact ? "space-y-2 p-3" : "space-y-3 p-5"}`} onSubmit={event => { event.preventDefault(); submit(); }}>
       <label className={compact ? "sr-only" : "block text-xs font-medium"} htmlFor={`knowledge-question-${state.owner?.id ?? "library"}`}>Question</label>
       {compact && attachments}
-      {compact ? <div className="flex flex-wrap items-end gap-2">{composerStart}<div className="min-w-0 flex-1">{questionInput}</div></div> : <div className="flex items-end gap-3"><div className="min-w-0 flex-1">{questionInput}</div><Button type="submit" disabled={!ready || state.sending || !question.trim()}>Ask</Button></div>}
+      {compact ? <div className="flex flex-wrap items-end gap-2">{composerStart}<div className="min-w-0 flex-1">{questionInput}</div></div> : <div className="flex items-end gap-3"><div className="min-w-0 flex-1">{questionInput}</div><Button type="submit" disabled={!ready || state.sending || !question.trim()}>{hasNotes ? "Review and ask" : "Ask"}</Button></div>}
       <div className="flex items-center gap-2">{compact && <Button type="submit" disabled={!ready || state.sending || !question.trim()}>Ask</Button>}
-        {state.sending && <Button type="button" variant="outline" onClick={state.cancel}>Cancel answer</Button>}
+        {state.sending && <Button type="button" variant="outline" onClick={() => { closeReview(); state.cancel(); }}>Cancel answer</Button>}
         <span className="text-xs text-muted-foreground">Shift+Enter for a new line</span>
       </div>
       {!provider || !model ? <p className="text-xs text-muted-foreground">Choose a summary provider and model in Settings.</p> : null}

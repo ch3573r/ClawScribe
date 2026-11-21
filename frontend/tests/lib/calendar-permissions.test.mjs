@@ -27,7 +27,7 @@ test('upcoming meetings skip calendar requests on mount, timer, focus and visibi
       sonner: { toast: { error() {} } },
       '@/lib/openExternal': { openExternal: async () => {} },
       '@/hooks/useICalendar': { useICalendar: () => ({ events: [], sources: [] }) },
-      '@/hooks/usePendingCalendar': { usePendingCalendar: () => null },
+      '@/hooks/usePendingCalendar': { useNextCalendarChoice: () => ({ link: null }) },
       '@/services/microsoftExportService': { microsoftExportService: {
         connectionStatus: async () => status,
         listCalendarEvents: async () => { reads++; return []; },

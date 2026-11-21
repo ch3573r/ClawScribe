@@ -115,6 +115,7 @@ pub struct OpenAICompatibleProcessingProvider {
     config: OpenAICompatibleProviderConfig,
     client: Client,
     dispatch_check: Option<super::request_config::DispatchCheck>,
+    single_attempt: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -181,16 +182,35 @@ impl OpenAICompatibleProcessingProvider {
         client: reqwest::ClientBuilder,
     ) -> Result<Self, String> {
         let config = normalize_config(config)?;
-        let client = client
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(config.timeout_seconds))
-            .build()
-            .map_err(|e| format!("Failed to create OpenAI-compatible HTTP client: {e}"))?;
+        let client = Self::http_client(client, config.timeout_seconds)?;
         Ok(Self {
             config,
             client,
             dispatch_check: None,
+            single_attempt: false,
         })
+    }
+
+    fn http_client(
+        builder: reqwest::ClientBuilder,
+        timeout_seconds: u64,
+    ) -> Result<Client, String> {
+        builder
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(timeout_seconds))
+            .build()
+            .map_err(|e| format!("Failed to create OpenAI-compatible HTTP client: {e}"))
+    }
+
+    pub(super) fn into_reviewed(mut self) -> Result<Self, String> {
+        // Only change transport. The configuration already identifies the exact
+        // endpoint shown in the preview, including any repeated path components.
+        self.client = Self::http_client(
+            super::request_config::direct_client().http1_only(),
+            self.config.timeout_seconds,
+        )?;
+        self.single_attempt = true;
+        Ok(self)
     }
 
     pub(super) fn with_dispatch_check(
@@ -515,6 +535,7 @@ impl OpenAICompatibleProcessingProvider {
             cancellation_token,
             self.config.api_key.as_deref().unwrap_or_default(),
             &[system_prompt, user_prompt],
+            self.single_attempt,
         )
         .await?;
         super::llm_client::parse_response(
@@ -593,7 +614,12 @@ impl OpenAICompatibleProcessingProvider {
 
         let client = if self.config.base_url.starts_with("http:") {
             crate::openai::secret_destination::secret_client(
-                Client::builder().timeout(Duration::from_secs(self.config.timeout_seconds)),
+                if self.single_attempt {
+                    super::request_config::direct_client().http1_only()
+                } else {
+                    Client::builder()
+                }
+                .timeout(Duration::from_secs(self.config.timeout_seconds)),
                 &self.config.base_url,
                 self.config.allow_unencrypted,
             )
@@ -963,6 +989,30 @@ mod tests {
                 .await
                 .unwrap(),
             "The deadline was not agreed."
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewed_post_uses_the_previewed_path_with_repeated_components() {
+        let path = "/gateway/chat/completions/chat/completions/chat/completions";
+        let server = fake_openai_server(move |request, _| {
+            assert!(request.starts_with(&format!("POST {path} HTTP/1.1")));
+            (200, chat_response("Synthetic answer"))
+        })
+        .await;
+        let provider = OpenAICompatibleProcessingProvider::new(OpenAICompatibleProviderConfig {
+            base_url: format!("{server}{path}"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(provider.destination().0, format!("{server}{path}"));
+        let reviewed = provider.into_reviewed().unwrap();
+        assert_eq!(
+            reviewed
+                .send_text_prompt("Only use the question.", "Synthetic excerpt")
+                .await
+                .unwrap(),
+            "Synthetic answer"
         );
     }
 

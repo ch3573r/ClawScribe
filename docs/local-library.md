@@ -5,6 +5,9 @@
 Open **Meetings → Archive** to see transcript and summary status alongside
 titles, dates, and project tags. The archive shows whether audio was recorded or
 imported and its measured duration when available, including audio-only recordings.
+New recordings use the time capture began, including when Stop or recovery saves
+the meeting on another day. A legacy recording without a readable start time
+uses its save time. Imports keep the date selected during import.
 Older meetings may have no duration or source. **Meetings that need attention** puts saved
 meetings with recording warnings, missing transcripts, or failed or cancelled
 summary jobs before the rest of the archive. Select **Needs attention** to show
@@ -71,21 +74,50 @@ already read are under the client's control.
 
 ## Archive search
 
-Open **Meetings → Archive** to browse saved meetings or search titles and
-transcripts together. Search ignores letter case and treats punctuation like
-`%` and `_` literally. Choose a Project filter or inclusive date range to
-narrow both kinds of results. Select **Show in transcript** to open the
-verified segment, including segments on later transcript pages. **Back to
-archive** restores the search text, project filters, dates, and sort order
-for the current app session. The sidebar offers the same search with one
-passage preview per matching meeting.
+Open **Meetings → Archive** to search saved titles, current transcript
+passages, visible saved summaries, personal notes and timestamped bookmarks.
+Search ignores letter case, including German umlauts, and treats punctuation
+such as `%` and `_` literally. Projects, inclusive dates and **Needs attention**
+apply to every source. The sidebar shows a preview for each matching source
+type in a meeting.
 
-Queries accept up to 256 characters. The desktop shows up to 50 title matches
-and 50 passage matches. Searches stop at a scan or time limit and tell you
-when results are limited. Browse or narrow the query and filters to search
+Open a match to see its source. Transcript passages open at their verified
+position, including later pages. Summary and note matches show a verified
+excerpt. Saved notes open with their surrounding text, and bookmark matches
+open the marker in the meeting. A changed or
+deleted source prompts a new search. **Back to archive** restores your search,
+filters and sort order for the current app session.
+
+Queries accept up to 256 characters. The desktop shows up to 50 matches
+per source type. Saved summaries, notes and bookmark labels are checked
+locally with a 512 KiB limit per stored entry. Searches reaching a size, row,
+result or time limit display a notice. Browse or narrow the query and filters to search
 a smaller set. Literal search uses a local substring index to find candidates,
 then checks the saved text and its exact offset. Short searches and terms without
 an indexable substring use a bounded scan. No download or answer provider is required.
+
+**Ask about these results** opens a fresh Meeting memory conversation scoped
+to the displayed matching meetings, including when results are limited.
+The Archive also carries over project and date filters. Review the selected
+meetings, compose a question, and choose **Ask** to use the configured summary
+provider. Answers use the existing transcript evidence and eligible saved
+summary overviews. Personal notes and bookmarks stay local by default. Check
+**Review excerpt with a question** on individual results to bring up to eight
+excerpt references into the composer. Opening the composer sends nothing.
+**Review and ask** resolves each excerpt locally and shows its exact text, the
+question, and the provider, model, endpoint and configured organization or
+project. Remove an excerpt or go back to edit the question before confirming.
+**Confirm and send** allows one attempt with that selection. Changes to the
+sources, question, scope or destination require a fresh review. A failed
+attempt also requires another review.
+
+Reviewed requests send the displayed snippets as personal context alongside
+the usual meeting evidence. They omit prior conversation. Their saved questions
+and answers remain visible locally and are excluded from future provider
+history. The built-in model and providers with an identifiable HTTP endpoint
+support this review. Codex and Claude Code manage their own connections, so
+use them with personal excerpts deselected. The local assistant's `search_meetings` tool continues
+to match only titles and current transcripts.
 
 ## Meeting memory
 

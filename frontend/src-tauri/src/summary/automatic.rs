@@ -4,15 +4,18 @@ use super::request_config::{AutomaticRequest, DestinationReview, DispatchCheck};
 use super::service::{SummaryProviderRequest, SummaryService};
 use crate::{
     behavior_settings::{self, Backing},
-    database::repositories::summary::{SummaryProcessesRepository, RECOVERY_NEEDED},
+    database::repositories::summary::{SummaryProcessesRepository, NO_TRANSCRIPT, RECOVERY_NEEDED},
     state::AppState,
 };
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_store::StoreExt;
+
+pub(crate) mod publication;
 
 const LEGACY_AUTO_SUMMARY: &str = "automatic_summary";
 const AUTO_SUMMARY: &str = "automatic_summary_v2";
@@ -246,8 +249,86 @@ pub(crate) async fn start<R: Runtime>(
     pool: SqlitePool,
     meeting_id: String,
 ) -> Result<(), String> {
-    launch(app, pool, meeting_id, Start::Recording).await?;
+    launch_recording(app, pool, meeting_id).await?;
     Ok(())
+}
+
+async fn launch_recording<R: Runtime>(
+    app: AppHandle<R>,
+    pool: SqlitePool,
+    meeting_id: String,
+) -> Result<Launch, String> {
+    if !recording_allowed(&app, &pool, &meeting_id).await? {
+        return Ok(Launch::Handled);
+    }
+    launch(app, pool, meeting_id, Start::Recording).await
+}
+
+async fn recording_allowed<R: Runtime>(
+    app: &AppHandle<R>,
+    pool: &SqlitePool,
+    meeting_id: &str,
+) -> Result<bool, String> {
+    let restored = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Could not check the recording location")?
+        .join("restored-recordings");
+    let roots = crate::audio::recording_preferences::recording_roots(app).await;
+    is_local_recording(pool, meeting_id, &restored, &roots).await
+}
+
+async fn is_local_recording(
+    pool: &SqlitePool,
+    meeting: &str,
+    restored_root: &std::path::Path,
+    roots: &[std::path::PathBuf],
+) -> Result<bool, String> {
+    let row: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT recording_source, folder_path FROM meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| "Could not check the recording source")?;
+    let Some((source, Some(folder))) = row else {
+        return Ok(false);
+    };
+    // Archive restore preserves the source field but does not transfer automatic consent.
+    if source.as_deref() == Some("import")
+        || crate::local_path::lexically_inside(&folder, restored_root)
+    {
+        return Ok(false);
+    }
+    // Before recording_source existed, only an owned native recording marker
+    // can establish origin. A folder or a recording_outcomes row alone cannot.
+    let recorded_here = source.as_deref() == Some("recording");
+    let meeting = meeting.to_owned();
+    let roots = roots.to_vec();
+    let restored_root = restored_root.to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        use crate::database::meeting_files;
+        let Ok(folder) = crate::trusted_roots::resolve_allowed(&folder, &roots) else {
+            return recorded_here;
+        };
+        if crate::local_path::lexically_inside(&folder.to_string_lossy(), &restored_root) {
+            return false;
+        }
+        let Some(marker) = meeting_files::read_marker(&folder) else {
+            return recorded_here;
+        };
+        let owner = meeting_files::stamped_meeting_id(&marker)
+            .or_else(|| meeting_files::recording_id(&marker));
+        if meeting_files::has_invalid_marker_id(&marker)
+            || marker["source"] == "import"
+            || owner.is_some_and(|id| id != meeting)
+        {
+            return false;
+        }
+        recorded_here
+            || (owner.is_some() && crate::audio::interrupted::is_recording_marker(&marker))
+    })
+    .await
+    .map_err(|_| "Could not check the recording source".into())
 }
 
 pub(crate) async fn start_import<R: Runtime>(
@@ -261,6 +342,7 @@ pub(crate) async fn start_import<R: Runtime>(
 }
 
 pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: SqlitePool) {
+    publication::resume(&app, &pool).await;
     if get_automatic_summary_preference(app.clone()).await != Ok(true) {
         return;
     }
@@ -280,25 +362,35 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
     };
     drop(route_guard);
 
-    let Ok(candidates) =
-        SummaryProcessesRepository::automatic_resume_candidates(&pool, &fingerprint).await
+    let profile = publication::stored_profile(&app).ok().flatten();
+    let Ok(candidates) = SummaryProcessesRepository::automatic_resume_candidates(
+        &pool,
+        &fingerprint,
+        profile.as_deref(),
+    )
+    .await
     else {
         log::warn!("Could not read interrupted automatic notes");
         return;
     };
-    for meeting in candidates {
+    for (meeting, stored_fingerprint) in candidates {
+        if stored_fingerprint != fingerprint
+            && recording_allowed(&app, &pool, &meeting).await != Ok(true)
+        {
+            continue;
+        }
         match launch(
             app.clone(),
             pool.clone(),
             meeting,
-            Start::Resume(request.clone()),
+            Start::Resume(request.clone(), stored_fingerprint),
         )
         .await
         {
-            Ok(Some(worker)) => {
+            Ok(Launch::Started(worker)) => {
                 let _ = worker.await;
             }
-            Ok(None) => {}
+            Ok(_) => {}
             Err(_) => log::warn!("Could not resume automatic notes"),
         }
     }
@@ -307,7 +399,13 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
 enum Start {
     Recording,
     Import(AuthorizedRequest),
-    Resume(AuthorizedRequest),
+    Resume(AuthorizedRequest, String),
+}
+
+enum Launch {
+    Handled,
+    Busy,
+    Started(tauri::async_runtime::JoinHandle<()>),
 }
 
 async fn launch<R: Runtime>(
@@ -315,28 +413,28 @@ async fn launch<R: Runtime>(
     pool: SqlitePool,
     meeting: String,
     start: Start,
-) -> Result<Option<tauri::async_runtime::JoinHandle<()>>, String> {
+) -> Result<Launch, String> {
     let (origin, resume, prepared) = match start {
-        Start::Recording => ("recording", false, None),
-        Start::Import(request) => ("import", false, Some(request)),
-        Start::Resume(request) => ("", true, Some(request)),
+        Start::Recording => ("recording", None, None),
+        Start::Import(request) => ("import", None, Some(request)),
+        Start::Resume(request, fingerprint) => ("", Some(fingerprint), Some(request)),
     };
     // Stop and repair can both wake this path. Avoid even resolving a provider
     // for rows that cannot be claimed. The write repeats this eligibility check.
-    if !resume
+    if resume.is_none()
         && !SummaryProcessesRepository::can_start_automatic_process(&pool, &meeting, origin)
             .await
             .map_err(|_| "Could not read automatic notes status")?
     {
-        return Ok(None);
+        return Ok(Launch::Handled);
     }
     if origin != "import" && !get_automatic_summary_preference(app.clone()).await? {
         record_outcome(&app, &pool, &meeting, origin, DISABLED).await?;
-        return Ok(None);
+        return Ok(Launch::Handled);
     }
     if let Some(reason) = transcript_unavailable(&pool, &meeting).await? {
         record_outcome(&app, &pool, &meeting, origin, reason).await?;
-        return Ok(None);
+        return Ok(Launch::Handled);
     }
 
     let _route = ROUTE_CHANGE_LOCK.lock().await;
@@ -347,7 +445,7 @@ async fn launch<R: Runtime>(
             Ok(request) => request,
             Err(reason) => {
                 record_outcome(&app, &pool, &meeting, origin, &reason).await?;
-                return Ok(None);
+                return Ok(Launch::Handled);
             }
         };
         let check = dispatch_check(app.clone(), request.review());
@@ -356,16 +454,16 @@ async fn launch<R: Runtime>(
     if let Some(check) = &check {
         if let Err(reason) = check() {
             record_outcome(&app, &pool, &meeting, origin, &reason).await?;
-            return Ok(None);
+            return Ok(Launch::Handled);
         }
     }
     let fingerprint = request.review().fingerprint;
     let provider = super::llm_client::canonical_provider(&request.provider);
     let Some(job) = SummaryService::try_register_job(&meeting, provider)? else {
-        return Ok(None);
+        return Ok(Launch::Busy);
     };
 
-    let claimed = if resume {
+    let claimed = if let Some(fingerprint) = resume {
         SummaryProcessesRepository::claim_automatic_resume(&pool, &meeting, &fingerprint).await
     } else {
         SummaryProcessesRepository::create_automatic_process(&pool, &meeting, origin, &fingerprint)
@@ -373,12 +471,12 @@ async fn launch<R: Runtime>(
     }
     .map_err(|_| "Could not start automatic notes")?;
     if !claimed {
-        return Ok(None);
+        return Ok(Launch::Handled);
     }
     let _ = app.emit(CHANGED_EVENT, &meeting);
     drop(_route);
 
-    Ok(Some(tauri::async_runtime::spawn(async move {
+    Ok(Launch::Started(tauri::async_runtime::spawn(async move {
         match prepare(&app, &pool, &meeting).await {
             Ok((context, language)) => {
                 SummaryService::process_transcript_background(
@@ -434,25 +532,39 @@ async fn transcript_unavailable(
     pool: &SqlitePool,
     meeting: &str,
 ) -> Result<Option<&'static str>, String> {
-    let needs_recovery = sqlx::query_as::<_, crate::audio::outcome::RecordingOutcome>(
-        "SELECT * FROM recording_outcomes WHERE meeting_id = ?",
-    )
-    .bind(meeting)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| "Could not check the transcript recovery status")?
-    .is_some_and(|outcome| outcome.needs_recovery());
-    if needs_recovery {
-        return Ok(Some(RECOVERY_NEEDED));
-    }
-    let has_transcript: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM transcripts WHERE meeting_id = ? AND TRIM(transcript) <> '')",
+    let needs_recovery: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM recording_outcomes WHERE meeting_id = ?1
+            AND (audio_save_failed OR transcription_incomplete))
+         OR EXISTS(SELECT 1 FROM transcript_file_sync WHERE meeting_id = ?1
+            AND retranscription_json IS NOT NULL)",
     )
     .bind(meeting)
     .fetch_one(pool)
     .await
-    .map_err(|_| "Could not check the saved transcript")?;
-    Ok((!has_transcript).then_some("There is no saved transcript to summarize."))
+    .map_err(|_| "Could not check the transcript recovery status")?;
+    if needs_recovery {
+        return Ok(Some(RECOVERY_NEEDED));
+    }
+    // SQLite TRIM only removes spaces, and SQLite permits blobs in a TEXT column.
+    // Validate all saved passages, including those following a usable short reply.
+    let mut rows = sqlx::query("SELECT transcript FROM transcripts WHERE meeting_id = ?")
+        .bind(meeting)
+        .fetch(pool);
+    let mut has_text = false;
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .map_err(|_| "Could not check the saved transcript")?
+    {
+        let Ok(text) = row.try_get::<&str, _>("transcript") else {
+            return Ok(Some(RECOVERY_NEEDED));
+        };
+        if text.contains('\0') {
+            return Ok(Some(RECOVERY_NEEDED));
+        }
+        has_text |= !text.trim().is_empty();
+    }
+    Ok((!has_text).then_some(NO_TRANSCRIPT))
 }
 
 async fn prepare<R: Runtime>(
@@ -512,6 +624,171 @@ async fn notify_ready<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool, meeting
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn gap_allows_usable_text_but_incomplete_publication_and_damaged_text_wait() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        sqlx::query("INSERT INTO recording_outcomes (meeting_id, capture_incomplete, recording_files_incomplete) VALUES (?, 1, 1)")
+            .bind(meeting).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE transcripts SET transcript = 'Ja.'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(transcript_unavailable(&pool, meeting).await.unwrap(), None);
+        for field in ["audio_save_failed", "transcription_incomplete"] {
+            sqlx::query(&format!("UPDATE recording_outcomes SET {field} = 1"))
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                transcript_unavailable(&pool, meeting).await.unwrap(),
+                Some(RECOVERY_NEEDED)
+            );
+            sqlx::query(&format!("UPDATE recording_outcomes SET {field} = 0"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO transcript_file_sync (meeting_id, retranscription_json) VALUES (?, 'broken')")
+            .bind(meeting).execute(&pool).await.unwrap();
+        assert_eq!(
+            transcript_unavailable(&pool, meeting).await.unwrap(),
+            Some(RECOVERY_NEEDED)
+        );
+        sqlx::query("DELETE FROM transcript_file_sync")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for expression in ["x'4142'", "CAST(x'FF' AS TEXT)", "'OK' || char(0)"] {
+            sqlx::query(&format!(
+                "UPDATE transcripts SET transcript = {expression} WHERE id = 'b'"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                transcript_unavailable(&pool, meeting).await.unwrap(),
+                Some(RECOVERY_NEEDED)
+            );
+        }
+        sqlx::query("UPDATE transcripts SET transcript = ?")
+            .bind(" \t\n\u{a0}")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            transcript_unavailable(&pool, meeting).await.unwrap(),
+            Some(NO_TRANSCRIPT)
+        );
+    }
+
+    #[tokio::test]
+    async fn repairing_an_empty_transcript_claims_one_job_and_preserves_prior_results() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        SummaryProcessesRepository::record_automatic_outcome(
+            &pool,
+            meeting,
+            "skipped",
+            NO_TRANSCRIPT,
+            "recording",
+        )
+        .await
+        .unwrap();
+        for column in ["result", "previous_result", "result_backup", "metadata"] {
+            sqlx::query(&format!("UPDATE summary_processes SET {column} = 'saved'"))
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(!SummaryProcessesRepository::can_start_automatic_process(
+                &pool,
+                meeting,
+                "recording"
+            )
+            .await
+            .unwrap());
+            assert!(!SummaryProcessesRepository::create_automatic_process(
+                &pool,
+                meeting,
+                "recording",
+                "approved"
+            )
+            .await
+            .unwrap());
+            sqlx::query(&format!("UPDATE summary_processes SET {column} = NULL"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        assert!(SummaryProcessesRepository::can_start_automatic_process(
+            &pool,
+            meeting,
+            "recording"
+        )
+        .await
+        .unwrap());
+        assert!(SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved"
+        )
+        .await
+        .unwrap());
+        assert!(!SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved"
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn retranscription_requires_a_local_recording_or_matching_legacy_marker() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let folder = tempfile::tempdir().unwrap();
+        let id = format!("meeting-{}", uuid::Uuid::new_v4());
+        let restored = folder.path().join("restored-recordings");
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 'Synthetic', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
+            .bind(&id).bind(folder.path().to_string_lossy().as_ref()).execute(&pool).await.unwrap();
+        let local = || is_local_recording(&pool, &id, &restored, &[]);
+        assert!(!local().await.unwrap());
+        for (owner, mode, source, allowed) in [
+            (id.as_str(), "audio_only", "recording", true),
+            (id.as_str(), "live", "recording", true),
+            (id.as_str(), "live", "import", false),
+            ("foreign", "live", "recording", false),
+        ] {
+            std::fs::write(
+                folder.path().join("metadata.json"),
+                serde_json::json!({
+                    "version": "1.0", "transcript_file": "transcripts.json", "meeting_id": owner,
+                    "source": source, "recording_mode": mode
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert_eq!(local().await.unwrap(), allowed);
+        }
+        sqlx::query("UPDATE meetings SET recording_source = 'import' WHERE id = ?")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!local().await.unwrap());
+        sqlx::query(
+            "UPDATE meetings SET recording_source = 'recording', folder_path = ? WHERE id = ?",
+        )
+        .bind(restored.join("copy").to_string_lossy().as_ref())
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(!local().await.unwrap());
+    }
 
     #[test]
     fn upgrades_keep_local_preference_once_and_require_explicit_external_consent() {

@@ -8,6 +8,7 @@ pub struct SummaryProcessesRepository;
 const INTERRUPTED: &str = "Summary generation was interrupted when ClawScribe closed";
 pub(crate) const RECOVERY_NEEDED: &str =
     "Review or retranscribe this meeting before generating notes.";
+pub(crate) const NO_TRANSCRIPT: &str = "There is no saved transcript to summarize.";
 
 #[cfg(test)]
 mod tests {
@@ -202,7 +203,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved", None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -227,13 +228,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved", None)
                 .await
                 .unwrap(),
-            vec![meeting.to_owned()]
+            vec![(meeting.to_owned(), "approved".to_owned())]
         );
         assert!(
-            SummaryProcessesRepository::automatic_resume_candidates(&pool, "different")
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "different", None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -257,7 +258,7 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved", None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -626,14 +627,15 @@ impl SummaryProcessesRepository {
             SELECT NOT EXISTS (
                 SELECT 1 FROM summary_processes WHERE meeting_id = ?
                 AND NOT (? = 'recording' AND status = 'skipped'
-                    AND error IS ? AND (automatic_origin = 'recording' OR automatic_origin IS NULL)
-                    AND result IS NULL AND result_backup IS NULL AND metadata IS NULL)
+                    AND (error IS ? OR error IS ?) AND (automatic_origin = 'recording' OR automatic_origin IS NULL)
+                    AND result IS NULL AND result_backup IS NULL AND previous_result IS NULL AND metadata IS NULL)
             )
         "#,
         )
         .bind(meeting)
         .bind(origin)
         .bind(RECOVERY_NEEDED)
+        .bind(NO_TRANSCRIPT)
         .fetch_one(pool)
         .await
     }
@@ -646,23 +648,28 @@ impl SummaryProcessesRepository {
     ) -> Result<bool, sqlx::Error> {
         Ok(sqlx::query(r#"
             INSERT INTO summary_processes (meeting_id, status, created_at, updated_at, start_time, automatic_origin, automatic_request_fingerprint)
-            SELECT id, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ? FROM meetings WHERE id = ?
+            SELECT id, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?,
+                COALESCE((SELECT profile || ':' FROM retranscription_notes_retry WHERE meeting_id = meetings.id), '') || ?
+            FROM meetings WHERE id = ?
             ON CONFLICT(meeting_id) DO UPDATE SET status = excluded.status, error = NULL,
                 start_time = excluded.start_time, updated_at = excluded.updated_at, end_time = NULL,
                 automatic_origin = excluded.automatic_origin, automatic_request_fingerprint = excluded.automatic_request_fingerprint
             WHERE excluded.automatic_origin = 'recording' AND summary_processes.status = 'skipped'
-              AND summary_processes.error = ? AND (summary_processes.automatic_origin = 'recording' OR summary_processes.automatic_origin IS NULL)
+              AND summary_processes.error IN (?, ?) AND (summary_processes.automatic_origin = 'recording' OR summary_processes.automatic_origin IS NULL)
               AND summary_processes.result IS NULL AND summary_processes.result_backup IS NULL
-              AND summary_processes.metadata IS NULL
-        "#).bind(origin).bind(fingerprint).bind(meeting).bind(RECOVERY_NEEDED).execute(pool).await?.rows_affected() == 1)
+              AND summary_processes.previous_result IS NULL AND summary_processes.metadata IS NULL
+        "#).bind(origin).bind(fingerprint).bind(meeting).bind(RECOVERY_NEEDED).bind(NO_TRANSCRIPT).execute(pool).await?.rows_affected() == 1)
     }
 
     pub(crate) async fn automatic_resume_candidates(
         pool: &SqlitePool,
         fingerprint: &str,
-    ) -> Result<Vec<String>, sqlx::Error> {
-        sqlx::query_scalar("SELECT meeting_id FROM summary_processes WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ? AND automatic_resume_attempted = 0 AND status = 'failed' AND error = ? ORDER BY start_time DESC, meeting_id LIMIT 3")
-            .bind(fingerprint).bind(INTERRUPTED).fetch_all(pool).await
+        profile: Option<&str>,
+    ) -> Result<Vec<(String, String)>, sqlx::Error> {
+        sqlx::query_as("SELECT meeting_id, automatic_request_fingerprint FROM summary_processes
+            WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint IN (?1, ?2 || ':' || ?1)
+            AND automatic_resume_attempted = 0 AND status = 'failed' AND error = ?3 ORDER BY start_time DESC, meeting_id LIMIT 3")
+            .bind(fingerprint).bind(profile).bind(INTERRUPTED).fetch_all(pool).await
     }
 
     pub(crate) async fn claim_automatic_resume(
@@ -681,7 +688,7 @@ impl SummaryProcessesRepository {
         reason: &str,
         origin: &str,
     ) -> Result<(), sqlx::Error> {
-        // Atomically replace the recoverable skip (RECOVERY_NEEDED, no results) with
+        // Atomically replace a recoverable transcript skip with
         // the new reason. Any other existing state — manual, completed, another skip
         // reason — is preserved by the WHERE guard on the DO UPDATE.
         sqlx::query(r#"
@@ -691,14 +698,15 @@ impl SummaryProcessesRepository {
                 status = excluded.status, error = excluded.error,
                 updated_at = excluded.updated_at, end_time = excluded.end_time,
                 automatic_origin = excluded.automatic_origin
-            WHERE summary_processes.status = 'skipped'
-                AND summary_processes.error = ?
+            WHERE excluded.automatic_origin = 'recording' AND summary_processes.status = 'skipped'
+                AND summary_processes.error IN (?, ?)
                 AND (summary_processes.automatic_origin = 'recording' OR summary_processes.automatic_origin IS NULL)
                 AND summary_processes.result IS NULL
                 AND summary_processes.result_backup IS NULL
+                AND summary_processes.previous_result IS NULL
                 AND summary_processes.metadata IS NULL
         "#)
-            .bind(status).bind(reason).bind(origin).bind(meeting).bind(RECOVERY_NEEDED).execute(pool).await?;
+            .bind(status).bind(reason).bind(origin).bind(meeting).bind(RECOVERY_NEEDED).bind(NO_TRANSCRIPT).execute(pool).await?;
         Ok(())
     }
 

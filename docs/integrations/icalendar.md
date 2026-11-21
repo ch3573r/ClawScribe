@@ -15,6 +15,9 @@ credential storage.
 **Upcoming meetings** on Home shows the next five meetings across your
 configured calendars for the coming week. The Calendars page lists more
 occurrences. **Use for next recording** takes priority over automatic matching.
+The selection expires five minutes after the event ends. Choose **Clear selection**
+to remove it sooner. Invitations without an end time expire one hour after their
+start, or one hour after selection if the start time is also missing.
 Without a selection, capture starts first. ClawScribe then looks for a single
 timed event that was in progress at the start across enabled Microsoft 365 and
 iCalendar sources. For an early join, **Choose event** offers timed invitations

@@ -120,6 +120,9 @@ export function useMicrosoftExport() {
 
   const signOut = useCallback(async () => {
     setError(null);
+    // Invalidate old click handlers and pending calendar reads immediately, including
+    // when the core ends the session but removing its stored credential later fails.
+    clearMicrosoftCalendarLinks();
     try {
       await microsoftExportService.signOut();
       setConnection({
@@ -134,14 +137,15 @@ export function useMicrosoftExport() {
       setOneNoteNotebookListingLimited(false);
       setCalendarEvents([]);
       setCurrentMeeting(null);
-      // Drop Microsoft calendar associations and their attendee data on sign-out.
-      clearMicrosoftCalendarLinks();
       // Broadcast so the OTHER hook instances (OneNote / Planner panels, which
       // each call this hook separately) also reset and don't show stale data.
       // Sign-in already broadcasts this event from the backend.
       await emit("microsoft-auth-complete", { state: "not_connected" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      // Also discard reads that started while sign-out was in flight.
+      clearMicrosoftCalendarLinks();
     }
   }, []);
 

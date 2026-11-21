@@ -8,6 +8,7 @@ interface ConfirmationModalProps {
   text: string;
   title?: string;
   confirmLabel?: string;
+  confirmVariant?: 'destructive' | 'default';
   isOpen: boolean;
   /** Disables the confirm action while the surface cannot act on it yet. */
   confirmDisabled?: boolean;
@@ -16,7 +17,7 @@ interface ConfirmationModalProps {
   children?: React.ReactNode;
 }
 
-export function ConfirmationModal({ onConfirm, onCancel, text, title = 'Confirm delete', confirmLabel = 'Delete', isOpen, confirmDisabled = false, returnFocus, children }: ConfirmationModalProps) {
+export function ConfirmationModal({ onConfirm, onCancel, text, title = 'Confirm delete', confirmLabel = 'Delete', confirmVariant = 'destructive', isOpen, confirmDisabled = false, returnFocus, children }: ConfirmationModalProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
 
@@ -45,7 +46,7 @@ export function ConfirmationModal({ onConfirm, onCancel, text, title = 'Confirm 
           >
             Cancel
           </Button>
-          <Button variant="destructive" disabled={confirmDisabled}
+          <Button variant={confirmVariant} disabled={confirmDisabled}
             onClick={onConfirm}
           >
             {confirmLabel}

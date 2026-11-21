@@ -166,6 +166,17 @@ fn regular_file_size(path: &Path) -> Option<u64> {
     (metadata.is_file() && !is_link(&metadata)).then_some(metadata.len())
 }
 
+pub(crate) fn is_recording_marker(marker: &Value) -> bool {
+    marker["source"].as_str() != Some("import")
+        && (matches!(marker["source"].as_str(), Some("recording"))
+            || matches!(
+                marker["recording_mode"].as_str(),
+                Some("live" | "audio_only")
+            )
+            || crate::database::meeting_files::recording_id(marker).is_some()
+            || (marker["devices"].is_object() && marker["sample_rate"].is_u64()))
+}
+
 /// Read duration from the selected recording's saved audio or measured marker.
 /// Legacy markers may contain the last transcript timestamp, so their duration
 /// is only suitable for the interrupted-recording preview.
@@ -176,14 +187,7 @@ pub(crate) fn recovered_provenance(
 ) -> RecordingProvenance {
     use crate::database::meeting_files;
     let imported = marker["source"].as_str() == Some("import");
-    let recorded = matches!(marker["source"].as_str(), Some("recording"))
-        || matches!(
-            marker["recording_mode"].as_str(),
-            Some("live" | "audio_only")
-        )
-        || meeting_files::recording_id(marker).is_some()
-        || (marker["devices"].is_object() && marker["sample_rate"].is_u64());
-    if !imported && !recorded {
+    if !imported && !is_recording_marker(marker) {
         return RecordingProvenance::default();
     }
     let is_saved_audio = |name: &str| {
@@ -220,7 +224,7 @@ pub(crate) fn recovered_provenance(
     if imported {
         RecordingProvenance::import(duration)
     } else {
-        RecordingProvenance::recording(duration)
+        RecordingProvenance::recording(duration, marker["created_at"].as_str())
     }
 }
 
@@ -1682,7 +1686,7 @@ mod tests {
         .await
         .unwrap();
 
-        let provenance = RecordingProvenance::recording(Some(5.0));
+        let provenance = RecordingProvenance::recording(Some(5.0), None);
         assert!(
             commit_repaired_audio(&pool, "repair", path, path, provenance, false)
                 .await

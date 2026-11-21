@@ -36,6 +36,9 @@ pub struct CallWindow {
     pub(crate) provider: Provider,
     pub(crate) window: String,
     pub(crate) key: String,
+    // Only the core compares room identity. Never expose the address or its digest.
+    #[serde(skip)]
+    pub(crate) teams_room: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -84,7 +87,35 @@ fn desktop_provider(exe: &str) -> Option<Provider> {
     }
 }
 
-fn browser_surface(address: &str) -> Option<(Provider, String)> {
+pub(super) fn teams_room(url: &url::Url) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || !matches!(
+            url.host_str(),
+            Some("teams.microsoft.com" | "teams.cloud.microsoft" | "teams.live.com")
+        )
+    {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/');
+    let segments: Vec<_> = path.split('/').collect();
+    let valid = match segments.as_slice() {
+        ["", "meet", id] => !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+        ["", "l", "meetup-join", thread, "0"] => {
+            !thread.is_empty()
+                && thread
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_%.:@".contains(&b))
+        }
+        _ => false,
+    };
+    valid.then(|| Sha256::digest(format!("{}{path}", url.host_str().unwrap())).into())
+}
+
+fn browser_surface(address: &str) -> Option<(Provider, String, Option<[u8; 32]>)> {
     let address = address.trim();
     let full = if address.contains("://") {
         address.to_owned()
@@ -105,13 +136,13 @@ fn browser_surface(address: &str) -> Option<(Provider, String)> {
                     .iter()
                     .all(|p| p.bytes().all(|b| b.is_ascii_lowercase()))
             {
-                Some((Provider::GoogleMeet, code.to_owned()))
+                Some((Provider::GoogleMeet, code.to_owned(), None))
             } else {
                 None
             }
         }
         "teams.microsoft.com" | "teams.cloud.microsoft" | "teams.live.com" => {
-            Some((Provider::Teams, url.path().into()))
+            Some((Provider::Teams, url.path().into(), teams_room(&url)))
         }
         _ => None,
     }
@@ -386,8 +417,8 @@ mod native {
             let Ok(root) = (unsafe { api.ElementFromHandle(hwnd) }) else {
                 continue;
             };
-            let (provider, room) = match desktop {
-                Some(p) => (p, String::new()),
+            let (provider, room, teams_room) = match desktop {
+                Some(p) => (p, String::new(), None),
                 None => {
                     let Some(surface) = address(&api, &root).and_then(|url| browser_surface(&url))
                     else {
@@ -406,6 +437,7 @@ mod native {
                 provider,
                 window,
                 key,
+                teams_room,
             };
             let names: &[&str] = match provider {
                 Provider::Zoom
@@ -488,10 +520,34 @@ mod native {
 mod tests {
     use super::*;
     #[test]
+    fn only_a_meeting_path_on_a_trusted_teams_origin_can_identify_a_room() {
+        let room = |value: &str| teams_room(&url::Url::parse(value).unwrap());
+        let meeting = room("https://teams.microsoft.com/meet/123456?p=synthetic");
+        assert!(meeting.is_some());
+        assert_eq!(meeting, room("https://teams.microsoft.com/meet/123456"));
+        assert_ne!(meeting, room("https://teams.live.com/meet/123456"));
+        assert_ne!(meeting, room("https://teams.microsoft.com/meet/789"));
+        assert!(room(
+            "https://teams.cloud.microsoft/l/meetup-join/19%3ameeting_example%40thread.v2/0"
+        )
+        .is_some());
+        for address in [
+            "http://teams.microsoft.com/meet/123",
+            "https://teams.microsoft.com.example.org/meet/123",
+            "https://user@teams.microsoft.com/meet/123",
+            "https://teams.microsoft.com:444/meet/123",
+            "https://teams.microsoft.com/v2/",
+            "https://teams.microsoft.com/meet/123/extra",
+        ] {
+            assert!(room(address).is_none());
+        }
+    }
+
+    #[test]
     fn browser_meeting_requires_a_provider_origin_and_meet_room() {
         assert!(matches!(
             browser_surface("meet.google.com/abc-defg-hij"),
-            Some((Provider::GoogleMeet, _))
+            Some((Provider::GoogleMeet, _, _))
         ));
         for url in [
             "https://meet.google.com/landing",

@@ -10,7 +10,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { CallProvider, CallSettings } from '@/lib/autoRecord';
 
-export type StartRequestSource = 'tray' | 'shortcut' | 'cli' | 'call' | 'after_save';
+export type StartRequestSource = 'tray' | 'shortcut' | 'cli' | 'call' | 'calendar_call' | 'after_save';
 
 export interface StartRequest {
   requestId: string;
@@ -23,6 +23,7 @@ export interface CallPrompt {
   provider: CallProvider;
   /** An automatic start failed and the user may try again. */
   retry: boolean;
+  eventTitle?: string | null;
 }
 
 export interface CallNotice {

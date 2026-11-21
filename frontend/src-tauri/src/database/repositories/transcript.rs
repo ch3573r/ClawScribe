@@ -12,6 +12,63 @@ mod recording_save_tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_recovered_recording_uses_its_start_time_even_when_saved_another_day() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let marker = serde_json::json!({
+            "recording_mode": "audio_only",
+            "created_at": "2025-07-01T00:01:02+02:00"
+        });
+        let provenance =
+            crate::audio::interrupted::recovered_provenance(folder.path(), &marker, None);
+        let outcome = crate::audio::outcome::RecordingOutcome::default();
+        let id = "meeting-5dd2d62d-dc83-40af-87f9-33e4eefbc609";
+        let path = folder.path().to_string_lossy().into_owned();
+        for facts in [provenance, RecordingProvenance::default()] {
+            TranscriptsRepository::save_recording_handoff(
+                &pool,
+                id,
+                "Overnight recording",
+                &[],
+                path.clone(),
+                &outcome,
+                facts,
+            )
+            .await
+            .unwrap();
+        }
+        let (created, updated): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) =
+            sqlx::query_as("SELECT created_at, updated_at FROM meetings WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            created,
+            "2025-06-30T22:01:02Z"
+                .parse::<chrono::DateTime<Utc>>()
+                .unwrap()
+        );
+        assert!(updated > created);
+        for bad in [serde_json::Value::Null, serde_json::json!("yesterday")] {
+            let marker = serde_json::json!({"source": "recording", "created_at": bad});
+            assert!(
+                crate::audio::interrupted::recovered_provenance(folder.path(), &marker, None)
+                    .started_at
+                    .is_none()
+            );
+        }
+        let imported =
+            serde_json::json!({"source": "import", "created_at": "2025-06-30T22:01:02Z"});
+        assert!(
+            crate::audio::interrupted::recovered_provenance(folder.path(), &imported, None)
+                .started_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn handoff_retries_after_rollback_but_never_after_deletion() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
@@ -38,7 +95,7 @@ mod recording_save_tests {
                 &[],
                 "synthetic-recording".into(),
                 &outcome,
-                RecordingProvenance::recording(Some(93.5)),
+                RecordingProvenance::recording(Some(93.5), None),
             )
         };
         sqlx::raw_sql("CREATE TRIGGER fail_outcome BEFORE INSERT ON recording_outcomes BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;")
@@ -80,7 +137,7 @@ mod recording_save_tests {
                 &[],
                 "original-before-restore".into(),
                 &outcome,
-                RecordingProvenance::recording(Some(500.0)),
+                RecordingProvenance::recording(Some(500.0), None),
             )
             .await
             .unwrap(),
@@ -143,7 +200,7 @@ mod recording_save_tests {
             &[],
             "relocated-folder".into(),
             &Default::default(),
-            RecordingProvenance::recording(None),
+            RecordingProvenance::recording(None, None),
         )
         .await
         .unwrap();
@@ -198,7 +255,7 @@ mod recording_save_tests {
                 &[],
                 id.into(),
                 &Default::default(),
-                RecordingProvenance::recording(None),
+                RecordingProvenance::recording(None, None),
             )
             .await
             .unwrap();
@@ -528,7 +585,7 @@ impl TranscriptsRepository {
         )
         .bind(&meeting_id)
         .bind(meeting_title)
-        .bind(now)
+        .bind(provenance.started_at.unwrap_or(now))
         .bind(now)
         .bind(&folder_path)
         .bind(draft.or(calendar_link))
