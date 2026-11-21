@@ -18,7 +18,8 @@
 //!   incomplete capture or incomplete recording files, and the folder is not
 //!   saved in the library.
 //!
-//! A folder saved in the library qualifies only for `unfinished_audio`. The
+//! A folder saved in the library qualifies for unfinished audio. The exact
+//! recording ID can also match audio to a transcript saved while offline. The
 //! folder of a recording that is running now, and any folder when a recording
 //! is running but its folder cannot be told, is never listed. Nothing is
 //! deleted here.
@@ -146,8 +147,10 @@ pub struct InterruptedScan {
     pub resolved_cache_ids: Vec<String>,
     /// Cache entries that can be recovered only without their old folder.
     pub detached_cache_ids: Vec<String>,
-    /// Cache entries that must wait for another attempt to verify the folder.
+    /// Cache entries whose transcript can be read but whose folder cannot be used.
     pub unverified_cache_ids: Vec<String>,
+    /// A saved transcript still needs its recording folder to be verified.
+    pub waiting_for_audio: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -374,6 +377,7 @@ fn classify_folder_with_deletions(
     folder: &Path,
     registered: Option<&str>,
     registered_ids: &HashSet<String>,
+    pending_audio_ids: &HashSet<String>,
     deleted: &HashSet<String>,
 ) -> Option<InterruptedRecording> {
     use crate::database::meeting_files;
@@ -388,6 +392,14 @@ fn classify_folder_with_deletions(
     if registered.is_some_and(|owner| stamped.or(recording_id).is_some_and(|id| id != owner)) {
         return None;
     }
+    let pending_audio = registered.is_none()
+        && is_recording_marker(&marker)
+        && recording_id.is_some_and(|id| pending_audio_ids.contains(id) && !deleted.contains(id));
+    let registered = if pending_audio {
+        recording_id
+    } else {
+        registered
+    };
     // A different restored copy owns the ID. Never offer to save, repair or
     // discard this copy via the path that is absent from the library.
     if [stamped, recording_id]
@@ -411,9 +423,15 @@ fn classify_folder_with_deletions(
             .is_some_and(|name| name.starts_with("audio_chunk_") && name.ends_with(".mp4"))
     });
     let has_capture = spool_chunks > 0 || checkpoints > 0;
+    if pending_audio && !has_capture && !has_final_audio {
+        return None;
+    }
     let outcome = super::outcome::RecordingOutcome::read(folder);
 
     let mut reasons: Vec<&'static str> = Vec::new();
+    if pending_audio {
+        reasons.push("audio_for_saved_transcript");
+    }
     if has_capture && !has_final_audio {
         reasons.push("unfinished_audio");
     }
@@ -455,6 +473,7 @@ fn classify_folder_with_deletions(
         .or_else(|| (checkpoints > 0).then(|| f64::from(checkpoints) * LEGACY_CHECKPOINT_SECONDS))
         .or(last_line_end.filter(|seconds| seconds.is_finite() && *seconds > 0.0));
     let reason = match reasons[0] {
+        "audio_for_saved_transcript" => "Audio is available for the recovered transcript",
         "unfinished_audio" => "The recorded audio was not finished into a file",
         "did_not_finish" => "The recording stopped unexpectedly",
         "library_handoff_pending" => "The recording ended before it could be added to your library",
@@ -501,6 +520,13 @@ pub(crate) struct ScanInput<'a> {
 /// Looks through the recording roots: each root's folders, and one level below a
 /// folder that is not itself a recording (a container). Links are never followed.
 pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
+    scan_with_pending_audio(input, &HashSet::new())
+}
+
+fn scan_with_pending_audio(
+    input: &ScanInput<'_>,
+    pending_audio_ids: &HashSet<String>,
+) -> InterruptedScan {
     let mut result = InterruptedScan::default();
     let active = input.active.canonical();
     if active == ActiveFolder::Unknown {
@@ -579,6 +605,7 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
                     &path,
                     registered,
                     input.registered_ids,
+                    pending_audio_ids,
                     input.deleted,
                 ) else {
                     continue;
@@ -662,6 +689,17 @@ async fn registered_rows(pool: &sqlx::SqlitePool) -> Result<Vec<(String, String)
         .fetch_all(pool)
         .await
         .map_err(|_| "Could not read the library".to_string())
+}
+
+async fn pending_audio_ids(pool: &sqlx::SqlitePool) -> Result<HashSet<String>, String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT meetings.id FROM meetings JOIN recording_outcomes ON meeting_id = meetings.id
+         WHERE folder_path IS NULL AND recording_source = 'recording' AND audio_save_failed = 1",
+    )
+    .fetch_all(pool)
+    .await
+    .map(|ids| ids.into_iter().collect())
+    .map_err(|_| "Could not read the library's recovery status.".into())
 }
 
 async fn deleted_recording_ids(pool: &sqlx::SqlitePool) -> Result<HashSet<String>, String> {
@@ -882,7 +920,9 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
     cache_entries: Option<Vec<RecoveryCacheEntry>>,
 ) -> Result<InterruptedScan, String> {
     let roots = super::recording_preferences::recording_roots(&app).await;
-    let owners = recovery_owners(state.db_manager.pool()).await?;
+    let pool = state.db_manager.pool();
+    let owners = recovery_owners(pool).await?;
+    let pending_audio = pending_audio_ids(pool).await?;
     let rows = owners
         .iter()
         .filter(|owner| !owner.is_deleted)
@@ -925,15 +965,18 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
             time_limit: limits.time_limit.saturating_sub(started.elapsed()),
             ..limits
         };
-        let mut result = scan(&ScanInput {
-            roots: &roots,
-            kept: &kept,
-            registered: &registered,
-            registered_ids: &registered_ids,
-            deleted: &deleted,
-            active,
-            limits,
-        });
+        let mut result = scan_with_pending_audio(
+            &ScanInput {
+                roots: &roots,
+                kept: &kept,
+                registered: &registered,
+                registered_ids: &registered_ids,
+                deleted: &deleted,
+                active,
+                limits,
+            },
+            &pending_audio,
+        );
         result.recording_active |= active_cache_unknown;
         result.active_cache_id = active_cache_id;
         result.recordings.retain(|recording| {
@@ -944,6 +987,7 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
         result.resolved_cache_ids = cache.resolved;
         result.detached_cache_ids = cache.detached;
         result.unverified_cache_ids = cache.unverified;
+        result.waiting_for_audio = !pending_audio.is_empty();
         result
     })
     .await
@@ -1018,20 +1062,53 @@ fn import_owner_waiting_for_metadata(folder: &Path, meeting_id: &str, roots: &[P
     })
 }
 
-/// Repairs the library meeting a folder already belongs to: the unfinished
-/// capture in its folder becomes its audio file, the capture is released, and
-/// the meeting's recovery status is updated. It never creates another meeting.
+fn verify_pending_audio_inputs(folder: &Path) -> std::io::Result<()> {
+    // Audio recovery opens these children by name. Reject linked inputs even
+    // when the recording root and its identity marker were verified.
+    let check = |path: &Path, directory: bool| match std::fs::symlink_metadata(path) {
+        Ok(meta)
+            if meeting_files::is_link(path, &meta)
+                || if directory {
+                    !meta.is_dir()
+                } else {
+                    !meta.is_file()
+                } =>
+        {
+            Err(std::io::Error::other("Unsafe recording file"))
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    };
+    for name in FINAL_AUDIO_NAMES {
+        check(&folder.join(name), false)?;
+    }
+    for name in [".audio-spool", ".checkpoints"] {
+        let subfolder = folder.join(name);
+        if check(&subfolder, true)? {
+            for child in std::fs::read_dir(subfolder)? {
+                check(&child?.path(), false)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Repairs a saved recording or attaches trusted audio to an offline
+/// transcript with the same recording ID. Neither path creates a meeting.
 #[tauri::command]
 pub async fn repair_saved_recording<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::state::AppState>,
     folder: String,
 ) -> Result<RepairedRecording, String> {
+    let _install_guard = crate::updates::admit_work()?;
     let job = super::inference::claim_job().map_err(|_| {
         "Another operation is using the recorder. Try repairing again when it finishes.".to_string()
     })?;
     let roots = super::recording_preferences::recording_roots(&app).await;
     let rows = registered_rows(state.db_manager.pool()).await?;
+    let pending = pending_audio_ids(state.db_manager.pool()).await?;
     let active = super::recording_commands::active_recording_folder();
     let repair_roots = roots.clone();
     let (authorised, meeting_id, registered_path, marker) =
@@ -1050,7 +1127,8 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
                 return Err("A recording is running. Try again when it has stopped.".into());
             }
             let registered = registered_map(rows.clone(), &roots, REGISTERED_BUDGET);
-            let meeting = registered
+            let marker = meeting_files::read_marker(Path::new(&authorised));
+            let registered_id = registered
                 .get(&folder_key(Path::new(&authorised)))
                 .or_else(|| {
                     std::fs::canonicalize(&authorised)
@@ -1060,36 +1138,52 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
                                 &crate::database::meeting_files::plain_path(&canonical),
                             ))
                         })
-                })
-                .cloned()
-                .ok_or_else(|| "This recording is not saved in your library".to_string())?;
-            let registered_path = rows
-                .into_iter()
-                .find_map(|(id, path)| (id == meeting).then_some(path))
-                .ok_or("The recording is no longer saved in your library.")?;
-            let marker = crate::database::meeting_files::read_marker(Path::new(&authorised));
-            let owns_folder = match marker.as_ref() {
-                Some(marker) => {
-                    !meeting_files::has_invalid_marker_id(marker)
-                        && meeting_files::stamped_meeting_id(marker)
-                            .or_else(|| meeting_files::recording_id(marker))
-                            .is_none_or(|id| id == meeting)
+                });
+            let (meeting_id, registered_path) = if let Some(meeting) = registered_id {
+                let owns_folder = match marker.as_ref() {
+                    Some(marker) => {
+                        !meeting_files::has_invalid_marker_id(marker)
+                            && meeting_files::stamped_meeting_id(marker)
+                                .or_else(|| meeting_files::recording_id(marker))
+                                .is_none_or(|id| id == meeting.as_str())
+                    }
+                    None => {
+                        import_owner_waiting_for_metadata(Path::new(&authorised), meeting, &roots)
+                    }
+                };
+                if !owns_folder {
+                    return Err("This folder belongs to a different recording.".into());
                 }
-                None => import_owner_waiting_for_metadata(Path::new(&authorised), &meeting, &roots),
+                let path = rows
+                    .into_iter()
+                    .find_map(|(id, path)| (&id == meeting).then_some(path))
+                    .ok_or("The recording is no longer saved in your library.")?;
+                (meeting.clone(), Some(path))
+            } else {
+                let id = marker
+                    .as_ref()
+                    .filter(|marker| {
+                        !meeting_files::has_invalid_marker_id(marker) && is_recording_marker(marker)
+                    })
+                    .and_then(meeting_files::recording_id)
+                    .filter(|id| pending.contains(*id))
+                    .ok_or("This recording does not match a saved meeting.")?;
+                verify_pending_audio_inputs(Path::new(&authorised)).map_err(|_| {
+                    "Could not verify the audio files. Keep the recording folder and retry."
+                })?;
+                (id.to_owned(), None)
             };
-            if !owns_folder {
-                return Err("This folder belongs to a different recording.".into());
-            }
-            Ok::<_, String>((authorised, meeting, registered_path, marker))
+            Ok::<_, String>((authorised, meeting_id, registered_path, marker))
         })
         .await
         .map_err(|_| "Could not repair the recording".to_string())??;
 
     use crate::database::transcript_edits;
     let pool = state.db_manager.pool();
-    if transcript_edits::import_file_stage(pool, &meeting_id)
-        .await?
-        .is_some()
+    if registered_path.is_some()
+        && transcript_edits::import_file_stage(pool, &meeting_id)
+            .await?
+            .is_some()
     {
         transcript_edits::sync_file_with_profile(pool, &meeting_id, &roots, |_| Ok(None)).await?;
         transcript_edits::notify_file_sync(&app, &meeting_id);
@@ -1099,17 +1193,25 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
             audio_path: None,
         });
     }
-    if marker.is_none() {
+    let Some(marker) = marker else {
         return Err("There is no pending import file repair for this folder.".into());
-    }
+    };
 
-    let status = super::incremental_saver::recover_audio_in_folder(authorised.clone()).await?;
+    let status = super::incremental_saver::recover_audio_in_folder(authorised.clone())
+        .await
+        .map_err(|_| {
+            "Could not recover the audio. Keep the recording folder and retry.".to_string()
+        })?;
     let recovered =
         status.audio_file_path.is_some() && matches!(status.status.as_str(), "success" | "partial");
+    if !recovered && registered_path.is_none() {
+        return Err(
+            "No audio could be recovered yet. The saved transcript and recording folder are kept."
+                .into(),
+        );
+    }
     if recovered {
-        let transcribes = marker
-            .as_ref()
-            .is_some_and(super::recording_mode::marker_transcribes);
+        let transcribes = super::recording_mode::marker_transcribes(&marker);
         let provenance = {
             let folder = authorised.clone();
             let recovered_path = status.audio_file_path.clone();
@@ -1118,12 +1220,9 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
                     .as_deref()
                     .and_then(|path| Path::new(path).file_name())
                     .and_then(std::ffi::OsStr::to_str);
-                marker
-                    .as_ref()
-                    .zip(name)
-                    .map_or_else(RecordingProvenance::default, |(marker, name)| {
-                        recovered_provenance(Path::new(&folder), marker, Some(name))
-                    })
+                name.map_or_else(RecordingProvenance::default, |name| {
+                    recovered_provenance(Path::new(&folder), &marker, Some(name))
+                })
             })
             .await
             .map_err(|_| "Could not read recovered recording details".to_string())?
@@ -1131,7 +1230,7 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
         let outcome_updated = commit_repaired_audio(
             state.db_manager.pool(),
             &meeting_id,
-            &registered_path,
+            registered_path.as_deref(),
             &authorised,
             provenance,
             status.status == "partial",
@@ -1152,7 +1251,7 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
 async fn commit_repaired_audio(
     pool: &sqlx::SqlitePool,
     meeting_id: &str,
-    registered_path: &str,
+    registered_path: Option<&str>,
     authorised: &str,
     provenance: RecordingProvenance,
     partial: bool,
@@ -1160,18 +1259,26 @@ async fn commit_repaired_audio(
     // The meeting no longer has a failed audio save; a partial recovery says
     // the capture had gaps.
     let mut tx = pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|_| "Could not save recovered recording details")?;
     let meeting = sqlx::query(
-        "UPDATE meetings SET recording_source = COALESCE(recording_source, ?),
+        "UPDATE meetings SET folder_path = COALESCE(folder_path, ?),
+         recording_source = COALESCE(recording_source, ?),
          recording_duration_s = COALESCE(recording_duration_s, ?)
-         WHERE id = ? AND folder_path = ?",
+         WHERE id = ? AND folder_path IS ?
+         AND (? IS NOT NULL OR (
+            NOT EXISTS (SELECT 1 FROM meetings AS owner WHERE owner.folder_path = ? COLLATE NOCASE)
+            AND EXISTS (SELECT 1 FROM recording_outcomes WHERE meeting_id = meetings.id AND audio_save_failed = 1)
+         ))",
     )
+    .bind(authorised)
     .bind(provenance.source)
     .bind(provenance.duration_seconds)
     .bind(meeting_id)
     .bind(registered_path)
+    .bind(registered_path)
+    .bind(authorised)
     .execute(&mut *tx)
     .await
     .map_err(|_| "Could not save recovered recording details")?;
@@ -1264,7 +1371,9 @@ pub(crate) fn discard_folder(
     {
         return Err(REFUSED.into());
     }
-    if classify_folder_with_deletions(&path, None, registered_ids, deleted).is_none() {
+    if classify_folder_with_deletions(&path, None, registered_ids, &HashSet::new(), deleted)
+        .is_none()
+    {
         return Err(REFUSED.into());
     }
     let others: Vec<PathBuf> = registered.keys().map(PathBuf::from).collect();
@@ -1482,18 +1591,43 @@ mod tests {
         std::fs::write(folder.join("audio.mp4"), [1u8]).unwrap();
         let mut deleted = std::collections::HashSet::new();
         assert_eq!(
-            classify_folder_with_deletions(folder, None, &HashSet::new(), &deleted)
-                .unwrap()
-                .reasons,
+            classify_folder_with_deletions(
+                folder,
+                None,
+                &HashSet::new(),
+                &HashSet::new(),
+                &deleted
+            )
+            .unwrap()
+            .reasons,
             ["library_handoff_pending"]
         );
-        assert!(
-            classify_folder_with_deletions(folder, Some(id), &HashSet::new(), &deleted).is_none()
-        );
+        assert!(classify_folder_with_deletions(
+            folder,
+            Some(id),
+            &HashSet::new(),
+            &HashSet::new(),
+            &deleted
+        )
+        .is_none());
         let elsewhere = HashSet::from([id.to_owned()]);
-        assert!(classify_folder_with_deletions(folder, None, &elsewhere, &deleted).is_none());
+        assert!(classify_folder_with_deletions(
+            folder,
+            None,
+            &elsewhere,
+            &HashSet::new(),
+            &deleted
+        )
+        .is_none());
         deleted.insert(id.to_owned());
-        assert!(classify_folder_with_deletions(folder, None, &HashSet::new(), &deleted).is_none());
+        assert!(classify_folder_with_deletions(
+            folder,
+            None,
+            &HashSet::new(),
+            &HashSet::new(),
+            &deleted
+        )
+        .is_none());
     }
 
     #[test]
@@ -1507,12 +1641,14 @@ mod tests {
         let registered = HashSet::from([id.to_owned()]);
         let empty = HashSet::new();
         assert_eq!(
-            classify_folder_with_deletions(&folder, None, &empty, &empty)
+            classify_folder_with_deletions(&folder, None, &empty, &empty, &empty)
                 .unwrap()
                 .reasons[0],
             "unfinished_audio",
         );
-        assert!(classify_folder_with_deletions(&folder, None, &empty, &registered).is_none());
+        assert!(
+            classify_folder_with_deletions(&folder, None, &empty, &empty, &registered).is_none()
+        );
         assert!(discard_folder(
             &folder.to_string_lossy(),
             &roots,
@@ -2165,6 +2301,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_offline_transcript_reuses_its_meeting_when_verified_audio_returns() {
+        use crate::database::repositories::transcript::TranscriptsRepository;
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let volume = tempfile::tempdir().unwrap();
+        let roots = [volume.path().join("missing-drive")];
+        let folder = roots[0].join("meeting");
+        let id = "meeting-5dd2d62d-dc83-40af-87f9-33e4eefbc609";
+        let segment = serde_json::from_value(serde_json::json!({
+            "id": "sample", "text": "Synthetic cached words", "timestamp": "00:01"
+        }))
+        .unwrap();
+        for _ in 0..2 {
+            TranscriptsRepository::save_offline_recording_transcript(
+                &pool,
+                id,
+                "Synthetic meeting",
+                std::slice::from_ref(&segment),
+                1_795_260_000_000,
+            )
+            .await
+            .unwrap();
+        }
+        let saved: (i64, Option<String>) =
+            sqlx::query_as("SELECT COUNT(*), MIN(folder_path) FROM meetings")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(saved, (1, None));
+        let registered = HashMap::new();
+        let registered_ids = HashSet::from([id.to_owned()]);
+        let pending = pending_audio_ids(&pool).await.unwrap();
+        let scan_input = ScanInput {
+            roots: &roots,
+            kept: &[],
+            registered: &registered,
+            registered_ids: &registered_ids,
+            deleted: &HashSet::new(),
+            active: ActiveFolder::None,
+            limits: Limits::default(),
+        };
+        assert!(scan_with_pending_audio(&scan_input, &pending)
+            .recordings
+            .is_empty());
+
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("metadata.json"), serde_json::json!({
+            "version": "1.0", "transcript_file": "transcripts.json", "recording_id": id, "status": "completed"
+        }).to_string()).unwrap();
+        assert!(
+            scan_with_pending_audio(&scan_input, &pending)
+                .recordings
+                .is_empty(),
+            "a transcript alone should not offer audio repair"
+        );
+        std::fs::write(folder.join("audio.mp4"), b"Synthetic audio").unwrap();
+        let scan = scan_with_pending_audio(&scan_input, &pending);
+        assert_eq!(scan.recordings.len(), 1);
+        assert_eq!(
+            scan.recordings[0].registered_meeting_id.as_deref(),
+            Some(id)
+        );
+        let authorised = &scan.recordings[0].folder;
+        assert!(commit_repaired_audio(
+            &pool,
+            id,
+            None,
+            authorised,
+            RecordingProvenance::default(),
+            false
+        )
+        .await
+        .unwrap());
+        assert!(pending_audio_ids(&pool).await.unwrap().is_empty());
+        let saved: (i64, String) =
+            sqlx::query_as("SELECT COUNT(*), MIN(folder_path) FROM meetings")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(saved, (1, authorised.clone()));
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
     async fn a_moved_library_link_preserves_the_capture_for_a_repair_retry() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().to_str().unwrap();
@@ -2196,7 +2422,7 @@ mod tests {
 
         let provenance = RecordingProvenance::recording(Some(5.0), None);
         assert!(
-            commit_repaired_audio(&pool, "repair", path, path, provenance, false)
+            commit_repaired_audio(&pool, "repair", Some(path), path, provenance, false)
                 .await
                 .unwrap_err()
                 .contains("moved")
@@ -2216,7 +2442,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            commit_repaired_audio(&pool, "repair", path, path, provenance, false)
+            commit_repaired_audio(&pool, "repair", Some(path), path, provenance, false)
                 .await
                 .unwrap()
         );

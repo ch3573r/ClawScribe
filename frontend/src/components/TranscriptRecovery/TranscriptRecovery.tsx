@@ -22,7 +22,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import type { TranscriptPreview } from '@/services/indexedDBService';
 import { errorText } from '@/lib/errorText';
-import { describeDuration, describeSize, type RecoveryCandidate } from '@/lib/interruptedRecordings';
+import { describeDuration, describeSize, hasStableRecordingId, type OfflineTranscriptSaveResult, type RecoveryCandidate } from '@/lib/interruptedRecordings';
 import { cn } from '@/lib/utils';
 
 interface TranscriptRecoveryProps {
@@ -31,12 +31,14 @@ interface TranscriptRecoveryProps {
   recoverableMeetings: RecoveryCandidate[];
   isScanning: boolean;
   scanFailed: boolean;
+  hasUnverifiedFolders: boolean;
   onRetryScan: () => void;
   onRecover: (meetingId: string) => Promise<unknown>;
   onDelete: (meetingId: string) => Promise<void>;
   /** "Keep, do not ask again" for a recording found on disk. */
   onKeep?: (meetingId: string) => Promise<void>;
   onLoadPreview: (meetingId: string) => Promise<TranscriptPreview[]>;
+  onSaveOfflineTranscript: (meetingId: string) => Promise<OfflineTranscriptSaveResult>;
 }
 
 export function TranscriptRecovery({
@@ -45,20 +47,25 @@ export function TranscriptRecovery({
   recoverableMeetings,
   isScanning,
   scanFailed,
+  hasUnverifiedFolders,
   onRetryScan,
   onRecover,
   onDelete,
   onKeep,
   onLoadPreview,
+  onSaveOfflineTranscript,
 }: TranscriptRecoveryProps) {
   const [requestedMeetingId, setRequestedMeetingId] = useState<string | null>(null);
   const selectedMeeting = recoverableMeetings.find(m => m.meetingId === requestedMeetingId) ?? recoverableMeetings[0];
   const selectedMeetingId = selectedMeeting?.meetingId ?? null;
-  const [preview, setPreview] = useState<{ meetingId: string; rows: TranscriptPreview[] } | null>(null);
+  const [preview, setPreview] = useState<{ meetingId: string; rows: TranscriptPreview[]; failed?: boolean; hasTranscript?: boolean } | null>(null);
   const isLoadingPreview = !!selectedMeetingId && preview?.meetingId !== selectedMeetingId;
   const previewTranscripts = preview?.meetingId === selectedMeetingId ? preview.rows : [];
   const [isRecovering, setIsRecovering] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isSavingTranscript, setIsSavingTranscript] = useState(false);
+  const savingTranscript = useRef(false);
+  const busy = isRecovering || isDeleting || isSavingTranscript;
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const cancelDeleteRef = useRef<HTMLButtonElement>(null);
   const deleteButtonRef = useRef<HTMLButtonElement>(null);
@@ -76,11 +83,13 @@ export function TranscriptRecovery({
     if (!isOpen || !selectedMeetingId) return;
     let active = true;
     void onLoadPreview(selectedMeetingId).then(transcripts => {
-      if (active) setPreview({ meetingId: selectedMeetingId, rows: transcripts.slice(0, 10) });
-    }).catch(error => {
-      if (!active) return;
-      console.error('Failed to load preview:', error);
-      setPreview({ meetingId: selectedMeetingId, rows: [] });
+      if (active) setPreview({
+        meetingId: selectedMeetingId,
+        rows: transcripts.slice(0, 10),
+        hasTranscript: transcripts.some(row => row.text.trim()),
+      });
+    }).catch(() => {
+      if (active) setPreview({ meetingId: selectedMeetingId, rows: [], failed: true });
     });
     return () => { active = false; };
   }, [isOpen, selectedMeetingId, onLoadPreview]);
@@ -97,6 +106,26 @@ export function TranscriptRecovery({
       toast.error('Could not recover the meeting. Your recovery data is still available. Try again.');
     } finally {
       setIsRecovering(false);
+    }
+  };
+
+  const handleSaveTranscript = async () => {
+    if (!selectedMeetingId || busy || savingTranscript.current) return;
+    savingTranscript.current = true;
+    setIsSavingTranscript(true);
+    try {
+      const result = await onSaveOfflineTranscript(selectedMeetingId);
+      if (result === 'library') {
+        toast.success('Transcript saved to your library');
+        onClose();
+      } else if (result === 'file') {
+        toast.success('Transcript copy saved');
+      }
+    } catch (error) {
+      toast.error(errorText(error, 'Could not save the transcript. Your draft is still available.'));
+    } finally {
+      savingTranscript.current = false;
+      setIsSavingTranscript(false);
     }
   };
 
@@ -136,6 +165,8 @@ export function TranscriptRecovery({
     : '';
   const deleteTarget = recoverableMeetings.find(m => m.meetingId === deleteTargetId);
   const deleteBlocked = !!selectedMeeting?.disk?.registeredMeetingId;
+  const folderUnverified = selectedMeeting?.folderUnverified === true;
+  const canSaveToLibrary = folderUnverified && hasStableRecordingId(selectedMeeting.meetingId);
 
   if (isScanning || recoverableMeetings.length === 0) {
     return (
@@ -145,7 +176,7 @@ export function TranscriptRecovery({
             <DialogTitle>Interrupted recordings</DialogTitle>
             <DialogDescription role={scanFailed && !isScanning ? 'alert' : 'status'}>
               {isScanning ? 'Checking for interrupted recordings…' : scanFailed
-                ? 'Some recordings could not be checked. Reconnect the recordings location if needed, then retry. Your drafts are kept.'
+                ? 'The recovery scan failed. Try again. Your drafts are kept.'
                 : 'No interrupted recordings found.'}
             </DialogDescription>
           </DialogHeader>
@@ -159,19 +190,19 @@ export function TranscriptRecovery({
   }
 
   return (
-    <Dialog open={isOpen} onOpenChange={open => { if (!open && !isRecovering && !isDeleting) onClose(); }}>
+    <Dialog open={isOpen} onOpenChange={open => { if (!open && !busy) onClose(); }}>
       <DialogContent className="max-w-4xl h-[80vh] flex flex-col p-0">
         <DialogHeader className="px-6 pt-6">
           <DialogTitle className="text-2xl">Recover interrupted meetings</DialogTitle>
           <DialogDescription>
             We found {recoverableMeetings.length} meeting{recoverableMeetings.length !== 1 ? 's' : ''} that {recoverableMeetings.length !== 1 ? 'were' : 'was'} interrupted. Select a meeting to preview and recover it.
           </DialogDescription>
-          {scanFailed && (
+          {(scanFailed || hasUnverifiedFolders) && (
             <div className="flex items-center justify-between gap-3">
               <p role="alert" className="text-sm text-muted-foreground">
-                Some recordings could not be checked. Reconnect the recordings location if needed, then retry. Your drafts are kept.
+                {scanFailed ? 'The recovery scan failed. Your drafts are kept.' : 'Some folders could not be verified. Reconnect the recordings location if needed, then retry.'}
               </p>
-              <Button variant="outline" size="sm" onClick={onRetryScan} disabled={isRecovering || isDeleting}>Retry scan</Button>
+              <Button variant="outline" size="sm" onClick={onRetryScan} disabled={busy}>Retry scan</Button>
             </div>
           )}
         </DialogHeader>
@@ -185,7 +216,7 @@ export function TranscriptRecovery({
                 {recoverableMeetings.map((meeting) => (
                   <Button variant="ghost"
                     key={meeting.meetingId}
-                    disabled={isRecovering || isDeleting}
+                    disabled={busy}
                     onClick={() => setRequestedMeetingId(meeting.meetingId)}
                     className={cn(
                       'block h-auto font-normal text-base whitespace-normal hover:text-foreground w-full text-left p-3 rounded-lg border transition-colors',
@@ -206,7 +237,11 @@ export function TranscriptRecovery({
                           {meeting.transcriptCount} transcript{meeting.transcriptCount !== 1 ? 's' : ''}
                         </p>
                       </div>
-                      {meeting.folderPath ? (
+                      {meeting.folderUnverified ? (
+                        <span title="Folder unverified">
+                          <AlertCircle className="w-4 h-4 text-warning-foreground flex-shrink-0" />
+                        </span>
+                      ) : meeting.folderPath ? (
                         <span title="Audio available">
                           <CheckCircle2 className="w-4 h-4 text-success-foreground flex-shrink-0" />
                         </span>
@@ -239,7 +274,12 @@ export function TranscriptRecovery({
                         <FileText className="w-4 h-4" />
                         {selectedMeeting.transcriptCount} transcripts
                       </span>
-                      {selectedMeeting.folderPath ? (
+                      {folderUnverified ? (
+                        <span className="flex items-center gap-1 text-warning-foreground">
+                          <AlertCircle className="w-4 h-4" />
+                          Folder unverified
+                        </span>
+                      ) : selectedMeeting.folderPath ? (
                         <span className="flex items-center gap-1 text-success-foreground">
                           <CheckCircle2 className="w-4 h-4" />
                           Audio available
@@ -251,6 +291,13 @@ export function TranscriptRecovery({
                         </span>
                       )}
                     </div>
+                    {folderUnverified && preview?.meetingId === selectedMeetingId && preview?.hasTranscript && (
+                      <p className="text-sm text-muted-foreground mt-2">
+                        {canSaveToLibrary
+                          ? 'Save the full transcript to your library now. When the folder is verified, use recovery to add its audio to the same meeting.'
+                          : 'Save the full transcript as a text file. The original draft and its folder are kept for a future scan.'}
+                      </p>
+                    )}
                     {selectedMeeting.disk && (
                       <p className="text-sm text-muted-foreground mt-2">
                         {selectedMeeting.disk.reason}{diskDetails ? ` (${diskDetails})` : ''}
@@ -265,6 +312,8 @@ export function TranscriptRecovery({
                       <div className="flex items-center justify-center h-full text-muted-foreground">
                         Loading preview...
                       </div>
+                    ) : preview?.meetingId === selectedMeetingId && preview?.failed ? (
+                      <p role="alert" className="text-sm text-muted-foreground">Could not load the transcript preview. Check the recording again.</p>
                     ) : previewTranscripts.length > 0 ? (
                       <div className="space-y-3">
                         <Alert>
@@ -309,7 +358,7 @@ export function TranscriptRecovery({
                       </div>
                     ) : (
                       <div className="flex items-center justify-center h-full text-muted-foreground">
-                        No transcript yet. A transcript is not required to recover recorded audio.
+                        {folderUnverified ? 'There is no cached transcript.' : 'No transcript yet. You can still recover recorded audio.'}
                       </div>
                     )}
                   </ScrollArea>
@@ -327,50 +376,59 @@ export function TranscriptRecovery({
           <Button
             variant="outline"
             onClick={onClose}
-            disabled={isRecovering || isDeleting}
+            disabled={busy}
           >
             Cancel
           </Button>
           {onKeep && selectedMeeting?.disk && (
-            <Button variant="ghost" onClick={handleKeep} disabled={isRecovering || isDeleting}>
+            <Button variant="ghost" onClick={handleKeep} disabled={busy}>
               Keep, do not ask again
             </Button>
           )}
-          <Button
-            ref={deleteButtonRef}
-            variant="outline"
-            className="text-destructive"
-            onClick={() => setDeleteTargetId(selectedMeetingId)}
-            disabled={!selectedMeetingId || isRecovering || isDeleting || deleteBlocked}
-          >
-            {isDeleting ? (
-              <>
-                <XCircle className="w-4 h-4 mr-2 animate-spin" />
-                Deleting...
-              </>
-            ) : (
-              <>
-                <Trash2 className="w-4 h-4 mr-2" />
-                Delete
-              </>
-            )}
-          </Button>
-          <Button
-            onClick={handleRecover}
-            disabled={!selectedMeetingId || isRecovering || isDeleting}
-          >
-            {isRecovering ? (
-              <>
-                <CheckCircle2 className="w-4 h-4 mr-2 animate-spin" />
-                Recovering...
-              </>
-            ) : (
-              <>
-                <CheckCircle2 className="w-4 h-4 mr-2" />
-                Recover
-              </>
-            )}
-          </Button>
+          {folderUnverified && (isLoadingPreview || preview?.hasTranscript) && (
+            <Button onClick={handleSaveTranscript} disabled={busy || isLoadingPreview}>
+              {isSavingTranscript ? 'Saving transcript…' : canSaveToLibrary ? 'Save transcript to library' : 'Save transcript copy…'}
+            </Button>
+          )}
+          {!folderUnverified && (
+            <>
+              <Button
+                ref={deleteButtonRef}
+                variant="outline"
+                className="text-destructive"
+                onClick={() => setDeleteTargetId(selectedMeetingId)}
+                disabled={!selectedMeetingId || busy || deleteBlocked}
+              >
+                {isDeleting ? (
+                  <>
+                    <XCircle className="w-4 h-4 mr-2 animate-spin" />
+                    Deleting...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-4 h-4 mr-2" />
+                    Delete
+                  </>
+                )}
+              </Button>
+              <Button
+                onClick={handleRecover}
+                disabled={!selectedMeetingId || busy}
+              >
+                {isRecovering ? (
+                  <>
+                    <CheckCircle2 className="w-4 h-4 mr-2 animate-spin" />
+                    Recovering...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4 mr-2" />
+                    Recover
+                  </>
+                )}
+              </Button>
+            </>
+          )}
         </DialogFooter>
         <Dialog open={deleteTargetId !== null} onOpenChange={open => { if (!open && !isDeleting) setDeleteTargetId(null); }}>
           <DialogContent

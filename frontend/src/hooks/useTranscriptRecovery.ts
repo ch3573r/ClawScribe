@@ -8,15 +8,17 @@
 
 import { useState, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { indexedDBService, type MeetingMetadata, type TranscriptPreview } from '@/services/indexedDBService';
+import { indexedDBService, type MeetingMetadata, type StoredTranscript, type TranscriptPreview } from '@/services/indexedDBService';
 import { storageService } from '@/services/storageService';
 import { applyPinnedSummaryLanguageToMeeting } from '@/lib/summary-language-preferences';
 import {
   EMPTY_DISK_SCAN,
   folderKey,
+  hasStableRecordingId,
   mergeRecoveryCandidates,
   readDiskScan,
   type DiskScan,
+  type OfflineTranscriptSaveResult,
   type RecoveryCandidate,
 } from '@/lib/interruptedRecordings';
 import { toast } from 'sonner';
@@ -30,6 +32,34 @@ interface AudioRecoveryStatus {
   message: string;
 }
 
+function formatCachedTranscripts(transcripts: StoredTranscript[]) {
+  return transcripts.map((t, index) => ({
+    id: t.id?.toString() || `${Date.now()}-${index}`,
+    text: t.text,
+    timestamp: t.timestamp,
+    sequence_id: t.sequenceId ?? t.sequence_id ?? index,
+    chunk_start_time: t.chunk_start_time,
+    is_partial: t.is_partial ?? false,
+    confidence: t.confidence,
+    audio_start_time: t.audio_start_time,
+    audio_end_time: t.audio_end_time,
+    duration: t.duration,
+    speaker: t.speaker ?? t.source,
+    word_timestamps: t.word_timestamps,
+  }));
+}
+
+async function applyRecoverySummaryLanguage(meetingId: string) {
+  try {
+    await applyPinnedSummaryLanguageToMeeting(meetingId);
+  } catch {
+    console.warn('Could not apply the default summary language to the recovered meeting.');
+    toast.warning('Could not apply default summary language', {
+      description: 'The recovered meeting was saved. You can choose a summary language from the meeting.',
+    });
+  }
+}
+
 /**
  * Every interrupted recording known right now: the browser's unsaved meetings
  * (with their audio checked) merged with what the core finds on disk, one entry
@@ -38,10 +68,13 @@ interface AudioRecoveryStatus {
 export async function fetchRecoveryCandidates(
   options: { includeKept?: boolean } = {},
 ): Promise<{ candidates: RecoveryCandidate[]; scan: DiskScan; scanFailed: boolean; keptCount: number }> {
-  const meetings = await indexedDBService.getAllMeetings().catch((error) => {
-    console.error('Failed to read the browser recovery data:', error);
-    return [] as MeetingMetadata[];
-  });
+  let meetings: MeetingMetadata[];
+  try {
+    meetings = await indexedDBService.getAllMeetings();
+  } catch {
+    console.warn('Could not read the browser recovery data.');
+    meetings = [];
+  }
 
   // Give an in-progress save time to finish. Unresolved entries have no expiry.
   const handoffCutoff = Date.now() - 2_000;
@@ -56,8 +89,8 @@ export async function fetchRecoveryCandidates(
     });
     if (!Array.isArray(result?.recordings)) throw new Error('Missing native recovery results');
     scan = readDiskScan(result);
-  } catch (error) {
-    console.warn('Could not look for interrupted recordings on disk:', error);
+  } catch {
+    console.warn('Could not look for interrupted recordings on disk.');
     return { candidates: [], scan: EMPTY_DISK_SCAN, scanFailed: true, keptCount: 0 };
   }
   const resolvedCacheIds = new Set(scan.resolvedCacheIds);
@@ -68,13 +101,15 @@ export async function fetchRecoveryCandidates(
     (!scan.recordingActive || !!scan.activeCacheId) &&
     meeting.meetingId !== scan.activeCacheId && !resolvedCacheIds.has(meeting.meetingId));
 
+  const unverified = (meeting: MeetingMetadata) => {
+    unverifiedFolders.add(folderKey(meeting.folderPath));
+    return { ...meeting, folderUnverified: true, recordingFolder: meeting.folderPath, folderPath: undefined };
+  };
+
   // Verify audio checkpoint availability for each pending meeting.
   const meetingsWithAudioStatus = await Promise.all(
     pendingMeetings.map(async (meeting) => {
-      if (unverifiedCacheIds.has(meeting.meetingId)) {
-        unverifiedFolders.add(folderKey(meeting.folderPath));
-        return null;
-      }
+      if (unverifiedCacheIds.has(meeting.meetingId)) return unverified(meeting);
       if (detachedCacheIds.has(meeting.meetingId)) return { ...meeting, folderPath: undefined };
       if (meeting.folderPath) {
         try {
@@ -89,10 +124,8 @@ export async function fetchRecoveryCandidates(
             recordingFolder: meeting.folderPath,
             folderPath: hasAudio ? meeting.folderPath : undefined
           };
-        } catch (error) {
-          console.warn('Failed to check audio for meeting:', error);
-          unverifiedFolders.add(folderKey(meeting.folderPath));
-          return null;
+        } catch {
+          return unverified(meeting);
         }
       }
       return meeting;
@@ -100,14 +133,14 @@ export async function fetchRecoveryCandidates(
   );
 
   const merged = mergeRecoveryCandidates(
-    meetingsWithAudioStatus.filter(meeting => meeting !== null),
+    meetingsWithAudioStatus,
     scan.recordings.filter(recording => !unverifiedFolders.has(folderKey(recording.folder))),
   );
   // A recording the user asked not to be asked about again is left out, and
   // counted, so Settings can still offer to show it.
   const keptCount = merged.filter(candidate => candidate.disk?.kept).length;
   const candidates = options.includeKept ? merged : merged.filter(candidate => !candidate.disk?.kept);
-  return { candidates, scan, scanFailed: unverifiedFolders.size > 0, keptCount };
+  return { candidates, scan, scanFailed: false, keptCount };
 }
 
 export interface UseTranscriptRecoveryReturn {
@@ -117,11 +150,13 @@ export interface UseTranscriptRecoveryReturn {
   /** The recordings found on disk could be incomplete: the scan stopped at a bound. */
   diskScanTruncated: boolean;
   scanFailed: boolean;
+  hasUnverifiedFolders: boolean;
   checkForRecoverableTranscripts: (options?: { includeKept?: boolean }) => Promise<RecoveryCandidate[]>;
   /** "Keep, do not ask again": the recording stays on disk and is not offered unasked. */
   keepRecoverableMeeting: (meetingId: string) => Promise<void>;
   recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount?: number }>;
   loadMeetingTranscripts: (meetingId: string) => Promise<TranscriptPreview[]>;
+  saveOfflineTranscript: (meetingId: string) => Promise<OfflineTranscriptSaveResult>;
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
 }
 
@@ -162,8 +197,8 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       setDiskScanTruncated(scan.truncated);
       setScanFailed(scanFailed);
       return candidates;
-    } catch (error) {
-      console.error('Failed to check for recoverable transcripts:', error);
+    } catch {
+      console.warn('Failed to check for recoverable transcripts.');
       if (request === scanRequest.current) setScanFailed(true);
       return [];
     } finally {
@@ -190,33 +225,38 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         }));
       }
       return await indexedDBService.getTranscripts(meetingId);
-    } catch (error) {
-      console.error('Failed to load meeting transcripts:', error);
-      return [];
+    } catch {
+      throw new Error('Could not read the transcript preview.');
     }
   }, [currentCandidate]);
 
-  /**
-   * The steps after a recovered meeting is saved: language, originals and the list.
-   */
-  const finishRecovery = useCallback(async (
-    entryId: string,
-    folderPath: string | undefined,
-    audioRecoveryStatus: AudioRecoveryStatus | null,
-    savedMeetingId: string,
-  ) => {
-    const audioRecovered = Boolean(audioRecoveryStatus?.audio_file_path) &&
-      (audioRecoveryStatus?.status === 'success' || audioRecoveryStatus?.status === 'partial');
+  const saveOfflineTranscript = useCallback(async (meetingId: string): Promise<OfflineTranscriptSaveResult> => {
+    const candidate = currentCandidate(meetingId);
+    if (!candidate.folderUnverified) throw new Error('Check the recording again before saving the transcript.');
+    let transcripts;
     try {
-      await applyPinnedSummaryLanguageToMeeting(savedMeetingId);
-    } catch (error) {
-      console.warn('Failed to apply pinned summary language to recovered meeting:', error);
-      toast.warning('Could not apply default summary language', {
-        description: 'The recovered meeting was saved, but the default summary language was not applied.',
-      });
+      transcripts = formatCachedTranscripts(await indexedDBService.getTranscripts(meetingId));
+    } catch {
+      throw new Error('Could not read the cached transcript. Try again.');
     }
-    return { audioRecovered, entryId, folderPath };
-  }, []);
+    if (!transcripts.some(row => row.text.trim())) throw new Error('There is no cached transcript to save.');
+    if (currentCandidate(meetingId) !== candidate) throw new Error('The recording list changed. Review the draft again.');
+
+    try {
+      if (hasStableRecordingId(meetingId)) {
+        await invoke('save_offline_recording_transcript', {
+          meetingId, meetingTitle: candidate.title, startedAt: candidate.startTime, transcripts,
+        });
+        await applyRecoverySummaryLanguage(meetingId);
+        setCandidates(previous => previous.filter(entry => entry !== candidate));
+        return 'library';
+      }
+      const saved = await invoke<boolean>('save_recovery_transcript_copy', { transcripts });
+      return saved ? 'file' : 'cancelled';
+    } catch {
+      throw new Error('Could not save the transcript. Your draft is still available. Try again.');
+    }
+  }, [currentCandidate, setCandidates]);
 
   /**
    * Recover a recording that exists only on disk. Audio goes through the same
@@ -281,8 +321,8 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       recording.hasTranscript,
     );
     const savedMeetingId = saveResponse.meeting_id;
-    const { audioRecovered: recovered } = await finishRecovery(candidate.meetingId, recording.folder, audioRecoveryStatus, savedMeetingId);
-    if (recovered) {
+    await applyRecoverySummaryLanguage(savedMeetingId);
+    if (audioRecovered) {
       try {
         await invoke('release_recovered_capture', { meetingFolder: recording.folder });
       } catch {
@@ -303,7 +343,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       meetingId: savedMeetingId,
       transcriptCount: recording.transcriptLines,
     };
-  }, [finishRecovery, setCandidates]);
+  }, [setCandidates]);
 
   /**
    * Recover a meeting from IndexedDB
@@ -312,6 +352,9 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     setIsRecovering(true);
     try {
       const candidate = currentCandidate(meetingId);
+      if (candidate.folderUnverified) {
+        throw new Error('Retry the scan to verify the recordings folder before recovering the meeting.');
+      }
       if (candidate.disk && (candidate.source === 'disk' || candidate.disk.registeredMeetingId)) {
         return await recoverDiskMeeting(candidate);
       }
@@ -366,20 +409,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       }
 
       // 5. Convert StoredTranscripts to the format expected by storageService
-      const formattedTranscripts = transcripts.map((t, index) => ({
-        id: t.id?.toString() || `${Date.now()}-${index}`,
-        text: t.text,
-        timestamp: t.timestamp,
-        sequence_id: t.sequenceId ?? t.sequence_id ?? index,
-        chunk_start_time: t.chunk_start_time,
-        is_partial: t.is_partial ?? false,
-        confidence: t.confidence,
-        audio_start_time: t.audio_start_time,
-        audio_end_time: t.audio_end_time,
-        duration: t.duration,
-        speaker: t.speaker ?? t.source,
-        word_timestamps: t.word_timestamps,
-      }));
+      const formattedTranscripts = formatCachedTranscripts(transcripts);
 
       // 6. Save to backend database using existing save utilities
       const saveResponse = await storageService.saveMeeting(
@@ -395,14 +425,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
 
       const savedMeetingId = saveResponse.meeting_id;
 
-      try {
-        await applyPinnedSummaryLanguageToMeeting(savedMeetingId);
-      } catch (error) {
-        console.warn('Failed to apply pinned summary language to recovered meeting:', error);
-        toast.warning('Could not apply default summary language', {
-          description: 'The recovered meeting was saved, but the default summary language was not applied.',
-        });
-      }
+      await applyRecoverySummaryLanguage(savedMeetingId);
 
       // 7. Mark as saved in IndexedDB
       await indexedDBService.markMeetingSaved(meetingId);
@@ -452,6 +475,9 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   const deleteRecoverableMeeting = useCallback(async (meetingId: string): Promise<void> => {
     try {
       const candidate = currentCandidate(meetingId);
+      if (candidate.folderUnverified) {
+        throw new Error('Retry the scan to verify the recordings folder before deleting this draft.');
+      }
       if (candidate.disk?.registeredMeetingId) {
         throw new Error('This recording is saved in your library and cannot be deleted from here.');
       }
@@ -481,10 +507,12 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     isRecovering,
     diskScanTruncated,
     scanFailed,
+    hasUnverifiedFolders: recoverableMeetings.some(entry => entry.folderUnverified),
     checkForRecoverableTranscripts,
     keepRecoverableMeeting,
     recoverMeeting,
     loadMeetingTranscripts,
+    saveOfflineTranscript,
     deleteRecoverableMeeting
   };
 }

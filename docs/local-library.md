@@ -553,10 +553,10 @@ the original, then removes the moved files. If removal stops partway through,
 the cleanup list shows the temporary location for the next retry. An unavailable
 drive, share, or parent folder keeps staged cleanup pending until the location can
 be verified again. ClawScribe can clear an empty staging folder when the original
-is verified absent, or retry the move when the recording marker confirms the
-original still belongs to the deleted meeting. Review other unfinished staging
-locations before removing files manually. A new meeting using the original path
-can keep using it. A recording-folder retry before the
+is verified absent, or retry the move after checking it still belongs to the
+cleanup entry. For recordings, this requires a matching marker. Review other
+unfinished staging locations before removing files manually. A new meeting
+using the original path can keep using it. A recording-folder retry before the
 files have moved requires a marker that identifies that meeting. If an older
 folder has no marker or its marker has no meeting ID, use **Keep files** and review
 the folder before removing it manually. **Keep files** clears the item from the
@@ -573,11 +573,17 @@ recordings in that target available to the disk scan. Folder deletion continues
 to require an unlinked path and verified ownership.
 
 If a recovery scan cannot verify a draft's folder or read its recording marker,
-the draft and audio folder are kept. Reconnect the location or let OneDrive
-finish downloading, then choose **Retry scan** in the recovery dialog or under
-**Settings → General**. A draft with a folder is offered as transcript-only
-recovery when the folder is verified missing or belongs to a different recording.
-ClawScribe uses recording identity and library deletion history during the check.
+**Interrupted recordings** shows **Folder unverified** and lets you preview the
+cached transcript. Reconnect the location or let OneDrive finish downloading,
+then choose **Retry scan** in the recovery dialog or under **Settings → General**.
+For a draft with a stable recording ID, **Save transcript to library** saves the
+full cached transcript. When the audio returns, retry the scan and recover it
+into the same meeting. For older drafts, **Save transcript copy** saves a local
+text file and keeps the draft linked to its original folder. Both options keep
+the original recovery data. A scan that confirms the original folder is absent
+or belongs to a different recording can offer transcript-only recovery.
+ClawScribe checks recording identity and library deletion history before
+offering recovery.
 
 Pre-migration database snapshots in app-data `backups` can contain deleted
 meetings. Each new snapshot keeps the newest two, and startup cleanup removes

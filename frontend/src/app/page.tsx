@@ -56,10 +56,12 @@ export default function Home() {
     recoverableMeetings,
     isLoading: isRecoveryScanning,
     scanFailed: recoveryScanFailed,
+    hasUnverifiedFolders,
     checkForRecoverableTranscripts,
     keepRecoverableMeeting,
     recoverMeeting,
     loadMeetingTranscripts,
+    saveOfflineTranscript,
     deleteRecoverableMeeting
   } = useTranscriptRecovery();
 
@@ -224,11 +226,13 @@ export default function Home() {
         recoverableMeetings={recoverableMeetings}
         isScanning={isRecoveryScanning}
         scanFailed={recoveryScanFailed}
+        hasUnverifiedFolders={hasUnverifiedFolders}
         onRetryScan={() => { void checkForRecoverableTranscripts(); }}
         onRecover={handleRecovery}
         onDelete={deleteRecoverableMeeting}
         onKeep={keepRecoverableMeeting}
         onLoadPreview={loadMeetingTranscripts}
+        onSaveOfflineTranscript={saveOfflineTranscript}
       />
       <div className="flex flex-1 overflow-hidden">
         {isRecordingOrStarting || transcripts.length > 0 || isProcessingStop || isStopping ? (
