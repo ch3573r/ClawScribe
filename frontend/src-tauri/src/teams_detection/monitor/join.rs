@@ -22,6 +22,7 @@ pub(super) struct Invitation {
     near_start: bool,
     // None until the pre-launch scan finishes and the launcher succeeds.
     active_before: Option<Vec<String>>,
+    open_before: Vec<String>,
     // Dropping the invitation also wakes and releases its timeout worker.
     timeout: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -52,6 +53,7 @@ impl Invitation {
             epoch: recording_epoch(),
             near_start: start <= now + WAIT_MS,
             active_before: None,
+            open_before: Vec::new(),
             timeout: None,
         })
     }
@@ -71,7 +73,9 @@ impl Invitation {
         }
         match call.teams_room {
             Some(room) if room != self.room => Mode::Off,
-            Some(_) if self.near_start => Mode::Auto,
+            // An already-open window may have been showing a call that Windows
+            // UI Automation could not inspect before the invitation opened.
+            Some(_) if self.near_start && !self.open_before.contains(&call.window) => Mode::Auto,
             _ => Mode::Prompt,
         }
     }
@@ -89,6 +93,7 @@ impl Invitation {
             "Teams opened. ClawScribe could not check existing calls. Start recording manually.",
         )?;
         self.active_before = Some(scan.active.iter().map(|call| call.window.clone()).collect());
+        self.open_before = scan.open_windows.clone();
         Ok(())
     }
 }
@@ -293,6 +298,21 @@ mod tests {
             active,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn an_existing_window_that_first_becomes_readable_after_launch_requires_confirmation() {
+        let mut join = invitation();
+        let baseline = CallScan {
+            open_windows: vec!["existing".into()],
+            ..snapshot(vec![])
+        };
+        join.launch(Some(&baseline), || Ok(())).unwrap();
+        assert!(matches!(
+            join.mode(&call("existing", Some([1; 32]))),
+            Mode::Prompt
+        ));
+        assert!(matches!(join.mode(&call("new", Some([1; 32]))), Mode::Auto));
     }
 
     #[test]

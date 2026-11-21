@@ -49,7 +49,8 @@ whichever comes first. Use **Cancel recording request** on Home to withdraw it.
 Microsoft sign-out or starting a separate recording also clears the request.
 
 ClawScribe checks for active Teams calls before opening the link. An already
-active call window is ineligible. A new browser call with the same Teams room
+active call window is ineligible. A call in a window that was already open
+requires confirmation. A new browser window with the same Teams room
 can start automatically when the invitation is in progress or starts within
 five minutes. If the meeting is further away or Teams only exposes call
 controls, confirm the event shown on Home, in the recording prompt or in the
