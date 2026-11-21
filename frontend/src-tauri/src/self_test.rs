@@ -82,8 +82,8 @@ const BUNDLED_TEMPLATES: [(&str, &str); 6] = [
         include_str!("../templates/project_sync.json"),
     ),
     (
-        "psychatric_session.json",
-        include_str!("../templates/psychatric_session.json"),
+        "psychiatric_session.json",
+        include_str!("../templates/psychiatric_session.json"),
     ),
     (
         "retrospective.json",

@@ -1286,20 +1286,14 @@ pub async fn api_save_meeting_title<R: Runtime>(
     auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
-    log_info!("Saving meeting title");
+    let _install_guard = crate::updates::admit_work()?;
     let pool = state.db_manager.pool();
     match MeetingsRepository::update_meeting_title(pool, &meeting_id, &title).await {
-        Ok(true) => {
-            log_info!("Successfully saved meeting title");
-            Ok(serde_json::json!({"message": "Meeting title saved successfully"}))
-        }
-        Ok(false) => {
-            log_error!("No meeting found with id");
-            Err(format!("No meeting found with id {}", meeting_id))
-        }
-        Err(e) => {
-            log_error!("Failed to update meeting");
-            Err(format!("Failed to update meeting: {}", e))
+        Ok(true) => Ok(serde_json::json!({"message": "Meeting title saved successfully"})),
+        Ok(false) => Err("Meeting was not found".into()),
+        Err(_) => {
+            log_error!("Could not persist the meeting title");
+            Err("Could not save the meeting title".into())
         }
     }
 }

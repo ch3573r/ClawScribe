@@ -1,7 +1,7 @@
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_store::StoreExt;
 
@@ -14,6 +14,8 @@ use crate::audio::capture::AudioCaptureBackend;
 
 const DEFAULT_RECORDINGS_FOLDER_NAME: &str = "ClawScribe";
 const LEGACY_RECORDINGS_FOLDER_NAME: &str = "meetily-recordings";
+const DEVICE_PREFERENCES_CHANGED: &str = "recording-device-preferences-changed";
+static PREFERENCE_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn default_auto_open_floating_controls() -> bool {
     true
@@ -37,6 +39,12 @@ pub struct RecordingPreferences {
     /// default folder is used instead. Never read from the webview, never stored.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub folder_notice: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct RecordingDevicePreferences {
+    preferred_mic_device: Option<String>,
+    preferred_system_device: Option<String>,
 }
 
 impl Default for RecordingPreferences {
@@ -375,19 +383,16 @@ pub async fn load_recording_preferences<R: Runtime>(
         .unwrap_or_default();
 
     if migrate_legacy_recordings_folder(&mut prefs) {
-        info!(
-            "Migrated legacy default recordings folder to {:?}",
-            prefs.save_folder
-        );
+        info!("Migrated the legacy default recordings folder");
 
         match serde_json::to_value(&prefs) {
             Ok(prefs_value) => {
                 store.set("preferences", prefs_value);
-                if let Err(e) = store.save() {
-                    warn!("Failed to persist migrated recording preferences: {}", e);
+                if store.save().is_err() {
+                    warn!("Could not persist migrated recording preferences");
                 }
             }
-            Err(e) => warn!("Failed to serialize migrated preferences: {}", e),
+            Err(_) => warn!("Could not serialize migrated recording preferences"),
         }
     }
 
@@ -407,9 +412,6 @@ pub async fn load_recording_preferences<R: Runtime>(
         prefs.folder_notice = Some(FOLDER_NOTICE.to_string());
     }
 
-    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, mic={:?}, system={:?}",
-          prefs.save_folder, prefs.auto_save, prefs.file_format,
-          prefs.preferred_mic_device, prefs.preferred_system_device);
     Ok(prefs)
 }
 
@@ -420,9 +422,6 @@ pub async fn save_recording_preferences<R: Runtime>(
 ) -> Result<()> {
     // Check the folder before changing either the in-memory or on-disk state.
     ensure_recordings_directory(&preferences.save_folder)?;
-    info!("Saving recording preferences: save_folder={:?}, auto_save={}, format={}, mic={:?}, system={:?}",
-          preferences.save_folder, preferences.auto_save, preferences.file_format,
-          preferences.preferred_mic_device, preferences.preferred_system_device);
 
     // Get or create store
     let store = app
@@ -475,8 +474,6 @@ pub async fn save_recording_preferences<R: Runtime>(
         }
         return Err(anyhow::anyhow!("Failed to save store to disk: {}", error));
     }
-
-    info!("Successfully persisted recording preferences to disk");
 
     // Save backend preference to global config
     #[cfg(target_os = "macos")]
@@ -657,12 +654,26 @@ pub(crate) fn classify_folder_request(
 pub async fn set_recording_preferences<R: Runtime>(
     app: AppHandle<R>,
     mut preferences: RecordingPreferences,
+    preserve_device_preferences: Option<bool>,
 ) -> Result<(), String> {
+    let _write = PREFERENCE_WRITE.lock().await;
     // The folder is not taken from the text the webview sends. Unchanged, it
     // stays; the default folder is always allowed; anything else must be a
     // folder the user chose in the core's folder picker (`select_recording_folder`)
     // in this session, and becomes a trusted root.
     let current = load_recording_preferences(&app).await.ok();
+    let preserve_devices = preserve_device_preferences.unwrap_or(false);
+    if preserve_devices {
+        let current = current
+            .as_ref()
+            .ok_or("Could not load audio device preferences")?;
+        preferences
+            .preferred_mic_device
+            .clone_from(&current.preferred_mic_device);
+        preferences
+            .preferred_system_device
+            .clone_from(&current.preferred_system_device);
+    }
     let change = classify_folder_request(
         current
             .as_ref()
@@ -698,12 +709,62 @@ pub async fn set_recording_preferences<R: Runtime>(
         preferences.save_folder = granted;
     }
     preferences.folder_notice = None;
-    let saved = save_recording_preferences(&app, &preferences)
+    save_recording_preferences(&app, &preferences)
         .await
-        .map_err(|e| format!("Failed to save recording preferences: {}", e));
+        .map_err(|_| {
+            warn!("Could not persist recording preferences");
+            "Could not save recording preferences".to_string()
+        })?;
     // The roots changed with it.
     let _ = recording_roots(&app).await;
-    saved
+    if !preserve_devices {
+        let _ = app.emit(
+            DEVICE_PREFERENCES_CHANGED,
+            RecordingDevicePreferences {
+                preferred_mic_device: preferences.preferred_mic_device,
+                preferred_system_device: preferences.preferred_system_device,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Patch just the device fields so Home and Settings never write a stale
+/// recordings folder or other unrelated preferences when choosing a device.
+#[tauri::command]
+pub async fn set_recording_device_preferences<R: Runtime>(
+    app: AppHandle<R>,
+    preferences: RecordingDevicePreferences,
+) -> Result<RecordingDevicePreferences, String> {
+    let _write = PREFERENCE_WRITE.lock().await;
+    let current = load_recording_preferences(&app)
+        .await
+        .map_err(|_| "Could not load recording preferences")?;
+    let store = app
+        .store("recording_preferences.json")
+        .map_err(|_| "Could not access recording preferences")?;
+    let previous = store.get("preferences");
+    let mut stored = match &previous {
+        Some(value) => value.clone(),
+        None => {
+            serde_json::to_value(current).map_err(|_| "Could not prepare recording preferences")?
+        }
+    };
+    stored["preferred_mic_device"] = serde_json::json!(preferences.preferred_mic_device);
+    stored["preferred_system_device"] = serde_json::json!(preferences.preferred_system_device);
+    store.set("preferences", stored);
+    if store.save().is_err() {
+        match previous {
+            Some(value) => store.set("preferences", value),
+            None => {
+                store.delete("preferences");
+            }
+        }
+        warn!("Could not persist audio device preferences");
+        return Err("Could not save audio device preferences".into());
+    }
+    let _ = app.emit(DEVICE_PREFERENCES_CHANGED, &preferences);
+    Ok(preferences)
 }
 
 #[tauri::command]

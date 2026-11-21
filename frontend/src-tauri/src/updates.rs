@@ -202,12 +202,16 @@ pub async fn download_app_update<R: Runtime>(
 /// it covers the whole installer hand-off, survives a page reload, and is
 /// released when the installer fails; on success the installer ends the process.
 #[tauri::command]
-pub async fn install_app_update(rid: ResourceId) -> Result<(), String> {
+pub async fn install_app_update(
+    rid: ResourceId,
+    edits: tauri::State<'_, crate::summary::edit_exit::SummaryEditsState>,
+) -> Result<(), String> {
     let staged = staged()
         .installer
         .take_if(|installer| installer.rid == rid)
         .ok_or("The downloaded update is no longer available. Check for updates again.")?;
     let permit = UpdateInstallPermit::acquire()?;
+    edits.ensure_saved_for_update()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
         staged
@@ -217,6 +221,12 @@ pub async fn install_app_update(rid: ResourceId) -> Result<(), String> {
     })
     .await
     .map_err(|_| "The installer stopped unexpectedly. Try again.".to_string())?
+}
+
+#[tauri::command]
+pub fn discard_app_update(rid: ResourceId) {
+    // The webview may stop before hand-off if saving meeting edits fails.
+    let _ = staged().installer.take_if(|installer| installer.rid == rid);
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

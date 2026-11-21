@@ -16,8 +16,8 @@ test('the install exclusion is a Rust-owned permit, never a webview resource', (
   assert.doesNotMatch(updates, /impl tauri::Resource for UpdateInstallPermit/);
   assert.doesNotMatch(updates, /resources_table\(\)\s*\.add\(\s*permit/);
   assert.doesNotMatch(updates, /reserve_update_install|check_update_install_ready/);
-  assert.match(updates, /pub async fn install_app_update\(rid: ResourceId\)/);
-  assert.match(updates, /let permit = UpdateInstallPermit::acquire\(\)\?;[\s\S]*spawn_blocking\(move \|\| \{\s*let _permit = permit;/);
+  assert.match(updates, /pub async fn install_app_update\(\s*rid: ResourceId,/);
+  assert.match(updates, /let permit = UpdateInstallPermit::acquire\(\)\?;\s*edits\.ensure_saved_for_update\(\)\?;\s*tauri::async_runtime::spawn_blocking\(move \|\| \{\s*let _permit = permit;/);
   const lib = rust('lib.rs');
   assert.match(lib, /updates::download_app_update/);
   assert.match(lib, /updates::install_app_update/);
@@ -38,6 +38,8 @@ test('the page cannot reach the updater plugin and does not hold the installer',
 
 test('summaries, saved answers and every export write are admitted through the install gate', () => {
   assert.match(rust('summary/service.rs'), /crate::updates::admit_work\(\)\?/);
+  assert.match(rust('summary/commands.rs'), /pub async fn api_save_meeting_summary[\s\S]{0,350}crate::updates::admit_work\(\)\?/);
+  assert.match(rust('api/api.rs'), /pub async fn api_save_meeting_title[\s\S]{0,420}crate::updates::admit_work\(\)\?/);
   const answers = rust('knowledge/answers.rs');
   assert.match(answers, /crate::updates::admit_work\(\)\?/);
   // A dropped lease still owes the durable cancellation write, so it keeps the guard.

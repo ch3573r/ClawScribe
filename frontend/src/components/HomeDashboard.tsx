@@ -17,6 +17,7 @@ import {
   Volume2,
 } from "lucide-react";
 import { RecordingControls } from "@/components/RecordingControls";
+import { AudioDeviceSelect } from "@/components/AudioDeviceSelect";
 import { RecordingModeSelect } from '@/components/RecordingModeSelect';
 import { UpcomingMeetings } from "@/components/UpcomingMeetings";
 import { useRouter } from "next/navigation";
@@ -25,7 +26,6 @@ import { useConfig } from "@/contexts/ConfigContext";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
 import { RecordingStatus, useRecordingState } from "@/contexts/RecordingStateContext";
 import {
-  getAudioDeviceDisplayName,
   audioSourceReadiness,
   type AudioDevice,
 } from "@/lib/audioDevicePreferences";
@@ -96,7 +96,9 @@ export function HomeDashboard({
     selectedLanguage,
     audioDeviceInventory,
     devicePreferencesStatus,
+    isSavingDevicePreferences,
     refreshDevicePreferences,
+    saveSelectedDevices,
   } = useConfig();
   const { openImportDialog } = useImportDialog();
   const recordingState = useRecordingState();
@@ -129,7 +131,10 @@ export function HomeDashboard({
     : modelIssue ? "Live transcription needs attention"
     : null;
   const micOnly = !deviceCheckFailed && !checkingDevices && micReady === "available" && systemReady === "default_unavailable";
-  const canStart = !firstFailure && !recordingState.isSavingMode;
+  const canStart = !firstFailure && !recordingState.isSavingMode && !isSavingDevicePreferences;
+  const canChooseDevices = inventoryStatus === 'ready' && devicePreferencesStatus === 'ready'
+    && !isSavingDevicePreferences && !isRecording && !isProcessingStop && !recordingState.isStarting
+    && !recordingState.isStopping && !recordingState.isSaving && !recordingState.isProcessing;
   const appStatus = isRecording
     ? recordingState.isPaused
       ? { label: "Paused", dot: "bg-warning-foreground", ring: "ring-warning-foreground/20" }
@@ -149,29 +154,12 @@ export function HomeDashboard({
 
   const openRecordingSettings = () => router.push("/settings?tab=recording");
   const openTranscriptionSettings = () => router.push(transcriptionSettingsPath(provider));
-  const signalSteps = [
-    {
-      icon: Mic,
-      label: "Microphone",
-      value: getAudioDeviceDisplayName(selectedDevices.micDevice, inventory?.defaultMicrophone ?? "System default microphone"),
-      meta: deviceMeta("Input", selectedDevices.micDevice),
-      onClick: openRecordingSettings,
-    },
-    {
-      icon: Volume2,
-      label: "System audio",
-      value: getAudioDeviceDisplayName(selectedDevices.systemDevice, inventory?.defaultOutput ?? "System default output"),
-      meta: deviceMeta("Output", selectedDevices.systemDevice),
-      onClick: openRecordingSettings,
-    },
-    {
-      icon: AudioLines,
-      label: "Live transcription",
-      value: audioOnly ? "Off in audio-only mode" : providerLabel ?? (checkingModel ? "Checking engine" : "Engine unavailable"),
-      meta: audioOnly ? "Transcribe from the saved meeting" : providerLabel ? `${languageLabel} · On this device` : "On-device engine required",
-      onClick: openTranscriptionSettings,
-    },
-  ];
+  const audioSources = [
+    { key: 'micDevice', type: 'Input', label: 'Microphone', icon: Mic, defaultName: inventory?.defaultMicrophone },
+    { key: 'systemDevice', type: 'Output', label: 'System audio', icon: Volume2, defaultName: inventory?.defaultOutput },
+  ] as const;
+  const engineName = audioOnly ? "Off in audio-only mode" : providerLabel ?? (checkingModel ? "Checking engine" : "Engine unavailable");
+  const engineDetail = audioOnly ? "Transcribe from the saved meeting" : providerLabel ? `${languageLabel} · On this device` : "On-device engine required";
 
   const recheckDevices = () => {
     void refresh();
@@ -251,7 +239,7 @@ export function HomeDashboard({
                   {micOnly && <p role="status" className="max-w-sm text-sm text-warning-foreground">No default output is available. Only your microphone will be recorded.</p>}
                   {deviceCheckFailed && <p role="alert" className="max-w-sm text-sm text-destructive">Could not verify the audio devices or load their preferences. Recheck devices to try again.</p>}
                   {(micReady === "preferred_unavailable" || micReady === "default_unavailable" || systemReady === "preferred_unavailable") &&
-                    <p role="status" className="max-w-sm text-sm text-warning-foreground">Reconnect the device or choose an available device in Recording settings.</p>}
+                    <p role="status" className="max-w-sm text-sm text-warning-foreground">Reconnect the device or choose an available device under Signal path.</p>}
                   {modelIssue && <p role="status" className="max-w-sm text-sm text-warning-foreground">{LIVE_MODEL_FAILURE_MESSAGE[modelIssue]}</p>}
                   {modelCheckFailed && <Button variant="outline" onClick={() => void liveReadiness.refresh()}>Recheck speech model</Button>}
                   {(modelIssue || modelCheckFailed) && (
@@ -310,29 +298,33 @@ export function HomeDashboard({
             </div>
 
             <div className="mt-6 space-y-3">
-              {signalSteps.map((step) => (
-                <Button
-                  variant="ghost"
-                  key={step.label}
-                  type="button"
-                  onClick={step.onClick}
-                  className="h-auto whitespace-normal font-normal group relative grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border bg-background px-3 py-3.5 text-left transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-foreground"
-                >
-                  <step.icon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-                  <span className="min-w-0">
-                    <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                      {step.label}
-                    </span>
-                    <span className="mt-1 block truncate text-sm font-medium text-foreground" title={step.value}>
-                      {step.value}
-                    </span>
-                    <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
-                      {step.meta}
-                    </span>
-                  </span>
-                  <ChevronRight className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
-                </Button>
-              ))}
+              {audioSources.map(source => {
+                const id = `home-${source.key}`;
+                const value = selectedDevices[source.key];
+                return (
+                  <div key={source.key} className="space-y-1.5 rounded-md border border-border bg-background p-3">
+                    <label htmlFor={id} className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <source.icon className="h-4 w-4" aria-hidden="true" />{source.label}
+                    </label>
+                    <AudioDeviceSelect id={id} label={source.label} value={value}
+                      defaultLabel={source.defaultName ? `System default (${source.defaultName})` : 'System default'}
+                      options={inventory?.devices.filter(device => device.device_type === source.type) ?? []}
+                      disabled={!canChooseDevices}
+                      onChange={next => void saveSelectedDevices({ ...selectedDevices, [source.key]: next })} />
+                    <p className="text-xs text-muted-foreground">{deviceMeta(source.type, value)}</p>
+                  </div>
+                );
+              })}
+              <Button variant="ghost" type="button" onClick={openTranscriptionSettings}
+                className="h-auto whitespace-normal font-normal group grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border bg-background px-3 py-3.5 text-left transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-foreground">
+                <AudioLines className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                <span className="min-w-0">
+                  <span className="block text-xs text-muted-foreground">Live transcription</span>
+                  <span className="mt-1 block truncate text-sm font-medium text-foreground">{engineName}</span>
+                  <span className="mt-0.5 block text-xs text-muted-foreground">{engineDetail}</span>
+                </span>
+                <ChevronRight className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-primary" aria-hidden="true" />
+              </Button>
             </div>
 
             <Button variant="outline" className="mt-5 w-full" onClick={recheckDevices} disabled={checkingDevices}>

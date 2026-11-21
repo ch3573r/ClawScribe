@@ -10,8 +10,10 @@ doing in ClawScribe.
   reloaded and is not brought to the front. If it is hidden in the tray, it
   stays hidden.
 - ClawScribe starts with the same saved device preferences and recording mode
-  as the Start button. The selected calendar event is saved with the recording.
-  Automatic calendar matching runs after capture starts.
+  as the Start button. Choose the microphone and system output in Home's
+  **Signal path** or **Settings → Recording**. Both use the same preferences
+  and apply changes to the next recording. The selected calendar event is saved
+  with the recording. Automatic calendar matching runs after capture starts.
 - Only one start can be under way. A repeated shortcut, a second command-line
   start or a detected call that arrives at the same moment does not start a
   second recording. During a save, **Start after saving** in the window or tray

@@ -68,7 +68,7 @@ export function createDraftQueue(write: (edits: Edits, canWrite: () => boolean) 
 
 export function reportSaveError() {
   toast.error('Could not save meeting edits', {
-    description: 'Your edits are still pending. Wait for generation to finish, then retry saving.',
+    description: 'Your edits are still pending. Retry saving before you continue.',
     action: { label: 'Retry', onClick: () => { void flushMeetingDrafts().catch(() => {}); } },
   });
 }
@@ -78,9 +78,15 @@ const deletedMeetings = new Set<string>();
 const discardedDraft = createDraftQueue(async () => {});
 discardedDraft.discard();
 const busy = (status?: string) => ['pending', 'processing', 'summarizing', 'regenerating'].includes(status?.toLowerCase() ?? '');
+const hasPendingDrafts = () => [...drafts.values()].some(draft => draft.dirty());
 let pendingUpdate: Promise<unknown> = Promise.resolve();
 const publishPending = () => {
-  pendingUpdate = pendingUpdate.then(() => invoke('api_set_summary_edits_pending', { pending: [...drafts.values()].some(draft => draft.dirty()) })).catch(() => {});
+  const update = pendingUpdate.catch(() => {}).then(() => invoke('api_set_summary_edits_pending', { pending: hasPendingDrafts() }));
+  // Edits still autosave if the notification fails. A hand-off must wait for
+  // a fresh acknowledgement before allowing exit or installation.
+  void update.catch(() => {});
+  pendingUpdate = update;
+  return update;
 };
 
 export function meetingDraft(meetingId: string) {
@@ -117,9 +123,10 @@ export function allowLoadedMeetingDrafts(meetings: readonly { id: string }[]) {
 
 export async function flushMeetingDrafts() {
   try {
-    await Promise.all([...drafts.values()].map(draft => draft.drain()));
-    publishPending();
-    await pendingUpdate;
+    do {
+      await Promise.all([...drafts.values()].filter(draft => draft.dirty()).map(draft => draft.drain()));
+      await publishPending();
+    } while (hasPendingDrafts());
   } catch (error) { reportSaveError(); throw error; }
 }
 

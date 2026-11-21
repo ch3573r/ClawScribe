@@ -24,11 +24,10 @@ export async function blocksToMarkdownSafely(
       markdown: await editor.blocksToMarkdownLossy(blocks),
       ok: true,
     };
-  } catch (error) {
+  } catch {
     console.error("Failed to convert BlockNote blocks to markdown", {
       source: options.source,
       blocksCount: blocks.length,
-      error,
     });
 
     return {

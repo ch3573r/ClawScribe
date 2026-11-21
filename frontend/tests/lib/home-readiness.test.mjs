@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
-import { createHookHarness, flush } from './hook-harness.mjs';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
 const devices = [
   { name: 'Desk mic', device_type: 'Input' },
@@ -60,12 +60,12 @@ function recordingSettings(t, { preferences, save }) {
     '@/lib/analytics': { default: { track: () => {} }, __esModule: true },
     '@/lib/behaviorSettings': { loadBehaviorSettings: async () => ({ showRecordingNotification: true }) },
     '@/contexts/ConfigContext': {
-      useConfig: () => ({ selectedDevices: preferred, setSelectedDevices }),
+      useConfig: () => ({ selectedDevices: preferred, devicePreferencesStatus: 'ready', saveSelectedDevices }),
     },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ recordingMode: 'audio_only' }) },
     sonner: { toast: { error: message => calls.push(['error', message]), success: () => {} } },
   });
-  function setSelectedDevices(next) { calls.push(['publishDevices', next]); }
+  async function saveSelectedDevices(next) { calls.push(['saveSelectedDevices', next]); }
   const nodes = root => Array.isArray(root) ? root.flatMap(nodes) :
     root && typeof root === 'object' ? [root, ...nodes(root.props.children)] : [];
   const find = predicate => nodes(hook.render(() => RecordingSettings({}))).find(predicate);
@@ -77,7 +77,7 @@ const recordingPreferences = {
   preferred_mic_device: 'Desk mic (input)', preferred_system_device: null,
 };
 
-test('Recording settings keeps audio-only saving read-only and rolls back rejected device saves', async t => {
+test('Recording settings keeps audio-only saving read-only and uses the shared device writer', async t => {
   const { calls, find } = recordingSettings(t, {
     preferences: () => recordingPreferences,
     save() { throw new Error('could not save'); },
@@ -93,14 +93,8 @@ test('Recording settings keeps audio-only saving read-only and rolls back reject
   assert.deepEqual(calls, []);
 
   const devices = () => find(node => node.type === 'AudioDevicesCard').props;
-  const oldError = console.error;
-  console.error = () => {};
-  try {
-    await devices().onDeviceChange({ micDevice: 'Other mic (input)', systemDevice: null });
-  } finally {
-    console.error = oldError;
-  }
-  assert.deepEqual(calls.map(([command]) => command), ['set_recording_preferences', 'error']);
+  await devices().onDeviceChange({ micDevice: 'Other mic (input)', systemDevice: null });
+  assert.deepEqual(calls.map(([command]) => command), ['saveSelectedDevices']);
   assert.equal(devices().selectedDevices.micDevice, 'Desk mic (input)');
 });
 
@@ -125,24 +119,27 @@ test('automatic floating controls can be turned off in Recording settings and ba
   assert.equal(stored.auto_open_floating_controls, true);
 });
 
-test('Home labels native live and hosted file transcription separately and can recheck disconnected devices', t => {
+test('Home can change a disconnected device without leaving the signal path', async t => {
   const hook = createHookHarness();
   t.after(() => hook.unmount());
   let rechecks = 0;
   const state = { status: 'ready', data: inventory, refresh: () => { rechecks++; } };
   const preferred = { micDevice: null, systemDevice: null };
+  const savedDevices = [];
   const jsx = (type, props) => ({ type, props });
   const stub = (...names) => Object.fromEntries(names.map(name => [name, name]));
   const { HomeDashboard } = loadTsModule('src/components/HomeDashboard', {
     react: hook.react,
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@/components/ui/button': stub('Button'),
+    '@/components/AudioDeviceSelect': stub('AudioDeviceSelect'),
     '@/components/RecordingControls': stub('RecordingControls'),
     '@/components/RecordingModeSelect': stub('RecordingModeSelect'),
     '@/components/UpcomingMeetings': stub('UpcomingMeetings'),
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ meetings: [] }) },
     '@/contexts/ConfigContext': { useConfig: () => ({
       selectedDevices: preferred, selectedLanguage: 'auto', audioDeviceInventory: state, devicePreferencesStatus: 'ready',
+      saveSelectedDevices: async devices => { savedDevices.push(devices); Object.assign(preferred, devices); },
     }) },
     '@/contexts/ImportDialogContext': { useImportDialog: () => ({}) },
     '@/contexts/RecordingStateContext': {
@@ -170,6 +167,11 @@ test('Home labels native live and hosted file transcription separately and can r
   const stale = render();
   assert.match(text(stale), /Preferred microphone unavailable/);
   assert.equal(nodes(stale).find(node => node.type === 'RecordingControls').props.isRecordingDisabled, true);
+  const microphone = nodes(stale).find(node => node.type === 'AudioDeviceSelect' && node.props.label === 'Microphone');
+  assert.equal(microphone.props.value, 'Unplugged mic (input)');
+  await microphone.props.onChange('Desk mic (input)');
+  assert.equal(JSON.stringify(savedDevices), JSON.stringify([{ micDevice: 'Desk mic (input)', systemDevice: null }]));
+  assert.equal(nodes(render()).find(node => node.type === 'RecordingControls').props.isRecordingDisabled, false);
   nodes(stale).find(node => node.type === 'Button' && /Recheck devices/.test(text(node))).props.onClick();
   assert.equal(rechecks, 2);
 
@@ -178,4 +180,56 @@ test('Home labels native live and hosted file transcription separately and can r
   const failed = render();
   assert.match(text(failed), /Could not check audio devices/);
   assert.doesNotMatch(text(failed), /Ready to record/);
+});
+
+test('the shared preference owner ignores stale reads and keeps the prior devices if saving fails', async t => {
+  const hook = createHookHarness();
+  const initial = deferred();
+  const saves = [];
+  const errors = [];
+  let changeDevices;
+  let unsubscribed = false;
+  let saving = deferred();
+  const { useRecordingDevicePreferences } = loadTsModule('src/hooks/useRecordingDevicePreferences.ts', {
+    react: hook.react,
+    '@tauri-apps/api/event': { listen: async (name, handler) => {
+      assert.equal(name, 'recording-device-preferences-changed');
+      changeDevices = payload => handler({ payload });
+      return () => { unsubscribed = true; };
+    } },
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      assert.equal(command, 'set_recording_device_preferences');
+      saves.push(args.preferences);
+      return saving.promise;
+    } },
+    '@/services/configService': { configService: { getRecordingPreferences: () => initial.promise } },
+    sonner: { toast: { error: message => errors.push(message) } },
+  });
+  const render = () => hook.render(useRecordingDevicePreferences);
+  render();
+  await flush();
+  changeDevices({ preferred_mic_device: 'Shared mic (input)', preferred_system_device: null });
+  initial.resolve({ preferred_mic_device: 'Old mic (input)', preferred_system_device: null });
+  await flush();
+  assert.equal(render().selectedDevices.micDevice, 'Shared mic (input)');
+
+  const devices = { micDevice: 'New mic (input)', systemDevice: null };
+  const first = render().saveSelectedDevices(devices);
+  assert.equal(render().isSavingDevicePreferences, true);
+  await render().saveSelectedDevices(devices);
+  saving.reject(new Error('Synthetic write error'));
+  await first;
+  assert.equal(render().selectedDevices.micDevice, 'Shared mic (input)');
+  assert.deepEqual(errors, ['Could not save audio device selection']);
+  assert.equal(saves.length, 1);
+
+  saving = deferred();
+  const retry = render().saveSelectedDevices(devices);
+  saving.resolve({ preferred_mic_device: 'New mic (input)', preferred_system_device: null });
+  await retry;
+  assert.equal(render().selectedDevices.micDevice, 'New mic (input)');
+  assert.equal(render().isSavingDevicePreferences, false);
+  hook.unmount();
+  await flush();
+  assert.equal(unsubscribed, true);
 });

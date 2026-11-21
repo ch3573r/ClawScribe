@@ -769,13 +769,8 @@ pub fn run() {
             // }
 
             // Initialize bundled templates directory for dynamic template discovery
-            log::info!("Initializing bundled templates directory...");
             if let Ok(resource_path) = _app.handle().path().resource_dir() {
                 let templates_dir = resource_path.join("templates");
-                log::info!(
-                    "Setting bundled templates directory to: {:?}",
-                    templates_dir
-                );
                 summary::templates::set_bundled_templates_dir(templates_dir);
             } else {
                 log::warn!("Failed to resolve resource directory for templates");
@@ -854,6 +849,7 @@ pub fn run() {
             updates::get_update_channel,
             updates::download_app_update,
             updates::install_app_update,
+            updates::discard_app_update,
             updates::set_update_channel,
             updates::check_app_update,
             start_recording,
@@ -1051,6 +1047,7 @@ pub fn run() {
             summary::template_commands::api_save_default_template,
             summary::template_commands::api_get_template_editor,
             summary::template_commands::api_save_template,
+            summary::template_commands::api_remove_template,
             audio::recording_mode::get_recording_mode,
             audio::recording_mode::set_recording_mode,
             database::transcript_edits::api_update_transcript_text,
@@ -1074,6 +1071,7 @@ pub fn run() {
             openrouter::get_openrouter_models,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
+            audio::recording_preferences::set_recording_device_preferences,
             audio::vocabulary_settings::get_custom_vocabulary,
             audio::vocabulary_settings::set_custom_vocabulary,
             audio::recording_preferences::get_default_recordings_folder_path,
