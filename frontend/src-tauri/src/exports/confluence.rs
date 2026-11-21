@@ -608,20 +608,28 @@ fn valid_page_id(id: &str) -> bool {
 fn page_id_from_reference(base: &str, reference: &str) -> Result<String, String> {
     let reference = reference.trim();
     let id = if let Ok(url) = url::Url::parse(reference) {
-        let expected = page_url(base, "0")
-            .and_then(|value| url::Url::parse(&value).ok())
-            .ok_or("Invalid Confluence destination.")?;
+        let expected = url::Url::parse(base).map_err(|_| "Invalid Confluence destination.")?;
         if expected.origin() != url.origin()
-            || expected.path() != url.path()
             || !url.username().is_empty()
             || url.password().is_some()
         {
-            return Err("Use a page link from the selected Confluence site, with pageId in the web address.".into());
+            return Err("Use a page link from the selected Confluence site.".into());
         }
-        url.query_pairs()
-            .find(|(key, _)| key == "pageId")
-            .map(|(_, id)| id.into_owned())
-            .unwrap_or_default()
+        let path = url
+            .path()
+            .strip_prefix(expected.path().trim_end_matches('/'))
+            .unwrap_or_default();
+        match path {
+            "/pages/viewpage.action" | "/pages/viewinfo.action" => url
+                .query_pairs()
+                .find(|(key, _)| key == "pageId")
+                .map(|(_, id)| id.into_owned())
+                .unwrap_or_default(),
+            _ => match path.split('/').collect::<Vec<_>>().as_slice() {
+                ["", "spaces", _, "pages", id, ..] => (*id).to_owned(),
+                _ => String::new(),
+            },
+        }
     } else {
         reference.to_owned()
     };
@@ -933,6 +941,20 @@ mod tests {
             page_id_from_reference(base, &page_url(base, "318").unwrap()).unwrap(),
             "318"
         );
+        assert_eq!(
+            page_id_from_reference(base, &format!("{base}/pages/viewinfo.action?pageId=318"))
+                .unwrap(),
+            "318"
+        );
+        assert_eq!(
+            page_id_from_reference(base, &format!("{base}/spaces/TEST/pages/318/Notes")).unwrap(),
+            "318"
+        );
+        assert!(page_id_from_reference(
+            base,
+            "https://confluence.example.com/other/pages/viewinfo.action?pageId=318"
+        )
+        .is_err());
         assert!(page_id_from_reference(
             base,
             "https://other.example.com/wiki/pages/viewpage.action?pageId=318"
