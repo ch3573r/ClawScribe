@@ -42,7 +42,7 @@ function panel(t, initial = live) {
       subscribeToSystemTheme: () => () => {},
     },
     '@tauri-apps/api/core': { invoke: async (name, args) => {
-      calls.push({ name, label: args?.label });
+      calls.push({ name, label: args?.label, ...(args?.paused !== undefined ? { paused: args.paused } : {}) });
       return name === 'floating_status' ? snapshot : action;
     } },
   }).default;
@@ -110,6 +110,18 @@ test('closing while paused leaves capture alone and stops polling', async t => {
   assert.equal(paused.hasTimer(), false);
 });
 
+test('pause and resume target the bound recording and preserve an unfinished note', async t => {
+  const app = panel(t);
+  await flush();
+  app.find('Input').props.onChange({ target: { value: 'Draft note' } });
+  await app.find('Button', 'children', 'Pause').props.onClick();
+  assert.equal(app.calls.at(-1).paused, true);
+  await app.refresh({ ...live, paused: true });
+  await app.find('Button', 'children', 'Resume').props.onClick();
+  assert.equal(app.calls.at(-1).paused, false);
+  assert.equal(app.find('Input').props.value, 'Draft note');
+});
+
 test('the panel can reopen during a save and keeps recovery directions visible', async t => {
   const app = panel(t, { state: 'saving', seconds: 70, progress: 90, message: 'Saving…' });
   await flush();
@@ -127,6 +139,7 @@ test('app and Windows capabilities grant no plugin access to the controls webvie
       const labels = [...(capability.windows ?? []), ...(capability.webviews ?? [])];
       for (const pattern of labels) {
         assert.equal(matchesGlob('recording-controls-00000000-0000-4000-8000-000000000001', pattern), false, pattern);
+        assert.equal(matchesGlob('call-recording-prompt', pattern), false, pattern);
       }
     }
   }

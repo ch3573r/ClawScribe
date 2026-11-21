@@ -8,14 +8,15 @@ import { Progress } from '@/components/ui/progress';
 import { levelToDb, SegmentedLevelMeter } from '@/components/AudioLevelMeter';
 import type { RecordingLevelsPayload, SourceLevelPayload } from '@/lib/recording-levels';
 import { bookmarkTime } from '@/lib/library';
+import { deviceLabel, recordingHealthMetrics, recordingHealthWarnings, type MissingRecordingDevice, type RecordingHealth } from '@/lib/recording-health';
 import { applyAccent, applyThemePreference, DEFAULT_ACCENT_ID, subscribeToSystemTheme, type ThemePreference } from '@/lib/theme';
 
 type Status =
   | { state: 'recording'; seconds: number; paused: boolean; levels: RecordingLevelsPayload | null }
   | { state: 'saving'; seconds: number; progress: number; message: string }
-  | { state: 'reconnecting' | 'review' | 'ended' };
+  | { state: 'review' | 'ended' };
 
-type Snapshot = Status & { appearance: { theme: ThemePreference; accent: string | null } | null };
+type Snapshot = Status & { appearance: { theme: ThemePreference; accent: string | null } | null; health?: RecordingHealth | null };
 
 function Level({ label, reading, paused }: { label: string; reading?: SourceLevelPayload | null; paused: boolean }) {
   return <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
@@ -31,7 +32,7 @@ export default function FloatingControls() {
   const [status, setStatus] = useState<Snapshot | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [draft, setDraft] = useState('');
-  const [pending, setPending] = useState<'note' | 'stop' | null>(null);
+  const [pending, setPending] = useState<'note' | 'stop' | 'pause' | 'reconnect' | null>(null);
   const busy = useRef(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
@@ -78,8 +79,11 @@ export default function FloatingControls() {
 
   const recording = status?.state === 'recording' ? status : null;
   const saving = status?.state === 'saving' ? status : null;
-  const canNote = !!recording && !unavailable && !pending;
-  const canStop = (!!recording || status?.state === 'reconnecting') && !unavailable && !pending;
+  const health = status?.health;
+  const warnings = health ? recordingHealthWarnings(health) : [];
+  const metrics = health ? recordingHealthMetrics(health) : [];
+  const canStop = !!recording && !unavailable && !pending;
+  const canNote = canStop && !health?.reconnecting;
 
   async function saveNote(event: FormEvent) {
     event.preventDefault();
@@ -117,10 +121,40 @@ export default function FloatingControls() {
     }
   }
 
+  async function setPaused() {
+    if (!recording || !canNote || busy.current) return;
+    busy.current = true;
+    setPending('pause');
+    setError('');
+    try {
+      await invoke('floating_set_paused', { paused: !recording.paused });
+    } catch (error) {
+      setError(typeof error === 'string' ? error : 'Could not change recording pause state.');
+    } finally {
+      busy.current = false;
+      setPending(null);
+    }
+  }
+
+  async function reconnect(device: MissingRecordingDevice) {
+    if (!canNote || busy.current) return;
+    busy.current = true;
+    setPending('reconnect');
+    setError('');
+    try {
+      const result = await invoke<{ reconnected: boolean }>('floating_reconnect', { deviceName: device.name, deviceType: device.device_type });
+      if (!result.reconnected) setError('Audio device still unavailable. Check its connection and try again.');
+    } catch (error) {
+      setError(typeof error === 'string' ? error : 'Could not reconnect the audio device.');
+    } finally {
+      busy.current = false;
+      setPending(null);
+    }
+  }
+
   const stopping = !!saving || pending === 'stop';
   const title = saving ? 'Saving recording' : stopping ? 'Stopping recording'
     : recording ? (recording.paused ? 'Paused' : 'Recording')
-    : status?.state === 'reconnecting' ? 'Checking audio device'
     : status?.state === 'review' || status?.state === 'ended' ? 'Recording stopped'
     : unavailable ? 'Recording controls' : 'Loading controls…';
   const seconds = recording?.seconds ?? saving?.seconds;
@@ -139,10 +173,21 @@ export default function FloatingControls() {
           </h1>
           {seconds != null && <span role="timer" aria-label="Active recording time" className="text-lg font-medium tabular-nums">{bookmarkTime(seconds)}</span>}
         </div>
-        {(recording || status?.state === 'reconnecting') && <Button type="button" size="sm" variant="destructive" disabled={!canStop} onClick={stop}>
+        {recording && <Button type="button" size="sm" variant="outline" disabled={!canNote} onClick={setPaused}>
+          {recording.paused ? 'Resume' : 'Pause'}
+        </Button>}
+        {recording && <Button type="button" size="sm" variant="destructive" disabled={!canStop} onClick={stop}>
           <Square aria-hidden="true" className="fill-current" />Stop
         </Button>}
       </header>
+      {health?.reconnecting && <p role="status" className="text-xs">Checking audio device…</p>}
+      {warnings.length > 0 && <ul role="alert" className="space-y-1 text-xs text-warning-foreground">
+        {warnings.map(warning => <li key={warning}>{warning}</li>)}
+      </ul>}
+      {recording && health?.disconnected_devices.map(device => <div key={device.device_type} className="flex items-center justify-between gap-2 text-xs">
+        <span>{deviceLabel(device)} unavailable</span>
+        <Button type="button" size="sm" variant="outline" disabled={!canNote} onClick={() => void reconnect(device)}>Retry</Button>
+      </div>)}
       {saving ? <div className="space-y-2">
         <p className="text-sm" role="status">{saving.message}</p>
         <Progress value={saving.progress} aria-label="Recording save progress" aria-valuenow={saving.progress} />
@@ -159,6 +204,7 @@ export default function FloatingControls() {
           </Button>
         </form>
       </>}
+      {metrics.length > 0 && <p className="text-xs text-muted-foreground">{metrics.join(' · ')}</p>}
       {status?.state === 'review' && <p role="alert" className="text-sm">Open ClawScribe to review the recording and its recovery options.</p>}
       {unavailable || (canStop && error) ? <p role="alert" className="text-xs text-destructive">{unavailable ? 'Recording status unavailable. Reconnecting…' : error}</p>
         : <p role="status" className="text-xs text-muted-foreground">{recording && notice}</p>}

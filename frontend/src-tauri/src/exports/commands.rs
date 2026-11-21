@@ -253,7 +253,7 @@ pub async fn microsoft_sign_out<R: tauri::Runtime>(
 ) -> Result<(), String> {
     {
         let mut session = state.inner.write().await;
-        crate::teams_detection::monitor::join::cancel_pending(&app);
+        crate::teams_detection::monitor::join::cancel_microsoft_pending(&app);
         session.end_session(token_store::delete_token)?;
     }
     crate::library::calendar::clear_microsoft(app_state.db_manager.pool()).await

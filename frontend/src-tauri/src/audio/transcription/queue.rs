@@ -312,7 +312,7 @@ pub fn transcription_queue() -> io::Result<(
     transcription_queue_in(&transcription_spool_root())
 }
 
-fn transcription_spool_root() -> PathBuf {
+pub(crate) fn transcription_spool_root() -> PathBuf {
     std::env::temp_dir()
         .join("clawscribe")
         .join("transcription-queue")

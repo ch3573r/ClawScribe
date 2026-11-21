@@ -93,6 +93,14 @@ pub struct RecordingStats {
 }
 
 /// Unified state management for audio recording
+#[derive(Clone, Default, serde::Serialize)]
+pub(crate) struct CaptureHealth {
+    pub warnings: Vec<String>,
+    pub destination_free_bytes: Option<u64>,
+    pub scratch_free_bytes: Option<u64>,
+    pub details: super::outcome::CaptureDetails,
+}
+
 pub struct RecordingState {
     // Core recording state
     is_recording: AtomicBool,
@@ -120,6 +128,7 @@ pub struct RecordingState {
     last_error: Mutex<Option<AudioError>>,
     error_callback: Mutex<Option<Box<dyn Fn(&AudioError) + Send + Sync>>>,
     // Non-fatal warnings surfaced to the UI (e.g. system audio is silent).
+    pub(crate) health: Mutex<CaptureHealth>,
     warning_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
     warning_cleared_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
     // Called once per recording when the recordings volume runs low.
@@ -159,6 +168,7 @@ impl RecordingState {
             last_error: Mutex::new(None),
             error_callback: Mutex::new(None),
             warning_callback: Mutex::new(None),
+            health: Mutex::new(Default::default()),
             warning_cleared_callback: Mutex::new(None),
             disk_space_callback: Mutex::new(None),
             levels_callback: Mutex::new(None),
@@ -331,6 +341,26 @@ impl RecordingState {
         }
     }
 
+    pub(crate) fn record_sample_loss(&self, samples: usize) {
+        let mut health = self.health.lock().unwrap();
+        let first = health.details.dropped_samples == 0;
+        health.details.dropped_samples = health
+            .details
+            .dropped_samples
+            .saturating_add(samples as u64);
+        drop(health);
+        self.mark_capture_incomplete();
+        if first {
+            self.report_warning("Some audio was lost while processing was busy. Recording continues; the saved meeting will show a capture gap.");
+        }
+    }
+
+    pub(crate) fn record_system_silence(&self) {
+        let mut health = self.health.lock().unwrap();
+        health.details.system_silence_periods =
+            health.details.system_silence_periods.saturating_add(1);
+    }
+
     pub fn send_audio_chunk(&self, chunk: AudioChunk) -> Result<()> {
         if self.is_paused() || !self.is_recording() {
             return Ok(());
@@ -339,10 +369,8 @@ impl RecordingState {
         if let Some(sender) = sender {
             match sender.try_send(chunk) {
                 Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    if !self.capture_incomplete.swap(true, Ordering::AcqRel) {
-                        self.report_warning("Some audio was lost while processing was busy. Recording continues; the saved meeting will be marked incomplete.");
-                    }
+                Err(mpsc::error::TrySendError::Full(chunk)) => {
+                    self.record_sample_loss(chunk.data.len());
                     return Ok(());
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -429,6 +457,11 @@ impl RecordingState {
 
     /// Resolve one recoverable warning without clearing unrelated recording failures.
     pub fn clear_warning(&self, message: &str) {
+        self.health
+            .lock()
+            .unwrap()
+            .warnings
+            .retain(|warning| warning != message);
         if let Some(callback) = self.warning_cleared_callback.lock().unwrap().as_ref() {
             callback(message);
         }
@@ -436,6 +469,12 @@ impl RecordingState {
 
     /// Surface a non-fatal warning to the UI. Does not affect recording state.
     pub fn report_warning(&self, message: &str) {
+        let mut health = self.health.lock().unwrap();
+        if health.warnings.iter().any(|warning| warning == message) {
+            return;
+        }
+        health.warnings.push(message.into());
+        drop(health);
         log::warn!("Recording warning: {message}");
         if let Some(callback) = self.warning_callback.lock().unwrap().as_ref() {
             callback(message);
@@ -617,6 +656,7 @@ impl Default for RecordingState {
             last_error: Mutex::new(None),
             error_callback: Mutex::new(None),
             warning_callback: Mutex::new(None),
+            health: Mutex::new(Default::default()),
             warning_cleared_callback: Mutex::new(None),
             disk_space_callback: Mutex::new(None),
             levels_callback: Mutex::new(None),

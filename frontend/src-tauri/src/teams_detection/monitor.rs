@@ -17,6 +17,7 @@
 //!   shown by the window and by the tray menu, so it can be answered while the
 //!   window is hidden.
 pub mod join;
+pub(crate) mod prompt_window;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -88,10 +89,10 @@ impl CallSettings {
 fn ended_on_scan(call: &CallWindow, scan: &CallScan) -> bool {
     scan.supported
         && scan.complete
-        && !scan
-            .active
-            .iter()
-            .any(|active| active.provider == call.provider)
+        && !scan.active.iter().any(|active| {
+            active.key == call.key
+                || (call.teams_room.is_some() && active.teams_room == call.teams_room)
+        })
         && (scan.ended.iter().any(|ended| ended.key == call.key)
             || !scan.open_windows.contains(&call.window))
 }
@@ -352,7 +353,7 @@ impl Tracker {
             // A manual recording seen during this call stays manual, also after
             // the user stops it. Anything else busy (for example a save) is
             // looked at again on the next scan.
-            if ctx.recording {
+            if ctx.recording && self.owner.is_none() {
                 self.seen.remember(call);
             }
             return Decision::Nothing;
@@ -385,9 +386,10 @@ impl Tracker {
     }
 
     fn prompt_key(&self, call: &CallWindow, serial: u64) -> String {
-        self.join
-            .as_ref()
-            .map_or_else(|| call.key.clone(), |join| format!("{}-{serial}", join.id))
+        self.join.as_ref().map_or_else(
+            || format!("{}-{serial}", call.key),
+            |join| format!("{}-{serial}", join.id),
+        )
     }
 
     /// Whether a start decided earlier may still go ahead. An automatic start
@@ -525,6 +527,18 @@ pub fn pending_prompt() -> Option<PromptView> {
     tracker().prompt_view()
 }
 
+/// Any new capture invalidates prompts and ownership from older sessions.
+pub(crate) fn capture_started<R: Runtime>(app: &AppHandle<R>) {
+    let before = {
+        let mut tracker = tracker();
+        tracker.owner = None;
+        let before = tracker.prompt_view();
+        tracker.drop_prompt();
+        before
+    };
+    sync_prompt(app, before, None);
+}
+
 /// Tells the window and the tray when the pending prompt changed.
 fn sync_prompt<R: Runtime>(
     app: &AppHandle<R>,
@@ -548,6 +562,7 @@ fn sync_prompt<R: Runtime>(
         }
     }
     crate::tray::update_tray_menu(app);
+    prompt_window::refresh(app);
 }
 
 fn notify<R: Runtime>(app: &AppHandle<R>, kind: &str, provider: Provider) {
@@ -636,7 +651,11 @@ async fn begin<R: Runtime>(
     };
     match outcome {
         StartOutcome::Started { session_id } => {
-            tracker().started(&call, session_id, admitted_revision);
+            let mut monitor = tracker();
+            let session_id = session_id
+                .filter(|id| crate::audio::recording_commands::active_capture(id).is_some());
+            monitor.started(&call, session_id, admitted_revision);
+            drop(monitor);
             notify(app, "started", call.provider);
         }
         StartOutcome::Busy => {
@@ -727,7 +746,7 @@ fn offer_retry<R: Runtime>(
 }
 
 /// Stops the recording a call started, once the call has ended.
-async fn stop_owned<R: Runtime>(app: &AppHandle<R>, owner: Owner, revision: u64) {
+async fn stop_owned<R: Runtime>(app: &AppHandle<R>, owner: Owner, revision: u64) -> bool {
     let provider = owner.call.provider;
     match crate::audio::recording_commands::stop_detected_call_recording(
         app.clone(),
@@ -735,21 +754,25 @@ async fn stop_owned<R: Runtime>(app: &AppHandle<R>, owner: Owner, revision: u64)
     )
     .await
     {
-        Ok(true) => notify(app, "stopped", provider),
-        Ok(false) => {}
+        Ok(true) => {
+            notify(app, "stopped", provider);
+            true
+        }
+        Ok(false) => false,
         Err(error) => {
             log::warn!("Could not stop the recording of an ended call: {error}");
             tracker().stop_failed(owner, revision);
             notify(app, "stop-failed", provider);
+            false
         }
     }
 }
 
-async fn tick<R: Runtime>(app: AppHandle<R>) {
+async fn tick<R: Runtime>(app: AppHandle<R>) -> bool {
     let (providers, windows, revision) = {
         let tracker = tracker();
         if !tracker.watching() {
-            return;
+            return false;
         }
         (
             tracker.providers(),
@@ -758,7 +781,7 @@ async fn tick<R: Runtime>(app: AppHandle<R>) {
         )
     };
     if !crate::tray::check_can_record(&app).await {
-        return;
+        return false;
     }
     let scan = super::calls::scan(providers, windows).await.ok();
     let ctx = context().await;
@@ -770,9 +793,12 @@ async fn tick<R: Runtime>(app: AppHandle<R>) {
     };
     sync_prompt(&app, before, after);
     match decision {
-        Decision::Nothing | Decision::Prompt => {}
+        Decision::Nothing | Decision::Prompt => false,
         Decision::Stop(owner) => stop_owned(&app, owner, revision).await,
-        Decision::Start { call, serial } => begin(&app, call, serial, revision, false).await,
+        Decision::Start { call, serial } => {
+            begin(&app, call, serial, revision, false).await;
+            false
+        }
     }
 }
 
@@ -781,8 +807,10 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         loop {
             // A tick that panics must not end the monitor.
-            if let Err(error) = tauri::async_runtime::spawn(tick(app.clone())).await {
-                log::error!("Call monitor: a scan failed unexpectedly: {error}");
+            match tauri::async_runtime::spawn(tick(app.clone())).await {
+                Ok(true) => continue, // A new call may have started while the old recording saved.
+                Ok(false) => {}
+                Err(error) => log::error!("Call monitor: a scan failed unexpectedly: {error}"),
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
@@ -1056,7 +1084,8 @@ mod tests {
             Decision::Nothing
         );
         assert!(tracker.confirm("another-room").is_none());
-        let (call, serial, confirmed_revision) = tracker.confirm("room-a").unwrap();
+        let key = tracker.prompt_view().unwrap().key;
+        let (call, serial, confirmed_revision) = tracker.confirm(&key).unwrap();
         assert!(tracker.prompt().is_none());
         assert!(tracker.may_begin(&call, serial, confirmed_revision, true, true));
         // Automatic starts are not allowed in prompt mode.
@@ -1107,8 +1136,69 @@ mod tests {
         failing.start_failed(&call, serial, revision, true);
         let prompt = failing.prompt().expect("retry offered");
         assert!(prompt.retry);
-        let (call, serial, revision) = failing.confirm("room-a").unwrap();
+        let key = prompt.key.clone();
+        let (call, serial, revision) = failing.confirm(&key).unwrap();
         assert!(failing.may_begin(&call, serial, revision, true, true));
+    }
+
+    #[test]
+    fn next_teams_call_stays_eligible_while_the_owned_call_closes_and_saves() {
+        let mut tracker = Tracker::new(CallSettings {
+            mode: Mode::Auto,
+            providers: vec![Provider::Teams],
+            auto_stop: true,
+        });
+        let revision = tracker.revision();
+        let first = snapshot(
+            &[call(Provider::Teams, "first-window", "first-call")],
+            &["first-window"],
+            &[],
+        );
+        let Decision::Start {
+            call: first_call, ..
+        } = tracker.observe(revision, Some(&first), IDLE)
+        else {
+            panic!("expected a start");
+        };
+        tracker.started(&first_call, Some("first-session".into()), revision);
+        let next_call = call(Provider::Teams, "second-window", "second-call");
+        let next = snapshot(&[next_call.clone()], &["second-window"], &[]);
+        let running = Context {
+            idle: false,
+            recording: true,
+        };
+        for _ in 1..MISSES_TO_END {
+            assert_eq!(
+                tracker.observe(revision, Some(&next), running),
+                Decision::Nothing
+            );
+        }
+        assert!(
+            matches!(tracker.observe(revision, Some(&next), running), Decision::Stop(owner)
+            if owner.session == "first-session")
+        );
+        let saving = Context {
+            idle: false,
+            recording: false,
+        };
+        assert_eq!(
+            tracker.observe(revision, Some(&next), saving),
+            Decision::Nothing
+        );
+        assert!(
+            matches!(tracker.observe(revision, Some(&next), IDLE), Decision::Start { call, .. }
+            if call == next_call)
+        );
+    }
+
+    #[test]
+    fn a_known_teams_room_survives_moving_to_a_new_call_window() {
+        let mut original = call(Provider::Teams, "first-window", "first-call");
+        original.teams_room = Some([3; 32]);
+        let mut moved = call(Provider::Teams, "second-window", "second-call");
+        moved.teams_room = original.teams_room;
+        let scan = snapshot(&[moved], &["second-window"], &[]);
+        assert!(!ended_on_scan(&original, &scan));
     }
 
     #[test]

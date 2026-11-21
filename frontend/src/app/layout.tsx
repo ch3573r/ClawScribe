@@ -46,7 +46,6 @@ import { useRouter } from 'next/navigation'
 import { ThemeInitializer } from '@/components/ThemeSettings'
 import { AppShortcuts } from '@/components/AppShortcuts'
 import { RecordingRequests } from '@/components/RecordingRequests'
-import { AudioDeviceHotSwapMonitor } from '@/components/AudioDeviceHotSwapMonitor'
 import { ArchiveStorageDialog } from '@/components/Archive/ArchiveStorageDialog'
 
 
@@ -368,7 +367,6 @@ export default function RootLayout({
         <AppTitlebar />
         <AnalyticsProvider>
           <RecordingStateProvider>
-            <AudioDeviceHotSwapMonitor />
             <TranscriptProvider>
               <ConfigProvider>
                 <LiveAssistanceProvider>

@@ -818,6 +818,9 @@ pub fn run() {
         .invoke_handler(floating::restrict_commands(tauri::generate_handler![
             floating::open_floating_controls,
             floating::floating_status,
+            floating::recording_window_appearance,
+            floating::floating_set_paused,
+            floating::floating_reconnect,
             floating::floating_note,
             floating::floating_stop,
             floating::dismiss_floating_controls,
@@ -934,8 +937,7 @@ pub fn run() {
             audio::recording_commands::get_transcript_history,
             audio::recording_commands::get_recording_meeting_name,
             // Device monitoring commands (AirPods/Bluetooth disconnect/reconnect)
-            audio::recording_commands::poll_audio_device_events,
-            audio::recording_commands::get_reconnection_status,
+            audio::recording_commands::get_recording_health,
             audio::recording_commands::attempt_device_reconnect,
             // Playback device detection (Bluetooth warning)
             // OpenClaw handoff commands

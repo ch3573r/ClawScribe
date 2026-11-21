@@ -567,6 +567,8 @@ version, audio devices, and result without publishing private meeting content.
 4. Run a sustained Teams/Webex session on the target notebook with its normal
    workload. Observe RAM, transcription backlog, CPU contention, and stop time;
    include device changes, sleep/wake, and failure recovery in acceptance testing.
+   Run the [capture health and call ownership scenarios](installed-capture-smoke.md#capture-health-and-call-ownership)
+   on that exact candidate.
 5. For the meeting-memory preview, use an isolated profile with invented English
    and German meetings. Check keyword retrieval offline before any model
    download, semantic fallback and downloaded-model retrieval, and visible

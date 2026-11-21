@@ -1,10 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
-import { createHookHarness } from './hook-harness.mjs';
-
-const messages = banner => Array.from(banner.props.children[1].props.children, item => item.props.children);
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
 test('the global saving banner scopes the next start and cancellation to the displayed session', async () => {
   const commands = [], notices = [];
@@ -31,75 +28,89 @@ test('the global saving banner scopes the next start and cancellation to the dis
   assert.equal(banner(), null);
 });
 
-test('repeated segment warnings keep the recording banner visible', () => {
-  const hooks = createHookHarness();
-  const listeners = new Map();
-  const { RecordingHealthBanner } = loadTsModule(fileURLToPath(new URL('../../src/components/RecordingHealthBanner.tsx', import.meta.url)), {
-    react: hooks.react,
-    '@tauri-apps/api/event': { listen: async (event, callback) => { listeners.set(event, callback); return () => listeners.delete(event); } },
-    'lucide-react': { AlertTriangle: 'Icon' },
-  });
-  assert.equal(hooks.render(RecordingHealthBanner), null);
-  listeners.get('transcription-error')({ payload: {} });
-  for (let i = 0; i < 10; i++) listeners.get('transcription-warning')({ payload: 'Synthetic failure' });
-  const banner = hooks.render(RecordingHealthBanner);
-  assert.equal(banner.props.role, 'alert');
-  assert.equal(messages(banner).length, 2);
-  assert.match(messages(banner)[0], /Live transcription failed/);
-  assert.match(messages(banner)[1], /Live transcription is incomplete/);
-  listeners.get('recording-started')({});
-  assert.equal(hooks.render(RecordingHealthBanner), null);
-  hooks.unmount();
-});
-
-function createWarningView() {
-  const hooks = createHookHarness();
-  const listeners = new Map();
-  const { RecordingHealthBanner } = loadTsModule(fileURLToPath(new URL('../../src/components/RecordingHealthBanner.tsx', import.meta.url)), {
-    react: hooks.react,
-    '@tauri-apps/api/event': { listen: async (event, callback) => { listeners.set(event, callback); return () => listeners.delete(event); } },
-    'lucide-react': { AlertTriangle: 'Icon' },
-  });
-  return { ...hooks, listeners, render: () => hooks.render(RecordingHealthBanner) };
+function health(warnings = []) {
+  return {
+    warnings, disconnected_devices: [], capture_incomplete: false, reconnecting: false,
+    destination_free_bytes: null, scratch_free_bytes: null, transcription: null,
+    details: { dropped_samples: 0, system_silence_periods: 0, backend: null, unfinished_segments: 0, empty_live_transcript: null },
+  };
 }
 
-test('late system audio clears the matching recording warning', () => {
-  const view = createWarningView();
-  const systemWarning = 'No system-audio samples have arrived yet.';
-  try {
-    view.render();
-    view.listeners.get('recording-warning')({ payload: systemWarning });
-    assert.deepEqual(messages(view.render()), [systemWarning]);
-    view.listeners.get('recording-warning-cleared')?.({ payload: systemWarning });
-    assert.equal(view.render(), null, 'Recovered system audio must remove its stale warning');
-  } finally {
-    view.unmount();
-  }
+function createWarningView(t, invoke) {
+  const hooks = createHookHarness();
+  const state = { sessionId: 'session-a', isRecording: true, isStopping: false };
+  let nextPoll;
+  t.mock.method(globalThis, 'setTimeout', callback => { nextPoll = callback; return 1; });
+  t.mock.method(globalThis, 'clearTimeout', () => { nextPoll = undefined; });
+  const { RecordingHealthBanner } = loadTsModule('src/components/RecordingHealthBanner.tsx', {
+    react: hooks.react,
+    '@tauri-apps/api/core': { invoke },
+    '@/contexts/RecordingStateContext': { useRecordingState: () => state },
+    '@/components/ui/button': { Button: 'button' },
+  });
+  t.after(hooks.unmount);
+  return {
+    state,
+    async poll() { nextPoll(); await flush(); },
+    render: () => hooks.render(RecordingHealthBanner),
+  };
+}
+
+function content(node) {
+  if (Array.isArray(node)) return node.flatMap(content);
+  if (typeof node === 'string') return [node];
+  return node?.props ? content(node.props.children) : [];
+}
+
+test('a restored window reads existing warnings and a cleared silence warning leaves the capture gap visible', async t => {
+  const silence = 'System audio is quiet.';
+  const gap = 'Samples were dropped.';
+  let snapshot = health([silence, gap]);
+  const view = createWarningView(t, async (command, args) => {
+    assert.equal(command, 'get_recording_health');
+    assert.equal(args.sessionId, 'session-a');
+    return snapshot;
+  });
+  assert.equal(view.render(), null);
+  await flush();
+  assert.ok(content(view.render()).includes(silence));
+  assert.ok(content(view.render()).includes(gap));
+  snapshot = health([gap]);
+  await view.poll();
+  assert.ok(!content(view.render()).includes(silence));
+  assert.ok(content(view.render()).includes(gap));
 });
 
-test('system audio recovery cannot hide a newer capture warning', () => {
-  const view = createWarningView();
-  const systemWarning = 'No system-audio samples have arrived yet.';
-  const captureWarning = 'Some audio could not be saved.';
-  try {
-    view.render();
-    view.listeners.get('recording-warning')({ payload: systemWarning });
-    view.listeners.get('recording-warning')({ payload: captureWarning });
-    view.listeners.get('recording-warning-cleared')?.({ payload: systemWarning });
-    assert.deepEqual(messages(view.render()), [captureWarning]);
-  } finally {
-    view.unmount();
-  }
+test('a replacement recording never displays the prior session warnings', async t => {
+  const old = deferred();
+  const view = createWarningView(t, async (_command, args) => args.sessionId === 'session-a' ? old.promise : health(['New warning']));
+  view.render();
+  view.state.sessionId = 'session-b';
+  view.render();
+  old.resolve(health(['Old warning']));
+  await flush();
+  assert.ok(content(view.render()).includes('New warning'));
+  assert.ok(!content(view.render()).includes('Old warning'));
 });
 
-test('clearing the most recent microphone warning still shows the earlier system warning', () => {
-  const view = createWarningView();
-  try {
-    view.render();
-    view.listeners.get('recording-warning')({ payload: 'System samples missing' });
-    view.listeners.get('recording-warning')({ payload: 'Microphone samples stopped' });
-    assert.deepEqual(messages(view.render()), ['System samples missing', 'Microphone samples stopped']);
-    view.listeners.get('recording-warning-cleared')({ payload: 'Microphone samples stopped' });
-    assert.deepEqual(messages(view.render()), ['System samples missing']);
-  } finally { view.unmount(); }
+test('a failed manual reconnect leaves Retry bound to the current missing source', async t => {
+  const snapshot = health();
+  snapshot.disconnected_devices.push({ name: 'Synthetic output', device_type: 'SystemAudio' });
+  const attempts = [];
+  const view = createWarningView(t, async (command, args) => {
+    if (command === 'get_recording_health') return snapshot;
+    assert.equal(command, 'attempt_device_reconnect');
+    attempts.push({ ...args });
+    return { reconnected: false };
+  });
+  view.render();
+  await flush();
+  const retry = () => view.render().props.children.flat(Infinity).find(node => node?.props?.children?.[1]?.type === 'button')
+    .props.children[1].props.onClick();
+  retry();
+  await flush();
+  assert.ok(content(view.render()).includes('Audio device still unavailable. Check its connection and try again.'));
+  retry();
+  await flush();
+  assert.deepEqual(attempts, Array(2).fill({ sessionId: 'session-a', deviceName: 'Synthetic output', deviceType: 'SystemAudio' }));
 });

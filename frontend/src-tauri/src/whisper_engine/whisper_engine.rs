@@ -403,9 +403,12 @@ impl WhisperEngine {
         &self,
         audio_data: Vec<f32>,
         language: Option<String>,
-    ) -> Result<((String, Option<f32>, bool), Option<&'static str>)> {
-        let (transcript, _, detected) = self.decode(audio_data, language, false).await?;
-        Ok((transcript, detected))
+    ) -> Result<(
+        (String, Option<f32>, bool),
+        Option<WhisperCompiledBackend>,
+        Option<&'static str>,
+    )> {
+        self.decode(audio_data, language, true).await
     }
 
     async fn decode(
