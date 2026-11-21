@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Button } from '@/components/ui/button';
@@ -10,7 +10,7 @@ import { Download, RefreshCw, BadgeAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { formatSummaryModelSizeLabelFromMb } from '@/lib/onboarding-summary-model';
 
-interface ModelInfo {
+export interface BuiltInModelInfo {
   name: string;
   display_name: string;
   status: {
@@ -21,6 +21,15 @@ interface ModelInfo {
   context_size: number;
   description: string;
   gguf_file: string;
+}
+
+interface DownloadEvent {
+  model: string;
+  progress: number;
+  downloaded_mb?: number;
+  total_mb?: number;
+  speed_mbps?: number;
+  status: 'downloading' | 'completed' | 'cancelled' | 'error';
 }
 
 interface DownloadProgressInfo {
@@ -40,47 +49,53 @@ export function BuiltInModelManager({
   onModelSelect,
   layout = 'inline',
 }: BuiltInModelManagerProps) {
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [models, setModels] = useState<BuiltInModelInfo[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [hasFetched, setHasFetched] = useState<boolean>(false);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
   const [downloadProgressInfo, setDownloadProgressInfo] = useState<Record<string, DownloadProgressInfo>>({});
   const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
 
-  const fetchModels = async () => {
+  const selection = useRef({ selectedModel, onModelSelect });
+  useEffect(() => { selection.current = { selectedModel, onModelSelect }; }, [selectedModel, onModelSelect]);
+  const fetchRevision = useRef(0);
+  const fetchModels = useCallback(async () => {
+    const revision = ++fetchRevision.current;
     try {
       setIsLoading(true);
-      const data = (await invoke('builtin_ai_list_models')) as ModelInfo[];
+      const data = await invoke<BuiltInModelInfo[]>('builtin_ai_list_models');
+      if (revision !== fetchRevision.current) return;
       setModels(data);
 
       // Auto-select first available model if none selected
-      if (data.length > 0 && !selectedModel) {
+      if (data.length > 0 && !selection.current.selectedModel) {
         const firstAvailable = data.find((m) => m.status.type === 'available');
         if (firstAvailable) {
-          onModelSelect(firstAvailable.name);
+          selection.current.onModelSelect(firstAvailable.name);
         }
       }
     } catch (error) {
+      if (revision !== fetchRevision.current) return;
       console.error('Failed to fetch built-in AI models:', error);
       toast.error('Failed to load models');
     } finally {
-      setIsLoading(false);
-      setHasFetched(true);
+      if (revision === fetchRevision.current) {
+        setIsLoading(false);
+        setHasFetched(true);
+      }
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchModels();
-  }, []);
+    void fetchModels();
+    return () => { fetchRevision.current += 1; };
+  }, [fetchModels]);
 
   // Listen for download progress events
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-
-    const setupListener = async () => {
-      unlisten = await listen('builtin-ai-download-progress', (event: any) => {
-        const { model, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
-
+    const subscription = listen<DownloadEvent>('builtin-ai-download-progress', ({ payload }) => {
+      const { model, progress, downloaded_mb, total_mb, speed_mbps, status } = payload;
+      if (status === 'downloading') {
         // Update percentage progress
         setDownloadProgress((prev) => ({
           ...prev,
@@ -97,106 +112,36 @@ export function BuiltInModelManager({
           },
         }));
 
-        // Handle downloading status - restore downloadingModels state on modal reopen
-        if (status === 'downloading') {
-          setDownloadingModels((prev) => {
-            if (!prev.has(model)) {
-              const newSet = new Set(prev);
-              newSet.add(model);
-              return newSet;
-            }
-            return prev;
-          });
-        }
-
-        // Handle completed status
-        if (status === 'completed') {
-          setDownloadingModels((prev) => {
-            const newSet = new Set(prev);
-            newSet.delete(model);
-            return newSet;
-          });
-          // Clean up progress state
-          setDownloadProgress((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-          setDownloadProgressInfo((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-          // Refresh models list
-          fetchModels();
-          toast.success(`Model ${model} downloaded successfully`);
-        }
-
-        // Handle cancelled status
-        if (status === 'cancelled') {
-          setDownloadingModels((prev) => {
-            const newSet = new Set(prev);
-            newSet.delete(model);
-            return newSet;
-          });
-          // Clean up progress state
-          setDownloadProgress((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-          setDownloadProgressInfo((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-          // Refresh models list
-          fetchModels();
-        }
-
-        // Handle error status
-        if (status === 'error') {
-          setDownloadingModels((prev) => {
-            const newSet = new Set(prev);
-            newSet.delete(model);
-            return newSet;
-          });
-          // Clean up progress state
-          setDownloadProgress((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-          setDownloadProgressInfo((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-
-          // Update model status to error locally instead of fetching from backend
-          // Backend doesn't persist error status, so fetchModels() would return not_downloaded
-          setModels((prevModels) =>
-            prevModels.map((m) =>
-              m.name === model
-                ? {
-                    ...m,
-                    status: {
-                      type: 'error',
-                      progress: 0,
-                    } as any,
-                  }
-                : m
-            )
-          );
-
-          // Don't show error toast here - DownloadProgressToast already handles it
-          // Don't call fetchModels() - it would overwrite error status with not_downloaded
-        }
-      });
-    };
-
-    setupListener();
-
-    return () => {
-      if (unlisten) {
-        unlisten();
+        setDownloadingModels(prev => prev.has(model) ? prev : new Set(prev).add(model));
+        return;
       }
-    };
-  }, []);
+
+      setDownloadingModels(prev => {
+        const next = new Set(prev);
+        next.delete(model);
+        return next;
+      });
+      setDownloadProgress(prev => {
+        const next = { ...prev };
+        delete next[model];
+        return next;
+      });
+      setDownloadProgressInfo(prev => {
+        const next = { ...prev };
+        delete next[model];
+        return next;
+      });
+
+      if (status === 'error') {
+        // The core does not persist errors. Keep this state until a retry.
+        setModels(prev => prev.map(item => item.name === model ? { ...item, status: { type: 'error' } } : item));
+      } else {
+        void fetchModels();
+        if (status === 'completed') toast.success(`Model ${model} downloaded successfully`);
+      }
+    });
+    return () => { void subscription.then(unlisten => unlisten()); };
+  }, [fetchModels]);
 
   const downloadModel = async (modelName: string) => {
     try {
@@ -439,8 +384,8 @@ export function BuiltInModelManager({
                 )}
                 {(isError || isCorrupted) && (
                   <p className="mb-1 text-xs text-destructive">
-                    {isError && typeof model.status === 'object' && 'Error' in model.status
-                      ? (model.status as any).Error
+                    {isError && typeof model.status === 'object' && 'Error' in model.status && typeof model.status.Error === 'string'
+                      ? model.status.Error
                       : isCorrupted
                       ? 'File is corrupted. Retry download or delete.'
                       : 'An error occurred'}

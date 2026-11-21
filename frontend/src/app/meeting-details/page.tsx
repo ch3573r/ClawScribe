@@ -1,7 +1,8 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useState, useEffect, useCallback, Suspense } from "react";
-import { Transcript, Summary, type SummaryDataResponse } from "@/types";
+import { type MeetingDetails as MeetingDetailsData, type MeetingSummary } from "@/types";
+import { readMeetingSummary } from '@/lib/meeting-summary';
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
 import Analytics from "@/lib/analytics";
@@ -13,15 +14,6 @@ import { listen } from '@tauri-apps/api/event';
 import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
 import { RecordingOutcome, recordingRecoveryMessage } from '@/lib/recording-outcome';
 
-interface MeetingDetailsResponse {
-  id: string;
-  title: string;
-  created_at: string;
-  updated_at: string;
-  transcripts: Transcript[];
-  folder_path?: string;
-}
-
 function MeetingDetailsContent() {
   const searchParams = useSearchParams();
   const meetingId = searchParams.get('id');
@@ -30,8 +22,8 @@ function MeetingDetailsContent() {
   const archiveAction = searchParams.get('archiveAction');
   const { setCurrentMeeting, refetchMeetings, stopSummaryPolling } = useSidebar();
   const router = useRouter();
-  const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsResponse | null>(null);
-  const [meetingSummary, setMeetingSummary] = useState<Summary | null>(null);
+  const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsData | null>(null);
+  const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null);
   const [summaryJob, setSummaryJob] = useState<SummaryJobSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
@@ -160,9 +152,9 @@ function MeetingDetailsContent() {
     const fetchMeetingSummary = async () => {
       const request = ++latestRequest;
       try {
-        const summary = await invoke('api_get_summary', {
+        const summary = await invoke<SummaryJobSnapshot>('api_get_summary', {
           meetingId: meetingId,
-        }) as SummaryJobSnapshot;
+        });
         if (!active || request !== latestRequest) return;
 
         setSummaryJob(summary);
@@ -181,81 +173,7 @@ function MeetingDetailsContent() {
           return;
         }
 
-        const summaryData = summary.data || {};
-
-        // Parse if it's a JSON string (backend may return double-encoded JSON)
-        let parsedData: SummaryDataResponse = typeof summaryData === "string" ? {} : summaryData;
-        if (typeof summaryData === 'string') {
-          try {
-            parsedData = JSON.parse(summaryData);
-          } catch (e) {
-            parsedData = {};
-          }
-        }
-
-
-        // Priority 1: BlockNote JSON format
-        if (parsedData.summary_json) {
-          setMeetingSummary(parsedData as any);
-          return;
-        }
-
-        // Priority 2: Markdown format
-        if (parsedData.markdown) {
-          setMeetingSummary(parsedData as any);
-          return;
-        }
-
-        // Legacy format - apply formatting
-
-        const { MeetingName, _section_order, ...restSummaryData } = parsedData;
-
-        // Format the summary data with consistent styling - PRESERVE ORDER
-        const formattedSummary: Summary = {};
-
-        // Use section order if available to maintain exact order and handle duplicates
-        const sectionKeys = _section_order || Object.keys(restSummaryData);
-
-
-        for (const key of sectionKeys) {
-          try {
-            const section = restSummaryData[key];
-            // Comprehensive null checks to prevent the error
-            if (section &&
-              typeof section === 'object' &&
-              'title' in section &&
-              'blocks' in section) {
-              const typedSection = section as { title?: string; blocks?: any[] };
-
-              // Ensure blocks is an array before mapping
-              if (Array.isArray(typedSection.blocks)) {
-                formattedSummary[key] = {
-                  title: typedSection.title || key,
-                  blocks: typedSection.blocks.map((block: any) => ({
-                    ...block,
-                    // type: 'bullet',
-                    color: 'default',
-                    content: block?.content?.trim() || ''
-                  }))
-                };
-              } else {
-                // Handle case where blocks is not an array
-                console.warn("Operation failed; see the application error message.");
-                formattedSummary[key] = {
-                  title: typedSection.title || key,
-                  blocks: []
-                };
-              }
-            } else {
-              console.warn("Operation failed; see the application error message.");
-            }
-          } catch (error) {
-            console.warn("Operation failed; see the application error message.");
-            // Continue processing other sections
-          }
-        }
-
-        setMeetingSummary(formattedSummary);
+        setMeetingSummary(readMeetingSummary(summary.data).summary);
       } catch {
         if (active && request === latestRequest) console.error('Could not read the saved summary');
       }

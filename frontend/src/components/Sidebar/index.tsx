@@ -59,6 +59,12 @@ import {
   InputGroupInput,
 } from "../ui/input-group";
 
+declare global {
+  interface Window {
+    openSettings?: () => void;
+  }
+}
+
 interface SidebarItem {
   id: string;
   title: string;
@@ -264,12 +270,12 @@ const Sidebar: React.FC = () => {
 
   // Expose settings navigation to the Tauri tray.
   useEffect(() => {
-    (window as any).openSettings = () => {
+    window.openSettings = () => {
       router.push("/settings");
     };
 
     return () => {
-      delete (window as any).openSettings;
+      delete window.openSettings;
     };
   }, [router]);
 

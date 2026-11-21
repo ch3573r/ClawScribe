@@ -235,6 +235,8 @@ test('choosing another provider only previews it; the saved provider stays in us
   assert.equal(app.context.modelConfig.provider, 'claude', 'summaries keep using the saved provider: the shared configuration is untouched');
   assert.match(text(app.render()), /Not in use yet/);
   assert.match(text(app.render()), /Claude stays your summary provider until you switch/);
+  await flush();
+  assert.equal(app.calls.filter(([command]) => command === 'codex_get_config').length, 1, 'opening the Codex preview checks its configuration once');
 
   button('Keep Claude').props.onClick();
   await flush();
@@ -317,6 +319,20 @@ test('an API key is saved by committing the field and a half-typed key is never 
   assert.equal(app.context.modelConfig.apiKey ?? null, null, 'a saved key is not kept in the configuration');
   app.render(); await flush(); app.render(); await flush();
   assert.equal(app.calls.filter(([command]) => command === 'get_anthropic_models').length, 1, 'the committed key loads the model list');
+  app.hooks.unmount();
+});
+
+test('switching providers in the explicit-save dialog discards the previous provider’s typed key before model discovery', async () => {
+  const app = modalHarness({ provider: 'claude', autosave: false });
+  app.render(); await flush();
+  const keyField = () => nodes(app.render()).find(node => node.props.id === 'legacy-api-key');
+  keyField().props.onDraftChange(KEY);
+  app.render(); await flush();
+  app.context.setModelConfig(prev => ({ ...prev, provider: 'groq', model: 'llama-3.3-70b-versatile' }));
+  const nextField = keyField();
+  await flush();
+  assert.equal(nextField.props.draft, '');
+  assert.equal(app.calls.some(([command]) => command === 'get_groq_models'), false);
   app.hooks.unmount();
 });
 

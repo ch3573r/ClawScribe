@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
+import { loadTsModule } from './load-ts-module.mjs';
 import test from 'node:test';
-import vm from 'node:vm';
-import ts from 'typescript';
 import { createHookHarness } from './hook-harness.mjs';
 
 // A summary already running in the core (for example the automatic one started
@@ -32,13 +30,8 @@ function setup() {
       stopSummaryPolling: id => events.stopped.push(id),
     }) },
   };
-  const exports = {};
-  const source = fs.readFileSync(new URL('../../src/hooks/meeting-details/useSummaryGeneration.ts', import.meta.url), 'utf8');
-  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { esModuleInterop: true, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText, {
-    exports, console: { log() {}, warn() {}, error() {} },
-    require: specifier => { assert.ok(Object.hasOwn(mocks, specifier), `Missing mock: ${specifier}`); return mocks[specifier]; },
-  });
-  const render = () => hooks.render(() => exports.useSummaryGeneration({
+  const { useSummaryGeneration } = loadTsModule('src/hooks/meeting-details/useSummaryGeneration.ts', mocks);
+  const render = () => hooks.render(() => useSummaryGeneration({
     meeting: { id: 'saved-meeting', created_at: '2026-01-01' }, transcripts: [],
     modelConfig: { provider: 'synthetic', model: 'synthetic' }, isModelConfigLoading: false, selectedTemplate: '',
     updateMeetingTitle: noop, setAiSummary: value => events.aiSummary.push(value),
@@ -81,4 +74,45 @@ test('a failed attached run ends in the error state', async t => {
   const view = app.render();
   assert.equal(view.summaryStatus, 'error');
   assert.equal(view.summaryError, 'Synthetic failure');
+});
+
+test('an encoded BlockNote result keeps its edited blocks and Markdown fallback', async t => {
+  const app = setup();
+  t.after(() => app.hooks.unmount());
+  app.render().attachToRunningSummary(true);
+  const summary = {
+    markdown: 'Fallback notes',
+    summary_json: [{ id: 'paragraph-1', type: 'paragraph', props: {}, content: [], children: [] }],
+  };
+  await app.polls[0].onUpdate({ status: 'completed', data: JSON.stringify(summary) });
+  assert.deepEqual(JSON.parse(JSON.stringify(app.events.aiSummary)), [summary]);
+  assert.equal(app.render().summaryStatus, 'completed');
+});
+
+test('legacy notes follow their saved order and ignore metadata', async t => {
+  const app = setup();
+  t.after(() => app.hooks.unmount());
+  app.render().attachToRunningSummary(false);
+  const data = {
+    last: { title: 'Last', blocks: [{ id: 'stable', type: 'bullet', content: '  Done  ' }] },
+    first: { title: 'First', blocks: [] },
+    _section_order: ['first', 'last'],
+    MeetingName: 'Review',
+  };
+  await app.polls[0].onUpdate({ status: 'completed', data });
+  const summary = app.events.aiSummary[0];
+  assert.deepEqual(Object.keys(summary), ['first', 'last']);
+  assert.deepEqual({ ...summary.last.blocks[0] }, { id: 'stable', type: 'bullet', content: 'Done', color: 'default' });
+});
+
+test('the legacy edit envelope retains repeated headings', async t => {
+  const app = setup();
+  t.after(() => app.hooks.unmount());
+  app.render().attachToRunningSummary(true);
+  const sections = ['First', 'Second'].map(content => ({ title: 'Topic', blocks: [{ content }] }));
+  await app.polls[0].onUpdate({ status: 'completed', data: { MeetingNotes: { sections } } });
+  const saved = Object.values(app.events.aiSummary[0]);
+  assert.deepEqual(saved.map(section => section.title), ['Topic', 'Topic']);
+  assert.deepEqual(saved.map(section => section.blocks[0].content), ['First', 'Second']);
+  assert.notEqual(saved[0].blocks[0].id, saved[1].blocks[0].id);
 });

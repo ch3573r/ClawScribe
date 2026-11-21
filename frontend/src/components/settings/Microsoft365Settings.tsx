@@ -140,11 +140,10 @@ export function OneNoteCard() {
 
   const isConnected = ms.connection.state === "connected";
 
+  const { loadNotebooks } = ms;
   useEffect(() => {
-    if (isConnected && ms.notebooks.length === 0 && !ms.loadingNotebooks) {
-      void ms.loadNotebooks();
-    }
-  }, [isConnected]);
+    if (isConnected) void loadNotebooks();
+  }, [isConnected, loadNotebooks]);
 
   // Persist the notebook destination. Exports create a fresh dated section in
   // this notebook, so Settings never lists or stores section ids.
@@ -263,11 +262,10 @@ export function ToDoCard() {
     }
   };
 
+  const { loadToDoLists } = ms;
   useEffect(() => {
-    if (isConnected && ms.todoLists.length === 0 && !ms.loadingToDoLists) {
-      void ms.loadToDoLists();
-    }
-  }, [isConnected]);
+    if (isConnected) void loadToDoLists();
+  }, [isConnected, loadToDoLists]);
 
   useEffect(() => {
     if (!selectedList) return;
@@ -558,17 +556,17 @@ export function PlannerCard() {
 
   const isConnected = ms.connection.state === "connected";
 
+  const { loadPlans } = ms;
   useEffect(() => {
-    if (isConnected && ms.plans.length === 0 && !ms.loadingPlans) {
-      void ms.loadPlans();
-    }
-  }, [isConnected]);
+    if (isConnected) void loadPlans();
+  }, [isConnected, loadPlans]);
 
+  const { loadBuckets } = ms;
   useEffect(() => {
     if (selectedPlan) {
-      void ms.loadBuckets(selectedPlan);
+      void loadBuckets(selectedPlan);
     }
-  }, [selectedPlan]);
+  }, [selectedPlan, loadBuckets]);
 
   useEffect(() => {
     if (!selectedBucket) return;

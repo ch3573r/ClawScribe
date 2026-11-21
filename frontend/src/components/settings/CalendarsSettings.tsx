@@ -32,6 +32,7 @@ export function CalendarsSettings() {
   const [shown, setShown] = useState(PAGE_SIZE);
   // The shared hook only loads the next day; this list promises a week.
   const [weekEvents, setWeekEvents] = useState<CalendarEvent[]>([]);
+  const { loadCalendar } = ms;
   const connected = ms.connection.state === "connected";
   const calendarAvailable = connected && !ms.connection.unavailableExports?.includes("Calendar lookup");
   const accountName = ms.connection.userDisplayName ?? ms.connection.userEmail;
@@ -42,7 +43,7 @@ export function CalendarsSettings() {
     let cancelled = false;
     const reload = () => {
       if (cancelled) return;
-      void ms.loadCalendar();
+      void loadCalendar();
       const revision = microsoftCalendarRevision;
       const now = new Date();
       const end = new Date(now);
@@ -67,7 +68,7 @@ export function CalendarsSettings() {
       window.removeEventListener(MICROSOFT_CALENDAR_CLEARED, clear);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [calendarAvailable, ms.loadCalendar]);
+  }, [calendarAvailable, loadCalendar]);
 
   const upcoming = useMemo(() => {
     const names = new Map(sources.map(source => [source.id, source.name]));
@@ -110,7 +111,7 @@ export function CalendarsSettings() {
 
   function reloadAll() {
     setActionError("");
-    if (calendarAvailable) void ms.loadCalendar();
+    if (calendarAvailable) void loadCalendar();
     void refresh().catch(() => setActionError("Could not refresh calendars. Try again."));
   }
 

@@ -81,6 +81,7 @@ function caller(kind, failOffset = -1) {
     sonner: { toast: { error: message => errors.push(message), info() {}, success() {}, warning() {} } },
     '@/lib/analytics': { trackCopy: async () => {}, trackSummaryGenerationStarted: async () => {}, trackCustomPromptUsed: async () => {} },
     '@/lib/meetingTranscripts': { fetchAllMeetingTranscripts },
+    '@/lib/meeting-summary': loadTsModule(sourcePath('lib/meeting-summary')),
     '@/lib/transcriptFormatting': loadTsModule(sourcePath('lib/transcriptFormatting')),
     '@/lib/meetingDrafts': loadTsModule(sourcePath('lib/meetingDrafts'), { '@tauri-apps/api/core': { invoke } }),
     '@/lib/openExternal': {},

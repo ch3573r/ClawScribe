@@ -36,7 +36,7 @@ export function SummaryTemplateSettings() {
   const [defaultError, setDefaultError] = useState('');
   const loadVersion = useRef(0);
   const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; loadVersion.current++; }; }, []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; loadVersion.current += 1; }; }, []);
 
   const open = async (id: string) => {
     const request = ++loadVersion.current;
@@ -74,7 +74,7 @@ export function SummaryTemplateSettings() {
       if (mounted.current) { setDefaultError('Could not save the default template. Try again'); setDefaultStatus('idle'); }
     } finally { if (mounted.current) setBusy(false); }
   };
-  const closeEditor = () => { loadVersion.current++; setDraft(null); setEditingId(''); setDirty(false); setError(''); };
+  const closeEditor = () => { loadVersion.current += 1; setDraft(null); setEditingId(''); setDirty(false); setError(''); };
 
   const defaultSelect = <>
     <SaveMark status={defaultStatus} />
@@ -109,7 +109,7 @@ export function SummaryTemplateSettings() {
                 </SelectContent>
               </Select>
             </label>
-            <Button variant="outline" disabled={busy || dirty} onClick={() => { loadVersion.current++; setEditingId(''); setDraft(emptyTemplate()); setDirty(true); setError(''); }}><Plus className="mr-2 h-4 w-4" />New template</Button>
+            <Button variant="outline" disabled={busy || dirty} onClick={() => { loadVersion.current += 1; setEditingId(''); setDraft(emptyTemplate()); setDirty(true); setError(''); }}><Plus className="mr-2 h-4 w-4" />New template</Button>
           </div>
           {busy && !draft && <p role="status" className="text-sm text-muted-foreground">Loading…</p>}
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}

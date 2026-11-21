@@ -67,7 +67,7 @@ export function useCommitField({ value, validate, onCommit, normalize = text => 
   latest.current = { validate, onCommit, normalize, clearAfterSave };
 
   useEffect(() => {
-    committed.current = normalize(value);
+    committed.current = latest.current.normalize(value);
     if (!dirty.current) { draftRef.current = value; setDraft(value); }
   }, [value]);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current as never); }, []);

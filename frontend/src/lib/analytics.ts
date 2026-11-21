@@ -26,91 +26,72 @@ export interface UserSession {
   [key: string]: unknown;
 }
 
+type CompatibilityMethod<T> = (...args: unknown[]) => T;
+const ignoreEvent: CompatibilityMethod<Promise<void>> = async () => {};
+const disabled: CompatibilityMethod<Promise<boolean>> = async () => false;
+const emptyString: CompatibilityMethod<Promise<string>> = async () => "";
+
 /** No-op analytics. All methods are inert. */
 export class Analytics {
   // ── lifecycle ───────────────────────────────────────────────────────────
-  static async init(..._args: unknown[]): Promise<void> {}
-  static async doInit(..._args: unknown[]): Promise<void> {}
-  static async cleanup(..._args: unknown[]): Promise<void> {}
-  static async disable(..._args: unknown[]): Promise<void> {}
-  static async reset(..._args: unknown[]): Promise<void> {}
-  static async waitForInitialization(..._args: unknown[]): Promise<boolean> {
-    return false;
-  }
-  static async isEnabled(..._args: unknown[]): Promise<boolean> {
-    return false;
-  }
+  static init = ignoreEvent;
+  static doInit = ignoreEvent;
+  static cleanup = ignoreEvent;
+  static disable = ignoreEvent;
+  static reset = ignoreEvent;
+  static waitForInitialization = disabled;
+  static isEnabled = disabled;
 
   // ── identity / session ──────────────────────────────────────────────────
-  static async identify(..._args: unknown[]): Promise<void> {}
-  static getCurrentUserId(..._args: unknown[]): string | null {
-    return null;
-  }
-  static async getPersistentUserId(..._args: unknown[]): Promise<string> {
-    return "";
-  }
-  static async startSession(..._args: unknown[]): Promise<string | null> {
-    return null;
-  }
-  static async endSession(..._args: unknown[]): Promise<void> {}
-  static async isSessionActive(..._args: unknown[]): Promise<boolean> {
-    return false;
-  }
+  static identify = ignoreEvent;
+  static getCurrentUserId: CompatibilityMethod<string | null> = () => null;
+  static getPersistentUserId = emptyString;
+  static startSession: CompatibilityMethod<Promise<string | null>> = async () => null;
+  static endSession = ignoreEvent;
+  static isSessionActive = disabled;
 
   // ── device info ─────────────────────────────────────────────────────────
-  static async getPlatform(..._args: unknown[]): Promise<string> {
-    return "";
-  }
-  static async getOSVersion(..._args: unknown[]): Promise<string> {
-    return "";
-  }
-  static async getDeviceInfo(..._args: unknown[]): Promise<DeviceInfo> {
-    return {};
-  }
+  static getPlatform = emptyString;
+  static getOSVersion = emptyString;
+  static getDeviceInfo: CompatibilityMethod<Promise<DeviceInfo>> = async () => ({});
 
   // ── usage bookkeeping ───────────────────────────────────────────────────
-  static async calculateDaysSince(..._args: unknown[]): Promise<number | null> {
-    return null;
-  }
-  static async getMeetingsCountToday(..._args: unknown[]): Promise<number> {
-    return 0;
-  }
-  static async updateMeetingCount(..._args: unknown[]): Promise<void> {}
-  static async hasUsedFeatureBefore(..._args: unknown[]): Promise<boolean> {
-    return false;
-  }
-  static async markFeatureUsed(..._args: unknown[]): Promise<void> {}
-  static async checkAndTrackFirstLaunch(..._args: unknown[]): Promise<void> {}
-  static async checkAndTrackDailyUsage(..._args: unknown[]): Promise<void> {}
-  static async trackDailyActiveUser(..._args: unknown[]): Promise<void> {}
-  static async trackUserFirstLaunch(..._args: unknown[]): Promise<void> {}
+  static calculateDaysSince: CompatibilityMethod<Promise<number | null>> = async () => null;
+  static getMeetingsCountToday: CompatibilityMethod<Promise<number>> = async () => 0;
+  static updateMeetingCount = ignoreEvent;
+  static hasUsedFeatureBefore = disabled;
+  static markFeatureUsed = ignoreEvent;
+  static checkAndTrackFirstLaunch = ignoreEvent;
+  static checkAndTrackDailyUsage = ignoreEvent;
+  static trackDailyActiveUser = ignoreEvent;
+  static trackUserFirstLaunch = ignoreEvent;
 
   // ── generic + named tracking (all inert) ────────────────────────────────
-  static async track(..._args: unknown[]): Promise<void> {}
-  static async trackEvent(..._args: unknown[]): Promise<void> {}
-  static async trackButtonClick(..._args: unknown[]): Promise<void> {}
-  static async trackPageView(..._args: unknown[]): Promise<void> {}
-  static async trackFeatureUsed(..._args: unknown[]): Promise<void> {}
-  static async trackFeatureUsedEnhanced(..._args: unknown[]): Promise<void> {}
-  static async trackError(..._args: unknown[]): Promise<void> {}
-  static async trackCopy(..._args: unknown[]): Promise<void> {}
-  static async trackCustomPromptUsed(..._args: unknown[]): Promise<void> {}
-  static async trackAppStarted(..._args: unknown[]): Promise<void> {}
-  static async trackBackendConnection(..._args: unknown[]): Promise<void> {}
-  static async trackModelChanged(..._args: unknown[]): Promise<void> {}
-  static async trackSettingsChanged(..._args: unknown[]): Promise<void> {}
-  static async trackMeetingStarted(..._args: unknown[]): Promise<void> {}
-  static async trackMeetingCompleted(..._args: unknown[]): Promise<void> {}
-  static async trackMeetingDeleted(..._args: unknown[]): Promise<void> {}
-  static async trackRecordingStarted(..._args: unknown[]): Promise<void> {}
-  static async trackRecordingStopped(..._args: unknown[]): Promise<void> {}
-  static async trackTranscriptionSuccess(..._args: unknown[]): Promise<void> {}
-  static async trackTranscriptionError(..._args: unknown[]): Promise<void> {}
-  static async trackSummaryGenerationStarted(..._args: unknown[]): Promise<void> {}
-  static async trackSummaryGenerationCompleted(..._args: unknown[]): Promise<void> {}
-  static async trackSummaryRegenerated(..._args: unknown[]): Promise<void> {}
-  static async trackSessionStarted(..._args: unknown[]): Promise<void> {}
-  static async trackSessionEnded(..._args: unknown[]): Promise<void> {}
+  static track = ignoreEvent;
+  static trackEvent = ignoreEvent;
+  static trackButtonClick = ignoreEvent;
+  static trackPageView = ignoreEvent;
+  static trackFeatureUsed = ignoreEvent;
+  static trackFeatureUsedEnhanced = ignoreEvent;
+  static trackError = ignoreEvent;
+  static trackCopy = ignoreEvent;
+  static trackCustomPromptUsed = ignoreEvent;
+  static trackAppStarted = ignoreEvent;
+  static trackBackendConnection = ignoreEvent;
+  static trackModelChanged = ignoreEvent;
+  static trackSettingsChanged = ignoreEvent;
+  static trackMeetingStarted = ignoreEvent;
+  static trackMeetingCompleted = ignoreEvent;
+  static trackMeetingDeleted = ignoreEvent;
+  static trackRecordingStarted = ignoreEvent;
+  static trackRecordingStopped = ignoreEvent;
+  static trackTranscriptionSuccess = ignoreEvent;
+  static trackTranscriptionError = ignoreEvent;
+  static trackSummaryGenerationStarted = ignoreEvent;
+  static trackSummaryGenerationCompleted = ignoreEvent;
+  static trackSummaryRegenerated = ignoreEvent;
+  static trackSessionStarted = ignoreEvent;
+  static trackSessionEnded = ignoreEvent;
 }
 
 export default Analytics;

@@ -44,8 +44,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   onStopInitiated,
   isRecordingDisabled,
   isParentProcessing,
-  selectedDevices,
-  meetingName,
   variant = 'floating',
 }) => {
   // Use global recording state context for pause state (syncs with tray operations)
@@ -108,13 +106,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     } finally {
       setIsStarting(false);
     }
-  }, [
-    onRecordingStart,
-    isStartPending,
-    selectedDevices,
-    meetingName,
-    isRecording,
-  ]);
+  }, [onRecordingStart, isStartPending]);
 
   const stopRecordingAction = useCallback(async () => {
     try {
@@ -174,7 +166,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     try {
       await invoke('pause_recording');
       // isPaused state now managed by RecordingStateContext via events
-    } catch (error) {
+    } catch {
       console.error("Failed to pause recording:");
       toast.error('Could not pause recording. Try pausing again or stop the recording.');
     } finally {
@@ -190,7 +182,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     try {
       await invoke('resume_recording');
       // isPaused state now managed by RecordingStateContext via events
-    } catch (error) {
+    } catch {
       console.error("Failed to resume recording:");
       toast.error('Could not resume recording. Try resuming again or stop the recording.');
     } finally {
@@ -251,7 +243,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           transcriptErrorUnsubscribe,
           transcriptionErrorUnsubscribe,
         ];
-      } catch (error) {
+      } catch {
         console.error("Failed to set up recording event listeners:");
       }
     };

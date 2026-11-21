@@ -16,7 +16,7 @@ import {
   Activity,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { invoke } from "@tauri-apps/api/core";
+import { configService } from "@/services/configService";
 import { cn } from "@/lib/utils";
 import { ConfluenceIcon, Microsoft365Icon } from "@/components/IntegrationIcons";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
@@ -97,7 +97,7 @@ export default function SettingsPage() {
   useEffect(() => {
     const loadTranscriptConfig = async () => {
       try {
-        const config = (await invoke("api_get_transcript_config")) as any;
+        const config = await configService.getTranscriptConfig();
         if (config) {
           setTranscriptModelConfig({
             provider: config.provider || "localWhisper",

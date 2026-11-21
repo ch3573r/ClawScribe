@@ -7,20 +7,22 @@ export function EvidenceRoute({token,meetingId,audioReady,audioStatus,audioError
   token:string|null|undefined;meetingId:string;audioReady:boolean;audioStatus:string;audioError:string|null;
   onReveal:(id:string,index:number,current:()=>boolean)=>Promise<void>;onPlay:(seconds:number,current:()=>boolean)=>Promise<void>;
 }) {
-  const generation=useRef(0);const completed=useRef('');const [error,setError]=useState('');const [busy,setBusy]=useState(false);const [retry,setRetry]=useState(0);
+  const completed=useRef('');const [error,setError]=useState('');const [busy,setBusy]=useState(false);const [retry,setRetry]=useState(0);
   const [waitExpired,setWaitExpired]=useState(false);
   useEffect(()=>{setWaitExpired(false);if(!token)return;const timer=setTimeout(()=>setWaitExpired(true),10000);return()=>clearTimeout(timer);},[token]);
   useEffect(()=>{
-    const request=++generation.current;const current=()=>generation.current===request;
+    let active = true;
+    const current = () => active;
+    const cancel = () => { active = false; };
     if(!token||completed.current===token)return;
     const intent=evidenceIntent(token,meetingId);
     if(!intent){setBusy(false);setError('This source link is no longer available. Open the source again.');return;}
-    if(intent.play&&!audioReady&&!audioError&&audioStatus!=='missing'&&!waitExpired){setBusy(true);return()=>{generation.current++;};}
+    if(intent.play&&!audioReady&&!audioError&&audioStatus!=='missing'&&!waitExpired){setBusy(true);return cancel;}
     setError('');setBusy(true);
     void navigateEvidence(intent.reference,intent.play,{current,resolve:knowledgeService.resolve,reveal:onReveal,play:onPlay},intent.contextReference)
       .then(value=>{if(!current()||!value)return;completed.current=token;finishEvidenceIntent(token);setBusy(false);})
       .catch(e=>{if(current()){setBusy(false);setError(e instanceof Error?e.message:'Could not open the source. Retry.');}});
-    return()=>{generation.current++;};
+    return cancel;
   },[token,meetingId,audioReady,audioStatus,audioError,onReveal,onPlay,retry,waitExpired]);
   if(!token||(!busy&&!error))return null;
   const intent = evidenceIntent(token, meetingId);

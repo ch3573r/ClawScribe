@@ -56,7 +56,10 @@ export function planSummaryReplacement<T>(blocks: T, options: ReplaceOptions): R
     if (Array.isArray(node.children)) visit(node.children);
     if (Array.isArray(node.rows)) visit(node.rows);
     if (Array.isArray(node.cells)) {
-      for (const cell of node.cells) Array.isArray(cell) ? inline(cell) : visit(cell);
+      for (const cell of node.cells) {
+        if (Array.isArray(cell)) inline(cell);
+        else visit(cell);
+      }
     }
   }
   visit(copy);

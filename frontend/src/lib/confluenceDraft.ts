@@ -174,7 +174,7 @@ export async function writeConfluenceDraftToClipboard(
   markdown: string,
 ): Promise<ClipboardWriteMode> {
   const html = markdownToConfluenceHtml(markdown);
-  const ClipboardItemCtor = (window as any).ClipboardItem;
+  const ClipboardItemCtor = window.ClipboardItem;
 
   if (navigator.clipboard?.write && ClipboardItemCtor) {
     const item = new ClipboardItemCtor({

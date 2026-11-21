@@ -8,7 +8,7 @@
 
 import { useState, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { indexedDBService, MeetingMetadata, StoredTranscript } from '@/services/indexedDBService';
+import { indexedDBService, type MeetingMetadata, type TranscriptPreview } from '@/services/indexedDBService';
 import { storageService } from '@/services/storageService';
 import { applyPinnedSummaryLanguageToMeeting } from '@/lib/summary-language-preferences';
 import {
@@ -111,7 +111,7 @@ export interface UseTranscriptRecoveryReturn {
   /** "Keep, do not ask again": the recording stays on disk and is not offered unasked. */
   keepRecoverableMeeting: (meetingId: string) => Promise<void>;
   recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount?: number }>;
-  loadMeetingTranscripts: (meetingId: string) => Promise<StoredTranscript[]>;
+  loadMeetingTranscripts: (meetingId: string) => Promise<TranscriptPreview[]>;
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
 }
 
@@ -150,7 +150,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   /**
    * Load transcripts for preview
    */
-  const loadMeetingTranscripts = useCallback(async (meetingId: string): Promise<StoredTranscript[]> => {
+  const loadMeetingTranscripts = useCallback(async (meetingId: string): Promise<TranscriptPreview[]> => {
     try {
       const candidate = candidatesRef.current.find(c => c.meetingId === meetingId);
       if (candidate?.source === 'disk' && candidate.disk) {
@@ -159,18 +159,13 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
           'preview_interrupted_recording',
           { folder: candidate.disk.folder, limit: 10 },
         );
-        return lines.map((line, index) => ({
-          meetingId,
+        return lines.map(line => ({
           text: line.text,
           timestamp: line.timestamp,
           audio_start_time: line.audioStartTime,
-          sequenceId: index,
-        } as StoredTranscript));
+        }));
       }
-      const transcripts = await indexedDBService.getTranscripts(meetingId);
-      // Sort by sequence ID
-      transcripts.sort((a, b) => (a.sequenceId || 0) - (b.sequenceId || 0));
-      return transcripts;
+      return await indexedDBService.getTranscripts(meetingId);
     } catch (error) {
       console.error('Failed to load meeting transcripts:', error);
       return [];
@@ -305,7 +300,6 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       // 2. Load all transcripts
       // A failed IndexedDB read is different from a deliberately empty transcript.
       const transcripts = await indexedDBService.getTranscripts(meetingId);
-      transcripts.sort((a, b) => (a.sequenceId || 0) - (b.sequenceId || 0));
 
       // Recovery only uses the folder recorded for this entry.
       const folderPath = metadata.folderPath;
@@ -349,15 +343,15 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         id: t.id?.toString() || `${Date.now()}-${index}`,
         text: t.text,
         timestamp: t.timestamp,
-        sequence_id: t.sequenceId || index,
-        chunk_start_time: (t as any).chunk_start_time,
-        is_partial: (t as any).is_partial || false,
+        sequence_id: t.sequenceId ?? t.sequence_id ?? index,
+        chunk_start_time: t.chunk_start_time,
+        is_partial: t.is_partial ?? false,
         confidence: t.confidence,
-        audio_start_time: (t as any).audio_start_time,
-        audio_end_time: (t as any).audio_end_time,
-        duration: (t as any).duration,
-        speaker: (t as any).speaker,
-        word_timestamps: (t as any).word_timestamps,
+        audio_start_time: t.audio_start_time,
+        audio_end_time: t.audio_end_time,
+        duration: t.duration,
+        speaker: t.speaker ?? t.source,
+        word_timestamps: t.word_timestamps,
       }));
 
       // 6. Save to backend database using existing save utilities

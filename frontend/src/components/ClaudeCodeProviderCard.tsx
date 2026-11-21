@@ -42,7 +42,7 @@ export function useClaudeCodeSettings(active: boolean) {
         if (current === epoch.current) { setBusy(false); inFlight.current = false; }
       }
     })();
-    return () => { ++epoch.current; };
+    return () => { epoch.current += 1; };
   }, [active]);
 
   const check = async () => {

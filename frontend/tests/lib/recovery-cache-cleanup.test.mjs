@@ -39,6 +39,7 @@ function recoveryCache(rows) {
           put: row => request(() => data.set(row.meetingId, { ...row })),
           delete: key => request(() => data.delete(key)),
           index: () => ({
+            getAll: meetingId => request(() => [...transcripts.values()].filter(row => row.meetingId === meetingId)),
             openCursor(meetingId) {
               pending++;
               const result = {};
@@ -73,6 +74,15 @@ test('successful SQLite save immediately removes the recovery meeting and transc
   await cache.indexedDBService.markMeetingSaved('saved');
   assert.equal(cache.meetings.size, 0);
   assert.equal(cache.transcripts.size, 0);
+});
+
+test('cached transcripts sort by sequence in both stored formats', async () => {
+  const cache = recoveryCache([]);
+  cache.transcripts.set(1, { meetingId: 'sample', sequence_id: 2 });
+  cache.transcripts.set(2, { meetingId: 'sample', sequenceId: 0 });
+  cache.transcripts.set(3, { meetingId: 'sample', sequenceId: 1 });
+  const rows = await cache.indexedDBService.getTranscripts('sample');
+  assert.deepEqual(rows.map(row => row.sequenceId ?? row.sequence_id), [0, 1, 2]);
 });
 
 test('library deletion removes matching recovery IDs by folder without deleting other drafts', async () => {

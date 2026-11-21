@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import test from 'node:test';
-import vm from 'node:vm';
-import ts from 'typescript';
 import { createHookHarness } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
@@ -63,13 +60,8 @@ function setup(t) {
       return { startSummaryPolling: api.startSummaryPolling, stopSummaryPolling: api.stopSummaryPolling, attachSummaryPolling: api.attachSummaryPolling };
     } },
   };
-  const exports = {};
-  const source = fs.readFileSync(new URL('../../src/hooks/meeting-details/useSummaryGeneration.ts', import.meta.url), 'utf8');
-  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { esModuleInterop: true, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText, {
-    exports, console: { log() {}, warn() {}, error() {} },
-    require: specifier => { assert.ok(Object.hasOwn(mocks, specifier), `Missing mock: ${specifier}`); return mocks[specifier]; },
-  });
-  const page = () => pageHooks.render(() => exports.useSummaryGeneration({
+  const { useSummaryGeneration } = loadTsModule('src/hooks/meeting-details/useSummaryGeneration.ts', mocks);
+  const page = () => pageHooks.render(() => useSummaryGeneration({
     meeting: { id: 'saved-meeting', created_at: '2026-01-01' }, transcripts: [],
     modelConfig: { provider: 'synthetic', model: 'synthetic' }, isModelConfigLoading: false, selectedTemplate: '',
     updateMeetingTitle: noop, setAiSummary: value => aiSummary.push(value),

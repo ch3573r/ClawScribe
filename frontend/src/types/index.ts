@@ -63,7 +63,7 @@ export interface Summary {
 export interface ApiResponse {
   message: string;
   num_chunks: number;
-  data: any[];
+  data: unknown[];
 }
 
 export interface SummaryResponse {
@@ -77,16 +77,11 @@ export interface SummaryResponse {
   };
 }
 
-// BlockNote-specific types
-export type SummaryFormat = 'legacy' | 'markdown' | 'blocknote';
-
-export interface BlockNoteBlock {
-  id: string;
-  type: string;
-  props?: Record<string, any>;
-  content?: any[];
-  children?: BlockNoteBlock[];
-}
+export type BlockNoteBlock = import('@blocknote/core').Block;
+export type EditorSummary =
+  | { markdown: string; summary_json?: BlockNoteBlock[] }
+  | { markdown?: string; summary_json: BlockNoteBlock[] };
+export type MeetingSummary = Summary | EditorSummary;
 
 export interface SummaryDataResponse {
   markdown?: string;
@@ -94,7 +89,7 @@ export interface SummaryDataResponse {
   // Legacy format fields
   MeetingName?: string;
   _section_order?: string[];
-  [key: string]: any; // For legacy section data
+  [key: string]: unknown; // Legacy sections and additional persisted metadata
 }
 
 // Pagination types for optimized transcript loading
@@ -104,6 +99,10 @@ export interface MeetingMetadata {
   created_at: string;
   updated_at: string;
   folder_path?: string;
+}
+
+export interface MeetingDetails extends MeetingMetadata {
+  transcripts: Transcript[];
 }
 
 export interface PaginatedTranscriptsResponse {

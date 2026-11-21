@@ -3,7 +3,8 @@
 import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import dynamic from 'next/dynamic';
-import { Summary, SummaryDataResponse, SummaryFormat, BlockNoteBlock } from '@/types';
+import type { EditorSummary, MeetingSummary, Summary } from '@/types';
+import { isEditorSummary } from '@/lib/meeting-summary';
 import { AISummary } from './index';
 import { Block, BlockNoteEditor } from '@blocknote/core';
 import { useCreateBlockNote } from '@blocknote/react';
@@ -21,8 +22,8 @@ import type { SummaryDraft, SaveState } from '@/lib/meetingDrafts';
 interface BlockNoteSummaryViewProps {
   onDraftChange?: (draft: SummaryDraft, read: () => Promise<SummaryDraft>) => void;
   saveState?: SaveState;
-  summaryData: SummaryDataResponse | Summary | null;
-  onSave?: (data: { markdown?: string; summary_json?: BlockNoteBlock[] }) => void | Promise<void>;
+  summaryData: MeetingSummary | null;
+  onSave?: (data: EditorSummary) => void | Promise<void>;
   onSummaryChange?: (summary: Summary) => void;
   status?: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
   error?: string | null;
@@ -31,7 +32,6 @@ interface BlockNoteSummaryViewProps {
     title: string;
     created_at: string;
   };
-  onDirtyChange?: (isDirty: boolean) => void;
 }
 
 export interface BlockNoteSummaryViewRef {
@@ -42,37 +42,6 @@ export interface BlockNoteSummaryViewRef {
   isDirty: boolean;
 }
 
-// Format detection helper
-function detectSummaryFormat(data: any): { format: SummaryFormat; data: any } {
-  if (!data) {
-    return { format: 'legacy', data: null };
-  }
-
-  // Priority 1: BlockNote format (has summary_json)
-  if (data.summary_json && Array.isArray(data.summary_json)) {
-    console.log('✅ FORMAT: BLOCKNOTE (summary_json exists)');
-    return { format: 'blocknote', data };
-  }
-
-  // Priority 2: Markdown format
-  if (data.markdown && typeof data.markdown === 'string') {
-    console.log('✅ FORMAT: MARKDOWN (will parse to BlockNote)');
-    return { format: 'markdown', data };
-  }
-
-  // Priority 3: Legacy JSON
-  const hasLegacyStructure = data.MeetingName || Object.keys(data).some(key =>
-    typeof data[key] === 'object' && data[key]?.title && data[key]?.blocks
-  );
-
-  if (hasLegacyStructure) {
-    console.log('✅ FORMAT: LEGACY (custom JSON)');
-    return { format: 'legacy', data };
-  }
-
-  return { format: 'legacy', data: null };
-}
-
 export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNoteSummaryViewProps>(({
   summaryData,
   onSave,
@@ -80,13 +49,14 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   status = 'idle',
   error = null,
   meeting,
-  onDirtyChange,
   onDraftChange,
   saveState,
 }, ref) => {
   const theme = useAppTheme();
   const saveInFlight = useRef(false);
-  const { format, data } = detectSummaryFormat(summaryData);
+  const hasEditorData = summaryData !== null && isEditorSummary(summaryData);
+  const data = hasEditorData ? summaryData : null;
+  const format = data?.summary_json ? 'blocknote' : hasEditorData ? 'markdown' : 'legacy';
   const [isDirty, setIsDirty] = useState(false);
   const [currentBlocks, setCurrentBlocks] = useState<Block[]>([]);
   const [loadError, setLoadError] = useState(false);
@@ -139,13 +109,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     }
   }, [editor, onDraftChange]);
 
-  // Notify parent of dirty state changes
-  useEffect(() => {
-    if (onDirtyChange) {
-      onDirtyChange(isDirty);
-    }
-  }, [isDirty, onDirtyChange]);
-
   const handleSave = useCallback(async () => {
     if (!onSave || !isDirty || saveInFlight.current) return;
     saveInFlight.current = true;
@@ -159,8 +122,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         source: 'BlockNoteSummaryView.handleSave',
       });
 
-      const saveData: { markdown?: string; summary_json?: BlockNoteBlock[] } = {
-        summary_json: currentBlocks as unknown as BlockNoteBlock[]
+      const saveData: EditorSummary = {
+        summary_json: currentBlocks
       };
 
       if (markdownResult.markdown !== undefined) {
@@ -219,7 +182,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
           console.log('📝 BlockNote format, currentBlocks:', currentBlocks.length);
           const blocks = currentBlocks.length > 0
             ? currentBlocks
-            : (data?.summary_json as unknown as Block[] | undefined) || [];
+            : data?.summary_json || [];
 
           if (blocks.length > 0 && editor) {
             const markdownResult = await blocksToMarkdownSafely(editor, blocks, {
@@ -254,7 +217,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     console.log('🎨 Rendering LEGACY format');
     return (
       <AISummary
-        summary={summaryData as Summary}
+        summary={hasEditorData ? null : summaryData}
         status={status}
         error={error}
         onSummaryChange={onSummaryChange || (() => { })}
@@ -270,7 +233,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         <div className="w-full">
           <Editor
             key={meeting?.id}
-            initialContent={data.summary_json}
+            initialContent={data?.summary_json}
             summaryPresentation
             onEditorReady={onEditorReady}
             onChange={(blocks) => {

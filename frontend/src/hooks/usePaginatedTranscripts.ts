@@ -271,7 +271,7 @@ export function usePaginatedTranscripts({
         reset();
         if (meetingId) void refetch();
         else setIsLoading(false);
-        return () => { generationRef.current++; };
+        return () => { generationRef.current += 1; };
     }, [meetingId, reset, refetch]);
 
     // Fetch the cited page without advancing sequential pagination past unloaded pages.

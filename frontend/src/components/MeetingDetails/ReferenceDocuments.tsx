@@ -59,12 +59,12 @@ export function ReferenceDocuments({state,provider,attachMeetingId,reveal=0,comp
   const previewGeneration = useRef(0);
   const identity = JSON.stringify({scope:state.scope,meeting:attachMeetingId});
   useEffect(() => {
-    generation.current++;
-    previewGeneration.current++;
+    generation.current += 1;
+    previewGeneration.current += 1;
     setPreview(null);setPreviewError('');setPreviewBusy(false);setDeleteTarget(null);setError('');
     return () => {
-      generation.current++;
-      previewGeneration.current++;
+      generation.current += 1;
+      previewGeneration.current += 1;
     };
   },[identity]);
   useEffect(() => { if (reveal) setExpanded(true); }, [reveal]);
@@ -136,7 +136,7 @@ export function ReferenceDocuments({state,provider,attachMeetingId,reveal=0,comp
       </div>)}
       {!compact && <Button variant="ghost" size="sm" disabled={panelBusy||state.documentsLoading} onClick={state.reloadDocuments}>Reload references</Button>}
     </div>}
-    <Dialog open={!!preview} onOpenChange={value => {if(!value){previewGeneration.current++;setPreview(null);setPreviewBusy(false);}}}><DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>{preview?.row.attachment.display_name ?? 'Reference preview'}</DialogTitle><DialogDescription>Locally extracted text with actual page and paragraph anchors.</DialogDescription></DialogHeader>
+    <Dialog open={!!preview} onOpenChange={value => {if(!value){previewGeneration.current += 1;setPreview(null);setPreviewBusy(false);}}}><DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>{preview?.row.attachment.display_name ?? 'Reference preview'}</DialogTitle><DialogDescription>Locally extracted text with actual page and paragraph anchors.</DialogDescription></DialogHeader>
       {previewBusy && <p role="status">Loading extracted text…</p>}{previewError && <p role="alert" className="text-sm text-destructive">{previewError}</p>}
       {preview?.blocks.map((block,index) => <section key={index} className="space-y-1"><h3 className="text-xs font-medium text-muted-foreground">{documentAnchor({kind:'document',document_id:preview.row.attachment.id,page:block.page,paragraph:block.paragraph})}</h3><p className="whitespace-pre-wrap break-words text-sm">{block.text}</p></section>)}
       {previewError && preview && <Button variant="outline" disabled={previewBusy} onClick={() => void inspect(preview.row)}>Retry preview</Button>}

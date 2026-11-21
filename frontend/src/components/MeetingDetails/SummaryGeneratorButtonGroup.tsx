@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Sparkles, Settings, Loader2, FileText, Check, Square, MoreHorizontal } from 'lucide-react';
 import Analytics from '@/lib/analytics';
+import type { OllamaModel } from '@/contexts/ConfigContext';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { useState, useEffect, ReactNode } from 'react';
@@ -202,7 +203,7 @@ export function SummaryGeneratorButtonGroup({
     setIsCheckingModels(true);
     try {
       const endpoint = modelConfig.ollamaEndpoint || null;
-      const models = await invoke('get_ollama_models', { endpoint }) as any[];
+      const models = await invoke<OllamaModel[]>('get_ollama_models', { endpoint });
 
       if (!models || models.length === 0) {
         // No models available, show message and open settings

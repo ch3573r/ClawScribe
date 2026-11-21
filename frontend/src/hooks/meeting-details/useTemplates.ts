@@ -49,7 +49,7 @@ export function useTemplates(meetingId?: string) {
     };
   }, [meetingId]);
 
-  const handleTemplateSelection = useCallback((id: string, _name?: string) => {
+  const handleTemplateSelection = useCallback((id: string) => {
     chosen.current = id;
     setSelectedTemplate(id);
   }, []);

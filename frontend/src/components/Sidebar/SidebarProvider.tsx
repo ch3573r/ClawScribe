@@ -26,7 +26,7 @@ export interface CurrentMeeting {
   updated_at?: string;
 }
 
-interface SidebarContextType {
+interface SidebarContextType extends ReturnType<typeof useSummaryPolling> {
   projectTags: MeetingTag[];
   projectTagsError: string | null;
   projectTagsLoading: boolean;
@@ -55,12 +55,6 @@ interface SidebarContextType {
   serverAddress: string;
   transcriptServerAddress: string;
   setTranscriptServerAddress: (address: string) => void;
-  // Summary polling management
-  activeSummaryPolls: Map<string, NodeJS.Timeout>;
-  startSummaryPolling: (meetingId: string, processId: string, onUpdate: (result: any) => void, options?: { background?: boolean }) => void;
-  stopSummaryPolling: (meetingId: string, options?: { keepBackground?: boolean }) => void;
-  /** Listen to the running poll for a meeting (or start one); returns the way to let go. */
-  attachSummaryPolling: (meetingId: string, onUpdate: (result: any) => void | Promise<void>) => () => void;
   // Refetch meetings from backend
   refetchMeetings: () => Promise<void>;
 
@@ -122,7 +116,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
   const [meetingsLoading, setMeetingsLoading] = useState(false);
   const meetingLoads = React.useRef(0);
-  const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([]);
   const [isMeetingActive, setIsMeetingActive] = useState(false);
   const [serverAddress, setServerAddress] = useState('');
   const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
@@ -141,13 +134,8 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       meetingLoads.current++;
       setMeetingsLoading(true);
       try {
-        const meetings = await invoke('api_get_meetings') as Array<{
-          id: string;
-          title: string;
-          created_at?: string;
-          updated_at?: string;
-        }>;
-        const transformedMeetings = meetings.map((meeting: any) => ({
+        const meetings = await invoke<CurrentMeeting[]>('api_get_meetings');
+        const transformedMeetings = meetings.map(meeting => ({
           id: meeting.id,
           title: meeting.title,
           created_at: meeting.created_at,
@@ -176,7 +164,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     void refreshProjectTags();
     const subscription = listen('library-changed', () => { void refreshProjectTags(); void fetchMeetings(); });
     void subscription.catch(() => setProjectTagsError('Could not watch project tags. Reopen ClawScribe to retry.'));
-    return () => { tagsVersion.current++; void subscription.then(unlisten => unlisten()).catch(() => {}); };
+    return () => { tagsVersion.current += 1; void subscription.then(unlisten => unlisten()).catch(() => {}); };
   }, [refreshProjectTags, fetchMeetings]);
 
   useEffect(() => {
@@ -187,17 +175,16 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     fetchSettings();
   }, []);
 
-  const baseItems: SidebarItem[] = [
+  const sidebarItems = React.useMemo<SidebarItem[]>(() => [
     {
       id: 'meetings',
       title: 'Meetings',
-      type: 'folder' as const,
-      children: [
-        ...meetings.map(meeting => ({ id: meeting.id, title: meeting.title, created_at: meeting.created_at, type: 'file' as const }))
-      ]
+      type: 'folder',
+      children: meetings.map(meeting => ({
+        id: meeting.id, title: meeting.title, created_at: meeting.created_at, type: 'file',
+      })),
     },
-  ];
-
+  ], [meetings]);
 
   const toggleCollapse = () => {
     setIsCollapsed(!isCollapsed);
@@ -208,13 +195,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     if (pathname === '/') {
       setCurrentMeeting({ id: 'intro-call', title: '+ New Call' });
     }
-    setSidebarItems(baseItems);
   }, [pathname]);
-
-  // Update sidebar items when meetings change
-  useEffect(() => {
-    setSidebarItems(baseItems);
-  }, [meetings]);
 
   // Function to handle recording toggle from sidebar
   const handleRecordingToggle = () => {

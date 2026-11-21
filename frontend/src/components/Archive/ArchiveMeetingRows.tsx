@@ -71,7 +71,7 @@ export function ArchiveMeetingRows({
     const subscriptions = ["retranscription-complete", "transcript-files-synchronized", "summary-job-changed", "library-changed"].map(event => listen(event, refresh));
     for (const subscription of subscriptions) void subscription.catch(() => {});
     return () => {
-      ++request.current;
+      request.current += 1;
       window.removeEventListener("focus", refresh);
       for (const subscription of subscriptions) void subscription.then(unlisten => unlisten()).catch(() => {});
     };

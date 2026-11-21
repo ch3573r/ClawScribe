@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getMeetingContext, setMeetingContext } from '@/lib/meetingContext';
 import { motion } from 'framer-motion';
-import { Summary, TranscriptSegmentData } from '@/types';
+import type { MeetingDetails, MeetingSummary, TranscriptSegmentData } from '@/types';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
@@ -55,11 +55,11 @@ export default function PageContent({
   loadedCount,
   onLoadMore,
 }: {
-  meeting: any;
+  meeting: MeetingDetails;
   evidenceToken?: string | null;
   fromArchive?: boolean;
   archiveAction?: string | null;
-  summaryData: Summary | null;
+  summaryData: MeetingSummary | null;
   summaryJob: SummaryJobSnapshot | null;
   onMeetingUpdated?: () => Promise<void>;
   onRevealTranscript?: (id: string, index: number) => Promise<void>;
@@ -67,7 +67,7 @@ export default function PageContent({
   onUpdateTranscriptSpeaker?: (transcriptId: string, speaker: string | null) => Promise<void>;
   onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
   // Pagination props
-  segments?: any[];
+  segments?: TranscriptSegmentData[];
   timelineSegments?: TranscriptSegmentData[];
   timelineComplete?: boolean;
   hasMore?: boolean;
@@ -78,7 +78,7 @@ export default function PageContent({
 }) {
   console.log('📄 PAGE CONTENT: Initializing with data:', {
     meetingId: meeting.id,
-    summaryDataKeys: summaryData ? Object.keys(summaryData) : null,
+    hasSummary: !!summaryData,
     transcriptsCount: meeting.transcripts?.length
   });
 
@@ -113,6 +113,7 @@ export default function PageContent({
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
   const audioPlayer = useAudioPlayer(audioPath);
+  const { seek, play, pause, isPlaying } = audioPlayer;
   // Review tools: follow-along, bookmarks on the timeline, and requests raised by keyboard shortcuts.
   const [followPlayback, setFollowPlayback] = useState(true);
   const [bookmarks, setBookmarks] = useState<MeetingBookmark[]>([]);
@@ -130,12 +131,12 @@ export default function PageContent({
   const playEvidence = useCallback(async (seconds: number, current: () => boolean) => {
     if (!current()) return;
     if (!isAudioReady) throw new Error('Saved audio is missing or not ready. The transcript can still be reviewed.');
-    await audioPlayer.seek(seconds);
+    await seek(seconds);
     if (!current()) return;
-    const played = await audioPlayer.play();
+    const played = await play();
     if (!current()) return;
     if (played === false) throw new Error('Saved audio could not play. Retry playback or review the transcript.');
-  }, [isAudioReady, audioPlayer.seek, audioPlayer.play]);
+  }, [isAudioReady, seek, play]);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
   const openModelSettingsRef = useRef<(() => void) | null>(null);
@@ -277,21 +278,21 @@ export default function PageContent({
   // useAudioPlayer), not the whole player object, which changes identity on
   // every clock tick during playback.
   const handleTimelineSeek = useCallback((seconds: number) => {
-    void audioPlayer.seek(seconds);
-  }, [audioPlayer.seek]);
+    void seek(seconds);
+  }, [seek]);
 
   const playPassage = useCallback((seconds: number) => {
-    void audioPlayer.seek(seconds);
-    void audioPlayer.play();
-  }, [audioPlayer.seek, audioPlayer.play]);
+    void seek(seconds);
+    void play();
+  }, [seek, play]);
 
   const handleTimelinePlayPause = useCallback(() => {
-    if (audioPlayer.isPlaying) {
-      audioPlayer.pause();
+    if (isPlaying) {
+      pause();
     } else {
-      void audioPlayer.play();
+      void play();
     }
-  }, [audioPlayer.isPlaying, audioPlayer.pause, audioPlayer.play]);
+  }, [isPlaying, pause, play]);
 
   // Space, arrows, speed, follow, bookmark and find. Resolved by playback-controls,
   // which stands down while typing, in dialogs and menus, and on controls that own the key.
@@ -348,7 +349,7 @@ export default function PageContent({
           onApplySpeakerToMatching={onApplySpeakerToMatching}
           currentTime={audioPlayer.currentTime}
           durationSeconds={audioPlayer.duration || undefined}
-          isPlaying={audioPlayer.isPlaying}
+          isPlaying={isPlaying}
           isAudioReady={isAudioReady}
           onPlayPause={handleTimelinePlayPause}
           onSeek={isAudioReady ? handleTimelineSeek : undefined}
@@ -390,7 +391,7 @@ export default function PageContent({
           onUpdateTranscriptSpeaker={onUpdateTranscriptSpeaker}
           onApplySpeakerToMatching={onApplySpeakerToMatching}
           onRevealSegment={onRevealTranscript}
-          followPlayback={isAudioReady && followPlayback && audioPlayer.isPlaying}
+          followPlayback={isAudioReady && followPlayback && isPlaying}
           onFollowStop={stopFollowing}
           findOpenRequest={findOpenRequest}
           bookmarkRequest={bookmarkRequest}
@@ -402,7 +403,7 @@ export default function PageContent({
             setFocusedSource({ id: source.transcript_id, request: Date.now() });
             document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
           }}
-          onPlaySource={isAudioReady ? async seconds => { await audioPlayer.seek(seconds); if (!audioPlayer.isPlaying) await audioPlayer.play(); } : undefined}
+          onPlaySource={isAudioReady ? async seconds => { await seek(seconds); if (!isPlaying) await play(); } : undefined}
           meeting={meeting}
           meetingTitle={meetingData.meetingTitle}
           isTitleDirty={meetingData.isTitleDirty}
@@ -424,7 +425,6 @@ export default function PageContent({
           customPrompt={customPrompt}
           onSaveSummary={meetingData.handleSaveSummary}
           onSummaryChange={meetingData.handleSummaryChange}
-          onDirtyChange={meetingData.setIsSummaryDirty}
           onSummaryDraft={meetingData.handleSummaryDraft}
           saveState={meetingData.saveState}
           hasPreviousSummary={meetingData.hasPreviousSummary}

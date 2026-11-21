@@ -110,6 +110,31 @@ test('meeting recovery failures preserve diagnostics and leave recovery availabl
   assert.equal(nodes(render()).find(node=>node.type==='button'&&text(node)==='Recover').props.disabled,false);hooks.unmount();
 });
 
+test('a late recovery preview cannot replace the selected meeting', async () => {
+  const hooks = createHookHarness();
+  const first = deferred();
+  const { TranscriptRecovery } = loadTsModule('src/components/TranscriptRecovery/TranscriptRecovery.tsx', {
+    ...primitives, react: hooks.react,
+  });
+  const props = {
+    isOpen: true,
+    recoverableMeetings: ['First', 'Second'].map(title => ({
+      meetingId: title, title, lastUpdated: Date.now(), startTime: Date.now(), transcriptCount: 1,
+    })),
+    onLoadPreview: id => id === 'First' ? first.promise : Promise.resolve([{ text: 'Second preview' }]),
+  };
+  const render = () => hooks.render(() => TranscriptRecovery(props));
+  nodes(render()).find(node => node.type === 'button' && text(node).includes('Second')).props.onClick();
+  render();
+  await flush();
+  first.resolve([{ text: 'First preview' }]);
+  await flush();
+  const contents = text(render());
+  assert.match(contents, /Second preview/);
+  assert.doesNotMatch(contents, /First preview/);
+  hooks.unmount();
+});
+
 test('permission settings errors give platform-neutral recovery instructions',async()=>{
   const hooks=createHookHarness(),errors=[];
   const {PermissionsStep}=loadTsModule('src/components/onboarding/steps/PermissionsStep.tsx',{

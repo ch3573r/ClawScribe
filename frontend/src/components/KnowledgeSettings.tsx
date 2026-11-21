@@ -43,10 +43,10 @@ export function KnowledgeSettings() {
     } finally { reading.current = false; }
   }
   useEffect(() => {
-    active.current++;
+    active.current += 1;
     void refresh();
     const timer = setInterval(() => void refresh(), 1000);
-    return () => { active.current++; clearInterval(timer); };
+    return () => { active.current += 1; clearInterval(timer); };
   }, []);
   async function action(label: string, operation: () => Promise<unknown>) {
     if (pending.current) return;

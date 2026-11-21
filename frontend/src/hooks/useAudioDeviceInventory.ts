@@ -26,7 +26,7 @@ export function useAudioDeviceInventory() {
     const media = navigator.mediaDevices;
     media?.addEventListener('devicechange', recheck);
     return () => {
-      revision.current++;
+      revision.current += 1;
       window.removeEventListener('focus', recheck);
       media?.removeEventListener('devicechange', recheck);
     };

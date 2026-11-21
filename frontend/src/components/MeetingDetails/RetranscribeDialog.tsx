@@ -172,7 +172,7 @@ export function RetranscribeDialog({
       // Fetch available models using centralized hook
       fetchModels();
     }
-  }, [open, selectedLanguage, transcriptModelConfig, fetchModels]);
+  }, [open, selectedLanguage, fetchModels, resetSelection]);
 
   // Listen for retranscription events
   useEffect(() => {
@@ -308,10 +308,10 @@ export function RetranscribeDialog({
         model: selectedModelDetails?.name || null,
         provider: selectedModelDetails?.provider || null,
       });
-    } catch (err: any) {
+    } catch (err) {
       setIsProcessing(false);
       setIsCancelling(false);
-      const errorMsg = typeof err === 'string' ? err : (err?.message || String(err));
+      const errorMsg = err instanceof Error ? err.message : String(err);
       setError(errorMsg);
 
       await Analytics.trackError('enhance_transcript_failed', errorMsg);
@@ -461,7 +461,7 @@ export function RetranscribeDialog({
                   <span className="text-sm font-medium">Language</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Language selection isn't supported for Parakeet. It always uses automatic detection.
+                  Language selection isn&apos;t supported for Parakeet. It always uses automatic detection.
                 </p>
               </div>
             )

@@ -626,7 +626,7 @@ export function DiagnosticsSettings() {
       value: openclaw.error ? "Status unavailable" : claw ? claw.status_message : "Loading status…",
       tone: openclaw.error ? "warning" : claw && claw.enabled && !claw.ready ? "warning" : "ok",
       status: openclaw.error ? "Unavailable" : !claw ? "Checking" : claw.ready ? "Ready" : claw.enabled ? "Not ready" : "Off",
-      action: <IconAction label="Refresh OpenClaw handoff status" onClick={() => void openclaw.load()} loading={openclaw.loading} />,
+      action: <IconAction label="Refresh OpenClaw handoff status" onClick={openclaw.load} loading={openclaw.loading} />,
     });
 
     const cx = codex.status;
@@ -636,7 +636,7 @@ export function DiagnosticsSettings() {
       tone: codex.error ? "warning" : "ok",
       status: codex.error ? "Unavailable" : !cx ? "Checking"
         : cx.authStatus === "authenticated" ? "Ready" : cx.found ? "Not signed in" : "Not available",
-      action: <IconAction label="Refresh Codex status" onClick={() => void codex.load()} loading={codex.loading} />,
+      action: <IconAction label="Refresh Codex status" onClick={codex.load} loading={codex.loading} />,
     });
 
     return sortHealthItems(list);

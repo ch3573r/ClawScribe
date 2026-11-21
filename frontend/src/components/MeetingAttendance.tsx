@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { CalendarClock } from "lucide-react";
 import { toast } from "sonner";
@@ -313,7 +313,7 @@ export function SavedMeetingAttendance({ meetingId, createdAt, durationSeconds, 
       if (version === lookup.current) setCandidates({ loading: false, matches: [], unavailable: ["your calendars"] });
     }
   };
-  const load = async () => {
+  const load = useCallback(async () => {
     const version = ++request.current;
     setLoading(true);
     setFailed(false);
@@ -325,7 +325,7 @@ export function SavedMeetingAttendance({ meetingId, createdAt, durationSeconds, 
     } finally {
       if (version === request.current) setLoading(false);
     }
-  };
+  }, [meetingId]);
   useEffect(() => {
     void load();
     const sync = () => {
@@ -336,10 +336,8 @@ export function SavedMeetingAttendance({ meetingId, createdAt, durationSeconds, 
       void load();
     };
     window.addEventListener(MICROSOFT_CALENDAR_CLEARED, sync);
-    return () => { request.current++; lookup.current++; window.removeEventListener(MICROSOFT_CALENDAR_CLEARED, sync); };
-    // The parent keys this control by meeting ID.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meetingId]);
+    return () => { request.current += 1; lookup.current += 1; window.removeEventListener(MICROSOFT_CALENDAR_CLEARED, sync); };
+  }, [load]);
   if (loading) return <span role="status" className="text-xs text-muted-foreground">Loading attendance…</span>;
   if (failed) return <Button variant="outline" size="sm" onClick={() => void load()}>Retry loading attendance</Button>;
   const save = async (value: MeetingCalendarLink | null) => {

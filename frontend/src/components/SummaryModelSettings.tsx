@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
 import { SettingsCard } from '@/components/ui/settings-layout';
 import { readSecretStatus, withoutSecrets } from '@/lib/secret-key';
+import type { CustomOpenAIConfig } from '@/services/configService';
 
 interface SummaryModelSettingsProps {
   refetchTrigger?: number; // Change this to trigger refetch
@@ -25,16 +26,15 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
   // Reusable fetch function
   const fetchModelConfig = useCallback(async () => {
     try {
-      const raw = await invoke('api_get_model_config') as any;
+      const raw = await invoke<ModelConfig | null>('api_get_model_config');
       // The core reports whether a key is stored, never the key.
       const data = raw && { ...withoutSecrets(raw), apiKeyStatus: readSecretStatus(raw.apiKeyStatus) };
       if (data && data.provider !== null) {
         // Fetch Custom OpenAI config if that's the active provider
         if (data.provider === 'custom-openai') {
           try {
-            const customConfig = (await invoke('api_get_custom_openai_config')) as any;
+            const customConfig = await invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config');
             if (customConfig) {
-              data.customOpenAIDisplayName = customConfig.displayName || null;
               data.customOpenAIEndpoint = customConfig.endpoint || null;
               data.customOpenAIModel = customConfig.model || null;
               data.customOpenAIKeyStatus = readSecretStatus(customConfig.apiKeyStatus);
@@ -83,12 +83,8 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
       return unlisten;
     };
 
-    let cleanup: (() => void) | undefined;
-    setupListener().then(fn => cleanup = fn);
-
-    return () => {
-      cleanup?.();
-    };
+    const subscription = setupListener();
+    return () => { void subscription.then(unlisten => unlisten()); };
   }, []);
 
   // Save handler. The Model card saves as the user changes a setting, so a

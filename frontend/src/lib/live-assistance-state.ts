@@ -36,6 +36,12 @@ export interface LiveAssistanceDependencies {
   uuid(): string;
 }
 
+function snapshotMetadata({
+  session_id, recording_generation, finalized_through_seconds, transcription_incomplete, transcription_available,
+}: LiveSnapshot): Omit<LiveSnapshot, 'segments'> {
+  return { session_id, recording_generation, finalized_through_seconds, transcription_incomplete, transcription_available };
+}
+
 /** One app-owned store; route subscribers never own native events or requests. */
 export function createLiveAssistanceStore(dependencies: LiveAssistanceDependencies) {
   const { service } = dependencies;
@@ -134,8 +140,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
       lifecycleOwner = identity;
       if (!state.sessionId) startSession(snapshot.session_id);
       // Text is native evidence only. Retain bounded metadata, never a second UI transcript.
-      const { segments: _segments, ...metadata } = snapshot;
-      update({ snapshot: metadata, snapshotError: null });
+      update({ snapshot: snapshotMetadata(snapshot), snapshotError: null });
     }).catch(() => {
       if (generation === version && snapshotRevision === revision && lifecycleRevision === phase && state.sessionId)
         update({ snapshotError: 'Could not read finalized transcript status. Retry before asking.' });
@@ -181,8 +186,7 @@ export function createLiveAssistanceStore(dependencies: LiveAssistanceDependenci
       lifecycleRevision++;
       snapshotRevision++;
       startSession(identity.id);
-      const { segments: _segments, ...metadata } = snapshot;
-      update({ snapshot: metadata, snapshotError: null });
+      update({ snapshot: snapshotMetadata(snapshot), snapshotError: null });
     }).catch(() => failedStart(candidate)).finally(() => finishRead(work));
     reading = work;
   }

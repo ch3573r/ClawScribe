@@ -26,7 +26,7 @@ export function useLiveTranscriptionReadiness(inspectModel: boolean, configuredP
 
   useEffect(() => {
     void refresh();
-    return () => { revision.current++; };
+    return () => { revision.current += 1; };
   }, [refresh]);
 
   useEffect(() => {

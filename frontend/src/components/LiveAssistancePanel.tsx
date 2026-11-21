@@ -42,7 +42,7 @@ export function LiveAssistancePanel() {
   useEffect(() => {
     previewRevision.current++;
     setPreview(null); setPreviewBusy(false); setPreviewError(''); setQuestion('');
-    return () => { previewRevision.current++; };
+    return () => { previewRevision.current += 1; };
   }, [state.sessionId]);
   const audioOnly = recording.sessionMode === 'audio_only' || state.snapshot?.transcription_available === false;
   const builtin = state.provider === 'builtin-ai';

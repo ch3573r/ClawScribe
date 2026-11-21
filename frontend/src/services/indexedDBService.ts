@@ -4,6 +4,8 @@
  * to enable recovery after app crashes or unexpected closures.
  */
 
+import type { Transcript, TranscriptUpdate } from '@/types';
+
 // Database schema interfaces
 export interface MeetingMetadata {
   meetingId: string;          // Primary key: "meeting-{timestamp}"
@@ -15,20 +17,15 @@ export interface MeetingMetadata {
   folderPath?: string;        // Path to recording folder
 }
 
-export interface StoredTranscript {
+export interface StoredTranscript extends Omit<Transcript, 'id'> {
   id?: number;                // Auto-increment primary key
   meetingId: string;          // Foreign key to meetings store
-  text: string;               // Transcript text
-  timestamp: string;          // ISO 8601 timestamp
-  confidence: number | null; // Null when the engine does not provide a score
-  sequenceId: number;         // Sequence number for ordering
+  sequenceId?: number;        // Older entries can use sequenceId instead of sequence_id
+  source?: string;            // Live updates label the speaker with source
   storedAt: number;           // Unix timestamp when saved
-  audio_start_time?: number;  // Recording-relative start time in seconds
-  audio_end_time?: number;    // Recording-relative end time in seconds
-  duration?: number;          // Duration in seconds
-  word_timestamps?: import('@/types').TranscriptWord[];
-  [key: string]: any;         // Allow additional fields from TranscriptUpdate
 }
+
+export type TranscriptPreview = Pick<StoredTranscript, 'text' | 'timestamp' | 'audio_start_time'>;
 
 class IndexedDBService {
   private db: IDBDatabase | null = null;
@@ -243,7 +240,7 @@ class IndexedDBService {
   /**
    * Save a transcript segment
    */
-  async saveTranscript(meetingId: string, transcript: any): Promise<void> {
+  async saveTranscript(meetingId: string, transcript: TranscriptUpdate): Promise<void> {
     try {
       if (!this.db) await this.init();
 
@@ -302,7 +299,7 @@ class IndexedDBService {
         request.onsuccess = () => {
           const transcripts = request.result as StoredTranscript[];
           // Sort by sequence ID
-          transcripts.sort((a, b) => a.sequenceId - b.sequenceId);
+          transcripts.sort((a, b) => (a.sequenceId ?? a.sequence_id ?? 0) - (b.sequenceId ?? b.sequence_id ?? 0));
           resolve(transcripts);
         };
         request.onerror = () => reject(request.error);

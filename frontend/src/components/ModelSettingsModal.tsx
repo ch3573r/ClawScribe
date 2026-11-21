@@ -1,10 +1,10 @@
 import { openExternal } from '@/lib/openExternal';
 import { UnencryptedHttpOptIn } from '@/components/UnencryptedHttpOptIn';
-import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
 import { useOllamaDownload } from '@/contexts/OllamaDownloadContext';
-import { BuiltInModelManager } from '@/components/BuiltInModelManager';
+import { BuiltInModelManager, type BuiltInModelInfo } from '@/components/BuiltInModelManager';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -41,7 +41,7 @@ import { SaveError, safeMessage, useSaveFeedback, type CommitResult } from '@/co
 import { CommitInputRow, CopyCommandRow, SaveMark, withError } from '@/components/settings/summary-provider-parts';
 import { providerLabel as summaryProviderLabel } from '@/components/settings/provider-data';
 import { SecretKeyControl, SecretKeyRow } from '@/components/settings/SecretKeyControl';
-import { configService } from '@/services/configService';
+import { configService, type CustomOpenAIConfig } from '@/services/configService';
 import {
   KEY_REQUIRED_FOR_NEW_ADDRESS, NO_SECRET, hasUsableKey, keyProblem, keyRequiredForAddress, newKeyPayload, readSecretStatus,
   removalNeedsConfirmation, withoutSecrets, type SecretStatus,
@@ -319,7 +319,9 @@ export function ModelSettingsModal({
   const [error, setError] = useState<string>('');
   // The key typed for the provider being looked at. A stored key is never loaded
   // here: the core reports only whether one is stored (`keyStatus`).
-  const [apiKey, setApiKey] = useState<string | null>(modelConfig.apiKey || null);
+  const [draftKey, setDraftKey] = useState({ provider: modelConfig.provider, value: modelConfig.apiKey || null });
+  const apiKey = draftKey.provider === modelConfig.provider ? draftKey.value : null;
+  const setApiKey = (value: string | null) => setDraftKey({ provider: modelConfig.provider, value });
   const keyStatus: SecretStatus =
     providerKeyStatus?.[modelConfig.provider as KeyProvider] ?? modelConfig.apiKeyStatus ?? NO_SECRET;
   const [openRouterModels, setOpenRouterModels] = useState<OpenRouterModel[]>([]);
@@ -329,9 +331,9 @@ export function ModelSettingsModal({
   const [isLoadingOllama, setIsLoadingOllama] = useState<boolean>(false);
   const [lastFetchedEndpoint, setLastFetchedEndpoint] = useState<string>(modelConfig.ollamaEndpoint || '');
   const [endpointValidationState, setEndpointValidationState] = useState<'valid' | 'invalid' | 'none'>('none');
-  const [hasAutoFetched, setHasAutoFetched] = useState<boolean>(false);
-  const hasSyncedFromParent = useRef<boolean>(false);
-  const hasLoadedInitialConfig = useRef<boolean>(false);
+  const savedOllamaEndpoint = modelConfig.ollamaEndpoint || '';
+  const ollamaOnOpen = useRef({ endpoint: savedOllamaEndpoint, silent: skipInitialFetch });
+  const ollamaRequest = useRef(0);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isEndpointSectionCollapsed, setIsEndpointSectionCollapsed] = useState<boolean>(true); // Collapsed by default
   const [ollamaNotInstalled, setOllamaNotInstalled] = useState<boolean>(false); // Track if Ollama is not installed
@@ -398,7 +400,7 @@ export function ModelSettingsModal({
   const { isDownloading, getProgress, downloadingModels } = useOllamaDownload();
 
   // Built-in AI models state
-  const [builtinAiModels, setBuiltinAiModels] = useState<any[]>([]);
+  const [builtinAiModels, setBuiltinAiModels] = useState<BuiltInModelInfo[]>([]);
 
   // Settings page (autosave) state
   const feedback = useSaveFeedback();
@@ -440,7 +442,7 @@ export function ModelSettingsModal({
   }, [ollamaEndpoint]);
 
   const configuredCodexModel = codexConfig.model || modelConfig.model || CODEX_DEFAULT_MODEL;
-  const codexPickerModels = codexModels.some((model) => model.id === configuredCodexModel)
+  const codexPickerModels = useMemo(() => codexModels.some((model) => model.id === configuredCodexModel)
     ? codexModels
     : [
         {
@@ -453,9 +455,9 @@ export function ModelSettingsModal({
           inputModalities: ['text', 'image'],
         },
         ...codexModels,
-      ];
+      ], [codexModels, configuredCodexModel]);
 
-  const modelOptions: Record<string, string[]> = {
+  const modelOptions = useMemo<Record<string, string[]>>(() => ({
     ollama: models.map((model) => model.name),
     claude: claudeModels.length > 0 ? claudeModels : CLAUDE_FALLBACK_MODELS,
     groq: groqModels.length > 0 ? groqModels : GROQ_FALLBACK_MODELS,
@@ -466,7 +468,7 @@ export function ModelSettingsModal({
     openclaw: ['openclaw-managed'],
     codex: codexPickerModels.map((model) => model.id),
     'claude-code': CLAUDE_CODE_MODELS,
-  };
+  }), [models, claudeModels, groqModels, openaiModels, openRouterModels, builtinAiModels, customOpenAIModel, codexPickerModels]);
 
   const requiresApiKey =
     modelConfig.provider === 'claude' ||
@@ -512,14 +514,10 @@ export function ModelSettingsModal({
 
   useEffect(() => {
     const fetchModelConfig = async () => {
-      // If parent component manages config, skip fetch and just mark as loaded
-      if (skipInitialFetch) {
-        hasLoadedInitialConfig.current = true;
-        return;
-      }
+      if (skipInitialFetch) return;
 
       try {
-        const data = (await invoke('api_get_model_config')) as any;
+        const data = await invoke<ModelConfig | null>('api_get_model_config');
         if (data && data.provider !== null) {
           setModelConfig({ ...withoutSecrets(data), apiKeyStatus: readSecretStatus(data.apiKeyStatus) });
 
@@ -528,12 +526,11 @@ export function ModelSettingsModal({
             setOllamaEndpoint(data.ollamaEndpoint);
             // Don't set lastFetchedEndpoint here - it will be set after successful model fetch
           }
-          hasLoadedInitialConfig.current = true; // Mark that initial config is loaded
 
           // Fetch Custom OpenAI config if that's the active provider
           if (data.provider === 'custom-openai') {
             try {
-              const customConfig = (await invoke('api_get_custom_openai_config')) as any;
+              const customConfig = await invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config');
               if (customConfig) {
                 setCustomOpenAIEndpoint(customConfig.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
                 setCustomOpenAIModel(customConfig.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
@@ -556,24 +553,15 @@ export function ModelSettingsModal({
         }
       } catch (error) {
         console.error('Failed to fetch model config:', error);
-        hasLoadedInitialConfig.current = true; // Mark as loaded even on error
       }
     };
 
     fetchModelConfig();
-  }, [skipInitialFetch]);
+  }, [skipInitialFetch, setModelConfig]);
 
   // Sync ollamaEndpoint state when modelConfig.ollamaEndpoint changes from parent
   useEffect(() => {
-    const endpoint = modelConfig.ollamaEndpoint || '';
-    if (endpoint !== ollamaEndpoint) {
-      setOllamaEndpoint(endpoint);
-      // Don't set lastFetchedEndpoint here - only after successful model fetch
-    }
-    // Only mark as synced if we have a valid provider (prevents race conditions during init)
-    if (modelConfig.provider) {
-      hasSyncedFromParent.current = true; // Mark that we've received prop value
-    }
+    setOllamaEndpoint(modelConfig.ollamaEndpoint || '');
   }, [modelConfig.ollamaEndpoint, modelConfig.provider]);
 
   // Sync custom OpenAI state from modelConfig (context or props)
@@ -611,10 +599,9 @@ export function ModelSettingsModal({
     modelConfig.project
   ]);
 
-  // Reset hasAutoFetched flag and clear models when switching away from Ollama
+  // Clear provider-specific state when leaving Ollama
   useEffect(() => {
     if (modelConfig.provider !== 'ollama') {
-      setHasAutoFetched(false); // Reset flag so it can auto-fetch again if user switches back
       setModels([]); // Clear models list
       setError(''); // Clear any error state
       setOllamaNotInstalled(false); // Reset installation status
@@ -636,7 +623,6 @@ export function ModelSettingsModal({
         setError('');
       } else {
         // No cache - clear models and allow refetch
-        setHasAutoFetched(false);
         setModels([]);
         setError('');
       }
@@ -645,7 +631,7 @@ export function ModelSettingsModal({
 
   // A key typed for one provider is never carried to another.
   useEffect(() => {
-    setApiKey(modelConfig.apiKey || null);
+    setDraftKey(prev => prev.provider === modelConfig.provider ? prev : { provider: modelConfig.provider, value: null });
   }, [modelConfig.provider]);
 
   useEffect(() => {
@@ -656,18 +642,24 @@ export function ModelSettingsModal({
   }, [modelConfig.provider]);
 
   // Re-check Claude Code after the program path was saved, once the new path is in state.
+  const lastClaudeRecheck = useRef(0);
+  const { check: checkClaudeCode } = claudeCode;
   useEffect(() => {
-    if (claudeRecheck > 0) void claudeCode.check();
-  }, [claudeRecheck]);
+    if (claudeRecheck === lastClaudeRecheck.current) return;
+    lastClaudeRecheck.current = claudeRecheck;
+    void checkClaudeCode();
+  }, [claudeRecheck, checkClaudeCode]);
 
   // Manual fetch function for Ollama models
-  const fetchOllamaModels = async (silent = false, endpointOverride?: string) => {
-    const trimmedEndpoint = (endpointOverride ?? ollamaEndpoint).trim();
+  const fetchOllamaModels = useCallback(async (silent: boolean, rawEndpoint: string) => {
+    const request = ++ollamaRequest.current;
+    const trimmedEndpoint = rawEndpoint.trim();
 
     // Validate URL if provided
     if (trimmedEndpoint && !validateOllamaEndpoint(trimmedEndpoint)) {
       const errorMsg = 'Invalid Ollama endpoint URL. Must start with http:// or https://';
       setError(errorMsg);
+      setIsLoadingOllama(false);
       if (!silent) {
         toast.error(errorMsg);
       }
@@ -680,6 +672,7 @@ export function ModelSettingsModal({
     try {
       const endpoint = trimmedEndpoint || null;
       const modelList = (await invoke('get_ollama_models', { endpoint })) as OllamaModel[];
+      if (request !== ollamaRequest.current) return;
       setModels(modelList);
       setLastFetchedEndpoint(trimmedEndpoint); // Track successful fetch
 
@@ -689,6 +682,7 @@ export function ModelSettingsModal({
       // Successfully fetched models, Ollama is installed
       setOllamaNotInstalled(false);
     } catch (err) {
+      if (request !== ollamaRequest.current) return;
       const errorMsg = err instanceof Error ? err.message : 'Failed to load Ollama models';
       setError(errorMsg);
 
@@ -704,34 +698,22 @@ export function ModelSettingsModal({
       }
       console.error('Error loading models:', err);
     } finally {
-      setIsLoadingOllama(false);
+      if (request === ollamaRequest.current) setIsLoadingOllama(false);
     }
-  };
+  }, []);
 
-  // Auto-fetch models on initial load only (not on endpoint changes)
   useEffect(() => {
-    let mounted = true;
+    ollamaOnOpen.current = { endpoint: savedOllamaEndpoint, silent: skipInitialFetch };
+  }, [savedOllamaEndpoint, skipInitialFetch]);
 
-    const initialLoad = async () => {
-      // Only auto-fetch on initial load if:
-      // 1. Provider is ollama
-      // 2. Haven't fetched yet
-      // 3. Component is still mounted
-      // If skipInitialFetch is true, fetch silently (no error toasts)
-      if (modelConfig.provider === 'ollama' &&
-        !hasAutoFetched &&
-        mounted) {
-        await fetchOllamaModels(skipInitialFetch); // Silent if skipInitialFetch=true
-        setHasAutoFetched(true);
-      }
-    };
-
-    initialLoad();
-
-    return () => {
-      mounted = false;
-    };
-  }, [modelConfig.provider]); // Only depend on provider, NOT endpoint
+  // Opening Ollama checks the saved endpoint. Editing its URL is local until
+  // the user requests a fetch or commits the field.
+  useEffect(() => {
+    if (modelConfig.provider !== 'ollama') return;
+    const { silent, endpoint } = ollamaOnOpen.current;
+    void fetchOllamaModels(silent, endpoint);
+    return () => { ollamaRequest.current += 1; };
+  }, [modelConfig.provider, fetchOllamaModels]);
 
   const loadOpenRouterModels = async () => {
     if (openRouterModels.length > 0) return; // Already loaded
@@ -755,12 +737,12 @@ export function ModelSettingsModal({
     if (builtinAiModels.length > 0) return; // Already loaded
 
     try {
-      const data = (await invoke('builtin_ai_list_models')) as any[];
+      const data = await invoke<BuiltInModelInfo[]>('builtin_ai_list_models');
       setBuiltinAiModels(data);
 
       // Auto-select first available model if none selected
       if (data.length > 0 && !modelConfig.model) {
-        const firstAvailable = data.find((m: any) => m.status?.type === 'available');
+        const firstAvailable = data.find((m) => m.status?.type === 'available');
         if (firstAvailable) {
           // The answer can arrive after the user moved to another provider.
           setModelConfig((prev: ModelConfig) => (prev.provider === 'builtin-ai' && !prev.model ? { ...prev, model: firstAvailable.name } : prev));
@@ -868,27 +850,7 @@ export function ModelSettingsModal({
     }
   };
 
-  const loadCodexConfig = async (): Promise<CodexProviderConfig | null> => {
-    try {
-      const config = (await invoke('codex_get_config')) as { processing?: { codex?: CodexProviderConfig } };
-      const codex = config.processing?.codex;
-      if (codex) {
-        setCodexConfig(codex);
-        if (codex.model && modelConfig.provider === 'codex') {
-          // The answer can arrive after the user moved to another provider.
-          setModelConfig((prev: ModelConfig) => (prev.provider === 'codex' ? { ...prev, model: codex.model } : prev));
-        }
-        return codex;
-      }
-      return null;
-    } catch (err) {
-      console.error('Failed to load Codex config:', err);
-      setCodexLastResult(err instanceof Error ? err.message : String(err));
-      return null;
-    }
-  };
-
-  const loadCodexModels = async () => {
+  const loadCodexModels = useCallback(async () => {
     setIsLoadingCodexModels(true);
     setCodexModelError('');
     try {
@@ -905,16 +867,28 @@ export function ModelSettingsModal({
     } finally {
       setIsLoadingCodexModels(false);
     }
-  };
+  }, []);
 
-  const checkCodexInstallation = async (nextConfig?: CodexProviderConfig) => {
+  const saveCodexConfig = useCallback(async (nextConfig: CodexProviderConfig) => {
+    const normalized = {
+      ...nextConfig,
+      codexHomeMode: 'clawscribe-isolated' as const,
+      useExistingUserCodexSession: false,
+      codexBinaryPath: null,
+      model: nextConfig.model.trim() || CODEX_DEFAULT_MODEL,
+      timeoutSeconds: nextConfig.timeoutSeconds || 600,
+    };
+    const saved = (await invoke('codex_save_config', { config: normalized })) as { processing?: { codex?: CodexProviderConfig } };
+    if (saved.processing?.codex) {
+      setCodexConfig(saved.processing.codex);
+    }
+    return normalized;
+  }, []);
+
+  const checkCodexInstallation = useCallback(async (nextConfig?: CodexProviderConfig) => {
     setIsCodexBusy(true);
     try {
-      if (nextConfig) {
-        await saveCodexConfig(nextConfig);
-      } else {
-        await saveCodexConfig();
-      }
+      if (nextConfig) await saveCodexConfig(nextConfig);
       const status = (await invoke('codex_check_installation')) as CodexInstallationStatus;
       setCodexStatus(status);
       setCodexLastResult(status.message);
@@ -931,7 +905,7 @@ export function ModelSettingsModal({
     } finally {
       setIsCodexBusy(false);
     }
-  };
+  }, [loadCodexModels, saveCodexConfig]);
 
   const findCodexAutomatically = async () => {
     setIsCodexBusy(true);
@@ -981,26 +955,10 @@ export function ModelSettingsModal({
     }
   };
 
-  const saveCodexConfig = async (nextConfig = codexConfig) => {
-    const normalized = {
-      ...nextConfig,
-      codexHomeMode: 'clawscribe-isolated' as const,
-      useExistingUserCodexSession: false,
-      codexBinaryPath: null,
-      model: nextConfig.model.trim() || CODEX_DEFAULT_MODEL,
-      timeoutSeconds: nextConfig.timeoutSeconds || 600,
-    };
-    const saved = (await invoke('codex_save_config', { config: normalized })) as { processing?: { codex?: CodexProviderConfig } };
-    if (saved.processing?.codex) {
-      setCodexConfig(saved.processing.codex);
-    }
-    return normalized;
-  };
-
   const runCodexAction = async (command: 'codex_login_browser' | 'codex_login_device' | 'codex_logout' | 'codex_test_app_server' | 'codex_test_processing') => {
     setIsCodexBusy(true);
     try {
-      await saveCodexConfig();
+      await saveCodexConfig(codexConfig);
       const result = (await invoke(command)) as CodexCommandStatus;
       const detail = [result.message, result.stdout, result.stderr].filter(Boolean).join('\n').trim();
       setCodexLastResult(detail || (result.success ? 'Codex command completed' : 'Codex command failed'));
@@ -1019,12 +977,14 @@ export function ModelSettingsModal({
     }
   };
 
+  const usableProviderKey = hasUsableKey(apiKey, keyStatus);
+
   // Auto-fetch OpenAI models when provider is openai and we have an API key
   useEffect(() => {
-    if (modelConfig.provider === 'openai' && hasUsableKey(apiKey, keyStatus)) {
+    if (modelConfig.provider === 'openai' && usableProviderKey) {
       loadOpenAIModels(apiKey, keyStatus.stored);
     }
-  }, [modelConfig.provider, apiKey, keyStatus.stored]);
+  }, [modelConfig.provider, apiKey, keyStatus.stored, usableProviderKey]);
 
   useEffect(() => {
     if (modelConfig.provider === 'openai') {
@@ -1033,24 +993,46 @@ export function ModelSettingsModal({
     if (modelConfig.provider === 'openclaw') {
       loadOpenClawStatus();
     }
-    if (modelConfig.provider === 'codex') {
-      loadCodexConfig().then((loaded) => checkCodexInstallation(loaded || undefined));
-    }
   }, [modelConfig.provider]);
+
+  useEffect(() => {
+    if (modelConfig.provider !== 'codex') return;
+    let active = true;
+    const load = async () => {
+      let codex: CodexProviderConfig | undefined;
+      try {
+        const config = await invoke<{ processing?: { codex?: CodexProviderConfig } }>('codex_get_config');
+        if (!active) return;
+        codex = config.processing?.codex;
+        if (codex) {
+          setCodexConfig(codex);
+          const model = codex.model;
+          if (model) setModelConfig(prev => prev.provider === 'codex' && prev.model !== model ? { ...prev, model } : prev);
+        }
+      } catch (err) {
+        if (!active) return;
+        console.error('Failed to load Codex config:', err);
+        setCodexLastResult(err instanceof Error ? err.message : String(err));
+      }
+      await checkCodexInstallation(codex);
+    };
+    void load();
+    return () => { active = false; };
+  }, [modelConfig.provider, setModelConfig, checkCodexInstallation]);
 
   // Auto-fetch Claude models when provider is claude and we have an API key
   useEffect(() => {
-    if (modelConfig.provider === 'claude' && hasUsableKey(apiKey, keyStatus)) {
+    if (modelConfig.provider === 'claude' && usableProviderKey) {
       loadClaudeModels(apiKey, keyStatus.stored);
     }
-  }, [modelConfig.provider, apiKey, keyStatus.stored]);
+  }, [modelConfig.provider, apiKey, keyStatus.stored, usableProviderKey]);
 
   // Auto-fetch Groq models when provider is groq and we have an API key
   useEffect(() => {
-    if (modelConfig.provider === 'groq' && hasUsableKey(apiKey, keyStatus)) {
+    if (modelConfig.provider === 'groq' && usableProviderKey) {
       loadGroqModels(apiKey, keyStatus.stored);
     }
-  }, [modelConfig.provider, apiKey, keyStatus.stored]);
+  }, [modelConfig.provider, apiKey, keyStatus.stored, usableProviderKey]);
 
   // Restore cached model when async model lists become available
   useEffect(() => {
@@ -1061,12 +1043,11 @@ export function ModelSettingsModal({
     if (modelConfig.model && providerModels.includes(modelConfig.model)) return;
 
     // Try to restore from localStorage cache
-    const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
-    const cachedModel = map[modelConfig.provider];
+    const cachedModel = readModelMap()[modelConfig.provider];
     if (cachedModel && providerModels.includes(cachedModel)) {
       setModelConfig((prev: ModelConfig) => ({ ...prev, model: cachedModel }));
     }
-  }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, codexModels, modelConfig.provider]);
+  }, [modelOptions, modelConfig.provider, modelConfig.model, setModelConfig]);
 
   const handleSave = async () => {
     const problem = keyProblem(apiKey) || keyProblem(customOpenAIApiKey) || keyProblem(openClawBearerToken);
@@ -1101,7 +1082,7 @@ export function ModelSettingsModal({
       }
     }
 
-    let updatedConfig = {
+    const updatedConfig = {
       ...modelConfig,
       // Only a key typed now is sent; without one the stored key is kept.
       apiKey: requiresApiKey ? newKeyPayload(apiKey) : null,
@@ -1323,7 +1304,7 @@ export function ModelSettingsModal({
       });
 
       // Refresh the models list after successful download
-      await fetchOllamaModels(true);
+      await fetchOllamaModels(true, ollamaEndpoint);
 
       // Note: Model is NOT auto-selected - user must explicitly choose it
       // This respects the database as the single source of truth
@@ -1358,17 +1339,17 @@ export function ModelSettingsModal({
 
     // Check if any downloads completed (were in previous, not in current)
     for (const modelName of previous) {
-      if (!current.has(modelName)) {
+      if (modelConfig.provider === 'ollama' && !current.has(modelName)) {
         // Download completed, refresh models list
         console.log(`[ModelSettingsModal] Download completed for ${modelName}, refreshing list`);
-        fetchOllamaModels(true);
+        fetchOllamaModels(true, ollamaEndpoint);
         break; // Only refresh once even if multiple completed
       }
     }
 
     // Update ref for next comparison
     previousDownloadingRef.current = new Set(current);
-  }, [downloadingModels]);
+  }, [downloadingModels, fetchOllamaModels, ollamaEndpoint, modelConfig.provider]);
 
   // Filter Ollama models based on search query
   const filteredModels = models.filter((model) => {
@@ -1426,7 +1407,7 @@ export function ModelSettingsModal({
       if (provider === 'openrouter') void loadOpenRouterModels();
       if (provider === 'builtin-ai') void loadBuiltinAiModels();
       if (provider === 'custom-openai') {
-        invoke<any>('api_get_custom_openai_config').then((config) => {
+        invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config').then((config) => {
           if (!config) return;
           setCustomOpenAIEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
           setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
@@ -1443,8 +1424,6 @@ export function ModelSettingsModal({
           setCustomProject(config.project || '');
         }).catch(() => { /* the fields keep their last values */ });
       }
-      if (provider === 'openclaw') void loadOpenClawStatus();
-      if (provider === 'codex') void loadCodexConfig().then((loaded) => checkCodexInstallation(loaded || undefined));
     }
   };
 
@@ -1721,9 +1700,9 @@ export function ModelSettingsModal({
   const checkAgain = async () => {
     const provider = modelConfig.provider;
     if (provider === 'claude-code') return claudeCode.check();
-    if (provider === 'codex') return checkCodexInstallation();
+    if (provider === 'codex') return checkCodexInstallation(codexConfig);
     if (provider === 'openclaw') return loadOpenClawStatus();
-    if (provider === 'ollama') return fetchOllamaModels(true);
+    if (provider === 'ollama') return fetchOllamaModels(true, ollamaEndpoint);
     if (provider === 'custom-openai') return runCustomCheck();
     if (provider === 'openai') { await loadOpenAIAuthStatus(); return loadOpenAIModels(apiKey, keyStatus.stored); }
     if (provider === 'claude') return loadClaudeModels(apiKey, keyStatus.stored);
@@ -2171,8 +2150,8 @@ export function ModelSettingsModal({
                   ...modelConfig,
                   provider,
                   model,
+                  apiKey: null,
                 });
-                // API key is now synced automatically via useEffect watching providerApiKeys
 
                 // Load OpenRouter models only when OpenRouter is selected
                 if (provider === 'openrouter') {
@@ -2186,7 +2165,7 @@ export function ModelSettingsModal({
 
                 // Load custom OpenAI config when selected
                 if (provider === 'custom-openai') {
-                  invoke<any>('api_get_custom_openai_config').then((config) => {
+                  invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config').then((config) => {
                     if (config) {
                       setCustomOpenAIEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
                       setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
@@ -2205,14 +2184,6 @@ export function ModelSettingsModal({
                   }).catch((err) => {
                     console.error('Failed to load custom OpenAI config:', err);
                   });
-                }
-
-                if (provider === 'openclaw') {
-                  loadOpenClawStatus();
-                }
-
-                if (provider === 'codex') {
-                  loadCodexConfig().then((loaded) => checkCodexInstallation(loaded || undefined));
                 }
               }}
             >
@@ -2540,7 +2511,7 @@ export function ModelSettingsModal({
                 type="button"
                 variant="ghost"
                 size="icon"
-                onClick={() => checkCodexInstallation()}
+                onClick={() => checkCodexInstallation(codexConfig)}
                 disabled={isCodexBusy}
                 title="Check Codex installation"
               >
@@ -2555,7 +2526,7 @@ export function ModelSettingsModal({
                 <Button type="button" variant="outline" onClick={() => void chooseCodexHome()} disabled={isCodexBusy}>Choose folder</Button>
               </div>
               <p className="text-xs text-muted-foreground mt-1">
-                ClawScribe never uses the user's normal ~/.codex profile or the standalone Codex CLI auth state for this provider.
+                ClawScribe never uses the user&apos;s normal ~/.codex profile or the standalone Codex CLI auth state for this provider.
               </p>
             </div>
 
@@ -2770,7 +2741,7 @@ export function ModelSettingsModal({
               <div>
                 <Label htmlFor="openclaw-include-audio-path">Include local audio path</Label>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Include the recorder machine's audio path in submitted metadata.
+                  Include the recorder machine&apos;s audio path in submitted metadata.
                 </p>
               </div>
               <Switch
@@ -2888,7 +2859,7 @@ export function ModelSettingsModal({
                   <Button
                     type="button"
                     size={'sm'}
-                    onClick={() => fetchOllamaModels()}
+                    onClick={() => fetchOllamaModels(false, ollamaEndpoint)}
                     disabled={isLoadingOllama}
                     variant="outline"
                     className="whitespace-nowrap"
@@ -2909,7 +2880,7 @@ export function ModelSettingsModal({
                 {ollamaEndpointChanged && !error && (
                   <Alert className="mt-3 border-warning-border bg-warning">
                     <AlertDescription className="text-warning-foreground">
-                      Endpoint changed. Please click "Fetch models" to load models from the new endpoint before saving.
+                      Endpoint changed. Please click &quot;Fetch models&quot; to load models from the new endpoint before saving.
                     </AlertDescription>
                   </Alert>
                 )}
@@ -2966,7 +2937,7 @@ export function ModelSettingsModal({
                       Download Ollama
                     </Button>
                     <div className="text-sm text-muted-foreground text-center">
-                      After installing Ollama, restart this application and click "Fetch models" to continue.
+                      After installing Ollama, restart this application and click &quot;Fetch models&quot; to continue.
                     </div>
                   </div>
                 ) : (
@@ -3028,7 +2999,7 @@ export function ModelSettingsModal({
                 {filteredModels.length === 0 ? (
                   <Alert>
                     <AlertDescription>
-                      No models found matching "{searchQuery}". Try a different search term.
+                      No models found matching &quot;{searchQuery}&quot;. Try a different search term.
                     </AlertDescription>
                   </Alert>
                 ) : (

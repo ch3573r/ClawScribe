@@ -36,7 +36,7 @@ export async function showRecordingNotification(): Promise<void> {
                 }}
                 className="rounded border-input text-primary focus:ring-ring focus:ring-2"
               />
-              <span className="select-none text-muted-foreground">Don't show this again</span>
+              <span className="select-none text-muted-foreground">Don&apos;t show this again</span>
             </label>
             <Button
               variant="ghost"
@@ -50,7 +50,7 @@ export async function showRecordingNotification(): Promise<void> {
               }}
               className="h-auto whitespace-normal w-full px-3 py-1.5 bg-primary text-primary-foreground text-xs rounded hover:bg-primary/90 transition-colors font-medium hover:text-primary-foreground"
             >
-              I've notified participants
+              I&apos;ve notified participants
             </Button>
           </div>
         ),

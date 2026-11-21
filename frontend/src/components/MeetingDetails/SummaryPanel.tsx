@@ -1,8 +1,9 @@
-import type { SummaryJobSnapshot } from '@/lib/summary-job-status';
 "use client";
 
+import type { SummaryJobSnapshot } from '@/lib/summary-job-status';
+
 import { Input } from '@/components/ui/input';
-import { Summary, Transcript } from '@/types';
+import type { EditorSummary, MeetingSummary, Summary, Transcript } from '@/types';
 import { BlockNoteSummaryView, BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { MeetingChat } from './MeetingChat';
 import { ActionIcon } from './ActionIcon';
@@ -51,7 +52,7 @@ interface SummaryPanelProps {
   onSaveAll: () => Promise<void>;
   onCopySummary: () => Promise<void>;
   onOpenFolder: () => Promise<void>;
-  aiSummary: Summary | null;
+  aiSummary: MeetingSummary | null;
   summaryStatus: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
   transcripts: Transcript[];
   modelConfig: ModelConfig;
@@ -62,9 +63,8 @@ interface SummaryPanelProps {
   customPrompt: string;
   contextLoading: boolean;
   onPromptChange: (value: string) => void;
-  onSaveSummary: (summary: Summary | { markdown?: string; summary_json?: any[] }) => Promise<void>;
+  onSaveSummary: (summary: EditorSummary) => Promise<void>;
   onSummaryChange: (summary: Summary) => void;
-  onDirtyChange: (isDirty: boolean) => void;
   summaryError: string | null;
   jobSnapshot: SummaryJobSnapshot | null;
   getSummaryStatusMessage: (status: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error') => string;
@@ -104,7 +104,6 @@ export function SummaryPanel({
   customPrompt, contextLoading, onPromptChange,
   onSaveSummary,
   onSummaryChange,
-  onDirtyChange,
   summaryError,
   jobSnapshot,
   getSummaryStatusMessage,
@@ -477,7 +476,7 @@ export function SummaryPanel({
           : <div ref={summarySearchRootRef} className="mx-auto w-full max-w-[45rem] px-6 py-5">
               <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource}>
                 <SummarySurface><BlockNoteSummaryView key={`${meeting.id}:${summaryRevision}`} saveState={saveState} onDraftChange={onSummaryDraft} ref={summaryRef}
-                  summaryData={aiSummary} onSave={onSaveSummary} onSummaryChange={onSummaryChange} onDirtyChange={onDirtyChange} status={summaryStatus} error={summaryError}
+                  summaryData={aiSummary} onSave={onSaveSummary} onSummaryChange={onSummaryChange} status={summaryStatus} error={summaryError}
                   meeting={{ id: meeting.id, title: meetingTitle, created_at: meeting.created_at }} /></SummarySurface>
               </SummarySources>
             </div>}

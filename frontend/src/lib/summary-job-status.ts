@@ -2,6 +2,7 @@ import type { SummaryDataResponse } from '@/types';
 
 export interface SummaryJobSnapshot {
   status: string;
+  meetingName?: string | null;
   data?: string | SummaryDataResponse | null;
   error?: string | null;
   partial_notes?: string | null;

@@ -83,8 +83,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         setUiProvider(engine === 'parakeet' || engine === 'localWhisper' || engine === 'nemotron'
             ? engine
             : transcriptModelConfig.provider);
-        setAllowUnencrypted(transcriptModelConfig.allowUnencrypted ?? false);
     }, [pcTest, transcriptModelConfig.provider]);
+
+    useEffect(() => {
+        setAllowUnencrypted(transcriptModelConfig.allowUnencrypted ?? false);
+    }, [transcriptModelConfig.provider, transcriptModelConfig.allowUnencrypted]);
 
     useEffect(() => {
         if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet' || transcriptModelConfig.provider === 'nemotron') {

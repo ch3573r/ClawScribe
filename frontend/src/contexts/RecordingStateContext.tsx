@@ -260,7 +260,8 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       });
     };
     const invalidateStart = () => { retryStart = null; queuedStart = null; };
-    lifecycleListeners.current.add(invalidateStart);
+    const listeners = lifecycleListeners.current;
+    listeners.add(invalidateStart);
     retryStartWork.current = () => {
       if (checkingStart || !retryStart || !currentStart(retryStart)) return;
       queuedStart = retryStart;
@@ -318,7 +319,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
           : payload.library_save_failed ? RecordingStatus.ERROR : RecordingStatus.IDLE;
         lifecycleStatus.current = status;
         stopPolling();
-        lifecycleListeners.current.forEach(callback => callback(RecordingStatus.STOPPING));
+        listeners.forEach(callback => callback(RecordingStatus.STOPPING));
         setState(prev => ({
             ...prev, status,
             statusMessage: payload?.library_save_failed ? payload.message : undefined,
@@ -343,7 +344,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     return () => {
       active = false;
       retryStartWork.current = () => {};
-      lifecycleListeners.current.delete(invalidateStart);
+      listeners.delete(invalidateStart);
       invalidateStart();
       stopPolling();
       unsubscribers.forEach(unsubscribe => unsubscribe());

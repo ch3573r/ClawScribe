@@ -402,7 +402,7 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
           <p>· <strong>Mic levels:</strong> Green = good, yellow = loud, red = too loud</p>
         )}
         {!isMonitoring && inputDevices.length > 0 && (
-          <p>· <strong>Tip:</strong> Click "Test mic" to check if your microphone is working</p>
+          <p>· <strong>Tip:</strong> Click &quot;Test mic&quot; to check if your microphone is working</p>
         )}
       </div>
     </div>

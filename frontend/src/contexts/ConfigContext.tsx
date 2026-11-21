@@ -134,7 +134,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const devicePreferencesRevision = useRef(0);
   const audioDeviceInventory = useAudioDeviceInventory();
   const setSelectedDevices = useCallback((devices: SelectedDevices) => {
-    devicePreferencesRevision.current++;
+    devicePreferencesRevision.current += 1;
     updateSelectedDevices(devices);
     setDevicePreferencesStatus('ready');
   }, []);
@@ -309,79 +309,12 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
           openai: statuses[2],
           openrouter: statuses[3],
         });
-      } catch (error) {
+      } catch {
         console.error('[ConfigContext] Failed to load provider key status');
       }
     };
 
     loadAllKeyStatus();
-  }, []);
-
-  // Listen for model config updates from other components
-  useEffect(() => {
-    const setupListener = async () => {
-      const { listen } = await import('@tauri-apps/api/event');
-      const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
-        console.log('[ConfigContext] Received model-config-updated event');
-        // Never keep a typed key: the core has it now.
-        setModelConfig(withoutSecrets(event.payload));
-
-        // The key may have changed with this save.
-        void refreshProviderKeyStatus(event.payload.provider);
-      });
-      return unlisten;
-    };
-
-    let cleanup: (() => void) | undefined;
-    setupListener().then(fn => cleanup = fn);
-
-    return () => {
-      cleanup?.();
-    };
-  }, []);
-
-  // Load device preferences on mount
-  const refreshDevicePreferences = useCallback(async () => {
-    const request = ++devicePreferencesRevision.current;
-    setDevicePreferencesStatus('loading');
-    try {
-      const prefs = await configService.getRecordingPreferences();
-      if (request === devicePreferencesRevision.current) setSelectedDevices(selectedDevicesFromPreferences(prefs));
-    } catch {
-      if (request === devicePreferencesRevision.current) setDevicePreferencesStatus('error');
-    }
-  }, [setSelectedDevices]);
-  useEffect(() => {
-    void refreshDevicePreferences();
-    return () => { devicePreferencesRevision.current++; };
-  }, [refreshDevicePreferences]);
-
-  // Calculate model options based on available models
-  const modelOptions: Record<ModelConfig['provider'], string[]> = {
-    ollama: models.map(model => model.name),
-    claude: ['claude-opus-5'],
-    groq: ['llama-3.3-70b-versatile'],
-    openrouter: [],
-    openai: ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-4o-mini'],
-    'builtin-ai': [],
-    'custom-openai': [modelConfig.customOpenAIModel || modelConfig.model || 'gpt-4o-mini'],
-    openclaw: ['openclaw-managed'],
-    codex: ['gpt-5.6-sol'],
-    'claude-code': ['sonnet', 'opus', 'haiku'],
-  };
-
-  const toggleIsAutoSummary = useCallback(async (enabled: boolean, fingerprint?: string) => {
-    setAutomaticSummaryBusy(true);
-    try {
-      await invoke('set_automatic_summary_preference', { enabled, fingerprint });
-      setIsAutoSummary(enabled);
-      return true;
-    } catch (reason) {
-      toast.error(typeof reason === 'string' ? reason : 'Could not save the automatic summary setting');
-      return false;
-    } finally {
-      setAutomaticSummaryBusy(false);
-    }
   }, []);
 
   // Ask the core again whether a provider has a stored key (after a save or a removal)
@@ -401,6 +334,69 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       setModelConfig(prev => withRefreshedKeyStatus(prev, provider, status));
     } catch {
       console.error('[ConfigContext] Failed to read provider key status');
+    }
+  }, []);
+
+  // Listen for model config updates from other components
+  useEffect(() => {
+    const setupListener = async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
+        console.log('[ConfigContext] Received model-config-updated event');
+        // Never keep a typed key: the core has it now.
+        setModelConfig(withoutSecrets(event.payload));
+
+        // The key may have changed with this save.
+        void refreshProviderKeyStatus(event.payload.provider);
+      });
+      return unlisten;
+    };
+
+    const subscription = setupListener();
+    return () => { void subscription.then(unlisten => unlisten()); };
+  }, [refreshProviderKeyStatus]);
+
+  // Load device preferences on mount
+  const refreshDevicePreferences = useCallback(async () => {
+    const request = ++devicePreferencesRevision.current;
+    setDevicePreferencesStatus('loading');
+    try {
+      const prefs = await configService.getRecordingPreferences();
+      if (request === devicePreferencesRevision.current) setSelectedDevices(selectedDevicesFromPreferences(prefs));
+    } catch {
+      if (request === devicePreferencesRevision.current) setDevicePreferencesStatus('error');
+    }
+  }, [setSelectedDevices]);
+  useEffect(() => {
+    void refreshDevicePreferences();
+    return () => { devicePreferencesRevision.current += 1; };
+  }, [refreshDevicePreferences]);
+
+  // Calculate model options based on available models
+  const modelOptions = useMemo<Record<ModelConfig['provider'], string[]>>(() => ({
+    ollama: models.map(model => model.name),
+    claude: ['claude-opus-5'],
+    groq: ['llama-3.3-70b-versatile'],
+    openrouter: [],
+    openai: ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-4o-mini'],
+    'builtin-ai': [],
+    'custom-openai': [modelConfig.customOpenAIModel || modelConfig.model || 'gpt-4o-mini'],
+    openclaw: ['openclaw-managed'],
+    codex: ['gpt-5.6-sol'],
+    'claude-code': ['sonnet', 'opus', 'haiku'],
+  }), [models, modelConfig.customOpenAIModel, modelConfig.model]);
+
+  const toggleIsAutoSummary = useCallback(async (enabled: boolean, fingerprint?: string) => {
+    setAutomaticSummaryBusy(true);
+    try {
+      await invoke('set_automatic_summary_preference', { enabled, fingerprint });
+      setIsAutoSummary(enabled);
+      return true;
+    } catch (reason) {
+      toast.error(typeof reason === 'string' ? reason : 'Could not save the automatic summary setting');
+      return false;
+    } finally {
+      setAutomaticSummaryBusy(false);
     }
   }, []);
 

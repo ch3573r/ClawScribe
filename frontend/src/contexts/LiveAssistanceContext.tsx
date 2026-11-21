@@ -10,7 +10,7 @@ const LiveAssistanceContext = createContext<ReturnType<typeof createLiveAssistan
 
 /** Mounted once in RootLayout, outside route and panel lifetimes. */
 export function LiveAssistanceProvider({ children }: { children: ReactNode }) {
-  const recording = useRecordingState();
+  const { status, subscribeLifecycle } = useRecordingState();
   const { modelConfig } = useConfig();
   const [owner] = useState(() => createLiveAssistanceStore({
     service: knowledgeService,
@@ -19,11 +19,11 @@ export function LiveAssistanceProvider({ children }: { children: ReactNode }) {
     uuid: () => globalThis.crypto.randomUUID(),
   }));
   useEffect(() => {
-    const unsubscribe = recording.subscribeLifecycle(owner.setRecording);
+    const unsubscribe = subscribeLifecycle(owner.setRecording);
     const disconnect = owner.connect();
     return () => { unsubscribe(); disconnect(); };
-  }, [owner, recording.subscribeLifecycle]);
-  useEffect(() => { owner.setRecording(recording.status); }, [owner, recording.status]);
+  }, [owner, subscribeLifecycle]);
+  useEffect(() => { owner.setRecording(status); }, [owner, status]);
   useEffect(() => {
     owner.configureProvider(modelConfig.provider, modelConfig.provider === 'custom-openai'
       ? modelConfig.customOpenAIModel || modelConfig.model : modelConfig.model);

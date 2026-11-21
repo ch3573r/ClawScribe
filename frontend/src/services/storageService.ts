@@ -6,7 +6,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { Transcript } from '@/types';
+import type { MeetingMetadata, Transcript } from '@/types';
 import type { RecordingOutcome } from '@/lib/recording-outcome';
 import type { MeetingCalendarLink } from '@/lib/meetingCalendar';
 
@@ -22,11 +22,7 @@ export interface SaveMeetingResponse {
   recording_outcome?: RecordingOutcome;
 }
 
-export interface Meeting {
-  id: string;
-  title: string;
-  [key: string]: any; // Allow additional properties from backend
-}
+export type Meeting = Pick<MeetingMetadata, 'id' | 'title' | 'created_at' | 'updated_at'>;
 
 /**
  * Storage Service
@@ -63,8 +59,8 @@ export class StorageService {
    * @param meetingId - ID of the meeting to fetch
    * @returns Promise with meeting details
    */
-  async getMeeting(meetingId: string): Promise<Meeting> {
-    return invoke<Meeting>('api_get_meeting', { meetingId });
+  async getMeeting(meetingId: string): Promise<Meeting & { transcripts: Transcript[] }> {
+    return invoke('api_get_meeting', { meetingId });
   }
 
   /**

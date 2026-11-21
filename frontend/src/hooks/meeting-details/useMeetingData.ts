@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { Summary } from '@/types';
+import type { EditorSummary, MeetingDetails, MeetingSummary, Summary, SummaryDataResponse } from '@/types';
+import { readMeetingSummary } from '@/lib/meeting-summary';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
@@ -7,8 +8,8 @@ import { toast } from 'sonner';
 import { meetingDraft, reportSaveError, SummaryDraft } from '@/lib/meetingDrafts';
 
 interface UseMeetingDataProps {
-  meeting: any;
-  summaryData: Summary | null;
+  meeting: MeetingDetails;
+  summaryData: MeetingSummary | null;
   onMeetingUpdated?: () => Promise<void>;
 }
 
@@ -16,7 +17,7 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
   const draft = useMemo(() => meetingDraft(meeting.id), [meeting.id]);
   const [meetingTitle, setMeetingTitle] = useState(draft.edits.title ?? meeting.title ?? '+ New Call');
   const [isEditingTitle, setIsEditingTitle] = useState(false);
-  const [aiSummary, setAiSummary] = useState<Summary | null>((draft.edits.summary as Summary) ?? summaryData);
+  const [aiSummary, setAiSummary] = useState<MeetingSummary | null>(() => readMeetingSummary(draft.edits.summary).summary ?? summaryData);
   const [hasPreviousSummary, setHasPreviousSummary] = useState(false);
   const [summaryRevision, setSummaryRevision] = useState(0);
   const [, refresh] = useState(0);
@@ -52,23 +53,18 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
     setMeetingTitle(title);
     draft.edit({ title });
   }, [draft]);
-  const formatSummary = useCallback((summary: Summary | SummaryDraft): SummaryDraft => {
-    if ('markdown' in summary || 'summary_json' in summary) return summary as SummaryDraft;
-    return { MeetingName: meetingTitle, MeetingNotes: { sections: Object.values(summary).map((section: any) => ({ title: section.title, blocks: section.blocks })) } };
-  }, [meetingTitle]);
   const handleSummaryDraft = useCallback((summary: SummaryDraft, readSummary?: () => Promise<SummaryDraft>) => {
     draft.edit({ summary, readSummary });
   }, [draft]);
   const handleSummaryChange = useCallback((summary: Summary) => {
     setAiSummary(summary);
-    handleSummaryDraft(formatSummary(summary));
-  }, [handleSummaryDraft, formatSummary]);
-  const handleSaveSummary = useCallback(async (summary: Summary | SummaryDraft) => {
-    const formatted = formatSummary(summary);
-    handleSummaryDraft(formatted);
+    handleSummaryDraft({ MeetingName: meetingTitle, MeetingNotes: { sections: Object.values(summary) } });
+  }, [handleSummaryDraft, meetingTitle]);
+  const handleSaveSummary = useCallback(async (summary: EditorSummary) => {
+    handleSummaryDraft(summary);
     await draft.flush();
-    if (!draft.dirty()) setAiSummary(formatted as Summary);
-  }, [draft, formatSummary, handleSummaryDraft]);
+    if (!draft.dirty()) setAiSummary(summary);
+  }, [draft, handleSummaryDraft]);
   const flushPendingChanges = useCallback(() => draft.drain(), [draft]);
   const saveAllChanges = useCallback(async () => {
     if (manualSave.current) return;
@@ -83,8 +79,8 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
     setIsRestoring(true);
     try {
       await draft.drain();
-      const result = await invoke<{ data: Summary; has_previous_result: boolean }>('api_restore_previous_summary', { meetingId: meeting.id });
-      setAiSummary(result.data);
+      const result = await invoke<{ data: SummaryDataResponse | string | null; has_previous_result: boolean }>('api_restore_previous_summary', { meetingId: meeting.id });
+      setAiSummary(readMeetingSummary(result.data).summary);
       setHasPreviousSummary(result.has_previous_result);
       setSummaryRevision(value => value + 1);
     } catch { toast.error('Could not restore the previous summary. Finish generation or retry saving your edits first.'); }
@@ -101,7 +97,6 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
     isTitleDirty: draft.edits.title !== undefined, aiSummary, isSaving: isRestoring || draft.state === 'saving',
     saveState: draft.state, hasPreviousSummary, summaryRevision, blockNoteSummaryRef,
     setMeetingTitle, setIsEditingTitle, setAiSummary,
-    setIsSummaryDirty: (_dirty: boolean) => {},
     handleTitleChange, handleSummaryChange, handleSummaryDraft, handleSaveSummary,
     handleSaveMeetingTitle: flushPendingChanges, flushPendingChanges, saveAllChanges,
     updateMeetingTitle, restorePreviousSummary,

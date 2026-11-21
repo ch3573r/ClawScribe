@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import Analytics from '@/lib/analytics';
+import { errorText } from '@/lib/errorText';
 import { readPinnedSummaryLanguageDefault } from '@/lib/summary-language-preferences';
 import { toast } from 'sonner';
 
@@ -212,9 +213,9 @@ export function useImportAudio({
       setFileInfo(result);
       setStatus('idle');
       return result;
-    } catch (err: any) {
+    } catch (err) {
       setStatus('error');
-      const errorMsg = typeof err === 'string' ? err : (err?.message || String(err) || 'Failed to validate file');
+      const errorMsg = errorText(err, 'Failed to validate file');
       setError(errorMsg);
       onErrorRef.current?.(errorMsg);
       return null;
@@ -260,9 +261,9 @@ export function useImportAudio({
           summaryUseAutomaticPreference: options?.summaryUseAutomaticPreference ?? false,
           summaryLanguage: readPinnedSummaryLanguageDefault(),
         });
-      } catch (err: any) {
+      } catch (err) {
         setStatus('error');
-        const errorMsg = typeof err === 'string' ? err : (err?.message || String(err) || 'Failed to start import');
+        const errorMsg = errorText(err, 'Failed to start import');
         setError(errorMsg);
 
         await Analytics.trackError('import_audio_failed', errorMsg);
@@ -285,7 +286,7 @@ export function useImportAudio({
     }));
     try {
       await invoke('cancel_import_command');
-    } catch (err: any) {
+    } catch (err) {
       // The core may already be committing the meeting. Wait for its outcome.
       if (!isCancelledRef.current) return;
       isCancelledRef.current = false;

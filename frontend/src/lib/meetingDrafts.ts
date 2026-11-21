@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
+import type { EditorSummary, Section } from '@/types';
 
-export type SummaryDraft = { markdown?: string; summary_json?: unknown[]; [key: string]: unknown };
+export type SummaryDraft = EditorSummary | { MeetingName: string; MeetingNotes: { sections: Section[] } };
 type Edits = { title?: string; summary?: SummaryDraft; readSummary?: () => Promise<SummaryDraft> };
 export type SaveState = 'saved' | 'unsaved' | 'saving' | 'error';
 

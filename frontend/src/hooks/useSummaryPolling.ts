@@ -5,7 +5,7 @@ import { isTerminalSummary, type SummaryJobSnapshot } from '@/lib/summary-job-st
 const POLL_INTERVAL_MS = 5000;
 
 export function useSummaryPolling() {
-  type Listener = (result: any) => void | Promise<void>;
+  type Listener = (result: SummaryJobSnapshot) => void | Promise<void>;
   const polls = useRef(new Map<string, NodeJS.Timeout>());
   // Who hears a poll's results. The starter is one listener; a meeting page that
   // opens while the poll runs adds another (see attachSummaryPolling) instead of
@@ -40,7 +40,7 @@ export function useSummaryPolling() {
     const heard = new Set<Listener>([onUpdate]);
     listeners.current.set(meetingId, heard);
     // Listeners are read before a finished poll is stopped, which clears them.
-    const notify = async (result: any, targets: Listener[]) => {
+    const notify = async (result: SummaryJobSnapshot, targets: Listener[]) => {
       for (const listener of targets) {
         try { await listener(result); } catch (error) { console.error('Summary update handler failed:', error); }
       }
@@ -51,7 +51,7 @@ export function useSummaryPolling() {
       if (!isCurrent()) return;
       if (inFlight) return;
       inFlight = true;
-      let result: any;
+      let result: SummaryJobSnapshot;
       try {
         result = await invoke<SummaryJobSnapshot>('api_get_summary', { meetingId });
       } catch (error) {

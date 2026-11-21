@@ -119,9 +119,10 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
   // Main transcript buffering logic with sequence_id ordering
   useEffect(() => {
+    let active = true;
     let unlistenFn: (() => void) | undefined;
     let transcriptCounter = 0;
-    let transcriptBuffer = new Map<number, Transcript>();
+    const transcriptBuffer = new Map<number, Transcript>();
     let lastProcessedSequence = 0;
     let processingTimer: NodeJS.Timeout | undefined;
 
@@ -214,9 +215,9 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
     const setupListener = async () => {
       try {
-        unlistenFn = await transcriptService.onTranscriptUpdate((update) => {
+        const unsubscribe = await transcriptService.onTranscriptUpdate((update) => {
           // Check for duplicate sequence_id before processing
-          if (transcriptBuffer.has(update.sequence_id)) {
+          if (!active || transcriptBuffer.has(update.sequence_id)) {
             return;
           }
 
@@ -254,7 +255,10 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
           // Process buffer with minimal delay for immediate UI updates (serial workers = sequential order)
           processingTimer = setTimeout(processBufferedTranscripts, 10);
         });
-      } catch (error) {
+        if (active) unlistenFn = unsubscribe;
+        else unsubscribe();
+      } catch {
+        if (!active) return;
         console.error("❌ Failed to setup MAIN transcript listener:");
         toast.error('Could not display live transcripts. Save your recording, then reopen ClawScribe to try again.');
       }
@@ -263,6 +267,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     setupListener();
 
     return () => {
+      active = false;
       if (processingTimer) {
         clearTimeout(processingTimer);
       }
@@ -275,44 +280,39 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   // Sync transcript history and meeting name from backend on reload
   // This fixes the issue where reloading during active recording causes state desync
   useEffect(() => {
+    if (!recordingState.isRecording || transcriptsRef.current.length > 0) return;
+    let active = true;
     const syncFromBackend = async () => {
-      // If recording is active and we have no local transcripts, sync from backend
-      if (recordingState.isRecording && transcripts.length === 0) {
-        try {
+      try {
+        const history = await transcriptService.getTranscriptHistory();
+        if (!active) return;
+        const restored: Transcript[] = history.map(({ display_time, ...segment }) => ({
+          ...segment,
+          timestamp: display_time,
+          chunk_start_time: segment.audio_start_time,
+          is_partial: false,
+          speaker: segment.speaker || undefined,
+        }));
 
-          // Fetch transcript history from backend
-          const history = await transcriptService.getTranscriptHistory();
+        // Live segments may have arrived while the snapshot was loading.
+        setTranscripts(current => {
+          if (!current.length) return restored;
+          const received = new Set(current.map(row => row.sequence_id));
+          const missing = restored.filter(row => !received.has(row.sequence_id));
+          return missing.length ? [...missing, ...current].sort((a, b) =>
+            (a.sequence_id ?? 0) - (b.sequence_id ?? 0)) : current;
+        });
 
-          // Convert backend format to frontend Transcript format
-          const formattedTranscripts: Transcript[] = history.map((segment: any) => ({
-            id: segment.id,
-            text: segment.text,
-            timestamp: segment.display_time, // Use display_time for UI
-            sequence_id: segment.sequence_id,
-            chunk_start_time: segment.audio_start_time,
-            is_partial: false, // History segments are always final
-            confidence: segment.confidence,
-            audio_start_time: segment.audio_start_time,
-            audio_end_time: segment.audio_end_time,
-            duration: segment.duration,
-            speaker: segment.speaker || undefined,
-          }));
-
-          setTranscripts(formattedTranscripts);
-
-          // Fetch meeting name from backend
-          const meetingName = await recordingService.getRecordingMeetingName();
-          if (meetingName) {
-            setMeetingTitle(meetingName);
-          }
-        } catch (error) {
-          console.error("[Reload Sync] Failed to sync from backend:");
-        }
+        const meetingName = await recordingService.getRecordingMeetingName();
+        if (active && meetingName) setMeetingTitle(meetingName);
+      } catch {
+        if (active) console.error("[Reload Sync] Failed to sync from backend:");
       }
     };
 
-    syncFromBackend();
-  }, [recordingState.isRecording]); // Run when recording state changes
+    void syncFromBackend();
+    return () => { active = false; };
+  }, [recordingState.isRecording, recordingState.sessionId]);
 
   // Manual transcript update handler (for RecordingControls component)
   const addTranscript = useCallback((update: TranscriptUpdate) => {

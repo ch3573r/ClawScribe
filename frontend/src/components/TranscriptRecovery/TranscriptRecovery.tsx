@@ -20,7 +20,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { StoredTranscript } from '@/services/indexedDBService';
+import type { TranscriptPreview } from '@/services/indexedDBService';
 import { errorText } from '@/lib/errorText';
 import { describeDuration, describeSize, type RecoveryCandidate } from '@/lib/interruptedRecordings';
 import { cn } from '@/lib/utils';
@@ -33,7 +33,7 @@ interface TranscriptRecoveryProps {
   onDelete: (meetingId: string) => Promise<void>;
   /** "Keep, do not ask again" for a recording found on disk. */
   onKeep?: (meetingId: string) => Promise<void>;
-  onLoadPreview: (meetingId: string) => Promise<StoredTranscript[]>;
+  onLoadPreview: (meetingId: string) => Promise<TranscriptPreview[]>;
 }
 
 export function TranscriptRecovery({
@@ -45,46 +45,39 @@ export function TranscriptRecovery({
   onKeep,
   onLoadPreview,
 }: TranscriptRecoveryProps) {
-  const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
-  const [previewTranscripts, setPreviewTranscripts] = useState<StoredTranscript[]>([]);
-  const [isLoadingPreview, setIsLoadingPreview] = useState(false);
+  const [requestedMeetingId, setRequestedMeetingId] = useState<string | null>(null);
+  const selectedMeeting = recoverableMeetings.find(m => m.meetingId === requestedMeetingId) ?? recoverableMeetings[0];
+  const selectedMeetingId = selectedMeeting?.meetingId ?? null;
+  const [preview, setPreview] = useState<{ meetingId: string; rows: TranscriptPreview[] } | null>(null);
+  const isLoadingPreview = !!selectedMeetingId && preview?.meetingId !== selectedMeetingId;
+  const previewTranscripts = preview?.meetingId === selectedMeetingId ? preview.rows : [];
   const [isRecovering, setIsRecovering] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const cancelDeleteRef = useRef<HTMLButtonElement>(null);
   const deleteButtonRef = useRef<HTMLButtonElement>(null);
 
-  // Reset selection when dialog opens
+  // Reopen on the first available meeting.
   useEffect(() => {
     setDeleteTargetId(null);
-    if (isOpen) {
-      setSelectedMeetingId(null);
-      setPreviewTranscripts([]);
+    if (!isOpen) {
+      setRequestedMeetingId(null);
+      setPreview(null);
     }
   }, [isOpen]);
 
-  // Auto-select first meeting if available
   useEffect(() => {
-    if (isOpen && recoverableMeetings.length > 0 && !selectedMeetingId) {
-      handleMeetingSelect(recoverableMeetings[0].meetingId);
-    }
-  }, [isOpen, recoverableMeetings]);
-
-  const handleMeetingSelect = async (meetingId: string) => {
-    setSelectedMeetingId(meetingId);
-    setIsLoadingPreview(true);
-
-    try {
-      const transcripts = await onLoadPreview(meetingId);
-      // Limit to first 10 for preview
-      setPreviewTranscripts(transcripts.slice(0, 10));
-    } catch (error) {
+    if (!isOpen || !selectedMeetingId) return;
+    let active = true;
+    void onLoadPreview(selectedMeetingId).then(transcripts => {
+      if (active) setPreview({ meetingId: selectedMeetingId, rows: transcripts.slice(0, 10) });
+    }).catch(error => {
+      if (!active) return;
       console.error('Failed to load preview:', error);
-      setPreviewTranscripts([]);
-    } finally {
-      setIsLoadingPreview(false);
-    }
-  };
+      setPreview({ meetingId: selectedMeetingId, rows: [] });
+    });
+    return () => { active = false; };
+  }, [isOpen, selectedMeetingId, onLoadPreview]);
 
   const handleRecover = async () => {
     if (!selectedMeetingId) return;
@@ -105,8 +98,8 @@ export function TranscriptRecovery({
     if (!selectedMeetingId || !onKeep || isRecovering || isDeleting) return;
     try {
       await onKeep(selectedMeetingId);
-      setSelectedMeetingId(null);
-      setPreviewTranscripts([]);
+      setRequestedMeetingId(null);
+      setPreview(null);
     } catch (error) {
       console.error('Keeping the recording failed:', error);
       toast.error(errorText(error, 'Could not keep the recording. Try again.'));
@@ -120,8 +113,8 @@ export function TranscriptRecovery({
     try {
       await onDelete(deleteTargetId);
       setDeleteTargetId(null);
-      setSelectedMeetingId(null);
-      setPreviewTranscripts([]);
+      setRequestedMeetingId(null);
+      setPreview(null);
     } catch (error) {
       console.error('Meeting recovery deletion failed:', error);
       toast.error('Could not delete the meeting. Try again.');
@@ -130,7 +123,6 @@ export function TranscriptRecovery({
     }
   };
 
-  const selectedMeeting = recoverableMeetings.find(m => m.meetingId === selectedMeetingId);
   // A recording found on disk says why it counts as interrupted. One that is
   // already saved in the library cannot be deleted from here.
   const diskDetails = selectedMeeting?.disk
@@ -159,7 +151,7 @@ export function TranscriptRecovery({
                   <Button variant="ghost"
                     key={meeting.meetingId}
                     disabled={isRecovering || isDeleting}
-                    onClick={() => handleMeetingSelect(meeting.meetingId)}
+                    onClick={() => setRequestedMeetingId(meeting.meetingId)}
                     className={cn(
                       'block h-auto font-normal text-base whitespace-normal hover:text-foreground w-full text-left p-3 rounded-lg border transition-colors',
                       selectedMeetingId === meeting.meetingId

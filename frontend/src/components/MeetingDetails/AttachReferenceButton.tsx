@@ -31,11 +31,11 @@ export function AttachReferenceButton({ meetingId, meetings = [], scopeKey, disa
   const identity = JSON.stringify([meetingId, scopeKey, meetings.map(meeting => meeting.id)]);
   useEffect(() => {
     mounted.current = true;
-    generation.current++;
+    generation.current += 1;
     setPickerOpen(false); setQuery(''); setError('');
     return () => {
       mounted.current = false;
-      generation.current++;
+      generation.current += 1;
       if (activeImport.current) void knowledgeService.cancelDocumentImport(activeImport.current).catch(() => {});
     };
   }, [identity]);

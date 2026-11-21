@@ -1,9 +1,10 @@
+import type { MeetingMetadata } from '@/types';
 import { useCallback } from 'react';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 
 interface UseMeetingOperationsProps {
-  meeting: any;
+  meeting: Pick<MeetingMetadata, 'id'>;
 }
 
 export function useMeetingOperations({

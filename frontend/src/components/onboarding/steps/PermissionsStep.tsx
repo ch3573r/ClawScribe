@@ -146,7 +146,7 @@ export function PermissionsStep({ onFinish, finishing, error }: {
             disabled={finishing || isPending}
             className="text-sm text-muted-foreground hover:text-foreground transition-colors h-auto p-0 font-normal hover:bg-transparent"
           >
-            I'll do this later
+            I&apos;ll do this later
           </Button>
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
 

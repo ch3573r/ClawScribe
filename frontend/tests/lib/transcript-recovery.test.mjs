@@ -92,6 +92,30 @@ for (const status of ['success', 'partial', 'none', 'failed']) {
   });
 }
 
+test('recovery preserves timing, sequence, speaker and word fields from both cache formats', async () => {
+  const words = [{ text: 'Sample', start: 0, end: 1 }];
+  const h = recoveryHarness({ transcripts: [
+    { id: 1, text: 'Sample', timestamp: '12:00', sequence_id: 0, source: 'Me',
+      chunk_start_time: 0, audio_start_time: 0, audio_end_time: 1, duration: 1,
+      confidence: null, is_partial: false, word_timestamps: words },
+    { id: 2, text: 'Later', timestamp: '12:02', sequenceId: 3, speaker: 'Participants' },
+  ] });
+  await h.render().recoverMeeting('interrupted');
+  const [first, second] = h.saves[0][1];
+  assert.equal(first.id, '1');
+  assert.equal(first.sequence_id, 0);
+  assert.equal(first.speaker, 'Me');
+  assert.equal(first.chunk_start_time, 0);
+  assert.equal(first.audio_start_time, 0);
+  assert.equal(first.audio_end_time, 1);
+  assert.equal(first.duration, 1);
+  assert.equal(first.confidence, null);
+  assert.deepEqual(first.word_timestamps, words);
+  assert.equal(second.sequence_id, 3);
+  assert.equal(second.speaker, 'Participants');
+  h.hooks.unmount();
+});
+
 for (const failure of ['failSave', 'failRead']) {
   test(`${failure} retains recovery data instead of treating it as an empty successful meeting`, async () => {
     const h = recoveryHarness({ [failure]: true });

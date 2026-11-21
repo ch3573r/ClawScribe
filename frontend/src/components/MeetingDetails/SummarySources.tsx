@@ -27,7 +27,7 @@ export function SummarySources({ meetingId, revision, onReveal, onPlay, children
     void invoke<Source[]>('api_get_summary_sources', { meetingId }).then(value => {
       if (version.current === request) setSources(value);
     }).catch(() => { if (version.current === request) setLoadError(true); });
-    return () => { version.current++; };
+    return () => { version.current += 1; };
   }, [meetingId, revision]);
   async function inspect(key: string) {
     const request = ++version.current;

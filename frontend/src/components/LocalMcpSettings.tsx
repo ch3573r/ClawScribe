@@ -52,7 +52,7 @@ export function LocalMcpSettings() {
 
   useEffect(() => {
     void refresh();
-    return () => { request.current++; pending.current = false; };
+    return () => { request.current += 1; pending.current = false; };
   }, []);
 
   let config = "";

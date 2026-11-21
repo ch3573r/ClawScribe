@@ -41,6 +41,7 @@ export function ModelManager({
   // Refs for stable callbacks
   const onModelSelectRef = useRef(onModelSelect);
   const autoSaveRef = useRef(autoSave);
+  const retryDownload = useRef<((name: string) => Promise<void>) | null>(null);
 
   // Progress throttle map to prevent rapid updates
   const progressThrottleRef = useRef<Map<string, { progress: number; timestamp: number }>>(new Map());
@@ -124,15 +125,9 @@ export function ModelManager({
 
   // Set up event listeners for download progress
   useEffect(() => {
-    let unlistenProgress: (() => void) | null = null;
-    let unlistenComplete: (() => void) | null = null;
-    let unlistenError: (() => void) | null = null;
-
-    const setupListeners = async () => {
-      console.log('[ModelManager] Setting up event listeners...');
-
+    const subscriptions = [
       // Download progress with throttling
-      unlistenProgress = await listen<{ modelName: string; progress: number }>(
+      listen<{ modelName: string; progress: number }>(
         'model-download-progress',
         (event) => {
           const { modelName, progress } = event.payload;
@@ -157,10 +152,10 @@ export function ModelManager({
             );
           }
         }
-      );
+      ),
 
       // Download complete
-      unlistenComplete = await listen<{ modelName: string }>(
+      listen<{ modelName: string }>(
         'model-download-complete',
         (event) => {
           const { modelName } = event.payload;
@@ -196,10 +191,10 @@ export function ModelManager({
             }
           }
         }
-      );
+      ),
 
       // Download error
-      unlistenError = await listen<{ modelName: string; error: string }>(
+      listen<{ modelName: string; error: string }>(
         'model-download-error',
         (event) => {
           const { modelName, error } = event.payload;
@@ -227,20 +222,16 @@ export function ModelManager({
             duration: 6000,
             action: {
               label: 'Retry',
-              onClick: () => downloadModel(modelName)
+              onClick: () => { void retryDownload.current?.(modelName); }
             }
           });
         }
-      );
-    };
-
-    setupListeners();
-
+      ),
+    ];
     return () => {
-      console.log('[ModelManager] Cleaning up event listeners...');
-      if (unlistenProgress) unlistenProgress();
-      if (unlistenComplete) unlistenComplete();
-      if (unlistenError) unlistenError();
+      for (const subscription of subscriptions) {
+        void subscription.then(unlisten => unlisten());
+      }
     };
   }, []); // Empty dependency array - listeners use refs for stable callbacks
 
@@ -329,6 +320,8 @@ export function ModelManager({
       );
     }
   };
+
+  useEffect(() => { retryDownload.current = downloadModel; });
 
   const selectModel = async (modelName: string) => {
     if (onModelSelect) {

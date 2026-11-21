@@ -1,6 +1,7 @@
 import { useCallback, RefObject } from 'react';
-import { Transcript, Summary } from '@/types';
+import type { Transcript, MeetingMetadata, MeetingSummary } from '@/types';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
+import { isEditorSummary } from '@/lib/meeting-summary';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
@@ -8,9 +9,9 @@ import { summaryClipboard, transcriptClipboard, writeClipboard } from '@/lib/cli
 import { fetchAllMeetingTranscripts } from '@/lib/meetingTranscripts';
 
 interface UseCopyOperationsProps {
-  meeting: any;
+  meeting: MeetingMetadata;
   meetingTitle: string;
-  aiSummary: Summary | null;
+  aiSummary: MeetingSummary | null;
   blockNoteSummaryRef: RefObject<BlockNoteSummaryViewRef | null>;
   includeSpeakerLabels?: boolean;
 }
@@ -90,34 +91,18 @@ export function useCopyOperations({
       }
 
       // Fallback: Check if aiSummary has markdown property
-      if (!summaryMarkdown && aiSummary && 'markdown' in aiSummary) {
+      if (!summaryMarkdown && aiSummary && isEditorSummary(aiSummary)) {
         console.log('📝 Using markdown from aiSummary');
-        summaryMarkdown = (aiSummary as any).markdown || '';
+        summaryMarkdown = aiSummary.markdown || '';
         console.log('📝 Markdown from aiSummary, length:', summaryMarkdown.length);
       }
 
       // Fallback: Check for legacy format
-      if (!summaryMarkdown && aiSummary) {
-        console.log('📝 Converting legacy format to markdown');
-        const sections = Object.entries(aiSummary)
-          .filter(([key]) => {
-            // Skip non-section keys
-            return key !== 'markdown' && key !== 'summary_json' && key !== '_section_order' && key !== 'MeetingName';
-          })
-          .map(([, section]) => {
-            if (section && typeof section === 'object' && 'title' in section && 'blocks' in section) {
-              const sectionTitle = `## ${section.title}\n\n`;
-              const sectionContent = section.blocks
-                .map((block: any) => `- ${block.content}`)
-                .join('\n');
-              return sectionTitle + sectionContent;
-            }
-            return '';
-          })
-          .filter(s => s.trim())
-          .join('\n\n');
-        summaryMarkdown = sections;
-        console.log('📝 Converted legacy format, length:', summaryMarkdown.length);
+      if (!summaryMarkdown && aiSummary && !isEditorSummary(aiSummary)) {
+        summaryMarkdown = Object.values(aiSummary).map(section => {
+          const content = section.blocks.map(block => `- ${block.content}`).join('\n');
+          return `## ${section.title}\n\n${content}`;
+        }).join('\n\n');
       }
 
       // If still no summary content, show message
