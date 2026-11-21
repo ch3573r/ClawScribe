@@ -125,7 +125,7 @@ fn allowed_file(name: &str) -> bool {
         || name.len() > 240
         || name.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*'])
         || name.chars().any(char::is_control)
-        || name.starts_with('.')
+        || (name.starts_with('.') && name != crate::audio::import::IMPORT_OWNER_FILE)
         || name.ends_with(['.', ' '])
     {
         return false;
@@ -144,7 +144,11 @@ fn allowed_file(name: &str) -> bool {
     }
     matches!(
         name,
-        "metadata.json" | "transcripts.json" | "exports.json" | "recording-outcome.json"
+        "metadata.json"
+            | "transcripts.json"
+            | "exports.json"
+            | "recording-outcome.json"
+            | crate::audio::import::IMPORT_OWNER_FILE
     ) || Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
@@ -3440,6 +3444,7 @@ mod tests {
         }
         assert!(allowed_file("audio.mp4"));
         assert!(allowed_file("exports.json"));
+        assert!(allowed_file(crate::audio::import::IMPORT_OWNER_FILE));
     }
     #[tokio::test]
     async fn calendar_and_recording_facts_round_trip_and_older_archives_still_restore() {

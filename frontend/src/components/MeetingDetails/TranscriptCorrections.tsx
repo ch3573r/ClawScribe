@@ -13,7 +13,7 @@ import { readLearnVocabulary, replacementSuggestion, vocabularySuggestions } fro
 import { offerVocabularyWords } from '@/lib/vocabulary-offer';
 
 interface EditResult { changed: number; file_warning: boolean }
-interface EditState { can_undo: boolean; pending_file_sync: boolean; has_edits: boolean; can_restore_previous: boolean }
+interface EditState { can_undo: boolean; pending_file_sync: boolean; import_file_stage?: 'metadata' | 'transcript' | null; has_edits: boolean; can_restore_previous: boolean }
 
 export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, replaceOpen, onReplaceOpenChange, renderActions }: {
   meetingId: string; editing: TranscriptSegmentData | null; onClose: () => void; onChanged?: () => Promise<void>;
@@ -67,12 +67,12 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
     {renderActions?.({ busy, canUndo: state.can_undo, canRestore: state.can_restore_previous,
       undo: () => void change('api_undo_transcript_edit', {}), restore: () => void change('api_restore_previous_transcript', {}) })}
     {(state.pending_file_sync || (!editing && error)) && <div className="space-y-2 border-b border-border px-3 py-2 text-xs">
-      {state.pending_file_sync && <p role="alert">The transcript is saved in ClawScribe. The recording-folder copy needs updating. <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-xs font-normal underline hover:bg-transparent hover:text-current" disabled={busy} onClick={async () => {
+      {state.pending_file_sync && <p role="alert">{state.import_file_stage === 'metadata' ? 'The meeting is saved. Its recording-folder metadata needs updating.' : 'The transcript is saved in ClawScribe. The recording-folder copy needs updating.'} <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-xs font-normal underline hover:bg-transparent hover:text-current" disabled={busy} onClick={async () => {
         if (operation.current) return;
         operation.current = true;
         setBusy(true); setError('');
         try { await invoke('api_sync_transcript_file', { meetingId }); await refresh(); }
-        catch { if (currentMeeting.current === meetingId) setError('Could not update the recording-folder copy. Check that the folder is available, then retry.'); }
+        catch { if (currentMeeting.current === meetingId) { setError('Could not update the recording-folder copy. Check that the folder is available, then retry.'); await refresh().catch(() => {}); } }
         finally { operation.current = false; setBusy(false); }
       }}>Retry file update</Button></p>}
       {!editing && error && <p role="alert" className="text-destructive">{error}</p>}

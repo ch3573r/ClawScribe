@@ -103,9 +103,11 @@ is not brought to the front. See
   toolbar. Cancellation waits for the current native step before another recording
   can start.
 - Import support for MP4, M4A, WAV, MP3, FLAC, OGG, AAC, MKV, WebM, and WMA.
-- Select several files and review them one at a time. For each file, choose the
-  meeting date, use the file's modified time, or keep the import time. You can
-  also ask Built-in AI to generate notes after transcription.
+  Review and queue multiple files from the picker or by dropping them on the
+  app. Cancel or retry an individual import from the queue. Open a saved meeting
+  to repair missing folder files without transcribing the audio again.
+- Apply a meeting date to the selected files, use each file's modified time,
+  or keep each import time. You can also queue summaries after transcription.
 - HE-AAC imports use the decoder's actual sample rate to preserve timing.
 - Interrupted Whisper and Parakeet downloads retain partial files for retry;
   cancellation finishes the active transfer before another attempt can start.
