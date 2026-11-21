@@ -152,34 +152,7 @@ pub struct RecordingState {
 
 impl RecordingState {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            capture_incomplete: AtomicBool::new(false),
-            recovery_signal: tokio::sync::Notify::new(),
-            live_transcription_disabled: AtomicBool::new(false),
-            is_recording: AtomicBool::new(false),
-            is_paused: AtomicBool::new(false),
-            microphone_device: Mutex::new(None),
-            system_device: Mutex::new(None),
-            disconnected_devices: Mutex::new(Vec::new()),
-            audio_sender: Mutex::new(None),
-            buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
-            error_count: AtomicU32::new(0),
-            recoverable_error_count: AtomicU32::new(0),
-            recent_errors: Mutex::new(VecDeque::new()),
-            last_error: Mutex::new(None),
-            error_callback: Mutex::new(None),
-            warning_callback: Mutex::new(None),
-            health: Mutex::new(Default::default()),
-            warning_cleared_callback: Mutex::new(None),
-            disk_space_callback: Mutex::new(None),
-            levels_callback: Mutex::new(None),
-            latest_levels: Mutex::new(None),
-            stats: Mutex::new(RecordingStats::default()),
-            recording_start: Mutex::new(None),
-            recording_end: Mutex::new(None),
-            pause_start: Mutex::new(None),
-            total_pause_duration: Mutex::new(std::time::Duration::ZERO),
-        })
+        Arc::new(Self::default())
     }
 
     // Recording control
