@@ -60,6 +60,13 @@ export interface MeetingExportHistory {
   status: string;
   at: string | null;
   webUrl: string | null;
+  canResolve: boolean;
+  canConfirmAbsence: boolean;
+}
+
+export interface ExportRecoveryCandidates {
+  items: Array<{ id: string; title: string; createdAt: string | null; webUrl: string | null }>;
+  truncated: boolean;
 }
 
 export interface NotebookInfo {
@@ -305,8 +312,13 @@ export const microsoftExportService = {
     return invoke("get_meeting_export_history", { meetingId });
   },
 
-  async reconcileMeetingExport(meetingId: string, entryKey: string, existingRemoteId: string | null): Promise<void> {
-    return invoke("reconcile_meeting_export", { meetingId, entryKey, existingRemoteId });
+  async listExportRecoveryCandidates(meetingId: string, entryKey: string): Promise<ExportRecoveryCandidates> {
+    return invoke("list_export_recovery_candidates", { meetingId, entryKey });
+  },
+
+  async reconcileMeetingExport(meetingId: string, entryKey: string, existingRemoteId: string | null,
+    confluenceDestination: { baseUrl: string; spaceKey: string; parentId: string | null } | null): Promise<void> {
+    return invoke("reconcile_meeting_export", { meetingId, entryKey, existingRemoteId, confluenceDestination });
   },
 
   async exportMeetingMarkdownToPlanner(

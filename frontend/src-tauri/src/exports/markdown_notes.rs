@@ -508,7 +508,18 @@ mod tests {
     #[test]
     fn parses_localized_lists_and_project_sync_tables() {
         let markdown = "## Aufgaben\n- [x] Bericht senden [00:01:18](#clawscribe-source-abc123)\n\n## Entscheidungen\n- Kein Auftrag\n\n## Próximos pasos\n| **Responsable** | **Tarea** | **Fecha límite** | **Estado** |\n| --- | --- | --- | --- |\n| Éva | Enviar informe | 2026-11-20 | Completado |\n\n## Action Items\n| **Owner** | **Task** | **Due Date** | **Priority** | **Status** |\n| --- | --- | --- | --- | --- |\n| Dana | Send draft | 2026-11-22 | High | Open |";
-        let items = parse_action_items(markdown);
+        let suggestions = parse_action_suggestions(markdown);
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.done)
+                .collect::<Vec<_>>(),
+            [true, true, false]
+        );
+        let items: Vec<_> = suggestions
+            .into_iter()
+            .map(|suggestion| suggestion.action)
+            .collect();
         assert_eq!(
             items
                 .iter()

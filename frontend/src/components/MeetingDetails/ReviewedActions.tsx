@@ -20,6 +20,8 @@ interface ReviewedAction {
   legacyAction: { id: string; titleHash: string } | null;
 }
 
+type DismissedSuggestion = { id: string; legacyAction: NonNullable<ReviewedAction["legacyAction"]> };
+
 function message(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -32,6 +34,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
   onReturnFocus?: () => void;
 }) {
   const [actions, setActions] = useState<ReviewedAction[]>([]);
+  const [dismissed, setDismissed] = useState<DismissedSuggestion[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [history, setHistory] = useState<MeetingExportHistory[]>([]);
   const [historyError, setHistoryError] = useState(false);
@@ -46,6 +49,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
     if (!open) return;
     let active = true;
     setActions([]);
+    setDismissed([]);
     setLoaded(false);
     setError("");
     setNotice("");
@@ -83,7 +87,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
 
   function importSuggestions() {
     void run(async () => {
-      const suggestions = await invoke<ReviewedAction[]>("suggest_meeting_actions", { meetingId, markdown: await getMarkdown(), reviewed: actions });
+      const suggestions = await invoke<ReviewedAction[]>("suggest_meeting_actions", { meetingId, markdown: await getMarkdown(), reviewed: actions, dismissed });
       const additional = suggestions.slice(0, 250 - actions.length);
       setActions([...actions, ...additional]);
       if (!additional.length) setNotice("No new action suggestions found in the meeting summary.");
@@ -93,6 +97,12 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
 
   function addAction() {
     setActions(previous => [...previous, { id: globalThis.crypto.randomUUID(), title: "", owner: null, dueDate: null, done: false, sourceKey: null, legacyAction: null }]);
+  }
+
+  function removeAction(action: ReviewedAction) {
+    const { id, legacyAction } = action;
+    if (legacyAction) setDismissed(previous => [...previous, { id, legacyAction }]);
+    setActions(rows => rows.filter(row => row.id !== id));
   }
 
   function inspectSource(action: ReviewedAction) {
@@ -121,7 +131,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
       {loaded && <form className="space-y-4" onSubmit={event => {
         event.preventDefault();
         void run(async () => {
-          await invoke("save_reviewed_meeting_actions", { meetingId, actions });
+          await invoke("save_reviewed_meeting_actions", { meetingId, actions, dismissed });
           onOpenChange(false);
         });
       }}>
@@ -151,7 +161,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
             <Checkbox id={`action-done-${action.id}`} checked={action.done} onCheckedChange={checked => update(action.id, { done: checked === true })} />
             <Label htmlFor={`action-done-${action.id}`}>Done</Label>
             {action.sourceKey && <Button type="button" size="sm" variant="ghost" onClick={() => inspectSource(action)}>View source</Button>}
-            <Button type="button" size="sm" variant="ghost" className="ml-auto" aria-label={action.title ? `Remove ${action.title}` : "Remove blank action"} onClick={() => setActions(rows => rows.filter(row => row.id !== action.id))}>Remove</Button>
+            <Button type="button" size="sm" variant="ghost" className="ml-auto" aria-label={action.title ? `Remove ${action.title}` : "Remove blank action"} onClick={() => removeAction(action)}>Remove</Button>
           </div>
           {source?.actionId === action.id && <div className="space-y-2">
             {source.passage.stale && <p role="status" className="text-sm text-muted-foreground">This passage has changed since the action was suggested.</p>}

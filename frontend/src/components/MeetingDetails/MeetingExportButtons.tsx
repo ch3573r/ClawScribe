@@ -41,6 +41,7 @@ import {
   type MicrosoftConnectionInfo,
   type OneNoteResume,
   type MeetingExportHistory,
+  type ExportRecoveryCandidates,
   type NotebookInfo,
 } from "@/services/microsoftExportService";
 import {
@@ -163,6 +164,9 @@ export function MeetingExportButtons({
   const [remoteId, setRemoteId] = useState("");
   const [savingReview, setSavingReview] = useState(false);
   const [reviewError, setReviewError] = useState("");
+  const [candidates, setCandidates] = useState<ExportRecoveryCandidates | null>(null);
+  const [candidatesError, setCandidatesError] = useState("");
+  const [candidateReload, setCandidateReload] = useState(0);
   const [busy, setBusy] = useState<Busy>(null);
   const pending = useRef(false);
   const [documentDestination, setDocumentDestination] = useState<DocumentDestination | null>(null);
@@ -276,7 +280,20 @@ export function MeetingExportButtons({
     setReviewOutcome("");
     setRemoteId("");
     setReviewError("");
+    setCandidates(null);
+    setCandidatesError("");
   }
+
+  useEffect(() => {
+    if (!historyOpen || !reviewItem || reviewItem.destination === "Confluence") return;
+    let active = true;
+    void microsoftExportService.listExportRecoveryCandidates(meetingId, reviewItem.entryKey)
+      .then(result => { if (active) setCandidates(result); })
+      .catch(error => { if (active) setCandidatesError(errorText(error)); });
+    return () => { active = false; };
+  }, [historyOpen, reviewItem, meetingId, candidateReload]);
+
+  const selectedCandidate = candidates?.items.find(item => item.id === remoteId);
 
   async function reconcileExport() {
     if (!reviewItem || pending.current || !reviewOutcome || (reviewOutcome === "exists" && !remoteId.trim())) return;
@@ -284,8 +301,14 @@ export function MeetingExportButtons({
     setSavingReview(true);
     setReviewError("");
     try {
+      const saved = getExportDestinations();
+      const confluenceDestination = reviewItem.destination === "Confluence" ? {
+        baseUrl: saved.confluenceBaseUrl ?? "",
+        spaceKey: saved.confluenceSpaceKey ?? "",
+        parentId: saved.confluenceParentId ?? null,
+      } : null;
       await microsoftExportService.reconcileMeetingExport(meetingId, reviewItem.entryKey,
-        reviewOutcome === "exists" ? remoteId.trim() : null);
+        reviewOutcome === "exists" ? remoteId.trim() : null, confluenceDestination);
       await openHistory();
     } catch (error) {
       setReviewError(errorText(error));
@@ -316,6 +339,7 @@ export function MeetingExportButtons({
             : undefined,
         });
       } else {
+        const unattempted = report.items.filter(item => item.code === "export_stopped_before_attempt").length;
         const description = report.items.some(item => item.status === "unknownaftersubmit")
           ? "Check the destination and resolve the outcome in Export history."
           : report.items.some(item => item.code === TASK_IDENTITY_REVIEW_CODE)
@@ -328,7 +352,7 @@ export function MeetingExportButtons({
                   ? "Choose an available destination in Microsoft 365 settings."
                   : "Open export history to review the results.";
         toast.warning(`${label} export finished with issues`, {
-          description,
+          description: unattempted ? `${description} ${unattempted} ${unattempted === 1 ? "task was" : "tasks were"} not attempted.` : description,
           action: { label: "View history", onClick: () => void openHistory() },
         });
       }
@@ -478,18 +502,32 @@ export function MeetingExportButtons({
           });
 
           setDocumentDestination(null);
-          toast.success("Confluence export complete", {
-            description: report.title,
+          const details = {
             action: report.webUrl
               ? { label: "Open", onClick: () => openExternal(report.webUrl!) }
               : undefined,
-          });
+          };
+          if (report.outcome === "published") {
+            toast.success("Confluence export complete", { ...details, description: report.title });
+          } else if (report.outcome === "alreadyPublished") {
+            toast.info("Already published to Confluence", { ...details, description: report.title });
+          } else {
+            toast.info("Confluence page already exists", {
+              ...details,
+              description: "This draft differs from the saved export. Open the page to review and apply your edits in Confluence.",
+            });
+          }
           return;
         } catch (restError) {
-          if (/export history/i.test(errorText(restError))) {
+          const message = errorText(restError);
+          if (message.startsWith("Another export is in progress")) {
+            toast.info("Another export is in progress", { description: "Wait for it to finish, then retry." });
+            return;
+          }
+          if (/export history/i.test(message)) {
             setDocumentDestination(null);
             toast.warning("Confluence export needs review", {
-              description: errorText(restError),
+              description: message,
               action: { label: "View history", onClick: () => void openHistory() },
             });
             return;
@@ -502,8 +540,8 @@ export function MeetingExportButtons({
           toast.error("Confluence REST export failed", {
             description:
               copyMode === "rich"
-                ? `${errorText(restError)} Draft copied with rich formatting instead.`
-                : `${errorText(restError)} Markdown draft copied instead.`,
+                ? `${message} Draft copied with rich formatting instead.`
+                : `${message} Markdown draft copied instead.`,
           });
           return;
         }
@@ -694,12 +732,32 @@ export function MeetingExportButtons({
               <SelectTrigger id="export-review-outcome"><SelectValue placeholder="Choose an outcome" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="exists">I found the exported item</SelectItem>
-                <SelectItem value="absent">I confirmed the item is missing</SelectItem>
+                {reviewItem.canConfirmAbsence && <SelectItem value="absent">I confirmed the item is missing</SelectItem>}
               </SelectContent>
             </Select>
-            {reviewOutcome === "exists" && <div className="space-y-2">
-              <Label htmlFor="export-review-id">ID of the existing item</Label>
-              <Input id="export-review-id" maxLength={512} value={remoteId} onChange={event => setRemoteId(event.target.value)} disabled={savingReview} />
+            {reviewOutcome === "exists" && reviewItem.destination === "Confluence" && <div className="space-y-2">
+              <Label htmlFor="export-review-id">Confluence page link</Label>
+              <Input id="export-review-id" maxLength={2048} value={remoteId} onChange={event => setRemoteId(event.target.value)} disabled={savingReview} />
+              <p className="text-sm text-muted-foreground">Use the link from Page information with pageId in its address.</p>
+            </div>}
+            {reviewOutcome === "exists" && reviewItem.destination !== "Confluence" && <div className="space-y-2">
+              {candidatesError && <div className="space-y-2">
+                <p role="alert" className="text-sm text-destructive">{candidatesError}</p>
+                <Button type="button" variant="outline" onClick={() => { setCandidatesError(""); setCandidateReload(value => value + 1); }}>Retry listing</Button>
+              </div>}
+              {!candidates && !candidatesError && <p role="status" className="text-sm text-muted-foreground">Checking the original destination…</p>}
+              {candidates?.items.length === 0 && <p className="text-sm text-muted-foreground">No matching item types were found in the original destination.</p>}
+              {!!candidates?.items.length && <>
+                <Label htmlFor="export-review-candidate">Existing item</Label>
+                <Select value={remoteId} onValueChange={setRemoteId} disabled={savingReview}>
+                  <SelectTrigger id="export-review-candidate"><SelectValue placeholder="Choose the item you found" /></SelectTrigger>
+                  <SelectContent>{candidates.items.map(item => <SelectItem key={item.id} value={item.id}>
+                    {item.title}{item.createdAt && ` · ${new Date(item.createdAt).toLocaleString()}`}
+                  </SelectItem>)}</SelectContent>
+                </Select>
+                {selectedCandidate?.webUrl && <Button type="button" variant="outline" size="sm" onClick={() => void openExternal(selectedCandidate.webUrl!)}>Open selected item</Button>}
+              </>}
+              {candidates?.truncated && <p className="text-sm text-muted-foreground">Showing part of the destination. Check the service directly if your item is missing here.</p>}
             </div>}
             {reviewError && <p role="alert" className="text-sm text-destructive">{reviewError}</p>}
             <div className="flex justify-end gap-2">
@@ -717,7 +775,7 @@ export function MeetingExportButtons({
                 {item.at && <time className="text-xs text-muted-foreground" dateTime={item.at}>{new Date(item.at).toLocaleString()}</time>}
               </div>
               {item.webUrl && <Button type="button" variant="outline" size="sm" aria-label={`Open in ${item.destination}`} onClick={() => void openExternal(item.webUrl!)}>Open</Button>}
-              {item.status === "unknown_after_submit" && <Button type="button" variant="outline" size="sm" onClick={() => selectReview(item)}>Resolve outcome</Button>}
+              {item.canResolve && <Button type="button" variant="outline" size="sm" onClick={() => selectReview(item)}>{item.status === "unknown_after_submit" ? "Resolve outcome" : "Review link"}</Button>}
             </li>)}
           </ul>}
         </DialogContent>

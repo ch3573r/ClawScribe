@@ -699,6 +699,8 @@ pub struct MeetingExportHistory {
     status: ExportStatus,
     at: Option<String>,
     web_url: Option<String>,
+    can_resolve: bool,
+    can_confirm_absence: bool,
 }
 
 #[tauri::command]
@@ -726,6 +728,10 @@ pub async fn get_meeting_export_history<R: Runtime>(
                 "confluence" => "Confluence",
                 _ => return None,
             };
+            let can_resolve = item.can_resolve() && !key.ends_with("-link");
+            let can_confirm_absence = can_resolve
+                && (destination != "Confluence"
+                    || (item.confluence.is_some() && item.resource_id.is_none()));
             Some(MeetingExportHistory {
                 action_id: if matches!(destination, "Planner" | "Microsoft To Do") {
                     key.rsplit(':')
@@ -745,6 +751,8 @@ pub async fn get_meeting_export_history<R: Runtime>(
                 entry_key: key,
                 display_name: item.display_name,
                 at: item.last_attempt_at,
+                can_resolve,
+                can_confirm_absence,
                 web_url: item
                     .web_url
                     .as_deref()
@@ -756,15 +764,20 @@ pub async fn get_meeting_export_history<R: Runtime>(
         ledger
             .onenote_sections
             .into_iter()
-            .filter(|(_, section)| section.section_id.is_none())
             .map(|(id, section)| MeetingExportHistory {
                 entry_key: format!("onenote-section:{id}"),
                 display_name: Some(section.section_name),
                 action_id: None,
                 destination: "OneNote section",
-                status: ExportStatus::UnknownAfterSubmit,
+                status: if section.section_id.is_some() {
+                    ExportStatus::Succeeded
+                } else {
+                    ExportStatus::UnknownAfterSubmit
+                },
                 at: Some(section.started_at),
                 web_url: None,
+                can_resolve: true,
+                can_confirm_absence: true,
             }),
     );
     history.sort_by(|a, b| b.at.cmp(&a.at));
@@ -772,20 +785,70 @@ pub async fn get_meeting_export_history<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn list_export_recovery_candidates<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, MicrosoftAuthState>,
+    meeting_id: String,
+    entry_key: String,
+) -> Result<super::resolution::ExportCandidates, String> {
+    let scope = super::resolution::scope_for(&entry_key)?;
+    let (token, tenant, user) = get_token_and_context(&state, scope).await?;
+    let account = ExportContext {
+        tenant_id: &tenant,
+        user_id: &user,
+        bearer_token: &token,
+    };
+    let ledger = load_ledger(&app, &meeting_id).await?;
+    let client = GraphClient::new(
+        ReqwestGraphTransport::new(),
+        TokioSleeper,
+        RetryPolicy::default(),
+    );
+    super::resolution::candidates(&client, &ledger, &entry_key, &account).await
+}
+
+#[tauri::command]
 pub async fn reconcile_meeting_export<R: Runtime>(
     app: AppHandle<R>,
+    state: tauri::State<'_, MicrosoftAuthState>,
     meeting_id: String,
     entry_key: String,
     existing_remote_id: Option<String>,
+    confluence_destination: Option<super::confluence::ConfluenceDestination>,
 ) -> Result<(), String> {
     let _guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
-    ledger.reconcile(
+    if entry_key.starts_with("confluence:") {
+        let destination = confluence_destination
+            .ok_or("Select the original Confluence destination in Settings.")?;
+        return super::confluence::reconcile_page(
+            &mut ledger,
+            &entry_key,
+            destination,
+            existing_remote_id.as_deref(),
+        )
+        .await;
+    }
+    let scope = super::resolution::scope_for(&entry_key)?;
+    let (token, tenant, user) = get_token_and_context(&state, scope).await?;
+    let account = ExportContext {
+        tenant_id: &tenant,
+        user_id: &user,
+        bearer_token: &token,
+    };
+    let client = GraphClient::new(
+        ReqwestGraphTransport::new(),
+        TokioSleeper,
+        RetryPolicy::default(),
+    );
+    super::resolution::reconcile(
+        &client,
+        &mut ledger,
         &entry_key,
-        existing_remote_id,
-        super::exporter::now_rfc3339(),
-    )?;
-    ledger.checkpoint().await
+        &account,
+        existing_remote_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -889,9 +952,12 @@ pub async fn preview_planner_tasks(
     let suggestions = super::actions::summary_suggestions(&markdown, summary.as_ref());
     let mut candidates = Vec::new();
     let suggestion_count;
-    if let Some(actions) = super::actions::load(pool, &meeting_id).await? {
-        suggestion_count = super::actions::remaining_suggestions(suggestions, &actions).len();
-        meeting_export.action_items = actions
+    if let Some(saved) = super::actions::load_saved(pool, &meeting_id).await? {
+        suggestion_count =
+            super::actions::remaining_suggestions(suggestions, &saved.actions, &saved.dismissed)
+                .len();
+        meeting_export.action_items = saved
+            .actions
             .into_iter()
             .filter(|action| !action.done)
             .map(|action| super::model::ExportActionItem {
@@ -1196,7 +1262,8 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
     let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
 
-    for (bucket_id, action_items) in by_bucket {
+    let mut buckets = by_bucket.into_iter();
+    while let Some((bucket_id, action_items)) = buckets.next() {
         let meeting_export = crate::exports::model::MeetingExport {
             meeting_id: meeting_id.clone(),
             title: meeting_title.clone(),
@@ -1241,13 +1308,19 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
                         .is_some_and(|code| code.starts_with("export_history_write_failed"))
             });
         let resp: ExportReportResponse = report.into();
+        let attempted = resp.items.len();
         merged_items.extend(resp.items);
         if stop {
+            merged_items.extend(planner_unattempted(
+                meeting_export
+                    .action_items
+                    .into_iter()
+                    .skip(attempted)
+                    .chain(buckets.flat_map(|(_, actions)| actions)),
+            ));
             break;
         }
     }
-    ledger.checkpoint().await?;
-
     if expired {
         let mut inner = state.inner.write().await;
         inner.connection_state = MicrosoftConnectionState::Expired;
@@ -1255,10 +1328,7 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
 
     let overall = if merged_items.is_empty() {
         "failed".to_string()
-    } else if merged_items
-        .iter()
-        .all(|i| i.status == "succeeded" || i.status == "skipped")
-    {
+    } else if merged_items.iter().all(|i| i.status == "succeeded") {
         "succeeded".to_string()
     } else {
         "partial".to_string()
@@ -1272,6 +1342,20 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
             None
         },
         items: merged_items,
+    })
+}
+
+fn planner_unattempted(
+    actions: impl Iterator<Item = ExportActionItem>,
+) -> impl Iterator<Item = ExportItemResult> {
+    actions.map(|action| ExportItemResult {
+        dedupe_key: String::new(),
+        local_id: action.local_action_id,
+        status: "skipped".into(),
+        resource_id: None,
+        web_url: None,
+        code: Some("export_stopped_before_attempt".into()),
+        graph_called: false,
     })
 }
 

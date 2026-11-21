@@ -13,9 +13,9 @@ function nodes(root) {
 const text = root => typeof root === 'string' ? root : Array.isArray(root) ? root.map(text).join('') : text(root?.props?.children ?? '');
 const find = (root, type, label) => nodes(root).find(node => node.type === type && (label === undefined || text(node) === label));
 
-async function setup({ connected = true, rest = false, restFailure = false, save = async () => 'export.docx', readFailure = false, resumes = [], history = [] } = {}) {
+async function setup({ connected = true, rest = false, restFailure = false, restOutcome = 'published', save = async () => 'export.docx', readFailure = false, resumes = [], history = [], candidates = [] } = {}) {
   const harness = createHookHarness();
-  const calls = [], errors = [];
+  const calls = [], errors = [], notices = [];
   const draft = loadTsModule('src/lib/confluenceDraft.ts');
   const { MeetingExportButtons } = loadTsModule('src/components/MeetingDetails/MeetingExportButtons.tsx', {
     react: harness.react,
@@ -44,7 +44,7 @@ async function setup({ connected = true, rest = false, restFailure = false, save
         return { transcripts: [{ id: 'saved', timestamp: '09:10:11', speaker: 'Speaker A', text: 'Saved words.' }] };
       }
     } },
-    sonner: { toast: { success() {}, info() {}, warning() {}, error: (...args) => errors.push(args) } },
+    sonner: { toast: { success: (...args) => notices.push(['success', ...args]), info: (...args) => notices.push(['info', ...args]), warning: (...args) => notices.push(['warning', ...args]), error: (...args) => errors.push(args) } },
     '@/lib/exportDestinations': {
       getExportDestinations: () => ({ notebookId: 'notebook', notebookName: 'Saved notebook', confluenceMode: rest ? 'rest' : 'draft', confluenceBaseUrl: 'https://confluence.example.com', confluenceSpaceKey: 'TEST' }),
       setExportDestinations() {}, hasPlannerDestination: () => true, hasToDoDestination: () => true,
@@ -55,6 +55,7 @@ async function setup({ connected = true, rest = false, restFailure = false, save
         connectionStatus: async () => ({ state: connected ? 'connected' : 'not_connected' }),
         listOneNoteResumes: async () => resumes,
         getMeetingExportHistory: async () => history,
+        listExportRecoveryCandidates: async (...args) => { calls.push({ kind: 'candidates', args }); return { items: candidates, truncated: false }; },
         reconcileMeetingExport: async (...args) => { calls.push({ kind: 'reconcile', args }); },
         listNotebooks: async () => [],
 
@@ -66,14 +67,14 @@ async function setup({ connected = true, rest = false, restFailure = false, save
     '@/services/confluenceExportService': { confluenceExportService: { exportPage: async args => {
       calls.push({ kind: 'confluence', args });
       if (restFailure) throw new Error(typeof restFailure === 'string' ? restFailure : 'Synthetic REST failure');
-      return { title: 'Page' };
+      return { title: 'Page', outcome: restOutcome, webUrl: 'https://confluence.example.com/pages/viewpage.action?pageId=321' };
     } } },
   });
   const props = { meetingId: 'meeting', meetingTitle: 'Review', meetingCreatedAt: '2026-01-01', getMarkdown: async () => 'Edited notes' };
   const render = () => harness.render(() => MeetingExportButtons(props));
   render();
   await flush();
-  return { render, calls, errors };
+  return { render, calls, errors, notices };
 }
 
 const destinations = [
@@ -158,6 +159,34 @@ test('Confluence does not copy a browser draft when the direct publish may have 
   assert.deepEqual(view.calls.map(call => call.kind), ['confluence']);
 });
 
+test('One Confluence page can be opened after a repeat or an edited draft without claiming new success', async () => {
+  for (const [restOutcome, headline] of [['alreadyPublished', 'Already published to Confluence'], ['draftChanged', 'Confluence page already exists']]) {
+    const view = await setup({ rest: true, restOutcome });
+    find(view.render(), 'DropdownMenuItem', 'Confluence').props.onClick();
+    await find(view.render(), 'Button', 'Export to Confluence').props.onClick();
+    assert.deepEqual(view.notices.map(([kind, title]) => [kind, title]), [['info', headline]]);
+    assert.equal(view.notices[0][2].action.label, 'Open');
+    assert.deepEqual(view.calls.map(call => call.kind), ['confluence']);
+  }
+});
+
+test('Planner reports selected tasks that had no attempt when the batch stopped', async () => {
+  const view = await setup();
+  find(view.render(), 'DropdownMenuItem', 'Planner action items').props.onClick();
+  find(view.render(), 'PlannerExportPreview').props.onReport({
+    overall: 'partial',
+    items: [
+      { status: 'unknownaftersubmit', graphCalled: true, code: 'submission_unconfirmed' },
+      { status: 'skipped', graphCalled: false, code: 'export_stopped_before_attempt' },
+      { status: 'skipped', graphCalled: false, code: 'export_stopped_before_attempt' },
+    ],
+  });
+  const [[kind, title, detail]] = view.notices;
+  assert.equal(kind, 'warning');
+  assert.equal(title, 'Planner export finished with issues');
+  assert.match(detail.description, /2 tasks were not attempted/);
+});
+
 test('failed transcript reads prevent remote exports and leave the dialog open for retry', async () => {
   const view = await setup({ readFailure: true });
   find(view.render(), 'DropdownMenuItem', 'OneDrive DOCX/PDF').props.onClick();
@@ -239,7 +268,7 @@ test('offline export history shows results and offers safe available links', asy
 
 test('export history requires an explicit finding before allowing another submission', async () => {
   const view = await setup({ history: [
-    { entryKey: 'opaque-key', destination: 'Confluence', status: 'unknown_after_submit', at: null, webUrl: null },
+    { entryKey: 'opaque-key', destination: 'Confluence', status: 'unknown_after_submit', at: null, webUrl: null, canResolve: true, canConfirmAbsence: true },
   ] });
   await find(view.render(), 'DropdownMenuItem', 'Export history').props.onClick();
   await flush();
@@ -250,5 +279,33 @@ test('export history requires an explicit finding before allowing another submis
   assert.equal(find(view.render(), 'Button', 'Allow retry').props.disabled, false);
   find(view.render(), 'form').props.onSubmit({ preventDefault() {} });
   await flush();
-  assert.deepEqual(view.calls, [{ kind: 'reconcile', args: ['meeting', 'opaque-key', null] }]);
+  assert.equal(view.calls.length, 1);
+  const [{ kind, args }] = view.calls;
+  assert.equal(kind, 'reconcile');
+  assert.deepEqual(args.slice(0, 3), ['meeting', 'opaque-key', null]);
+  assert.equal(args[3].baseUrl, 'https://confluence.example.com');
+  assert.equal(args[3].spaceKey, 'TEST');
+});
+
+test('export history can review a confirmed link using candidates from the recorded destination', async () => {
+  const view = await setup({ history: [
+    { entryKey: 'opaque-key', destination: 'Microsoft To Do', status: 'partial_failure', at: null, webUrl: null, canResolve: true, canConfirmAbsence: true },
+  ], candidates: [{ id: 'chosen-id', title: 'Review numbers', createdAt: null, webUrl: null }] });
+  await find(view.render(), 'DropdownMenuItem', 'Export history').props.onClick();
+  await flush();
+  find(view.render(), 'Button', 'Review link').props.onClick();
+  let dialog = view.render();
+  nodes(dialog).find(node => node.type === 'Select' && node.props.value === '').props.onValueChange('exists');
+  view.render();
+  await flush();
+  dialog = view.render();
+  assert.ok(find(dialog, 'SelectItem', 'Review numbers'));
+  assert.equal(find(dialog, 'Input'), undefined);
+  nodes(dialog).find(node => node.type === 'Select' && node.props.value === '').props.onValueChange('chosen-id');
+  find(view.render(), 'form').props.onSubmit({ preventDefault() {} });
+  await flush();
+  assert.deepEqual(view.calls, [
+    { kind: 'candidates', args: ['meeting', 'opaque-key'] },
+    { kind: 'reconcile', args: ['meeting', 'opaque-key', 'chosen-id', null] },
+  ]);
 });

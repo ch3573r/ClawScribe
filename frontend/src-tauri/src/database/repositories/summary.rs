@@ -29,11 +29,11 @@ mod tests {
             .await
             .unwrap();
         let result = serde_json::json!({
-            "markdown":"Generated",
+            "markdown":"## Action items\n- Removed during review",
             "english_cache":{"markdown":"Previous English text"},
             "generation":{"model":"example-model","template":"Standard","transcript_fingerprint":"original"},
             "structured_meeting_output":{
-                "action_items":[{"task":"Send draft", "owner":"Dana"}],
+                "action_items":[{"task":"Send draft", "owner":"Dana"}, {"task":"Removed during review"}],
                 "follow_up_email":{"subject":"Next steps","body_markdown":"Send draft"}
             }
         });
@@ -70,6 +70,13 @@ mod tests {
         assert_eq!(
             saved["structured_meeting_output"]["action_items"][0]["owner"],
             "Dana"
+        );
+        assert_eq!(
+            saved["structured_meeting_output"]["action_items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
         );
         assert!(saved.get("english_cache").is_none());
     }
@@ -546,6 +553,7 @@ impl SummaryProcessesRepository {
             if let Some(email) = previous.pointer("/structured_meeting_output/follow_up_email") {
                 saved["follow_up_email"] = email.clone();
             }
+            crate::exports::actions::prune_removed_summary_actions(&previous, &mut saved);
             if saved.get("generation").is_none() {
                 if let Some(source) = previous.pointer("/english_cache/source") {
                     saved["generation"] = serde_json::json!({

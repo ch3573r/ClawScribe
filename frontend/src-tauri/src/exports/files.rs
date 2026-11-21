@@ -7,8 +7,11 @@ use crate::exports::client::{GraphClient, GraphOutcome, Sleeper};
 use crate::exports::document::build_meeting_docx;
 use crate::exports::error::GraphErrorKind;
 use crate::exports::exporter::{now_rfc3339, ExportContext};
-use crate::exports::ledger::{artifact_key_hash, microsoft_web_url, valid_remote_id, ExportLedger};
+use crate::exports::ledger::{
+    artifact_key_hash, microsoft_web_url, valid_remote_id, DriveBinding, ExportLedger,
+};
 use crate::exports::model::ExportStatus;
+use crate::exports::resolution::drive_binding;
 use crate::exports::transport::{
     GraphBinaryRequest, GraphBinaryResponse, GraphRequest, GraphTransport, TransportError,
 };
@@ -517,7 +520,7 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
     ]);
     let folder_key = format!("onedrive:{scope}:{scope}:folder");
     let destination = match folder {
-        Some(name) => export_folder(client, ledger, token, base, name, &folder_key).await?,
+        Some(name) => export_folder(client, ledger, account, base, name, &folder_key).await?,
         None => base,
     };
 
@@ -531,10 +534,13 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
         .chars()
         .take(100)
         .collect();
-    let stem = format!("{title} - {}", &revision[..12]);
     let prefix = format!("onedrive:{scope}:{revision}");
     let docx_key = format!("{prefix}:docx");
     let pdf_key = format!("{prefix}:pdf");
+    let stem = revision_stem(ledger, &docx_key, &title, chrono::Utc::now());
+    let binding = drive_binding(account, &destination.drive_id, &destination.item_id);
+    bind_saved_drive_item(ledger, &docx_key, &binding).await?;
+    bind_saved_drive_item(ledger, &pdf_key, &binding).await?;
 
     let mut report = OneDriveExportResponse {
         destination,
@@ -543,7 +549,21 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
     };
     let docx_name = format!("{stem}.docx");
     let docx = match saved_file(ledger, &docx_key, &report.destination, &docx_name) {
-        Ok(Some(file)) => file,
+        Ok(Some(file)) => {
+            if let Err(issue) = super::resolution::check_saved_drive_item(
+                client,
+                account,
+                &binding,
+                &file.item_id,
+                "docx",
+            )
+            .await
+            {
+                report.issues.push(format!("Word document: {issue}"));
+                return Ok(report);
+            }
+            file
+        }
         Ok(None) => {
             let bytes = build_meeting_docx(
                 &request.meeting_title,
@@ -559,6 +579,7 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
                 DOCX_CONTENT_TYPE,
                 bytes,
                 &docx_key,
+                &binding,
             )
             .await
             {
@@ -580,7 +601,16 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
     let pdf = if request.include_pdf {
         let pdf_name = format!("{stem}.pdf");
         let outcome = match saved_file(ledger, &pdf_key, &report.destination, &pdf_name) {
-            Ok(Some(file)) => Ok(file),
+            Ok(Some(file)) => super::resolution::check_saved_drive_item(
+                client,
+                account,
+                &binding,
+                &file.item_id,
+                "pdf",
+            )
+            .await
+            .map(|()| file)
+            .map_err(FileExportFailure::Remote),
             Ok(None) => match convert_docx_to_pdf(client, token, &docx).await {
                 Ok(bytes) => {
                     export_file(
@@ -592,6 +622,7 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
                         PDF_CONTENT_TYPE,
                         bytes,
                         &pdf_key,
+                        &binding,
                     )
                     .await
                 }
@@ -660,23 +691,104 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
     Ok(report)
 }
 
+fn revision_stem(
+    ledger: &ExportLedger,
+    docx_key: &str,
+    title: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    if let Some(saved) = ledger
+        .entry(docx_key)
+        .and_then(|entry| entry.display_name.as_deref())
+        .and_then(|name| name.strip_suffix(".docx"))
+    {
+        return saved.into();
+    }
+    let base = format!("{title} - {}", now.format("%Y-%m-%d %H%M%S%.3f UTC"));
+    let names: std::collections::HashSet<_> = ledger
+        .entries
+        .values()
+        .filter_map(|entry| entry.display_name.as_deref())
+        .filter_map(|name| name.strip_suffix(".docx"))
+        .map(str::to_lowercase)
+        .collect();
+    if !names.contains(&base.to_lowercase()) {
+        return base;
+    }
+    for number in 2..=names.len() + 1 {
+        let stem = format!("{base} ({number})");
+        if !names.contains(&stem.to_lowercase()) {
+            return stem;
+        }
+    }
+    unreachable!("one more name than reserved revisions")
+}
+
+async fn bind_saved_drive_item(
+    ledger: &mut ExportLedger,
+    key: &str,
+    binding: &DriveBinding,
+) -> Result<(), String> {
+    let Some(entry) = ledger.entries.get_mut(key) else {
+        return Ok(());
+    };
+    if let Some(previous) = &entry.drive {
+        if previous == binding {
+            return Ok(());
+        }
+        if entry.can_resolve() {
+            return Err(
+                "Resolve the saved OneDrive item in its original folder before exporting again."
+                    .into(),
+            );
+        }
+    }
+    // The export key was derived from the original account, destination and
+    // revision. Repeating that export can restore a legacy item's binding.
+    entry.drive = Some(binding.clone());
+    ledger.checkpoint().await
+}
+
 async fn export_folder<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     ledger: &mut ExportLedger,
-    token: &str,
+    account: &ExportContext<'_>,
     base: DriveDestination,
     name: String,
     key: &str,
 ) -> Result<DriveDestination, String> {
+    let token = account.bearer_token;
+    let binding = drive_binding(account, &base.drive_id, &base.item_id);
+    bind_saved_drive_item(ledger, key, &binding).await?;
     if let Some(entry) = ledger.already_succeeded(key) {
         let item_id = entry
             .resource_id
             .clone()
             .ok_or("The saved folder ID is missing.")?;
+        let web_url = entry.web_url.clone();
+        let scope = key.split(':').nth(1).expect("OneDrive folder scope");
+        let prefix = format!("onedrive:{scope}:");
+        let child_binding = drive_binding(account, &base.drive_id, &item_id);
+        let mut changed = false;
+        for (child_key, child) in ledger.entries.range_mut(prefix.clone()..) {
+            if !child_key.starts_with(&prefix) {
+                break;
+            }
+            if matches!(child_key.rsplit(':').next(), Some("docx" | "pdf")) && child.drive.is_none()
+            {
+                child.drive = Some(child_binding.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            ledger.checkpoint().await?;
+        }
+        super::resolution::check_saved_drive_item(client, account, &binding, &item_id, "folder")
+            .await?;
         return Ok(DriveDestination {
             item_id,
             name,
-            web_url: entry.web_url.clone(),
+            web_url,
             ..base
         });
     }
@@ -692,6 +804,11 @@ async fn export_folder<T: GraphTransport, S: Sleeper>(
     );
     ledger.begin_attempt(key, now_rfc3339());
     ledger.label_attempt(key, &name);
+    ledger
+        .entries
+        .get_mut(key)
+        .expect("pending OneDrive folder")
+        .drive = Some(binding);
     ledger.checkpoint().await?;
     let outcome = match client.execute_create(&request, token).await {
         GraphOutcome::Success(response) => serde_json::from_str::<GraphDriveItem>(&response.body)
@@ -757,9 +874,15 @@ async fn export_file<T: GraphTransport, S: Sleeper>(
     content_type: &str,
     bytes: Vec<u8>,
     key: &str,
+    binding: &DriveBinding,
 ) -> Result<DriveFile, FileExportFailure> {
     ledger.begin_attempt(key, now_rfc3339());
     ledger.label_attempt(key, name);
+    ledger
+        .entries
+        .get_mut(key)
+        .expect("pending OneDrive file")
+        .drive = Some(binding.clone());
     ledger
         .checkpoint()
         .await
@@ -873,7 +996,7 @@ fn exported_file(
 mod tests {
     use super::*;
     use crate::exports::client::{RetryPolicy, Sleeper};
-    use crate::exports::transport::{GraphBinaryResponse, MockGraphTransport};
+    use crate::exports::transport::{GraphBinaryResponse, GraphResponse, MockGraphTransport};
     use async_trait::async_trait;
     use std::time::Duration;
 
@@ -897,6 +1020,41 @@ mod tests {
             web_url: None,
             source: "default_drive_root".to_string(),
         }
+    }
+
+    fn queue_confirmed_file(transport: &MockGraphTransport, id: &str, name: &str, repeats: usize) {
+        let body = serde_json::json!({ "id": id, "name": name, "file": {},
+            "parentReference": { "id": "root-id", "driveId": "drive-1" } })
+        .to_string();
+        transport.queue_for_url(
+            &format!("{GRAPH_BASE}/drives/drive-1/items/{id}"),
+            (0..repeats).map(|_| GraphResponse::success(200, body.clone())),
+        );
+    }
+
+    #[test]
+    fn readable_names_keep_the_same_reservation_and_distinguish_revisions() {
+        let mut ledger = ExportLedger::new("meeting");
+        let at = chrono::DateTime::parse_from_rfc3339("2026-04-03T10:22:45.123Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let first = revision_stem(&ledger, "first:docx", "Weekly notes", at);
+        assert_eq!(first, "Weekly notes - 2026-04-03 102245.123 UTC");
+        ledger.begin_attempt("first:docx", None);
+        ledger.label_attempt("first:docx", &format!("{first}.docx"));
+        assert_eq!(
+            revision_stem(
+                &ledger,
+                "first:docx",
+                "Weekly notes",
+                at + chrono::Duration::days(1)
+            ),
+            first
+        );
+        assert_eq!(
+            revision_stem(&ledger, "second:docx", "Weekly notes", at),
+            format!("{first} (2)")
+        );
     }
 
     #[test]
@@ -1007,6 +1165,8 @@ mod tests {
         assert_eq!(first.issues.len(), 1);
 
         let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        queue_confirmed_file(client.transport(), "word-id", "Notes.docx", 2);
+        queue_confirmed_file(client.transport(), "pdf-id", "Notes.pdf", 1);
         let second = export_meeting_files(&client, &mut ledger, &account, request.clone())
             .await
             .unwrap();
@@ -1026,7 +1186,7 @@ mod tests {
                 .iter()
                 .map(|request| request.method.as_str())
                 .collect::<Vec<_>>(),
-            ["PUT", "GET", "GET", "PUT"]
+            ["PUT", "GET", "GET", "GET", "PUT"]
         );
         let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
         assert!(
@@ -1036,7 +1196,7 @@ mod tests {
                 .issues
                 .is_empty()
         );
-        assert_eq!(client.transport().recorded().len(), 4);
+        assert_eq!(client.transport().recorded().len(), 7);
     }
 
     #[tokio::test]
@@ -1075,15 +1235,29 @@ mod tests {
             .await
             .unwrap();
         assert!(blocked.files.is_empty());
-        ledger
-            .reconcile(&key, Some("uploaded-word".into()), now_rfc3339())
-            .unwrap();
-        ledger.checkpoint().await.unwrap();
+        queue_confirmed_file(client.transport(), "uploaded-word", "Notes.docx", 2);
+        super::super::resolution::reconcile(
+            &client,
+            &mut ledger,
+            &key,
+            &account,
+            Some("uploaded-word"),
+        )
+        .await
+        .unwrap();
         let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
         let confirmed = export_meeting_files(&client, &mut ledger, &account, request)
             .await
             .unwrap();
         assert_eq!(confirmed.files[0].item_id, "uploaded-word");
-        assert_eq!(client.transport().recorded().len(), 1);
+        assert_eq!(
+            client
+                .transport()
+                .recorded()
+                .iter()
+                .filter(|call| call.method == "PUT")
+                .count(),
+            1
+        );
     }
 }

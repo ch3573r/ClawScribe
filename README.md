@@ -344,15 +344,19 @@ See [call detection](docs/teams-detection.md).
 - **Planner and Microsoft To Do** export selected, reviewed actions. Repeat
   the export to repair missing notes or due dates on tasks already created.
 - **OneDrive or SharePoint** saves Word and optional PDF files. Repeating a
-  partial export reuses confirmed files and retries unfinished steps.
+  partial export reuses confirmed files and retries unfinished steps. Edited
+  drafts get dated filenames.
 - **Confluence** copies nested lists, code, quotes, and checklist status into a
   browser draft, or publishes through a configured self-hosted REST endpoint.
+  If the page is already published, use **Open** to apply reviewed edits in
+  Confluence.
 - **OpenClaw:** optional handoff of completed Meetily-compatible recording folders.
 
 **Export history** shows Microsoft and Confluence results from the meeting and
-travels with portable backups. If an export has an unknown outcome, inspect the
-destination and use **Resolve outcome** to link the existing item or confirm that
-it is missing before retrying. See [export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
+travels with portable backups. Inspect the original destination and choose
+**Resolve outcome** for an interrupted export or **Review link** for a saved
+item. ClawScribe checks the item and destination before saving the link.
+See [export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
 
 Private-network HTTP for OpenClaw, custom OpenAI endpoints, and Confluence requires
 an explicit unencrypted-HTTP opt-in in Settings. Existing private HTTP setups

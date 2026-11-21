@@ -113,6 +113,25 @@ pub struct LedgerEntry {
     pub task_enrichment: Option<TaskEnrichment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confluence: Option<ConfluenceBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<DriveBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfluenceBinding {
+    pub account_hash: String,
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DriveBinding {
+    pub account_hash: String,
+    pub drive_id: String,
+    pub parent_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +180,10 @@ pub struct OneNoteSection {
 }
 
 impl LedgerEntry {
+    pub(super) fn can_resolve(&self) -> bool {
+        self.status == ExportStatus::UnknownAfterSubmit || self.resource_id.is_some()
+    }
+
     fn new_pending(now: Option<String>) -> Self {
         LedgerEntry {
             status: ExportStatus::Pending,
@@ -171,6 +194,8 @@ impl LedgerEntry {
             last_attempt_at: now,
             task_enrichment: None,
             display_name: None,
+            confluence: None,
+            drive: None,
         }
     }
 }
@@ -314,7 +339,7 @@ impl ExportLedger {
                     [tenant, user, section, kind]
                         .into_iter()
                         .all(|value| !value.is_empty())
-                        && hash(artifact, 16)
+                        && (hash(artifact, 16) || hash(artifact, 64))
                         && index.parse::<usize>().is_ok()
                 }
                 ["onedrive", destination, revision, "folder" | "docx" | "pdf" | "docx-link" | "pdf-link"] => {
@@ -349,6 +374,17 @@ impl ExportLedger {
                         .as_deref()
                         .is_some_and(|id| !text(id, 2048))
                     || entry.code.as_deref().is_some_and(|code| !text(code, 128))
+                    || entry.confluence.as_ref().is_some_and(|binding| {
+                        !key.starts_with("confluence:")
+                            || !hash(&binding.account_hash, 64)
+                            || binding.revision.as_deref().is_some_and(|id| !hash(id, 64))
+                    })
+                    || entry.drive.as_ref().is_some_and(|binding| {
+                        !key.starts_with("onedrive:")
+                            || !hash(&binding.account_hash, 64)
+                            || !valid_remote_id(&binding.drive_id)
+                            || !valid_remote_id(&binding.parent_id)
+                    })
                     || entry
                         .display_name
                         .as_deref()
@@ -477,7 +513,19 @@ impl ExportLedger {
                         && ex.resource_id != inc.resource_id
                         && ex.status.is_terminal_success()
                         && inc_status.is_terminal_success();
-                    if resource_conflict {
+                    let binding_conflict = ex
+                        .confluence
+                        .as_ref()
+                        .zip(inc.confluence.as_ref())
+                        .is_some_and(|(local, incoming)| {
+                            local.account_hash != incoming.account_hash
+                        })
+                        || ex
+                            .drive
+                            .as_ref()
+                            .zip(inc.drive.as_ref())
+                            .is_some_and(|(local, incoming)| local != incoming);
+                    if resource_conflict || binding_conflict {
                         ex.code =
                             Some("merge_conflict_check_for_duplicates_in_microsoft_365".into());
                         ex.attempts = ex.attempts.max(inc.attempts);
@@ -513,6 +561,10 @@ impl ExportLedger {
                         };
                     } else if ex.resource_id.is_none() && inc.resource_id.is_some() {
                         ex.task_enrichment = inc.task_enrichment;
+                        // The incoming ID and its binding were recorded together.
+                        // A legacy ID must go through review before it gains a binding.
+                        ex.confluence.clone_from(&inc.confluence);
+                        ex.drive.clone_from(&inc.drive);
                     }
 
                     if prefer_incoming {
@@ -783,6 +835,76 @@ impl ExportLedger {
             entry.code = Some("absence_confirmed".into());
         }
         entry.last_attempt_at = now;
+        Ok(())
+    }
+
+    /// Record the result of a provider-scoped GET and explicit user review.
+    pub(super) fn apply_resolution(
+        &mut self,
+        key: &str,
+        previous: Option<&str>,
+        replacement: Option<&str>,
+        url: Option<String>,
+        now: Option<String>,
+    ) -> Result<(), String> {
+        if let Some(section_id) = key.strip_prefix("onenote-section:") {
+            let section = self
+                .onenote_sections
+                .get_mut(section_id)
+                .filter(|section| section.section_id.as_deref() == previous)
+                .ok_or("The saved section changed. Reload export history.")?;
+            if let Some(replacement) = replacement {
+                if previous != Some(replacement) {
+                    section.notes_page_id = None;
+                }
+                section.section_id = Some(replacement.into());
+            } else {
+                self.onenote_sections.remove(section_id);
+            }
+            return Ok(());
+        }
+        let entry = self
+            .entries
+            .get_mut(key)
+            .filter(|entry| entry.can_resolve() && entry.resource_id.as_deref() == previous)
+            .ok_or("The saved item changed. Reload export history.")?;
+        entry.status = ExportStatus::UnknownAfterSubmit;
+        self.reconcile(key, replacement.map(str::to_owned), now.clone())?;
+        self.entries.get_mut(key).expect("resolved item").web_url = url.clone();
+        if previous != replacement {
+            if key.starts_with("onedrive:")
+                && matches!(key.rsplit(':').next(), Some("docx" | "pdf"))
+            {
+                self.entries.remove(&format!("{key}-link"));
+            }
+            if let (Some(previous), Some(scope)) = (previous, key.strip_prefix("onenote:")) {
+                let fields: Vec<_> = scope.split(':').collect();
+                if let [tenant, user, section, ..] = fields.as_slice() {
+                    let prefix = format!("onenote:{tenant}:{user}:{section}:");
+                    for (other_key, entry) in &mut self.entries {
+                        if other_key.starts_with(&prefix)
+                            && entry.resource_id.as_deref() == Some(previous)
+                        {
+                            entry.resource_id = replacement.map(str::to_owned);
+                            entry.web_url.clone_from(&url);
+                            if replacement.is_none() {
+                                entry.status = ExportStatus::Failed;
+                                entry.code = Some("absence_confirmed".into());
+                            }
+                            entry.last_attempt_at.clone_from(&now);
+                        }
+                    }
+                    for saved in self.onenote_sections.values_mut().filter(|saved| {
+                        saved.tenant_id == *tenant
+                            && saved.user_id == *user
+                            && saved.section_id.as_deref() == Some(*section)
+                            && saved.notes_page_id.as_deref() == Some(previous)
+                    }) {
+                        saved.notes_page_id = replacement.map(str::to_owned);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

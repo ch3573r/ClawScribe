@@ -66,6 +66,8 @@ If the description fails, re-export the same action to repair it using that
 task ID. An existing description is preserved. This also applies to older
 history whose task ID is available but whose details status was never saved.
 Exports stop when this history cannot be read or saved.
+If a batch stops, the result reports how many selected tasks were left
+unattempted, including those in later buckets.
 
 If submission was interrupted, check Planner and use **Resolve outcome** in
 Export history before retrying. A saved action retains its
@@ -78,6 +80,7 @@ The ledger stores:
 
 - local action IDs
 - task IDs
+- task titles used to identify entries in history
 - plan/bucket IDs
 - dedupe keys
 - status and sanitized error codes

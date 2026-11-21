@@ -90,23 +90,26 @@ blocks export instead of disabling duplicate protection.
 
 The section ID is saved before ClawScribe submits any pages. **Resume export**
 uses that ID, skips pages already created, and requires the same export content.
-**Update exported page** uses the saved page ID and the permission already
-requested for editing OneNote pages. It replaces the ClawScribe content block in
-that page. For older pages without an editable export block, the reviewed content
-is saved as a revised page in the same section. Edits made in the export preview
-apply to that export. If a section or page creation outcome is unknown, inspect
-OneNote and use **Resolve outcome** in **Export history**. See
+**Update exported page** checks that the saved page belongs to the saved section.
+It replaces a single, nested ClawScribe content block for this meeting when Graph
+returns its generated element ID. Legacy pages and layouts without that block get
+a separate revision in the same section. An unconfirmed in-place update can only
+be retried on the verified block or resolved against the revision it attempted.
+For a section or page with an unknown outcome, inspect OneNote and use **Resolve
+outcome** in **Export history**. See
 [export history and recovery](microsoft-graph.md#export-history-and-recovery).
 
 The ledger stores:
 
 - destination IDs
 - page IDs / URLs
+- section and page titles
 - sanitized error codes
 - dedupe keys
 - timestamps
 
-It must not store access tokens, refresh tokens, auth codes, or raw auth URLs.
+This history is included in portable backups. Keep it private along with the
+meeting notes.
 
 ## Error Handling
 

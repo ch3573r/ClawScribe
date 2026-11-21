@@ -418,10 +418,12 @@ discards old summary and transcript loading results. Title-only saves leave note
 unchanged, and save failures retain drafts for retry; edits made during a write
 remain available for the next save.
 
-Manual edits keep the structured action list supplied by the summary provider.
-**Add summary suggestions** brings those follow-ups into **Meeting actions**
-for review. Saving an action with an available transcript reference keeps that
-passage reference with the action, including after summary regeneration. The
+Manual edits keep structured follow-ups supplied by the summary provider and
+remove any corresponding actions deleted from the notes. **Add summary
+suggestions** brings the remaining follow-ups into **Meeting actions** for review.
+Removing a suggestion and saving the actions keeps it dismissed. Saving an
+action with an available transcript reference keeps that passage reference with
+the action, including after summary regeneration. The
 app flags passages that changed and reports when their transcript was replaced.
 
 The shared summary processor now advances chunks from their actual emitted
