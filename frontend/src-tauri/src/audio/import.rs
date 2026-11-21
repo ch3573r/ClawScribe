@@ -8,6 +8,7 @@ use crate::whisper_engine::WhisperEngine;
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,10 +19,12 @@ use uuid::Uuid;
 use super::audio_processing::create_meeting_folder;
 use super::common::{
     create_readable_transcript_segments_with_words, split_transcripts_to_timing_grid,
-    transcript_words_from_token_timestamps, write_transcripts_json, TranscribedSegment,
+    transcript_words_from_token_timestamps, TranscribedSegment,
 };
 use super::constants::AUDIO_EXTENSIONS;
 use super::recording_preferences::{get_default_recordings_folder, load_recording_preferences};
+
+pub mod queue;
 
 /// Global flag to track if import is in progress
 static IMPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -120,27 +123,146 @@ impl Drop for ImportGuard {
 struct ImportFolderGuard {
     path: PathBuf,
     committed: bool,
+    owner: String,
+    audio_name: String,
+    audio_copied: bool,
 }
 
 impl ImportFolderGuard {
-    fn new(path: PathBuf) -> Self {
-        Self {
+    fn owned(path: PathBuf, meeting_id: &str, audio_name: &str) -> Result<Self> {
+        if !unlinked_import_path(&path) {
+            return Err(anyhow!("Could not verify the new import folder"));
+        }
+        let marker = path.join(IMPORT_OWNER_FILE);
+        let mut file = std::fs::File::create_new(&marker)?;
+        file.write_all(meeting_id.as_bytes())?;
+        file.sync_all()?;
+        Ok(Self {
             path,
             committed: false,
-        }
+            owner: meeting_id.into(),
+            audio_name: audio_name.into(),
+            audio_copied: false,
+        })
     }
 }
 
 impl Drop for ImportFolderGuard {
     fn drop(&mut self) {
-        if !self.committed {
-            if let Err(error) = std::fs::remove_dir_all(&self.path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    warn!("Could not remove uncommitted import files");
-                }
+        if !self.committed && owns_import_folder(&self.path, &self.owner) {
+            if self.audio_copied {
+                let _ = std::fs::remove_file(self.path.join(&self.audio_name));
             }
+            let _ = std::fs::remove_file(self.path.join(IMPORT_OWNER_FILE));
+            let _ = std::fs::remove_dir(&self.path);
         }
     }
+}
+
+pub(crate) const IMPORT_OWNER_FILE: &str = ".clawscribe-import-owner";
+const COPY_BUFFER_BYTES: usize = 256 * 1024;
+
+pub(crate) fn owns_import_folder(folder: &Path, meeting_id: &str) -> bool {
+    let marker = folder.join(IMPORT_OWNER_FILE);
+    unlinked_import_path(folder)
+        && std::fs::symlink_metadata(&marker)
+            .is_ok_and(|meta| meta.is_file() && meta.len() == meeting_id.len() as u64)
+        && std::fs::read_to_string(&marker).is_ok_and(|id| id == meeting_id)
+}
+
+fn unlinked_import_path(folder: &Path) -> bool {
+    folder.ancestors().all(|path| {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                const REPARSE_POINT: u32 = 0x400;
+                if meta.file_attributes() & REPARSE_POINT != 0 {
+                    return false;
+                }
+            }
+            meta.is_dir() && !crate::database::meeting_files::is_link(&meta)
+        })
+    })
+}
+
+fn copy_audio_chunks(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    cancelled: &AtomicBool,
+    mut progress: impl FnMut(u64),
+) -> Result<u64> {
+    let mut buffer = vec![0; COPY_BUFFER_BYTES];
+    let mut total = 0;
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(anyhow!("Import cancelled"));
+        }
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(total);
+        }
+        total += count as u64;
+        if total > MAX_FILE_SIZE_BYTES {
+            return Err(anyhow!("The source audio file exceeds 20 GB"));
+        }
+        if cancelled.load(Ordering::Acquire) {
+            return Err(anyhow!("Import cancelled"));
+        }
+        writer.write_all(&buffer[..count])?;
+        progress(total);
+    }
+}
+
+fn copy_import_audio<R: Runtime>(
+    app: &AppHandle<R>,
+    source: &Path,
+    destination: &Path,
+    owner: &str,
+) -> Result<()> {
+    if !std::fs::metadata(source)?.is_file() {
+        return Err(anyhow!("Choose a regular audio or video file"));
+    }
+    let mut input = std::fs::File::open(source)?;
+    let metadata = input.metadata()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_FILE_SIZE_BYTES {
+        return Err(anyhow!(
+            "Choose a non-empty audio or video file up to 20 GB"
+        ));
+    }
+    let size = metadata.len();
+    let folder = destination
+        .parent()
+        .ok_or_else(|| anyhow!("Missing import folder"))?;
+    if !owns_import_folder(folder, owner) {
+        return Err(anyhow!("Could not verify the import folder"));
+    }
+    let mut output = tempfile::NamedTempFile::new_in(folder)?;
+    let mut last = 5;
+    let copied = copy_audio_chunks(&mut input, &mut output, &IMPORT_CANCELLED, |bytes| {
+        let percent = 5 + (bytes.min(size) * 9 / size) as u32;
+        if percent != last {
+            last = percent;
+            emit_progress(app, "copying", percent, "Copying audio file...");
+        }
+    })?;
+    if copied != size || input.metadata()?.modified().ok() != metadata.modified().ok() {
+        return Err(anyhow!(
+            "The source changed during the copy. Retry when the file is stable"
+        ));
+    }
+    if IMPORT_CANCELLED.load(Ordering::Acquire) {
+        return Err(anyhow!("Import cancelled"));
+    }
+    output.as_file().sync_all()?;
+    if IMPORT_CANCELLED.load(Ordering::Acquire) {
+        return Err(anyhow!("Import cancelled"));
+    }
+    if !owns_import_folder(folder, owner) {
+        return Err(anyhow!("The import folder changed during the copy"));
+    }
+    output.persist_noclobber(destination)?;
+    Ok(())
 }
 
 fn import_error(error: anyhow::Error, cancelled: bool) -> anyhow::Error {
@@ -186,12 +308,11 @@ pub struct ImportResult {
     pub title: String,
     pub segments_count: usize,
     pub duration_seconds: f64,
-}
-
-/// Error during import
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportError {
-    pub error: String,
+    pub files_pending: bool,
+    #[serde(default)]
+    pub transcription_provider: Option<String>,
+    #[serde(default)]
+    pub transcription_incomplete: bool,
 }
 
 /// Warning emitted during import (non-fatal)
@@ -201,13 +322,8 @@ pub struct ImportWarning {
     pub details: Option<String>,
 }
 
-/// Response when import is started
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportStarted {
-    pub message: String,
-}
-
 /// Check if import is currently in progress
+#[cfg(test)]
 pub fn is_import_in_progress() -> bool {
     IMPORT_IN_PROGRESS.load(Ordering::SeqCst)
 }
@@ -407,9 +523,11 @@ impl Default for ImportDate {
 }
 
 struct ImportOptions {
+    meeting_id: String,
     date: ImportDate,
     summary_request: Option<crate::summary::automatic::AuthorizedRequest>,
     summary_language: Option<String>,
+    cloud_destination: Option<String>,
 }
 
 /// Start import of an audio file
@@ -422,20 +540,12 @@ async fn start_import<R: Runtime>(
     provider: Option<String>,
     options: ImportOptions,
     guard: ImportGuard,
+    job: super::inference::BatchPermit,
+    phase: PhaseGuard,
 ) -> Result<ImportResult> {
     // Registered so a starting recording can cancel this job. A cancel before
     // the database commit removes the half-built meeting folder (see
     // `ImportFolderGuard`); the source file is never touched.
-    let cancel: super::inference::CancelBatchJob = std::sync::Arc::new(cancel_import_if_possible);
-    let _job = super::inference::claim_batch_job(
-        super::inference::BatchJob::Import,
-        cancel,
-        "Local summary stopped because import started. Generate it again afterwards.",
-    )
-    .await
-    .map_err(anyhow::Error::msg)?;
-    // Dropped before `_job`, so a cancel is refused once the import is over.
-    let _phase = PhaseGuard::open();
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
 
     let use_parakeet = provider.as_deref() == Some("parakeet")
@@ -458,8 +568,8 @@ async fn start_import<R: Runtime>(
 
     // Release the transcription slot before starting a local summary or
     // telling the UI that another import can begin.
-    drop(_phase);
-    drop(_job);
+    drop(phase);
+    drop(job);
     if let Ok(res) = &result {
         if let Some(request) = options.summary_request {
             if let Some(state) = app.try_state::<AppState>() {
@@ -504,7 +614,9 @@ async fn run_import<R: Runtime>(
 
     // Validate source file
     if !source.exists() {
-        return Err(anyhow!("Source file not found: {}", source.display()));
+        return Err(anyhow!(
+            "The source file is unavailable. Choose the original file again."
+        ));
     }
 
     info!(
@@ -527,24 +639,31 @@ async fn run_import<R: Runtime>(
             get_default_recordings_folder()
         }
     };
-    let meeting_folder = create_meeting_folder(&base_folder, &title)?;
-    let mut folder_guard = ImportFolderGuard::new(meeting_folder.clone());
-
     // Copy audio file to meeting folder
-    emit_progress(&app, "copying", 10, "Copying audio file...");
+    emit_progress(&app, "copying", 5, "Copying audio file...");
 
     let dest_filename = format!(
         "audio.{}",
-        source.extension().and_then(|e| e.to_str()).unwrap_or("mp4")
+        source
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("mp4")
+            .to_ascii_lowercase()
     );
+    let meeting_folder = create_meeting_folder(&base_folder, &title)?;
+    let mut folder_guard =
+        ImportFolderGuard::owned(meeting_folder.clone(), &options.meeting_id, &dest_filename)?;
     let dest_path = meeting_folder.join(&dest_filename);
 
     let src = source.clone();
     let dst = dest_path.clone();
-    tokio::task::spawn_blocking(move || std::fs::copy(&src, &dst))
+    let copy_app = app.clone();
+    let owner = options.meeting_id.clone();
+    tokio::task::spawn_blocking(move || copy_import_audio(&copy_app, &src, &dst, &owner))
         .await
         .map_err(|e| anyhow!("Copy task join error: {}", e))?
         .map_err(|e| anyhow!("Failed to copy audio file: {}", e))?;
+    folder_guard.audio_copied = true;
 
     info!("Imported audio copy saved");
 
@@ -555,7 +674,9 @@ async fn run_import<R: Runtime>(
 
     let mut cloud_fallback_error = None;
     if super::transcription::cloud::is_cloud_provider(provider.as_deref()) {
-        if super::recording_commands::cloud_transcription_enabled() {
+        if super::recording_commands::cloud_transcription_enabled()
+            && options.cloud_destination.is_some()
+        {
             let provider_id = provider.as_deref().unwrap_or_default().to_string();
             emit_progress(
                 &app,
@@ -570,6 +691,7 @@ async fn run_import<R: Runtime>(
                 &dest_path,
                 language.as_deref(),
                 &IMPORT_CANCELLED,
+                options.cloud_destination.as_deref(),
             )
             .await;
             if IMPORT_CANCELLED.load(Ordering::Acquire) {
@@ -996,6 +1118,9 @@ async fn save_import_transcripts<R: Runtime>(
 ) -> Result<ImportResult> {
     begin_import_save()?;
     let meeting_folder = folder_guard.path.as_path();
+    if !owns_import_folder(meeting_folder, &options.meeting_id) {
+        return Err(anyhow!("Could not verify the import folder"));
+    }
     emit_progress(app, "saving", 85, "Creating meeting...");
 
     // Create transcript segments, then stitch obvious VAD fragments so imported
@@ -1009,40 +1134,8 @@ async fn save_import_transcripts<R: Runtime>(
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("App state not available"))?;
 
-    let meeting_id = create_meeting_with_transcripts(
-        app_state.db_manager.pool(),
-        title,
-        &segments,
-        meeting_folder.to_string_lossy().to_string(),
-        failed_segments > 0,
-        options.date,
-        duration_seconds,
-    )
-    .await?;
-    folder_guard.committed = true;
-    if failed_segments > 0 {
-        let outcome = super::outcome::RecordingOutcome {
-            transcription_incomplete: true,
-            ..Default::default()
-        };
-        if outcome.write(meeting_folder).is_err() {
-            warn!("Could not mirror import transcription status");
-        }
-        let _ = app.emit("import-warning", ImportWarning {
-            warning: format!("Imported with incomplete transcription: {failed_segments} segments failed after retry."),
-            details: Some("The audio was saved. You can retry transcription from the meeting.".into()),
-        });
-    }
-
-    // Write transcripts.json and metadata.json to the meeting folder
-    emit_progress(app, "saving", 90, "Writing transcript files...");
-
-    if let Err(_e) = write_transcripts_json(meeting_folder, &segments) {
-        warn!("Failed to write transcripts.json");
-    }
-
-    if let Err(_e) = write_import_metadata(
-        meeting_folder,
+    let meeting_id = options.meeting_id.clone();
+    let metadata = import_metadata(
         &meeting_id,
         title,
         duration_seconds,
@@ -1053,37 +1146,70 @@ async fn save_import_transcripts<R: Runtime>(
         transcription_source_language,
         options.date,
         options.summary_language.as_deref(),
-    ) {
-        warn!("Failed to write metadata.json");
+    );
+    insert_import(
+        app_state.db_manager.pool(),
+        &meeting_id,
+        title,
+        &segments,
+        meeting_folder.to_string_lossy().to_string(),
+        failed_segments > 0,
+        options.date,
+        duration_seconds,
+        Some(&metadata),
+    )
+    .await?;
+    folder_guard.committed = true;
+    if failed_segments > 0 {
+        let _ = app.emit("import-warning", ImportWarning {
+            warning: format!("Imported with incomplete transcription: {failed_segments} segments failed after retry."),
+            details: Some("The audio was saved. You can retry transcription from the meeting.".into()),
+        });
+    }
+
+    // Write transcripts.json and metadata.json to the meeting folder
+    emit_progress(app, "saving", 90, "Writing transcript files...");
+    let roots = super::recording_preferences::recording_roots(app).await;
+    let files_pending = crate::database::transcript_edits::sync_file_with_profile(
+        app_state.db_manager.pool(),
+        &meeting_id,
+        &roots,
+        |_| Ok(None),
+    )
+    .await
+    .is_err();
+    if files_pending {
         let _ = app.emit(
             "import-warning",
             ImportWarning {
-                warning: "The meeting was saved but its metadata file could not be written.".into(),
-                details: None,
+                warning: "The meeting was saved. Its recording-folder files need updating.".into(),
+                details: Some("Open the saved meeting to retry the folder copy.".into()),
             },
         );
     }
 
-    emit_progress(app, "complete", 100, "Import complete");
+    emit_progress(app, "complete", 100, "Meeting saved");
 
     Ok(ImportResult {
         meeting_id,
         title: title.to_string(),
         segments_count: segments.len(),
         duration_seconds: duration_seconds.unwrap_or_default(),
+        files_pending,
+        transcription_provider: Some(used_provider.to_string()),
+        transcription_incomplete: failed_segments > 0,
     })
 }
 
 /// Emit progress event
 fn emit_progress<R: Runtime>(app: &AppHandle<R>, stage: &str, progress: u32, message: &str) {
-    let _ = app.emit(
-        "import-progress",
-        ImportProgress {
-            stage: stage.to_string(),
-            progress_percentage: progress,
-            message: message.to_string(),
-        },
-    );
+    let progress = ImportProgress {
+        stage: stage.to_string(),
+        progress_percentage: progress,
+        message: message.to_string(),
+    };
+    queue::set_progress(progress.clone());
+    let _ = app.emit("import-progress", progress);
 }
 
 /// Create a new meeting with transcripts in the database
@@ -1096,7 +1222,38 @@ pub(crate) async fn create_meeting_with_transcripts(
     date: ImportDate,
     duration_seconds: Option<f64>,
 ) -> Result<String> {
-    let meeting_id = format!("meeting-{}", Uuid::new_v4());
+    let meeting_id = new_meeting_id();
+    insert_import(
+        pool,
+        &meeting_id,
+        title,
+        segments,
+        folder_path,
+        transcription_incomplete,
+        date,
+        duration_seconds,
+        None,
+    )
+    .await?;
+    Ok(meeting_id)
+}
+
+fn new_meeting_id() -> String {
+    format!("meeting-{}", Uuid::new_v4())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_import(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    title: &str,
+    segments: &[TranscriptSegment],
+    folder_path: String,
+    transcription_incomplete: bool,
+    date: ImportDate,
+    duration_seconds: Option<f64>,
+    metadata: Option<&serde_json::Value>,
+) -> Result<()> {
     let provenance = super::provenance::RecordingProvenance::import(duration_seconds);
 
     // Start transaction
@@ -1114,7 +1271,7 @@ pub(crate) async fn create_meeting_with_transcripts(
                                recording_source, recording_duration_s)
          VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(&meeting_id)
+    .bind(meeting_id)
     .bind(title)
     .bind(date.meeting_date())
     .bind(date.imported_at)
@@ -1138,7 +1295,7 @@ pub(crate) async fn create_meeting_with_transcripts(
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&segment.id)
-        .bind(&meeting_id)
+        .bind(meeting_id)
         .bind(&segment.text)
         .bind(&segment.timestamp)
         .bind(segment.audio_start_time)
@@ -1151,9 +1308,20 @@ pub(crate) async fn create_meeting_with_transcripts(
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
     }
 
-    if transcription_incomplete {
-        sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete) VALUES (?, 0, 1)")
-            .bind(&meeting_id).execute(&mut *tx).await?;
+    if transcription_incomplete || metadata.is_some() {
+        sqlx::query("INSERT INTO recording_outcomes (meeting_id, transcription_incomplete, recording_files_incomplete) VALUES (?, ?, ?)")
+            .bind(meeting_id).bind(transcription_incomplete).bind(metadata.is_some()).execute(&mut *tx).await?;
+    }
+    if let Some(metadata) = metadata {
+        let payload = crate::database::transcript_edits::import_file_payload(metadata)
+            .map_err(anyhow::Error::msg)?;
+        sqlx::query(
+            "INSERT INTO transcript_file_sync (meeting_id, retranscription_json) VALUES (?, ?)",
+        )
+        .bind(meeting_id)
+        .bind(payload)
+        .execute(&mut *tx)
+        .await?;
     }
 
     tx.commit()
@@ -1166,7 +1334,7 @@ pub(crate) async fn create_meeting_with_transcripts(
         segments.len()
     );
 
-    Ok(meeting_id)
+    Ok(())
 }
 
 /// Get or initialize the Whisper engine
@@ -1336,8 +1504,7 @@ async fn get_configured_model<R: Runtime>(
 }
 
 /// Write metadata.json to a meeting folder (atomic write with temp file)
-fn write_import_metadata(
-    folder: &Path,
+fn import_metadata(
     meeting_id: &str,
     title: &str,
     duration_seconds: Option<f64>,
@@ -1348,9 +1515,7 @@ fn write_import_metadata(
     transcription_source_language: Option<&str>,
     date: ImportDate,
     summary_language: Option<&str>,
-) -> Result<()> {
-    let metadata_path = folder.join("metadata.json");
-    let temp_path = folder.join(".metadata.json.tmp");
+) -> serde_json::Value {
     let mut json = serde_json::json!({
         "version": "1.0",
         "meeting_id": meeting_id,
@@ -1376,12 +1541,7 @@ fn write_import_metadata(
     if let Some(language) = summary_language {
         json["summary_language"] = serde_json::json!(language);
     }
-    let json_string = serde_json::to_string_pretty(&json)?;
-    std::fs::write(&temp_path, &json_string)?;
-    std::fs::rename(&temp_path, &metadata_path)?;
-
-    info!("Meeting metadata saved");
-    Ok(())
+    json
 }
 
 // ============================================================================
@@ -1482,113 +1642,6 @@ pub async fn validate_audio_file_command(path: String) -> Result<AudioFileInfo, 
     validate_audio_file(&granted).map_err(|e| e.to_string())
 }
 
-/// Start importing an audio file.
-#[tauri::command]
-pub async fn start_import_audio_command<R: Runtime>(
-    app: AppHandle<R>,
-    source_path: String,
-    title: String,
-    language: Option<String>,
-    model: Option<String>,
-    provider: Option<String>,
-    meeting_at: Option<chrono::DateTime<chrono::Utc>>,
-    use_file_date: Option<bool>,
-    summarize: Option<bool>,
-    summary_destination_fingerprint: Option<String>,
-    summary_use_automatic_preference: Option<bool>,
-    summary_language: Option<String>,
-) -> Result<ImportStarted, String> {
-    let guard = ImportGuard::acquire()?;
-    let summary_language = summary_language
-        .map(|value| crate::summary::metadata::normalise_supported_summary_language(&value))
-        .transpose()
-        .map_err(|_| "Unsupported summary language")?;
-    let from_file = use_file_date.unwrap_or(false);
-    let meeting_at = if from_file {
-        let source =
-            crate::file_grants::peek(crate::file_grants::Purpose::AudioImport, &source_path)?;
-        Some(
-            tauri::async_runtime::spawn_blocking(move || std::fs::metadata(source)?.modified())
-                .await
-                .map_err(|_| "Could not read the file's modified time")?
-                .map(chrono::DateTime::<chrono::Utc>::from)
-                .map_err(|_| "Could not read the file's modified time")?,
-        )
-    } else {
-        meeting_at
-    };
-    let summary_request = if summarize.unwrap_or(false) {
-        let state = app
-            .try_state::<AppState>()
-            .ok_or("Meeting storage is unavailable")?;
-        Some(
-            crate::summary::automatic::prepare_import(
-                &app,
-                state.db_manager.pool(),
-                summary_destination_fingerprint.as_deref(),
-                summary_use_automatic_preference.unwrap_or(false),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-    let options = ImportOptions {
-        date: ImportDate {
-            meeting_at,
-            from_file,
-            ..ImportDate::default()
-        },
-        summary_request,
-        summary_language,
-    };
-    let taken = crate::file_grants::take(crate::file_grants::Purpose::AudioImport, &source_path)?;
-    let source_path = taken.path.to_string_lossy().into_owned();
-    IMPORT_CANCELLED.store(false, Ordering::SeqCst);
-
-    tauri::async_runtime::spawn(async move {
-        let result = start_import(
-            app.clone(),
-            source_path,
-            title,
-            language,
-            model,
-            provider,
-            options,
-            guard,
-        )
-        .await;
-        if let Err(e) = result {
-            // Return the original grant before notifying the UI that retry is available.
-            crate::file_grants::give_back(crate::file_grants::Purpose::AudioImport, &taken);
-            let _ = app.emit(
-                "import-error",
-                ImportError {
-                    error: e.to_string(),
-                },
-            );
-        }
-    });
-
-    Ok(ImportStarted {
-        message: "Import started".to_string(),
-    })
-}
-
-/// Cancel ongoing import
-#[tauri::command]
-pub async fn cancel_import_command() -> Result<(), String> {
-    if !is_import_in_progress() {
-        return Err("No import in progress".to_string());
-    }
-    if !cancel_import_if_possible() {
-        return Err(
-            "The import cannot be stopped during setup or save. Wait for it to finish.".into(),
-        );
-    }
-    Ok(())
-}
-
 fn accept_import_segment<T>(
     result: Result<T>,
     segment: usize,
@@ -1620,9 +1673,76 @@ fn accept_import_segment<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::common::create_transcript_segments;
+    use super::super::common::{create_transcript_segments, write_transcripts_json};
     use super::*;
     use crate::audio::common::split_segment_at_silence;
+
+    #[test]
+    fn copying_checks_cancel_between_bounded_writes() {
+        let mut source = std::io::Cursor::new(vec![7; 3 * COPY_BUFFER_BYTES]);
+        let mut destination = Vec::new();
+        let cancelled = AtomicBool::new(false);
+        let result = copy_audio_chunks(&mut source, &mut destination, &cancelled, |_| {
+            cancelled.store(true, Ordering::Release);
+        });
+        assert!(result.is_err());
+        assert_eq!(destination.len(), COPY_BUFFER_BYTES);
+    }
+
+    #[tokio::test]
+    async fn repair_resumes_after_metadata_and_refuses_a_foreign_folder() {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let folder = create_meeting_folder(&root.path().to_path_buf(), "Import").unwrap();
+        let id = new_meeting_id();
+        let _owner = ImportFolderGuard::owned(folder.clone(), &id, "audio.wav").unwrap();
+        std::fs::write(folder.join("audio.wav"), b"audio").unwrap();
+        std::fs::create_dir(folder.join("transcripts.json")).unwrap();
+        let date = ImportDate::default();
+        let metadata = import_metadata(
+            &id,
+            "Import",
+            None,
+            "audio.wav",
+            "import",
+            "localWhisper",
+            "test",
+            None,
+            date,
+            None,
+        );
+        insert_import(
+            &pool,
+            &id,
+            "Import",
+            &[],
+            folder.to_string_lossy().into(),
+            false,
+            date,
+            None,
+            Some(&metadata),
+        )
+        .await
+        .unwrap();
+        let roots = [root.path().to_path_buf()];
+        use crate::database::transcript_edits::{import_file_stage, sync_file};
+        assert!(sync_file(&pool, &id, &roots).await.is_err());
+        assert_eq!(
+            import_file_stage(&pool, &id).await.unwrap(),
+            Some("transcript")
+        );
+        assert!(folder.join("metadata.json").is_file());
+
+        std::fs::remove_dir(folder.join("transcripts.json")).unwrap();
+        std::fs::write(folder.join(IMPORT_OWNER_FILE), b"foreign meeting").unwrap();
+        assert!(sync_file(&pool, &id, &roots).await.is_err());
+        assert!(!folder.join("transcripts.json").exists());
+        std::fs::write(folder.join(IMPORT_OWNER_FILE), &id).unwrap();
+        sync_file(&pool, &id, &roots).await.unwrap();
+        assert!(folder.join("transcripts.json").is_file());
+        assert_eq!(import_file_stage(&pool, &id).await.unwrap(), None);
+    }
 
     #[tokio::test]
     async fn three_consecutive_engine_failures_abort_and_remove_the_import() {
@@ -1631,8 +1751,10 @@ mod tests {
         let folder = create_meeting_folder(&root.path().to_path_buf(), "Import").unwrap();
         let mut calls = 0;
         let result: Result<()> = async {
-            let _guard = ImportFolderGuard::new(folder.clone());
+            let mut guard =
+                ImportFolderGuard::owned(folder.clone(), &new_meeting_id(), "audio.wav")?;
             std::fs::write(folder.join("audio.wav"), b"synthetic audio")?;
+            guard.audio_copied = true;
             let mut consecutive = 0;
             let mut failed = 0;
             for index in 1..=10 {
@@ -1663,8 +1785,10 @@ mod tests {
         for cancelled in [false, true] {
             let folder = create_meeting_folder(&root.path().to_path_buf(), "Import").unwrap();
             let result: Result<()> = (|| {
-                let _guard = ImportFolderGuard::new(folder.clone());
+                let mut guard =
+                    ImportFolderGuard::owned(folder.clone(), &new_meeting_id(), "audio.wav")?;
                 std::fs::copy(&source, folder.join("audio.wav"))?;
+                guard.audio_copied = true;
                 // A segment failure propagates through the same guard as decode,
                 // cloud, engine initialization and database failures.
                 Err(anyhow!("Engine failed on segment 2"))
@@ -1688,8 +1812,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let folder = create_meeting_folder(&root.path().to_path_buf(), "Import").unwrap();
         {
-            let mut guard = ImportFolderGuard::new(folder.clone());
+            let mut guard =
+                ImportFolderGuard::owned(folder.clone(), &new_meeting_id(), "audio.wav").unwrap();
             std::fs::write(folder.join("audio.wav"), b"saved audio").unwrap();
+            guard.audio_copied = true;
             guard.committed = true;
         }
         assert!(folder.join("audio.wav").exists());
@@ -2109,11 +2235,8 @@ mod tests {
     }
 
     #[test]
-    fn test_write_import_metadata() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let result = write_import_metadata(
-            dir.path(),
+    fn test_import_metadata() {
+        let parsed = import_metadata(
             "meeting-123",
             "Test Meeting",
             Some(1800.0),
@@ -2129,13 +2252,7 @@ mod tests {
             },
             None,
         );
-        assert!(result.is_ok(), "write_import_metadata failed: {:?}", result);
 
-        let path = dir.path().join("metadata.json");
-        assert!(path.exists());
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["version"], "1.0");
         assert_eq!(parsed["meeting_id"], "meeting-123");
         assert_eq!(parsed["meeting_name"], "Test Meeting");

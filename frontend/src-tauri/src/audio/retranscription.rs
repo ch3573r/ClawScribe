@@ -267,6 +267,7 @@ async fn run_retranscription<R: Runtime>(
                 &audio_path,
                 language.as_deref(),
                 &RETRANSCRIPTION_CANCELLED,
+                None,
             )
             .await;
             if RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire) {

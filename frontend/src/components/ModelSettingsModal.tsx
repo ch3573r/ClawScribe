@@ -31,6 +31,7 @@ import {
   CommandList,
 } from '@/components/ui/command';
 import { cn, isOllamaNotInstalledError } from '@/lib/utils';
+import { openClawDeliveryLabel } from '@/lib/openclaw-delivery';
 import { toast } from 'sonner';
 import { ClaudeCodeProviderCard, CLAUDE_CODE_MODELS, useClaudeCodeSettings } from './ClaudeCodeProviderCard';
 import { platform as osPlatform } from '@tauri-apps/plugin-os';
@@ -110,6 +111,8 @@ interface OpenClawConfigStatus {
   enabled: boolean;
   configured: boolean;
   ready: boolean;
+  model_ready: boolean;
+  delivery_state: string;
   bearer_token_configured: boolean;
   endpoint: string;
   model_endpoint: string;
@@ -512,7 +515,6 @@ export function ModelSettingsModal({
 
   const isOpenClawInvalid = modelConfig.provider === 'openclaw' && (
     openClawTokenRequired ||
-    !openClawEndpoint.trim() ||
     !openClawModelEndpoint.trim() ||
     !openClawSource.trim() ||
     (!openClawBearerToken.trim() && !openClawStatus?.bearer_token_configured)
@@ -2564,7 +2566,7 @@ export function ModelSettingsModal({
               <div className="flex items-start gap-3">
                 <div className={cn(
                   'mt-0.5 rounded-md p-2',
-                  openClawStatus?.ready ? 'bg-success text-success-foreground' : 'bg-warning text-warning-foreground'
+                  openClawStatus?.model_ready ? 'bg-success text-success-foreground' : 'bg-warning text-warning-foreground'
                 )}>
                   <ServerCog className="h-4 w-4" />
                 </div>
@@ -2573,12 +2575,12 @@ export function ModelSettingsModal({
                     <span className="font-medium">OpenClaw gateway</span>
                     <span className={cn(
                       'rounded-full px-2 py-0.5 text-xs font-medium',
-                      openClawStatus?.ready ? 'bg-success text-success-foreground' : 'bg-warning text-warning-foreground'
+                      openClawStatus?.model_ready ? 'bg-success text-success-foreground' : 'bg-warning text-warning-foreground'
                     )}>
                       {isLoadingOpenClawStatus
                         ? 'Checking'
-                        : openClawStatus?.ready
-                          ? 'Ready'
+                        : openClawStatus?.model_ready
+                          ? 'Gateway configured'
                           : 'Needs setup'}
                     </span>
                   </div>
@@ -2588,7 +2590,7 @@ export function ModelSettingsModal({
                   <p className="text-xs text-muted-foreground">
                     {openClawStatusError
                       ? `OpenClaw status unavailable: ${openClawStatusError}`
-                      : openClawStatus?.status_message || 'OpenClaw status has not been checked yet.'}
+                      : openClawStatus ? `${openClawStatus.status_message} ${openClawDeliveryLabel(openClawStatus).text}.` : 'OpenClaw status has not been checked yet.'}
                   </p>
                 </div>
               </div>
@@ -2619,7 +2621,7 @@ export function ModelSettingsModal({
             </div>
 
             <div>
-              <Label htmlFor="openclaw-endpoint">Meeting handoff URL *</Label>
+              <Label htmlFor="openclaw-endpoint">Meeting handoff URL</Label>
               <Input
                 id="openclaw-endpoint"
                 type="url"

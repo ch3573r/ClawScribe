@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { openClawDeliveryLabel } from "@/lib/openclaw-delivery";
 import { Check, Copy, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -33,6 +35,7 @@ type OpenClawConfigStatus = {
   enabled: boolean;
   configured: boolean;
   ready: boolean;
+  delivery_state: string;
   bearer_token_configured: boolean;
   endpoint: string;
   source: string;
@@ -337,7 +340,12 @@ function useOpenClawStatus() {
       setLoading(false);
     }
   }, []);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    let active = true;
+    const subscriptions = ["openclaw-handoff-changed", "openclaw-config-changed"].map(event => listen(event, () => { if (active) void load(); }));
+    void Promise.allSettled(subscriptions).then(() => { if (active) void load(); });
+    return () => { active = false; for (const subscription of subscriptions) void subscription.then(unlisten => unlisten(), () => {}); };
+  }, [load]);
   return { status, error, loading, load };
 }
 
@@ -621,11 +629,12 @@ export function DiagnosticsSettings() {
     }
 
     const claw = openclaw.status;
+    const delivery = claw ? openClawDeliveryLabel(claw) : null;
     list.push({
       id: "openclaw", name: "OpenClaw handoff",
-      value: openclaw.error ? "Status unavailable" : claw ? claw.status_message : "Loading status…",
-      tone: openclaw.error ? "warning" : claw && claw.enabled && !claw.ready ? "warning" : "ok",
-      status: openclaw.error ? "Unavailable" : !claw ? "Checking" : claw.ready ? "Ready" : claw.enabled ? "Not ready" : "Off",
+      value: openclaw.error ? "Status unavailable" : claw && (claw.enabled && claw.ready ? claw.last_submission?.message ?? claw.status_message : claw.status_message) || "Loading status…",
+      tone: openclaw.error ? "warning" : delivery?.tone ?? "ok",
+      status: openclaw.error ? "Unavailable" : delivery?.text ?? "Checking",
       action: <IconAction label="Refresh OpenClaw handoff status" onClick={openclaw.load} loading={openclaw.loading} />,
     });
 

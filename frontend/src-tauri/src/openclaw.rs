@@ -1,19 +1,19 @@
-use chrono::{DateTime, Utc};
-use log::{error, info, warn};
+use chrono::Utc;
+use log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 const CONFIG_FILE_NAME: &str = "openclaw.json";
 const LAST_STATUS_FILE_NAME: &str = "openclaw-last-submission.json";
 const PENDING_MARKER: &str = ".openclaw-pending.json";
 const SUBMITTED_MARKER: &str = ".openclaw-submitted.json";
 const FAILED_MARKER: &str = ".openclaw-failed.json";
-const PENDING_STALE_SECONDS: i64 = 15 * 60;
+pub mod handoff;
 static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // No prefilled endpoints — the user supplies their own OpenClaw URLs. (A
 // hardcoded dev IP must never ship as a default.)
@@ -62,6 +62,8 @@ pub struct OpenClawConfigStatus {
     pub enabled: bool,
     pub configured: bool,
     pub ready: bool,
+    pub delivery_state: String,
+    pub model_ready: bool,
     pub bearer_token_configured: bool,
     pub endpoint: String,
     pub model_endpoint: String,
@@ -71,15 +73,6 @@ pub struct OpenClawConfigStatus {
     pub last_status_path: String,
     pub include_audio_path: bool,
     pub last_submission: Option<OpenClawSubmissionStatus>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenClawSubmissionResult {
-    pub submitted: bool,
-    pub state: String,
-    pub status_code: Option<u16>,
-    pub message: String,
-    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +100,27 @@ pub async fn get_openclaw_config_status<R: Runtime>(
     let source_configured = !config.source.trim().is_empty();
     let configured = endpoint_configured && source_configured && bearer_token_configured;
     let destination_error = config.destination_problem.clone();
-    let ready = config.enabled && configured && destination_error.is_none();
+    let problem = handoff_config_problem(&config);
+    let ready = config.enabled && configured && problem.is_none();
+    let model_ready = config.enabled
+        && bearer_token_configured
+        && crate::openai::secret_destination::validate_secret_destination(
+            &config.model_endpoint,
+            config.allow_unencrypted,
+        )
+        .is_ok();
+    let last_submission = match handoff::last_delivery(&app, &config).await {
+        Some(status) => Some(status),
+        None => read_last_submission_status(&last_status_path)
+            .ok()
+            .flatten()
+            .and_then(|status| legacy_delivery_status(status, &config)),
+    };
+    let delivery_state = last_submission
+        .as_ref()
+        .map(|status| status.state.as_str())
+        .unwrap_or("unverified")
+        .to_owned();
 
     Ok(OpenClawConfigStatus {
         destination_problem: destination_error.clone(),
@@ -115,24 +128,21 @@ pub async fn get_openclaw_config_status<R: Runtime>(
         enabled: config.enabled,
         configured,
         ready,
+        delivery_state,
+        model_ready,
         bearer_token_configured,
         endpoint: config.endpoint,
         model_endpoint: config.model_endpoint,
         source: config.source,
-        status_message: destination_error
-            .map(|error| format!("Settings need attention: {error}"))
-            .unwrap_or_else(|| {
-                openclaw_status_message(
-                    config.enabled,
-                    endpoint_configured,
-                    source_configured,
-                    bearer_token_configured,
-                )
-            }),
+        status_message: if !config.enabled {
+            "OpenClaw handoff is disabled.".into()
+        } else {
+            problem.unwrap_or_else(|| "OpenClaw handoff settings are complete.".into())
+        },
         config_path: config_path.to_string_lossy().to_string(),
         last_status_path: last_status_path.to_string_lossy().to_string(),
         include_audio_path: config.include_audio_path,
-        last_submission: read_last_submission_status(&last_status_path)?,
+        last_submission,
     })
 }
 
@@ -178,7 +188,9 @@ pub async fn save_openclaw_config<R: Runtime>(
         config,
         |value| crate::credentials::seal("openclaw/bearer-token", value),
         forget_bearer_reference,
-    )
+    )?;
+    let _ = app.emit("openclaw-config-changed", ());
+    Ok(())
 }
 
 /// Removes the credential-store entry behind a replaced or cleared token.
@@ -295,7 +307,9 @@ pub async fn clear_openclaw_bearer_token<R: Runtime>(app: AppHandle<R>) -> Resul
     let _guard = CONFIG_LOCK
         .lock()
         .map_err(|_| "Provider settings are unavailable")?;
-    clear_bearer_at(&config_path(&app)?, forget_bearer_reference)
+    clear_bearer_at(&config_path(&app)?, forget_bearer_reference)?;
+    let _ = app.emit("openclaw-config-changed", ());
+    Ok(())
 }
 
 fn clear_bearer_at(path: &Path, forget_old: impl FnOnce(&str)) -> Result<(), String> {
@@ -315,305 +329,20 @@ fn clear_bearer_at(path: &Path, forget_old: impl FnOnce(&str)) -> Result<(), Str
     Ok(())
 }
 
-pub fn submit_completed_recording<R: Runtime>(
+pub(crate) fn submit_completed_recording<R: Runtime>(
     app: AppHandle<R>,
-    folder_path: Option<String>,
-    meeting_name: Option<String>,
+    meeting_id: String,
+    empty: bool,
 ) {
-    let last_status_path = match last_status_path(&app) {
-        Ok(path) => Some(path),
-        Err(_e) => {
-            warn!("OpenClaw handoff status path could not be resolved");
-            None
-        }
-    };
-
-    let Some(folder_path) = folder_path else {
-        warn!("OpenClaw handoff skipped: ClawScribe did not provide a recording folder path");
-        let status = submission_status(
-            "skipped",
-            None,
-            None,
-            "ClawScribe did not provide a recording folder path".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
-        write_last_submission_status(last_status_path.as_deref(), &status);
-        return;
-    };
-
-    let config = match load_config(&app) {
-        Ok(config) => config,
-        Err(e) => {
-            error!("OpenClaw handoff config could not be loaded");
-            let folder = PathBuf::from(&folder_path);
-            let status = submission_status(
-                "failed",
-                Some(&folder),
-                None,
-                format!("OpenClaw handoff config could not be loaded: {}", e),
-                None,
-                None,
-                None,
-                None,
-            );
-            write_last_submission_status(last_status_path.as_deref(), &status);
-            return;
-        }
-    };
-
-    if !config.enabled {
-        info!("OpenClaw handoff skipped: disabled");
-        let folder = PathBuf::from(&folder_path);
-        let status = submission_status(
-            "disabled",
-            Some(&folder),
-            None,
-            "OpenClaw handoff is disabled".to_string(),
-            None,
-            Some(&config),
-            None,
-            None,
-        );
-        write_last_submission_status(last_status_path.as_deref(), &status);
-        return;
-    }
-
     tauri::async_runtime::spawn(async move {
-        match submit_folder_with_config(
-            PathBuf::from(folder_path),
-            meeting_name,
-            config,
-            last_status_path,
-        )
-        .await
+        if handoff::submit_automatic(&app, &meeting_id, empty)
+            .await
+            .is_err()
         {
-            Ok(result) => {
-                if result.submitted {
-                    info!("OpenClaw handoff complete: {}", result.message);
-                } else {
-                    warn!("OpenClaw handoff skipped");
-                }
-            }
-            Err(_e) => error!("OpenClaw handoff failed"),
+            warn!("Could not complete the OpenClaw handoff");
         }
     });
 }
-
-async fn submit_folder_with_config(
-    folder: PathBuf,
-    meeting_name: Option<String>,
-    config: OpenClawConfig,
-    last_status_path: Option<PathBuf>,
-) -> Result<OpenClawSubmissionResult, String> {
-    if !config.enabled {
-        let status = submission_status(
-            "disabled",
-            Some(&folder),
-            None,
-            "OpenClaw handoff is disabled".to_string(),
-            None,
-            Some(&config),
-            None,
-            None,
-        );
-        write_last_submission_status(last_status_path.as_deref(), &status);
-        return Ok(OpenClawSubmissionResult {
-            submitted: false,
-            state: "disabled".to_string(),
-            status_code: None,
-            message: "OpenClaw handoff is disabled".to_string(),
-            idempotency_key: None,
-        });
-    }
-
-    validate_endpoints(&config)?;
-    if config.endpoint.trim().is_empty() || config.bearer_token.trim().is_empty() {
-        let status = submission_status(
-            "not_configured",
-            Some(&folder),
-            None,
-            "OpenClaw handoff requires endpoint and bearer_token".to_string(),
-            None,
-            Some(&config),
-            None,
-            None,
-        );
-        write_last_submission_status(last_status_path.as_deref(), &status);
-        return Ok(OpenClawSubmissionResult {
-            submitted: false,
-            state: "not_configured".to_string(),
-            status_code: None,
-            message: "OpenClaw handoff requires endpoint and bearer_token".to_string(),
-            idempotency_key: None,
-        });
-    }
-
-    if folder.join(SUBMITTED_MARKER).exists() {
-        let status = read_submission_status_from_folder(&folder)?.unwrap_or_else(|| {
-            submission_status(
-                "submitted",
-                Some(&folder),
-                Some(&folder.join(SUBMITTED_MARKER)),
-                "Recording folder already has an OpenClaw submitted marker".to_string(),
-                None,
-                Some(&config),
-                Some(&build_idempotency_key(&folder)),
-                None,
-            )
-        });
-        let status_code = status.status_code;
-        let idempotency_key = status.idempotency_key.clone();
-        write_last_submission_status(last_status_path.as_deref(), &status);
-        return Ok(OpenClawSubmissionResult {
-            submitted: false,
-            state: "already_submitted".to_string(),
-            status_code,
-            message: "Recording folder already has an OpenClaw submitted marker".to_string(),
-            idempotency_key,
-        });
-    }
-
-    let idempotency_key = build_idempotency_key(&folder);
-    let payload = match build_payload(&folder, meeting_name, &config) {
-        Ok(payload) => payload,
-        Err(e) => {
-            let _ = write_failed_marker(&folder, e.clone(), None, &config, Some(&idempotency_key));
-            let status = submission_status(
-                "failed",
-                Some(&folder),
-                Some(&folder.join(FAILED_MARKER)),
-                e.clone(),
-                None,
-                Some(&config),
-                Some(&idempotency_key),
-                None,
-            );
-            write_last_submission_status(last_status_path.as_deref(), &status);
-            return Err(e);
-        }
-    };
-
-    if !write_pending_marker(&folder, &config, &idempotency_key)? {
-        let status = read_submission_status_from_folder(&folder)?.unwrap_or_else(|| {
-            submission_status(
-                "pending",
-                Some(&folder),
-                Some(&folder.join(PENDING_MARKER)),
-                "OpenClaw handoff is already in progress".to_string(),
-                None,
-                Some(&config),
-                Some(&idempotency_key),
-                None,
-            )
-        });
-        write_last_submission_status(last_status_path.as_deref(), &status);
-        return Ok(OpenClawSubmissionResult {
-            submitted: false,
-            state: "pending".to_string(),
-            status_code: None,
-            message: "OpenClaw handoff is already in progress".to_string(),
-            idempotency_key: Some(idempotency_key),
-        });
-    }
-
-    let client = crate::openai::secret_destination::secret_client(
-        reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)),
-        &config.endpoint,
-        config.allow_unencrypted,
-    )
-    .await?;
-    let response = match client
-        .post(config.endpoint.trim())
-        .bearer_auth(config.bearer_token.trim())
-        .json(&payload)
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(e) => {
-            let message = e.to_string();
-            let _ = write_failed_marker(
-                &folder,
-                message.clone(),
-                None,
-                &config,
-                Some(&idempotency_key),
-            );
-            let _ = remove_marker(&folder.join(PENDING_MARKER));
-            let status = submission_status(
-                "failed",
-                Some(&folder),
-                Some(&folder.join(FAILED_MARKER)),
-                message.clone(),
-                None,
-                Some(&config),
-                Some(&idempotency_key),
-                None,
-            );
-            write_last_submission_status(last_status_path.as_deref(), &status);
-            return Err(message);
-        }
-    };
-
-    let status = response.status();
-    let response_text = bounded_response(response).await;
-
-    if status.is_success() {
-        write_submitted_marker(
-            &folder,
-            status.as_u16(),
-            &response_text,
-            &config,
-            Some(&idempotency_key),
-        )?;
-        let _ = remove_marker(&folder.join(PENDING_MARKER));
-        let _ = remove_marker(&folder.join(FAILED_MARKER));
-        let last_status = submission_status(
-            "submitted",
-            Some(&folder),
-            Some(&folder.join(SUBMITTED_MARKER)),
-            format!("OpenClaw endpoint returned HTTP {}", status.as_u16()),
-            Some(status.as_u16()),
-            Some(&config),
-            Some(&idempotency_key),
-            None,
-        );
-        write_last_submission_status(last_status_path.as_deref(), &last_status);
-        Ok(OpenClawSubmissionResult {
-            submitted: true,
-            state: "submitted".to_string(),
-            status_code: Some(status.as_u16()),
-            message: format!("OpenClaw endpoint returned HTTP {}", status.as_u16()),
-            idempotency_key: Some(idempotency_key),
-        })
-    } else {
-        write_failed_marker(
-            &folder,
-            format!("OpenClaw endpoint returned HTTP {}", status.as_u16()),
-            Some(status.as_u16()),
-            &config,
-            Some(&idempotency_key),
-        )?;
-        let _ = remove_marker(&folder.join(PENDING_MARKER));
-        let message = format!("OpenClaw endpoint returned HTTP {}", status.as_u16());
-        let last_status = submission_status(
-            "failed",
-            Some(&folder),
-            Some(&folder.join(FAILED_MARKER)),
-            message.clone(),
-            Some(status.as_u16()),
-            Some(&config),
-            Some(&idempotency_key),
-            None,
-        );
-        write_last_submission_status(last_status_path.as_deref(), &last_status);
-        Err(message)
-    }
-}
-
 pub(crate) fn load_config<R: Runtime>(app: &AppHandle<R>) -> Result<OpenClawConfig, String> {
     let _guard = CONFIG_LOCK
         .lock()
@@ -743,26 +472,18 @@ fn normalize_config(mut config: OpenClawConfig) -> OpenClawConfig {
     config
 }
 
-fn openclaw_status_message(
-    enabled: bool,
-    endpoint_configured: bool,
-    source_configured: bool,
-    bearer_token_configured: bool,
-) -> String {
-    if !enabled {
-        return "OpenClaw handoff is disabled".to_string();
+fn handoff_config_problem(config: &OpenClawConfig) -> Option<String> {
+    if config.endpoint.trim().is_empty() {
+        return Some("OpenClaw handoff endpoint is missing.".into());
     }
-    if !endpoint_configured {
-        return "OpenClaw endpoint is missing".to_string();
+    if config.bearer_token.trim().is_empty() {
+        return Some("OpenClaw bearer token is missing.".into());
     }
-    if !source_configured {
-        return "OpenClaw source is missing".to_string();
-    }
-    if !bearer_token_configured {
-        return "OpenClaw bearer token is missing".to_string();
-    }
-
-    "OpenClaw handoff is ready".to_string()
+    crate::openai::secret_destination::validate_secret_destination(
+        &config.endpoint,
+        config.allow_unencrypted,
+    )
+    .err()
 }
 
 fn config_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -779,35 +500,43 @@ fn build_payload(
     folder: &Path,
     meeting_name: Option<String>,
     config: &OpenClawConfig,
-) -> Result<Value, String> {
+    meeting_id: &str,
+    idempotency_key: &str,
+) -> Result<Option<Value>, String> {
     let transcript_path = folder.join("transcripts.json");
-    if !transcript_path.exists() {
-        return Err(format!(
-            "Missing transcript artifact: {}",
-            transcript_path.display()
-        ));
+    if !fs::symlink_metadata(&transcript_path).is_ok_and(|meta| meta.is_file()) {
+        return Err("The saved transcript file is unavailable.".into());
     }
 
-    let metadata_path = folder.join("metadata.json");
-    let metadata = read_json_if_exists(&metadata_path)?;
+    use crate::database::meeting_files;
+    let metadata = meeting_files::read_marker(folder)
+        .filter(|marker| !meeting_files::has_invalid_marker_id(marker))
+        .filter(|marker| {
+            meeting_files::stamped_meeting_id(marker)
+                .or_else(|| meeting_files::recording_id(marker))
+                == Some(meeting_id)
+        })
+        .ok_or("The recording metadata could not be verified for this meeting.")?;
     let transcript = read_json_if_exists(&transcript_path)?;
-    let title = read_string(
-        &metadata,
-        &[
-            "title",
-            "meeting_title",
-            "meeting_name",
-            "meetingTitle",
-            "name",
-        ],
-    )
-    .or(meeting_name)
-    .unwrap_or_else(|| {
-        folder
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "ClawScribe recording".to_string())
-    });
+    let title = meeting_name
+        .or_else(|| {
+            read_string(
+                &metadata,
+                &[
+                    "title",
+                    "meeting_title",
+                    "meeting_name",
+                    "meetingTitle",
+                    "name",
+                ],
+            )
+        })
+        .unwrap_or_else(|| {
+            folder
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "ClawScribe recording".to_string())
+        });
 
     let audio_path = if config.include_audio_path {
         find_audio_file(folder).map(|path| path.to_string_lossy().to_string())
@@ -815,11 +544,14 @@ fn build_payload(
         None
     };
 
-    Ok(json!({
+    let Some(markdown) = build_transcript_markdown(&title, &transcript) else {
+        return Ok(None);
+    };
+    Ok(Some(json!({
         "type": "meeting.completed",
         "source": config.source,
-        "meeting_id": build_meeting_id(folder, &title),
-        "idempotency_key": build_idempotency_key(folder),
+        "meeting_id": meeting_id,
+        "idempotency_key": idempotency_key,
         "meeting": {
             "title": title,
             "started_at": read_string(&metadata, &["started_at", "startedAt", "start_time", "startTime", "created_at", "createdAt"]),
@@ -830,14 +562,14 @@ fn build_payload(
         "artifacts": {
             "layout": "meetily-json-v1",
             "folder": folder.to_string_lossy().to_string(),
-            "metadata": if metadata_path.exists() { Some("metadata.json") } else { None },
+            "metadata": "metadata.json",
             "transcript": "transcripts.json",
             "audio": audio_path,
             "checksums": {}
         },
-        "transcript_markdown": build_transcript_markdown(&title, &transcript),
+        "transcript_markdown": markdown,
         "warnings": []
-    }))
+    })))
 }
 
 fn read_json_if_exists(path: &Path) -> Result<Value, String> {
@@ -845,8 +577,9 @@ fn read_json_if_exists(path: &Path) -> Result<Value, String> {
         return Ok(Value::Null);
     }
 
-    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&content).map_err(|e| format!("{}: {}", path.display(), e))
+    let content =
+        fs::read_to_string(path).map_err(|_| "A saved handoff artifact is unavailable.")?;
+    serde_json::from_str(&content).map_err(|_| "A saved handoff artifact could not be read.".into())
 }
 
 fn read_string(value: &Value, names: &[&str]) -> Option<String> {
@@ -864,45 +597,7 @@ fn read_number(value: &Value, names: &[&str]) -> Option<f64> {
         .find_map(|name| value.get(*name).and_then(Value::as_f64))
 }
 
-fn build_meeting_id(folder: &Path, title: &str) -> String {
-    let candidate = folder
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| title.to_string());
-
-    let normalized: String = candidate
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-
-    let collapsed = normalized
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-
-    if collapsed.is_empty() {
-        "meetily-recording".to_string()
-    } else {
-        collapsed
-    }
-}
-
-fn build_idempotency_key(folder: &Path) -> String {
-    format!(
-        "{}-transcripts-v1",
-        build_meeting_id(folder, "ClawScribe recording")
-    )
-}
-
-fn build_transcript_markdown(title: &str, transcript: &Value) -> String {
+fn build_transcript_markdown(title: &str, transcript: &Value) -> Option<String> {
     let mut markdown = format!("# Transcript\n\nMeeting: {}\n\n", title);
     let mut wrote_transcript_line = false;
 
@@ -957,11 +652,7 @@ fn build_transcript_markdown(title: &str, transcript: &Value) -> String {
         }
     }
 
-    if !wrote_transcript_line {
-        markdown.push_str("Transcript artifact: transcripts.json\n");
-    }
-
-    markdown
+    wrote_transcript_line.then_some(markdown)
 }
 
 fn format_timestamp(seconds: f64) -> String {
@@ -987,251 +678,37 @@ fn read_last_submission_status(path: &Path) -> Result<Option<OpenClawSubmissionS
         .map_err(|e| e.to_string())
 }
 
-fn read_submission_status_from_folder(
-    folder: &Path,
-) -> Result<Option<OpenClawSubmissionStatus>, String> {
-    let submitted_marker = folder.join(SUBMITTED_MARKER);
-    if submitted_marker.exists() {
-        return marker_to_status(folder, &submitted_marker, "submitted").map(Some);
+fn legacy_delivery_status(
+    mut status: OpenClawSubmissionStatus,
+    config: &OpenClawConfig,
+) -> Option<OpenClawSubmissionStatus> {
+    let endpoint = handoff::delivery_destination_key(status.endpoint.as_deref()?)?;
+    if Some(endpoint) != handoff::delivery_destination_key(&config.endpoint) {
+        return None;
     }
-
-    let failed_marker = folder.join(FAILED_MARKER);
-    if failed_marker.exists() {
-        return marker_to_status(folder, &failed_marker, "failed").map(Some);
-    }
-
-    let pending_marker = folder.join(PENDING_MARKER);
-    if pending_marker.exists() {
-        return marker_to_status(folder, &pending_marker, "pending").map(Some);
-    }
-
-    Ok(None)
-}
-
-fn marker_to_status(
-    folder: &Path,
-    marker_path: &Path,
-    state: &str,
-) -> Result<OpenClawSubmissionStatus, String> {
-    let marker = read_json_if_exists(marker_path)?;
-    let updated_at = read_string(
-        &marker,
-        &["submitted_at", "failed_at", "pending_at", "updated_at"],
-    )
-    .unwrap_or_else(|| Utc::now().to_rfc3339());
-    let message = marker_message(state, &marker);
-    let status_code = marker
-        .get("status_code")
-        .and_then(Value::as_u64)
-        .and_then(|value| u16::try_from(value).ok());
-
-    Ok(OpenClawSubmissionStatus {
-        state: state.to_string(),
-        folder_path: Some(folder.to_string_lossy().to_string()),
-        marker_path: Some(marker_path.to_string_lossy().to_string()),
-        updated_at,
-        status_code,
-        message,
-        endpoint: read_string(&marker, &["endpoint"]),
-        source: read_string(&marker, &["source"]),
-        idempotency_key: read_string(&marker, &["idempotency_key"]),
-    })
-}
-
-fn marker_message(state: &str, marker: &Value) -> String {
-    if let Some(error) = marker.get("error").and_then(Value::as_str) {
-        return error.to_string();
-    }
-
-    if let Some(response) = marker.get("response").and_then(Value::as_str) {
-        if !response.trim().is_empty() {
-            return response.to_string();
+    let (state, message) = match status.state.as_str() {
+        "submitted" => ("submitted", "OpenClaw accepted a previous meeting."),
+        "pending" => (
+            "unknown",
+            "A previous OpenClaw delivery could not be confirmed.",
+        ),
+        "failed" if status.status_code.is_some_and(handoff::safe_rejection) => {
+            ("failed", "OpenClaw rejected a previous meeting.")
         }
-    }
-
-    match state {
-        "submitted" => "OpenClaw handoff submitted".to_string(),
-        "failed" => "OpenClaw handoff failed".to_string(),
-        "pending" => "OpenClaw handoff is in progress".to_string(),
-        _ => "OpenClaw handoff status is unknown".to_string(),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn submission_status(
-    state: &str,
-    folder: Option<&Path>,
-    marker_path: Option<&Path>,
-    message: String,
-    status_code: Option<u16>,
-    config: Option<&OpenClawConfig>,
-    idempotency_key: Option<&str>,
-    updated_at: Option<String>,
-) -> OpenClawSubmissionStatus {
-    OpenClawSubmissionStatus {
-        state: state.to_string(),
-        folder_path: folder.map(|path| path.to_string_lossy().to_string()),
-        marker_path: marker_path.map(|path| path.to_string_lossy().to_string()),
-        updated_at: updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
-        status_code,
-        message,
-        endpoint: config.map(|config| config.endpoint.clone()),
-        source: config.map(|config| config.source.clone()),
-        idempotency_key: idempotency_key.map(ToString::to_string),
-    }
-}
-
-fn write_last_submission_status(path: Option<&Path>, status: &OpenClawSubmissionStatus) {
-    let Some(path) = path else {
-        return;
+        "failed" => (
+            "unknown",
+            "A previous OpenClaw delivery could not be confirmed.",
+        ),
+        _ => return None,
     };
-
-    match serde_json::to_value(status) {
-        Ok(marker) => {
-            if let Err(_e) = write_marker(path.to_path_buf(), &marker) {
-                warn!("OpenClaw handoff status could not be written");
-            }
-        }
-        Err(_e) => warn!("OpenClaw handoff status could not be serialized"),
-    }
-}
-
-fn write_pending_marker(
-    folder: &Path,
-    config: &OpenClawConfig,
-    idempotency_key: &str,
-) -> Result<bool, String> {
-    let marker = json!({
-        "schema": "openclaw.meetily-submission-pending.v1",
-        "pending_at": Utc::now().to_rfc3339(),
-        "endpoint": config.endpoint,
-        "source": config.source,
-        "idempotency_key": idempotency_key
-    });
-    let path = folder.join(PENDING_MARKER);
-    let content = serde_json::to_string_pretty(&marker).map_err(|e| e.to_string())?;
-
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut file) => {
-            file.write_all(content.as_bytes())
-                .map_err(|e| e.to_string())?;
-            Ok(true)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            if pending_marker_is_stale(&path)? {
-                remove_marker(&path)?;
-                write_marker(path, &marker)?;
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-fn pending_marker_is_stale(path: &Path) -> Result<bool, String> {
-    let marker = read_json_if_exists(path)?;
-    let Some(pending_at) = marker.get("pending_at").and_then(Value::as_str) else {
-        return Ok(true);
-    };
-
-    let parsed = DateTime::parse_from_rfc3339(pending_at)
-        .map_err(|e| format!("{}: {}", path.display(), e))?;
-    Ok(Utc::now()
-        .signed_duration_since(parsed.with_timezone(&Utc))
-        .num_seconds()
-        > PENDING_STALE_SECONDS)
-}
-
-const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-
-#[cfg(test)]
-fn submit_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "Could not build OpenClaw client".into())
-}
-
-async fn bounded_response(mut response: reqwest::Response) -> String {
-    let mut bytes = Vec::new();
-    while bytes.len() < MAX_RESPONSE_BYTES {
-        match response.chunk().await {
-            Ok(Some(chunk)) => {
-                bytes.extend_from_slice(&chunk[..chunk.len().min(MAX_RESPONSE_BYTES - bytes.len())])
-            }
-            _ => break,
-        }
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-fn marker_response(response: &str) -> &str {
-    let mut end = response.len().min(MAX_RESPONSE_BYTES);
-    while !response.is_char_boundary(end) {
-        end -= 1;
-    }
-    &response[..end]
-}
-
-fn write_submitted_marker(
-    folder: &Path,
-    status_code: u16,
-    response: &str,
-    config: &OpenClawConfig,
-    idempotency_key: Option<&str>,
-) -> Result<(), String> {
-    let marker = json!({
-        "schema": "openclaw.meetily-submission.v1",
-        "submitted_at": Utc::now().to_rfc3339(),
-        "status_code": status_code,
-        "response": marker_response(response),
-        "endpoint": config.endpoint,
-        "source": config.source,
-        "idempotency_key": idempotency_key
-    });
-    write_marker(folder.join(SUBMITTED_MARKER), &marker)
-}
-
-fn write_failed_marker(
-    folder: &Path,
-    error: String,
-    status_code: Option<u16>,
-    config: &OpenClawConfig,
-    idempotency_key: Option<&str>,
-) -> Result<(), String> {
-    let marker = json!({
-        "schema": "openclaw.meetily-submission-failed.v1",
-        "failed_at": Utc::now().to_rfc3339(),
-        "status_code": status_code,
-        "error": error,
-        "endpoint": config.endpoint,
-        "source": config.source,
-        "idempotency_key": idempotency_key
-    });
-    write_marker(folder.join(FAILED_MARKER), &marker)
-}
-
-fn remove_marker(path: &Path) -> Result<(), String> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-fn write_marker(path: PathBuf, marker: &Value) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let content = serde_json::to_string_pretty(marker).map_err(|e| e.to_string())?;
-    fs::write(path, content).map_err(|e| e.to_string())
+    status.state = state.into();
+    status.message = message.into();
+    status.endpoint = None;
+    status.folder_path = None;
+    status.marker_path = None;
+    status.source = None;
+    status.idempotency_key = None;
+    Some(status)
 }
 
 #[cfg(test)]
@@ -1292,41 +769,12 @@ mod tests {
             persisted["bearer_token"].as_str().unwrap()
         ));
     }
-    #[tokio::test]
-    async fn submit_client_times_out_stalled_responses() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (_stream, _) = listener.accept().await.unwrap();
-            std::future::pending::<()>().await;
-        });
-        let error = submit_client(std::time::Duration::from_millis(50))
-            .unwrap()
-            .get(format!("http://{address}"))
-            .send()
-            .await
-            .unwrap_err();
-        assert!(error.is_timeout());
-        server.abort();
-    }
     #[test]
-    fn submitted_marker_caps_oversized_utf8_response() {
-        let folder = tempfile::tempdir().unwrap();
-        let response = "€".repeat(MAX_RESPONSE_BYTES);
-        write_submitted_marker(
-            folder.path(),
-            200,
-            &response,
-            &OpenClawConfig::default(),
-            None,
-        )
-        .unwrap();
-        let marker: Value =
-            serde_json::from_slice(&fs::read(folder.path().join(SUBMITTED_MARKER)).unwrap())
-                .unwrap();
-        let stored = marker["response"].as_str().unwrap();
-        assert!(stored.len() <= MAX_RESPONSE_BYTES);
-        assert!(response.starts_with(stored));
+    fn empty_transcript_artifacts_have_no_handoff_payload() {
+        for transcript in [json!({"segments":[{"text":"  "}]}), json!([]), json!({})] {
+            assert!(build_transcript_markdown("Synthetic meeting", &transcript).is_none());
+        }
+        assert!(build_transcript_markdown("Synthetic meeting", &json!([{"text":"Ja"}])).is_some());
     }
 }
 
@@ -1563,6 +1011,8 @@ mod secret_tests {
             enabled: true,
             configured: true,
             ready: true,
+            delivery_state: "unverified".into(),
+            model_ready: false,
             bearer_token_configured: true,
             endpoint: "https://openclaw.example.com".into(),
             model_endpoint: String::new(),

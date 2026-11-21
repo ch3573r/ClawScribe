@@ -313,7 +313,8 @@ pub async fn pick_word_save_path<R: Runtime>(
 pub(crate) fn grant_dropped_audio(paths: &[PathBuf]) -> Vec<String> {
     paths
         .iter()
-        .filter(|path| has_extension(path, AUDIO_EXTENSIONS))
+        .filter(|path| has_extension(path, crate::audio::constants::AUDIO_EXTENSIONS))
+        .take(MAX_GRANTS)
         .filter(|path| grant(Purpose::AudioImport, path).is_ok())
         .map(|path| path.to_string_lossy().into_owned())
         .collect()

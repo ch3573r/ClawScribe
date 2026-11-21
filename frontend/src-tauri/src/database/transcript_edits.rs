@@ -335,6 +335,7 @@ struct RestoredFileUpdate {
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum FilePublication {
+    Import(ImportFileUpdate),
     Restored(RestoredFileUpdate),
     Retranscription(RetranscriptionFileUpdate),
 }
@@ -346,9 +347,100 @@ impl FilePublication {
             Self::Restored(RestoredFileUpdate {
                 restored_provenance: RestoredProvenance::Known(provenance),
             }) => Some(provenance.clone()),
-            Self::Restored(_) => None,
+            Self::Restored(_) | Self::Import(_) => None,
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ImportFileUpdate {
+    import_metadata: serde_json::Value,
+    transcript_pending: bool,
+}
+
+pub(crate) fn import_file_payload(metadata: &serde_json::Value) -> Result<String, String> {
+    serde_json::to_string(&FilePublication::Import(ImportFileUpdate {
+        import_metadata: metadata.clone(),
+        transcript_pending: false,
+    }))
+    .map_err(error)
+}
+
+pub(crate) async fn import_file_stage(
+    pool: &SqlitePool,
+    meeting: &str,
+) -> Result<Option<&'static str>, String> {
+    let payload = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT retranscription_json FROM transcript_file_sync WHERE meeting_id = ?",
+    )
+    .bind(meeting)
+    .fetch_optional(pool)
+    .await
+    .map_err(error)?
+    .flatten();
+    let publication = payload
+        .as_deref()
+        .map(serde_json::from_str::<FilePublication>)
+        .transpose()
+        .map_err(error)?;
+    Ok(match publication {
+        Some(FilePublication::Import(update)) if update.transcript_pending => Some("transcript"),
+        Some(FilePublication::Import(_)) => Some("metadata"),
+        _ => None,
+    })
+}
+
+fn guarded_import_folder(
+    folder: &str,
+    meeting: &str,
+    roots: &[PathBuf],
+    others: &[String],
+) -> Result<PathBuf, String> {
+    const REFUSED: &str = "The import folder could not be verified for this meeting.";
+    let path = Path::new(folder);
+    let canonical = crate::database::meeting_files::resolve_recording_folder(path, roots)?;
+    if !crate::audio::import::owns_import_folder(path, meeting)
+        || others.iter().any(|other| {
+            crate::local_path::comparable_text(other) == crate::local_path::comparable_text(folder)
+                || (crate::trusted_roots::text_allowed(other, roots)
+                    && Path::new(other).canonicalize().is_ok_and(|other| {
+                        other == canonical
+                            || other.starts_with(&canonical)
+                            || canonical.starts_with(other)
+                    }))
+        })
+    {
+        return Err(REFUSED.into());
+    }
+    let folder = crate::database::meeting_files::plain_path(&canonical);
+    match std::fs::symlink_metadata(folder.join("metadata.json")) {
+        Ok(_)
+            if !crate::database::meeting_files::read_marker(&folder).is_some_and(|marker| {
+                crate::database::meeting_files::stamped_meeting_id(&marker) == Some(meeting)
+            }) =>
+        {
+            Err(REFUSED.into())
+        }
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(REFUSED.into()),
+        _ => Ok(folder),
+    }
+}
+
+fn publish_import_metadata(
+    folder: &Path,
+    meeting: &str,
+    metadata: &serde_json::Value,
+) -> Result<(), String> {
+    let audio = crate::library::archive::storage::owned_audio_name(metadata, meeting)
+        .ok_or("Missing import audio name")?;
+    if !std::fs::symlink_metadata(folder.join(audio)).is_ok_and(|meta| meta.is_file()) {
+        return Err("The saved import audio could not be verified".into());
+    }
+    let destination = folder.join("metadata.json");
+    if !destination.is_file() {
+        publish_json(&destination, metadata)?;
+    }
+    Ok(())
 }
 
 impl RestoredFileUpdate {
@@ -605,7 +697,7 @@ pub(crate) async fn sync_file_with_profile(
     else {
         return Ok(SyncedFiles::Other);
     };
-    let publication: Option<FilePublication> = payload
+    let mut publication: Option<FilePublication> = payload
         .as_deref()
         .map(serde_json::from_str)
         .transpose()
@@ -652,6 +744,35 @@ pub(crate) async fn sync_file_with_profile(
         saved.recording_files_incomplete = false;
         outcome = Some(saved);
     }
+    let mut import_others = None;
+    if let Some(FilePublication::Import(update)) = publication.as_mut() {
+        let others: Vec<String> = sqlx::query_scalar(
+            "SELECT folder_path FROM meetings WHERE id <> ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
+        ).bind(meeting).fetch_all(pool).await.map_err(error)?;
+        if !update.transcript_pending {
+            let target = folder.clone();
+            let roots = roots.to_vec();
+            let meeting = meeting.to_string();
+            let other_folders = others.clone();
+            let metadata = update.import_metadata.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let folder = guarded_import_folder(&target, &meeting, &roots, &other_folders)?;
+                publish_import_metadata(&folder, &meeting, &metadata)
+            })
+            .await
+            .map_err(error)??;
+            update.transcript_pending = true;
+            sqlx::query(
+                "UPDATE transcript_file_sync SET retranscription_json = ? WHERE meeting_id = ?",
+            )
+            .bind(serde_json::to_string(update).map_err(error)?)
+            .bind(meeting)
+            .execute(pool)
+            .await
+            .map_err(error)?;
+        }
+        import_others = Some(others);
+    }
     let mut transcripts = rows(pool, meeting).await?;
     transcripts.sort_by(|a, b| {
         a.audio_start_time
@@ -669,15 +790,42 @@ pub(crate) async fn sync_file_with_profile(
     let meeting_id = meeting.to_string();
     let (folder, recovered_audio) =
         tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
-            let folder = crate::trusted_roots::resolve_allowed(&folder, &roots)?;
+            let is_import = import_others.is_some();
+            let folder = match import_others {
+                Some(others) => guarded_import_folder(&folder, &meeting_id, &roots, &others)?,
+                None => crate::trusted_roots::resolve_allowed(&folder, &roots)?,
+            };
             let folder = crate::database::meeting_files::plain_path(&folder);
-            publish_json(
-                &folder.join("transcripts.json"),
-                &serde_json::json!({
-                    "version": "1.0", "total_segments": segments.len(), "segments": segments,
-                    "last_updated": chrono::Utc::now().to_rfc3339()
-                }),
-            )?;
+            let transcript_path = folder.join("transcripts.json");
+            let mut transcript = serde_json::json!({
+                "version": "1.0", "total_segments": segments.len(), "segments": segments,
+                "last_updated": chrono::Utc::now().to_rfc3339()
+            });
+            if is_import {
+                let Some(FilePublication::Import(update)) = publication.as_ref() else {
+                    return Err("The pending import metadata is unavailable".into());
+                };
+                publish_import_metadata(&folder, &meeting_id, &update.import_metadata)?;
+                match std::fs::symlink_metadata(&transcript_path) {
+                    Ok(meta) if meta.is_file() => {
+                        let existing: serde_json::Value =
+                            serde_json::from_reader(std::io::BufReader::new(
+                                std::fs::File::open(&transcript_path).map_err(error)?,
+                            ))
+                            .map_err(error)?;
+                        if existing["meeting_id"].as_str() != Some(meeting_id.as_str()) {
+                            return Err(
+                                "The transcript file could not be verified for this meeting."
+                                    .into(),
+                            );
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return Err("The transcript destination is unavailable.".into()),
+                }
+                transcript["meeting_id"] = serde_json::json!(meeting_id);
+            }
+            publish_json(&transcript_path, &transcript)?;
             let mut recovered_audio = false;
             if let Some((publication, outcome)) = publication.zip(outcome) {
                 match publication {
@@ -692,6 +840,11 @@ pub(crate) async fn sync_file_with_profile(
                     FilePublication::Restored(update) => {
                         update.write_metadata(&folder)?;
                         outcome.write(&folder)?;
+                    }
+                    FilePublication::Import(_) => {
+                        if outcome.needs_recovery() {
+                            outcome.write(&folder)?;
+                        }
                     }
                 }
             }
@@ -744,6 +897,7 @@ pub(crate) async fn sync_file_with_profile(
 pub struct EditState {
     can_undo: bool,
     pending_file_sync: bool,
+    import_file_stage: Option<&'static str>,
     has_edits: bool,
     can_restore_previous: bool,
 }
@@ -777,6 +931,7 @@ pub async fn api_get_transcript_edit_state(
     Ok(EditState {
         can_undo: can_undo > 0,
         pending_file_sync: pending > 0,
+        import_file_stage: import_file_stage(pool, &meeting_id).await?,
         has_edits: edits > 0,
         can_restore_previous: revisions > 0,
     })

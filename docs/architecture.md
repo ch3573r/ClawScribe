@@ -150,9 +150,13 @@ state, so the natural endpoint or final flush emits only the remaining tail.
 
 Imports own their newly created folder until the meeting database transaction
 commits. Failed or cancelled imports remove that copy; the source file is kept.
-Cancellation reports the same status during decoding, cloud and local inference.
+The worker copies in 256 KiB blocks and checks cancellation between filesystem
+operations. A single blocked filesystem operation can still delay cancellation.
+The meeting transaction includes a pending folder update. It records metadata
+publication before rebuilding the transcript file from saved rows. Repair checks
+the owner marker, registered location and other meetings before writing files.
 Batch inference retries each failed segment once. Imports retain successful text
-and mark persistent failures as incomplete with a segment-count warning.
+and mark persistent failures as incomplete.
 Retranscription replaces the transcript only when every segment succeeds.
 
 Whisper, Parakeet, and Nemotron model construction also runs behind the native
@@ -531,8 +535,13 @@ An incomplete excerpt set never replaces a complete summary or reaches exports.
 
 Import records the selected, file-modified, or import timestamp as the meeting
 date and preserves the import time and chosen date source in meeting metadata.
-Multiple selected files are reviewed and submitted individually through the
-existing single-job transcription slot.
+The core import queue uses the existing single-job transcription slot, yields
+to recording, and keeps running through dialog close and navigation. It saves
+item status and meeting IDs locally. After app restart, interrupted items with
+a committed meeting reopen that meeting. Other unfinished items need the user
+to select their original files again. Source paths and picker grants stay in
+memory. Hosted imports require explicit approval of the selected destination
+and check the saved endpoint and cloud setting again before upload.
 
 ## Microsoft Export Persistence
 

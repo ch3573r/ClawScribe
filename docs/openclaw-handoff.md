@@ -1,8 +1,9 @@
 # OpenClaw Handoff
 
-ClawScribe can submit completed Meetily-format recording folders directly to
-the OpenClaw meeting ingest endpoint. The handoff runs after recording stops
-and final `transcripts.json` and `metadata.json` artifacts have been written.
+ClawScribe can send saved meeting transcripts and details to the configured
+OpenClaw ingest endpoint. Automatic handoff runs after a live recording saves
+its library entry and recording-folder files. Open a saved meeting to review
+its handoff status or submit it manually.
 
 ## Configuration
 
@@ -102,31 +103,36 @@ using `OpenClaw managed auth` as a summary provider.
 
 ## Behavior
 
-When a recording stops, ClawScribe builds a `meeting.completed` payload from the
-recording folder and posts it to the configured endpoint with bearer auth.
+ClawScribe skips meetings with empty transcript text. Each request contains a
+`meeting.completed` payload and a stable idempotency key, also sent in the
+`Idempotency-Key` header. Configure the ingest service to deduplicate with this
+key. An HTTP success means the endpoint accepted the handoff. Settings shows
+configuration and the latest delivery result independently for the current URL.
 
-Before posting, ClawScribe writes `.openclaw-pending.json` into the recording
-folder. A fresh pending marker suppresses duplicate in-flight submissions; a
-pending marker older than 15 minutes is treated as stale and replaced.
+Each meeting's handoff is saved in its local library. Previously submitted
+meetings are protected against repeat sends. ClawScribe reads older folder
+markers and the previous Settings status file for compatibility.
 
-On success, ClawScribe writes `.openclaw-submitted.json` into the recording
-folder and removes stale pending or failure markers. On failure, it writes
-`.openclaw-failed.json`. Already-submitted folders are skipped locally so
-manual retries do not accidentally double-post a completed recording.
+Open a saved meeting and choose **Review retry** after a definite rejection or
+connection failure. If delivery is uncertain after a timeout, interruption, or
+ambiguous reply, choose **Review delivery**. Wait for processing to settle at
+the original destination and verify whether it received that meeting. Record
+**Confirmed received** to close the handoff or **Confirmed absent** to unlock a
+reviewed retry to the original destination. A retry after an uncertain result
+must match the saved payload hash when one is available. There is no automatic
+resend on restart or after an uncertain result. The local delivery history is
+outside portable backups.
 
-The Tauri app config directory also contains `openclaw-last-submission.json`,
-which mirrors the most recent automatic or manual handoff outcome for the
-Settings status panel.
+The Tauri commands use saved meeting IDs to look up verified folder artifacts.
 
-Frontend status commands:
-
-- `get_openclaw_config_status` returns enabled/configured state, config path,
-  last-status path, token-present status, audio-path setting, ready/not-ready
-  state, status message, and the last submission state if present.
-- `get_openclaw_submission_status` accepts a recording folder path and returns
-  the folder's pending, submitted, or failed marker state.
-- `submit_meeting_folder_to_openclaw` manually submits a folder and updates the
-  same markers and last-status file.
+- `get_openclaw_config_status` returns configuration readiness in `ready` and
+  the latest delivery state in `delivery_state` and `last_submission`.
+- `get_openclaw_submission_status` takes `meetingId` and returns the saved
+  result, available actions and a `review_token` for the current destination.
+- `submit_meeting_folder_to_openclaw` takes `meetingId` and `reviewToken` after
+  the user approves the displayed destination. It returns the meeting status.
+- `reconcile_openclaw_handoff` takes `meetingId` and `received` after the user
+  verifies the uncertain outcome at OpenClaw. It records the result locally.
 
 The companion Windows tray/agent is no longer needed for the happy path once
 this fork is used as the recorder. It can remain as a diagnostic/manual

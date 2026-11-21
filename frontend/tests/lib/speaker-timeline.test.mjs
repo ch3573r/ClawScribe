@@ -203,6 +203,7 @@ async function page(attribution, segments, updatedSegments) {
     '@/components/MeetingDetails/TranscriptPanel': { TranscriptPanel: 'TranscriptPanel' },
     '@/components/MeetingDetails/SummaryPanel': { SummaryPanel: 'SummaryPanel' },
     '@/components/MeetingDetails/MeetingHeader': { MeetingHeader: 'MeetingHeader' },
+    '@/components/MeetingDetails/OpenClawHandoff': { OpenClawHandoff: 'OpenClawHandoff' },
     '@/components/MeetingAttendance': { SavedMeetingAttendance: 'SavedMeetingAttendance' },
     '@/components/Knowledge/EvidenceRoute': { EvidenceRoute: 'EvidenceRoute' },
     '@/components/ui/button': { Button: 'button' },
