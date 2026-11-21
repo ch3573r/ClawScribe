@@ -229,6 +229,35 @@ where
     }
 }
 
+async fn claim_reviewed_question(
+    pool: &SqlitePool,
+    runtime: &super::KnowledgeState,
+    request: &AskRequest,
+) -> Result<RequestLease, String> {
+    // Cancel must reach this request even while it waits for a SQLite connection.
+    let mut lease = runtime.answers.claim(pool, request)?;
+    // There is no new row to cancel during this lookup. An existing row belongs
+    // to an earlier attempt and must keep its result and status.
+    lease.settled = true;
+    let lookup =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM knowledge_requests WHERE id=?)")
+            .bind(&request.request_id)
+            .fetch_one(pool);
+    let exists = tokio::select! {
+        biased;
+        _ = lease.token.cancelled() => return Err("Answer cancelled".into()),
+        result = tokio::time::timeout(Duration::from_secs(1), lookup) => {
+            result.map_err(|_| "Saved request lookup timed out")?
+                .map_err(|_| "Could not check the question")?
+        }
+    };
+    if exists {
+        return Err("This question was already attempted. Review it again.".into());
+    }
+    lease.settled = false;
+    Ok(lease)
+}
+
 /// A reviewed request shares retrieval, cancellation, persistence and evidence verification
 /// with ordinary Meeting memory. Only this entry can add a personal excerpt.
 pub(super) async fn ask_notes(
@@ -239,16 +268,7 @@ pub(super) async fn ask_notes(
     references: Vec<store::saved_search::SavedReference>,
     destination: llm_client::NoteDestination,
 ) -> Result<AssistantReply, String> {
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_requests WHERE id=?)")
-            .bind(&request.request_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|_| "Could not check the question")?;
-    if exists {
-        return Err("This question was already attempted. Review it again.".into());
-    }
-    let mut lease = runtime.answers.claim(pool, &request)?;
+    let mut lease = claim_reviewed_question(pool, runtime, &request).await?;
     let result = async {
         let resolved = super::note_review::configured(&app, pool).await?;
         if resolved.note_destination()? != destination {
@@ -1845,6 +1865,31 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reviewed_question_cancelled_before_database_access_cannot_reach_dispatch() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let (pool, request, _) = answer_fixture().await;
+        let runtime = super::super::KnowledgeState::default();
+        let connection = pool.acquire().await.unwrap();
+        let mut claim = std::pin::pin!(claim_reviewed_question(&pool, &runtime, &request));
+        assert!(futures_util::poll!(&mut claim).is_pending());
+        runtime.answers.cancel(&request.request_id);
+        assert!(matches!(claim.await, Err(error) if error == "Answer cancelled"));
+        assert!(!runtime
+            .answers
+            .active
+            .lock()
+            .unwrap()
+            .contains_key(&request.request_id));
+        drop(connection);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge_requests WHERE id=?")
+            .bind(&request.request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[tokio::test]
