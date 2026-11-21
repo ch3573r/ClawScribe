@@ -1198,6 +1198,7 @@ pub fn run() {
             exports::commands::list_onenote_resumes,
             exports::commands::get_meeting_export_history,
             exports::commands::reconcile_meeting_export,
+            exports::commands::list_export_recovery_candidates,
             exports::commands::export_meeting_markdown_to_planner,
             exports::commands::summary_has_action_items,
             exports::commands::list_onenote_notebooks,

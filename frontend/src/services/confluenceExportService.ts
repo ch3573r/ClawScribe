@@ -16,6 +16,7 @@ export interface ConfluenceExportResponse {
   pageId: string;
   title: string;
   webUrl: string | null;
+  outcome: "published" | "alreadyPublished" | "draftChanged";
 }
 
 export const confluenceExportService = {

@@ -105,8 +105,9 @@ window titles are returned only when the settings diagnostics panel requests the
   Planner, To Do, and OneDrive or SharePoint.
 - Confluence direct publish uses the configured server URL and PAT. Browser
   draft export remains available when SSO, proxy, or tenant policy blocks REST.
-  Direct publishing uses the meeting export history to retain the page ID and
-  hold uncertain submissions for explicit reconciliation. The browser clipboard
+  Direct publishing uses the meeting export history to retain the page ID,
+  account fingerprint, and draft revision. Repeats open the existing page for
+  reviewed edits. Uncertain submissions stay held for reconciliation. The browser clipboard
   includes readable source times, nested lists, quotes, code, and task status.
 - OpenClaw handoff is optional and sends completed recording artifacts only to
   the configured operator endpoint.
