@@ -1879,6 +1879,33 @@ mod tests {
         conversation_fixture_schema(false).await
     }
 
+    // Write the evidence columns available in the shipped schema. Current
+    // dispatch validates metadata introduced by later migrations.
+    async fn seed_legacy_evidence(
+        pool: &SqlitePool,
+        request: &str,
+        passage: &crate::knowledge::types::Passage,
+    ) {
+        let display = serde_json::json!({
+            "title": passage.title,
+            "date": passage.date,
+            "speaker": passage.speaker,
+            "metadata_truncated": passage.metadata_truncated,
+        });
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query(
+            "UPDATE knowledge_requests SET status='running' WHERE id=? AND status='preparing'",
+        )
+        .bind(request)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO knowledge_request_evidence(request_id,ordinal,reference_json,display_json) VALUES (?,1,?,?)")
+            .bind(request).bind(serde_json::to_string(&passage.evidence).unwrap())
+            .bind(display.to_string()).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
     async fn conversation_fixture_schema(
         legacy: bool,
     ) -> (SqlitePool, crate::knowledge::types::AskRequest) {
@@ -1945,16 +1972,20 @@ mod tests {
         )
         .await
         .unwrap();
-        conversations::prepare(
-            &pool,
-            &request.request_id,
-            &frozen,
-            &[passage],
-            &BTreeMap::new(),
-            SearchMode::Keyword,
-        )
-        .await
-        .unwrap();
+        if legacy {
+            seed_legacy_evidence(&pool, &request.request_id, &passage).await;
+        } else {
+            conversations::prepare(
+                &pool,
+                &request.request_id,
+                &frozen,
+                &[passage],
+                &BTreeMap::new(),
+                SearchMode::Keyword,
+            )
+            .await
+            .unwrap();
+        }
         conversations::finish(
             &pool,
             &request.request_id,
@@ -2329,16 +2360,7 @@ mod tests {
             )
             .await
             .unwrap();
-            conversations::prepare(
-                &source,
-                &request.request_id,
-                &frozen,
-                &[passage],
-                &BTreeMap::new(),
-                SearchMode::Keyword,
-            )
-            .await
-            .unwrap();
+            seed_legacy_evidence(&source, &request.request_id, &passage).await;
             conversations::finish(
                 &source,
                 &request.request_id,

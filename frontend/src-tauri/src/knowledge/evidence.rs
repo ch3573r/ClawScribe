@@ -142,6 +142,11 @@ pub async fn resolve(
     let passage = match super::store::materialize(pool, &selected, spans[0].clone(), false).await {
         Ok(passage) => passage,
         Err(KnowledgeError::Superseded) => return outcome(EvidenceStatus::Stale),
+        // A shorter replacement can put a previously valid excerpt beyond the
+        // new end of the passage or in the middle of a UTF-8 character.
+        Err(KnowledgeError::InvalidInput) if reference.source_revision < revision => {
+            return outcome(EvidenceStatus::Stale)
+        }
         Err(KnowledgeError::InvalidInput) => return outcome(EvidenceStatus::Invalid),
         Err(error) => return Err(error),
     };
