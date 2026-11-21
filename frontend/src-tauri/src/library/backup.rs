@@ -105,10 +105,15 @@ impl ScheduledBackup {
     }
 
     fn checkpoint(&self) -> Result<(), String> {
-        if self.state.load(Ordering::Acquire) == DEFERRED {
-            return Err(BACKUP_DEFERRED.into());
+        match self.state.load(Ordering::Acquire) {
+            DEFERRED => Err(BACKUP_DEFERRED.into()),
+            COPYING
+                if crate::summary::SummaryService::has_active_local_summary() && self.defer() =>
+            {
+                Err(BACKUP_DEFERRED.into())
+            }
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     fn archive_budget(&self, staged_bytes: u64) -> Option<u64> {
@@ -2241,7 +2246,16 @@ mod tests {
             matches!(claim_scheduled_archive(&control), Err(message) if message == BACKUP_DEFERRED)
         );
         drop(summary);
-        assert!(claim_scheduled_archive(&control).is_ok());
+        let permits = claim_scheduled_archive(&control).unwrap();
+        control.checkpoint().unwrap();
+        let late_summary =
+            crate::summary::SummaryService::register_job("backup-late-summary", "builtin-ai")
+                .unwrap();
+        assert_eq!(control.checkpoint().unwrap_err(), BACKUP_DEFERRED);
+        drop(late_summary);
+        assert_eq!(control.seal().unwrap_err(), BACKUP_DEFERRED);
+        drop(permits);
+        assert!(claim_scheduled_archive(&Default::default()).is_ok());
     }
 
     #[tokio::test]
