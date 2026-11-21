@@ -457,7 +457,7 @@ export function ImportAudioDialog({
                       <label htmlFor="import-summarize" className="text-sm font-medium">Generate a summary after transcription</label>
                       <p id="import-summary-help" className="break-all text-xs text-muted-foreground">
                         {destination ? destination.external
-                          ? 'Sends this transcript and notes context to ' + providerLabel(destination.provider) + ' (' + destination.endpoint + ') using ' + destination.model + '.'
+                          ? 'Sends the transcript and notes context, including the meeting date and available details, to ' + providerLabel(destination.provider) + ' (' + destination.endpoint + ') using ' + destination.model + '.'
                           : 'Generates notes locally with ' + providerLabel(destination.provider) + ' using ' + destination.model + '.'
                           : destinationError ?? 'Checking the selected summary provider…'}
                         {destination?.external && destination.unencrypted && ' This connection uses unencrypted HTTP.'}

@@ -273,6 +273,12 @@ pub async fn api_get_summary<R: Runtime>(
         Ok(Some((process, partial_notes))) => {
             let mut status = process.status.to_lowercase();
             let mut error = process.error;
+            if status == "cancelled"
+                && error.as_deref() == Some(super::automatic::PAUSED_FOR_INFERENCE)
+                && SummaryService::is_running_for(&meeting_id)
+            {
+                status = "deferred".into();
+            }
 
             // Parse result data if it exists (regardless of status)
             // This allows displaying restored summaries after cancellation or failure
@@ -374,7 +380,6 @@ pub async fn api_get_summary<R: Runtime>(
 
 pub(super) struct MeetingSummaryContext {
     pub(super) prompt: String,
-    pub(super) title: crate::library::calendar::ProviderTitle,
     pub(super) template: String,
 }
 
@@ -385,8 +390,7 @@ pub(super) async fn meeting_summary_context<R: Runtime>(
     base_prompt: String,
     template_id: Option<String>,
 ) -> Result<MeetingSummaryContext, String> {
-    let (calendar, summary_title) =
-        crate::library::calendar::read_snapshot(pool, meeting_id).await?;
+    let (calendar, _) = crate::library::calendar::read_snapshot(pool, meeting_id).await?;
     let final_prompt = match calendar.as_ref() {
         Some(link) => link.with_attendance(base_prompt),
         None => base_prompt,
@@ -409,7 +413,6 @@ pub(super) async fn meeting_summary_context<R: Runtime>(
 
     Ok(MeetingSummaryContext {
         prompt: final_prompt,
-        title: summary_title,
         template: final_template_id,
     })
 }
@@ -503,6 +506,7 @@ pub async fn api_process_transcript<R: Runtime>(
         context,
         summary_language,
         true,
+        false,
         job,
     ))
 }
@@ -520,6 +524,7 @@ pub async fn api_generate_meeting_summary<R: Runtime>(
     template_id: Option<String>,
     summary_language: Option<String>,
     include_speaker_labels: Option<bool>,
+    retry_translation: Option<bool>,
 ) -> Result<ProcessTranscriptResponse, String> {
     let pool = state.db_manager.pool().clone();
     let job = SummaryService::register_job(&meeting_id, &model)?;
@@ -533,6 +538,26 @@ pub async fn api_generate_meeting_summary<R: Runtime>(
     if !has_transcript {
         return Err("No saved transcript is available to summarize.".into());
     }
+    let retry_translation = retry_translation.unwrap_or(false);
+    let (template_id, include_speaker_labels) = if retry_translation {
+        let saved = SummaryProcessesRepository::get_summary_data(&pool, &meeting_id)
+            .await
+            .map_err(|_| "Could not read the English notes draft")?
+            .and_then(|row| row.result)
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .filter(|result| result["translation"]["target"].is_string())
+            .ok_or("There is no saved translation to retry.")?;
+        let template = saved
+            .pointer("/english_cache/source/template_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Could not read the template used by the English notes draft.")?;
+        let labels = saved["translation"]["include_speaker_labels"]
+            .as_bool()
+            .unwrap_or(true);
+        (Some(template.to_owned()), labels)
+    } else {
+        (template_id, include_speaker_labels.unwrap_or(true))
+    };
     let context = match custom_prompt {
         Some(context) => context,
         None => crate::library::context::read(&pool, &meeting_id).await?,
@@ -550,7 +575,8 @@ pub async fn api_generate_meeting_summary<R: Runtime>(
         model_name,
         context,
         summary_language,
-        include_speaker_labels.unwrap_or(true),
+        include_speaker_labels,
+        retry_translation,
         job,
     ))
 }
@@ -566,6 +592,7 @@ fn spawn_summary<R: Runtime>(
     context: MeetingSummaryContext,
     summary_language: Option<String>,
     include_speaker_labels: bool,
+    retry_translation: bool,
     job: super::service::SummaryJob,
 ) -> ProcessTranscriptResponse {
     let meeting_id_clone = m_id.clone();
@@ -579,15 +606,16 @@ fn spawn_summary<R: Runtime>(
             super::service::SummaryProviderRequest::Manual {
                 provider: model,
                 model: model_name,
+                retry_translation,
             },
             context.prompt,
-            context.title,
             context.template,
             summary_language,
             include_speaker_labels,
             &job,
         )
         .await;
+        drop(job);
         let _ = app.emit(super::automatic::CHANGED_EVENT, &meeting_id_clone);
     });
 

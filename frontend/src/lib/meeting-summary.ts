@@ -17,7 +17,13 @@ export function summaryDetails(input: string | SummaryDataResponse | null | unde
   const template = generation.template ?? cache.template_id;
   const structured = isRecord(record.structured_meeting_output) ? record.structured_meeting_output : {};
   const email = record.follow_up_email ?? structured.follow_up_email;
+  const translation = isRecord(record.translation) ? record.translation : {};
+  const reduction = isRecord(generation.reduction) ? generation.reduction : {};
   return {
+    translation: typeof translation.target === 'string' && typeof translation.message === 'string'
+      ? { target: translation.target, message: translation.message } : null,
+    reduction: typeof reduction.source_excerpts === 'number' && typeof reduction.passes === 'number'
+      ? { sourceExcerpts: reduction.source_excerpts, passes: reduction.passes, limitRetries: typeof reduction.limit_retries === 'number' ? reduction.limit_retries : 0 } : null,
     model: typeof model === 'string' ? model : '',
     template: typeof template === 'string' ? template.replace(/_/g, ' ') : '',
     email: isRecord(email) && typeof email.body_markdown === 'string' && email.body_markdown.trim()

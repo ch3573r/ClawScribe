@@ -63,7 +63,7 @@ export function SummarySettings() {
         }}>
           <DialogHeader>
             <DialogTitle>Allow automatic notes with {review && providerLabel(review.provider)}?</DialogTitle>
-            <DialogDescription>After you save a recording, ClawScribe will send its transcript and notes context to the destination below to generate notes.</DialogDescription>
+            <DialogDescription>ClawScribe will send the saved transcript and notes context, including the meeting date, duration when known, and title when permitted, to generate notes at this destination.</DialogDescription>
           </DialogHeader>
           {review && <div className="space-y-1 text-sm">
             <p className="break-all">{review.endpoint}</p>

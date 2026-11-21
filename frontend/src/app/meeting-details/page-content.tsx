@@ -431,6 +431,7 @@ export default function PageContent({
           setModelConfig={setModelConfig}
           onSaveModelConfig={handleSaveModelConfig}
           onGenerateSummary={summaryGeneration.handleGenerateSummary}
+          onRetryTranslation={summaryGeneration.handleRetryTranslation}
           onStopGeneration={summaryGeneration.handleStopGeneration}
           onPromptChange={handlePromptChange}
           contextLoading={contextLoading}

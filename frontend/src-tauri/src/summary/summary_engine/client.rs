@@ -129,13 +129,14 @@ fn get_cached_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<Pat
 ///
 /// # Returns
 /// Generated text
-pub async fn generate_with_builtin(
+pub(crate) async fn generate_with_builtin(
     app_data_dir: &PathBuf,
     model_name: &str,
     system_prompt: &str,
     user_prompt: &str,
     max_tokens: Option<u32>,
     cancellation_token: Option<&CancellationToken>,
+    dispatch_check: Option<&crate::summary::request_config::DispatchCheck>,
 ) -> Result<String> {
     // Check cancellation at start
     if let Some(token) = cancellation_token {
@@ -143,7 +144,17 @@ pub async fn generate_with_builtin(
             return Err(anyhow!("Generation cancelled before starting"));
         }
     }
-    let _job = crate::audio::inference::claim_job().map_err(anyhow::Error::msg)?;
+    let _job = match (dispatch_check, cancellation_token) {
+        (Some(check), Some(token)) => {
+            check().map_err(anyhow::Error::msg)?;
+            let permit = crate::audio::inference::wait_for_job(token)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            check().map_err(anyhow::Error::msg)?;
+            permit
+        }
+        _ => crate::audio::inference::claim_job().map_err(anyhow::Error::msg)?,
+    };
 
     log::info!("Built-in AI generation request");
     log::info!("Model: {}", model_name);

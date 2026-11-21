@@ -5,7 +5,7 @@ import { openExternal } from '@/lib/openExternal';
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { MeetingMetadata, MeetingSummary } from '@/types';
 import type { OllamaModel } from '@/contexts/ConfigContext';
-import { isEditorSummary, readMeetingSummary } from '@/lib/meeting-summary';
+import { isEditorSummary, readMeetingSummary, summaryDetails } from '@/lib/meeting-summary';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
@@ -212,7 +212,11 @@ export function useSummaryGeneration({
       setSummaryStatus('completed');
 
       // Show success toast
-      toast.success('Summary ready', { id: `summary-ready:${meeting.id}`, description: meetingName || meeting.title, duration: 4000 });
+      if (summaryDetails(pollingResult.data).translation) {
+        toast.warning('English notes saved. Translation needs a retry.', { id: `summary-ready:${meeting.id}` });
+      } else {
+        toast.success('Summary ready', { id: `summary-ready:${meeting.id}`, description: meetingName || meeting.title, duration: 4000 });
+      }
 
       await Analytics.trackSummaryGenerationCompleted(
         modelConfig.provider,
@@ -238,9 +242,11 @@ export function useSummaryGeneration({
   const startSummary = useCallback(async ({
     customPrompt = '',
     isRegeneration = false,
+    translationTarget,
   }: {
     customPrompt?: string;
     isRegeneration?: boolean;
+    translationTarget?: string;
   }) => {
     try {
       const accepted = await confirmSummaryRegeneration(
@@ -282,7 +288,7 @@ export function useSummaryGeneration({
         duration: 3000,
       });
 
-      const summaryLanguage = await readMeetingSummaryLanguage(meeting.id)
+      const summaryLanguage = translationTarget ?? await readMeetingSummaryLanguage(meeting.id)
         .then(preference => preference.language)
         .catch(() => null);
 
@@ -294,6 +300,7 @@ export function useSummaryGeneration({
         templateId: selectedTemplate || null,
         summaryLanguage,
         includeSpeakerLabels,
+        ...(translationTarget ? { retryTranslation: true } : {}),
       });
 
       const process_id = result.process_id;
@@ -522,6 +529,10 @@ export function useSummaryGeneration({
     detachSummary.current = attachSummaryPolling(meeting.id, pollingResult => handleSummaryUpdate(pollingResult, isRegeneration));
   }, [meeting.id, attachSummaryPolling, handleSummaryUpdate]);
 
+  const handleRetryTranslation = useCallback(async (target: string, customPrompt: string) => {
+    await processSummary({ customPrompt, isRegeneration: true, translationTarget: target });
+  }, [processSummary]);
+
   const handleStopGeneration = useCallback(async () => {
     try {
       await invokeTauri('api_cancel_summary', { meetingId: meeting.id });
@@ -536,6 +547,7 @@ export function useSummaryGeneration({
     jobUpdate,
     handleGenerateSummary,
     handleRegenerateSummary,
+    handleRetryTranslation,
     handleStopGeneration,
     attachToRunningSummary,
     getSummaryStatusMessage,

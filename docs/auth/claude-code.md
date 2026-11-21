@@ -48,8 +48,9 @@ these files or settings.
 
 ## Execution and limitations
 
-- Text only: Sonnet, Opus, and Haiku reuse the context and output budgets of the
-  Claude API provider. Transcript chunking, language processing, and chat evidence
+- Text only. Sonnet, Opus, and Haiku use a 200,000-token context allowance and
+  reserve 16,000 tokens for output because the CLI resolves the alias and sets
+  the generation limit. Transcript chunking, language processing, and chat evidence
   budgets continue to apply. There are no user file or audio attachments, tools,
   slash commands, hooks, or MCP tools.
 - Each request uses print mode with JSON output. The user prompt goes through

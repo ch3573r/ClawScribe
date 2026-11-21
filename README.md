@@ -276,12 +276,17 @@ notes after a failed attempt.
 Windows notifications can tell you when automatic notes are ready. See
 [Automatic notes](docs/automatic-notes.md) for supported providers and recovery.
 
+Setup offers a cancelable local notes model download and a separate choice to
+generate local notes automatically. Regenerating a summary keeps the saved
+notes readable. If translation fails, review the saved English draft and use
+**Retry translation** to translate that draft.
+
 **Claude Code**: Uses the Claude Code you installed and signed in to. Your Claude
 plan's limits apply. Install it yourself, run `claude auth login` in a terminal,
 then select **Claude Code** in Summary settings. ClawScribe does not install
 Claude Code or handle its sign-in or credentials. It supports text summaries and
-meeting chat with tools disabled; choose Sonnet (default), Opus, or Haiku. These
-models use the Claude API provider's context budgets. Prompts travel through stdin
+meeting chat with tools disabled. Choose Sonnet (default), Opus, or Haiku. The
+CLI aliases use a bounded context budget. Prompts travel through stdin
 and a temporary UTF-8 system file, keeping prompt text off the command line.
 See [Claude Code setup and limitations](docs/auth/claude-code.md), including
 Windows command shims and the optional Program path setting.

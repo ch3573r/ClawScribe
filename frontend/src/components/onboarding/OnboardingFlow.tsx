@@ -19,7 +19,7 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
   const [finishing, setFinishing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const finishingRef = useRef(false);
-  const choice = useRef<{ mode: RecordingMode; localNotesModel: string | null } | null>(null);
+  const choice = useRef<{ mode: RecordingMode; localNotesModel: string | null; automaticNotes: boolean } | null>(null);
 
   useEffect(() => {
     // Check if running on macOS
@@ -43,7 +43,7 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
     setFinishing(true);
     setError(null);
     try {
-      await finishRecordingSetup(choice.current.mode, choice.current.localNotesModel);
+      await finishRecordingSetup(choice.current.mode, choice.current.localNotesModel, choice.current.automaticNotes);
       onComplete();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not finish setup. Try again.');
@@ -53,8 +53,8 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
     }
   };
 
-  const choose = (mode: RecordingMode, localNotesModel: string | null) => {
-    choice.current = { mode, localNotesModel };
+  const choose = (mode: RecordingMode, localNotesModel: string | null, automaticNotes = false) => {
+    choice.current = { mode, localNotesModel, automaticNotes };
     if (isMac) setPermissionStep(true);
     else void finish();
   };

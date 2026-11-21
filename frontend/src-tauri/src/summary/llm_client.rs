@@ -198,9 +198,7 @@ pub(crate) async fn generate_summary(
         let app_data_dir = app_data_dir
             .ok_or_else(|| "app_data_dir is required for BuiltInAI provider".to_string())?;
 
-        if let Some(check) = dispatch.and_then(|route| route.check) {
-            check()?;
-        }
+        let check = dispatch.and_then(|route| route.check);
         return crate::summary::summary_engine::generate_with_builtin(
             app_data_dir,
             model_name,
@@ -208,6 +206,7 @@ pub(crate) async fn generate_summary(
             user_prompt,
             max_tokens,
             cancellation_token,
+            check,
         )
         .await
         .map_err(|e| e.to_string());
@@ -488,7 +487,7 @@ pub(crate) fn parse_response(
         reason,
         Some("length" | "max_tokens" | "model_context_window_exceeded")
     ) {
-        return Err("The model reached its output or context limit before finishing. No complete response was produced. Increase the output/context limit or choose a more concise template and retry.".into());
+        return Err(super::context_budget::MODEL_LIMIT.into());
     }
     if matches!(
         reason,
@@ -526,7 +525,7 @@ pub(crate) fn parse_response(
 }
 
 /// Helper function to get provider name for logging
-fn provider_name(provider: &LLMProvider) -> &str {
+pub(super) fn provider_name(provider: &LLMProvider) -> &str {
     match provider {
         LLMProvider::OpenAI => "OpenAI",
         LLMProvider::Claude => "Claude",

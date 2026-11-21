@@ -10,7 +10,7 @@ export interface SummaryJobSnapshot {
 }
 
 export function isActiveSummary(status?: string): boolean {
-  return status !== undefined && ['pending', 'processing', 'summarizing', 'regenerating'].includes(status);
+  return status !== undefined && ['pending', 'processing', 'summarizing', 'regenerating', 'deferred'].includes(status);
 }
 
 export function isTerminalSummary(status: string): boolean {

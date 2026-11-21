@@ -219,10 +219,11 @@ pub(crate) fn strip_source_links(markdown: &str) -> String {
 }
 
 /// Resolve model tags using only server-owned identities and timestamps.
+pub(super) const SOURCE_TAG_PATTERN: &str = r"\[S[0-9]+(?:[ \t]+(?:Source|[0-9]+:[0-9]{2}(?::[0-9]{2})?))?(?:[ \t]*[,;][ \t]*S[0-9]+(?:[ \t]+(?:Source|[0-9]+:[0-9]{2}(?::[0-9]{2})?))?)*\]";
+
 pub(crate) fn expand_tags(text: &str, sources: &[SummarySource]) -> String {
-    static TAG: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r"\[S\d+(?:[ \t]+\d{1,2}:\d{2}(?::\d{2})?)?(?:[ \t]*[,;][ \t]*S\d+(?:[ \t]+\d{1,2}:\d{2}(?::\d{2})?)?)*\]").unwrap()
-    });
+    static TAG: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(SOURCE_TAG_PATTERN).unwrap());
     static ID: once_cell::sync::Lazy<regex::Regex> =
         once_cell::sync::Lazy::new(|| regex::Regex::new(r"S(\d+)").unwrap());
     TAG.replace_all(text, |capture: &regex::Captures<'_>| {

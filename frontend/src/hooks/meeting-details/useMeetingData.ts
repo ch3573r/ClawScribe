@@ -48,8 +48,12 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
         setDetails({ ...summaryDetails(result.data), transcriptChanged: result.transcript_changed === true });
       }
     };
+    const summarySubscription = listen<string>('summary-job-changed', ({ payload }) => {
+      if (payload === meeting.id) void refresh().catch(() => {});
+    });
     const subscriptions = ['transcript-text-edited', 'retranscription-complete', 'speaker-diarization-complete', 'transcript-speaker-updated'].map(event =>
       listen<{ meeting_id: string }>(event, ({ payload }) => { if (payload.meeting_id === meeting.id) void refresh().catch(() => {}); }));
+    subscriptions.push(summarySubscription);
     void Promise.allSettled(subscriptions).then(() => { if (active) void refresh().catch(() => {}); });
     return () => { active = false; subscriptions.forEach(sub => void sub.then(off => off()).catch(() => {})); };
   }, [meeting.id, aiSummary]);

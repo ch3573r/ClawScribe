@@ -24,8 +24,11 @@ pub(super) const REVIEW_REQUIRED: &str =
     "Review the summary provider in Settings to allow automatic notes at this destination.";
 pub(super) const DESTINATION_CHANGED: &str =
     "The summary destination changed. Review it and try again.";
+pub(crate) const PAUSED_FOR_INFERENCE: &str =
+    "Automatic notes are paused while recording or transcription uses local inference.";
 pub(crate) const CHANGED_EVENT: &str = "summary-job-changed";
 pub(crate) static ROUTE_CHANGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static PREFERENCE_EPOCH: AtomicU64 = AtomicU64::new(0);
 static ROUTE_EPOCH: AtomicU64 = AtomicU64::new(0);
 static PREFERENCE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -172,16 +175,21 @@ pub async fn set_automatic_summary_preference<R: Runtime>(
             enabled,
             external_fingerprint,
         }
-        .persist(store)
+        .persist(store)?;
+        if !enabled {
+            PREFERENCE_EPOCH.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
     })
 }
 
 fn dispatch_check<R: Runtime>(app: AppHandle<R>, review: DestinationReview) -> DispatchCheck {
     let epoch = ROUTE_EPOCH.load(Ordering::SeqCst);
+    let preference_epoch = PREFERENCE_EPOCH.load(Ordering::SeqCst);
     Arc::new(move || {
         with_preference(&app, |store| {
             let preference = Preference::read(store);
-            if !preference.enabled {
+            if !preference.enabled || PREFERENCE_EPOCH.load(Ordering::SeqCst) != preference_epoch {
                 return Err(DISABLED.into());
             }
             if !preference.allows(&review) {
@@ -363,35 +371,49 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
     drop(route_guard);
 
     let profile = publication::stored_profile(&app).ok().flatten();
-    let Ok(candidates) = SummaryProcessesRepository::automatic_resume_candidates(
-        &pool,
-        &fingerprint,
-        profile.as_deref(),
-    )
-    .await
-    else {
-        log::warn!("Could not read interrupted automatic notes");
-        return;
-    };
-    for (meeting, stored_fingerprint) in candidates {
-        if stored_fingerprint != fingerprint
-            && recording_allowed(&app, &pool, &meeting).await != Ok(true)
-        {
-            continue;
-        }
-        match launch(
-            app.clone(),
-            pool.clone(),
-            meeting,
-            Start::Resume(request.clone(), stored_fingerprint),
+    let local = request.request.provider == super::llm_client::LLMProvider::BuiltInAI;
+    let mut after = String::new();
+    loop {
+        let Ok(candidates) = SummaryProcessesRepository::automatic_resume_candidates_after(
+            &pool,
+            &fingerprint,
+            profile.as_deref(),
+            &after,
+            local,
         )
         .await
-        {
-            Ok(Launch::Started(worker)) => {
-                let _ = worker.await;
+        else {
+            log::warn!("Could not read interrupted automatic notes");
+            return;
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        for (meeting, stored_fingerprint) in candidates {
+            after.clone_from(&meeting);
+            if stored_fingerprint != fingerprint
+                && recording_allowed(&app, &pool, &meeting).await != Ok(true)
+            {
+                continue;
             }
-            Ok(_) => {}
-            Err(_) => log::warn!("Could not resume automatic notes"),
+            match launch(
+                app.clone(),
+                pool.clone(),
+                meeting,
+                Start::Resume(request.clone(), stored_fingerprint),
+            )
+            .await
+            {
+                Ok(Launch::Started(worker)) => {
+                    let _ = worker.await;
+                }
+                Ok(_) => {}
+                Err(_) => log::warn!("Could not resume automatic notes"),
+            }
+        }
+        if !local {
+            // Retain the existing bound on automatically retried external requests.
+            return;
         }
     }
 }
@@ -459,7 +481,8 @@ async fn launch<R: Runtime>(
     }
     let fingerprint = request.review().fingerprint;
     let provider = super::llm_client::canonical_provider(&request.provider);
-    let Some(job) = SummaryService::try_register_job(&meeting, provider)? else {
+    let local = request.provider == super::llm_client::LLMProvider::BuiltInAI;
+    let Some(mut job) = SummaryService::try_register_job(&meeting, provider, true)? else {
         return Ok(Launch::Busy);
     };
 
@@ -477,26 +500,36 @@ async fn launch<R: Runtime>(
     drop(_route);
 
     Ok(Launch::Started(tauri::async_runtime::spawn(async move {
-        match prepare(&app, &pool, &meeting).await {
-            Ok((context, language)) => {
-                SummaryService::process_transcript_background(
-                    app.clone(),
-                    pool.clone(),
-                    meeting.clone(),
-                    String::new(),
-                    SummaryProviderRequest::Automatic(AuthorizedRequest { request, check }),
-                    context.prompt,
-                    context.title,
-                    context.template,
-                    language,
-                    true,
-                    &job,
-                )
-                .await;
-            }
-            Err(reason) => {
-                let _ = SummaryProcessesRepository::update_process_failed(&pool, &meeting, &reason)
+        let authorized = AuthorizedRequest { request, check };
+        loop {
+            let prepared = super::llm_client::with_cancellation(
+                Some(job.token()),
+                prepare(&app, &pool, &meeting),
+            )
+            .await;
+            match prepared {
+                Ok((context, language)) => {
+                    SummaryService::process_transcript_background(
+                        app.clone(),
+                        pool.clone(),
+                        meeting.clone(),
+                        String::new(),
+                        SummaryProviderRequest::Automatic(authorized.clone()),
+                        context.prompt,
+                        context.template,
+                        language,
+                        true,
+                        &job,
+                    )
                     .await;
+                }
+                Err(reason) => {
+                    super::service::finish_provider_error(&pool, &meeting, job.token(), &reason)
+                        .await;
+                }
+            }
+            if !local || !resume_after_preemption(&app, &pool, &meeting, &mut job).await {
+                break;
             }
         }
         let ready = SummaryProcessesRepository::get_summary_data(&pool, &meeting)
@@ -508,6 +541,48 @@ async fn launch<R: Runtime>(
             notify_ready(&app, &pool, &meeting).await;
         }
     })))
+}
+
+async fn resume_after_preemption<R: Runtime>(
+    app: &AppHandle<R>,
+    pool: &SqlitePool,
+    meeting: &str,
+    job: &mut super::service::SummaryJob,
+) -> bool {
+    let Ok(Some(paused)) = SummaryProcessesRepository::get_summary_data(pool, meeting).await else {
+        return false;
+    };
+    if paused.status != "cancelled" || paused.error.as_deref() != Some(PAUSED_FOR_INFERENCE) {
+        return false;
+    }
+    loop {
+        if !job.renew_after_preemption() {
+            super::service::finish_provider_error(pool, meeting, job.token(), PAUSED_FOR_INFERENCE)
+                .await;
+            return false;
+        }
+        let _ = app.emit(CHANGED_EVENT, meeting);
+        // Each native request takes its own permit and rechecks consent at dispatch.
+        if crate::audio::inference::wait_for_job(job.token())
+            .await
+            .map(drop)
+            .is_ok()
+        {
+            break;
+        }
+    }
+    let Ok(Some(fingerprint)) = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT automatic_request_fingerprint FROM summary_processes WHERE meeting_id = ?",
+    )
+    .bind(meeting)
+    .fetch_one(pool)
+    .await
+    else {
+        return false;
+    };
+    SummaryProcessesRepository::claim_automatic_resume(pool, meeting, &fingerprint)
+        .await
+        .unwrap_or(false)
 }
 
 async fn record_outcome<R: Runtime>(
