@@ -32,7 +32,10 @@ mod tests {
             "markdown":"Generated",
             "english_cache":{"markdown":"Previous English text"},
             "generation":{"model":"example-model","template":"Standard","transcript_fingerprint":"original"},
-            "structured_meeting_output":{"follow_up_email":{"subject":"Next steps","body_markdown":"Send draft"}}
+            "structured_meeting_output":{
+                "action_items":[{"task":"Send draft", "owner":"Dana"}],
+                "follow_up_email":{"subject":"Next steps","body_markdown":"Send draft"}
+            }
         });
         assert!(SummaryProcessesRepository::complete_for_revision(
             &pool,
@@ -64,6 +67,10 @@ mod tests {
         assert_ne!(row.current_content_revision, Some(revision));
         assert_eq!(saved["generation"]["model"], "example-model");
         assert_eq!(saved["follow_up_email"]["subject"], "Next steps");
+        assert_eq!(
+            saved["structured_meeting_output"]["action_items"][0]["owner"],
+            "Dana"
+        );
         assert!(saved.get("english_cache").is_none());
     }
 
@@ -515,7 +522,7 @@ impl SummaryProcessesRepository {
             ));
         }
 
-        // Editing replaces the document, not its generation provenance or companion email.
+        // Keep the generation provenance, structured suggestions, and email when editing the document.
         // Never reuse the English generation cache after an edit.
         let previous: Option<String> =
             sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id = ?")
@@ -530,6 +537,7 @@ impl SummaryProcessesRepository {
                 "generation",
                 "transcript_content_revision",
                 "follow_up_email",
+                "structured_meeting_output",
             ] {
                 if let Some(value) = previous.get(key) {
                     saved[key] = value.clone();

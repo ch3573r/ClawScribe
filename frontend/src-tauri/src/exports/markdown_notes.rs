@@ -196,6 +196,7 @@ static SOURCE_LINK: Lazy<Regex> =
 pub fn parse_action_items(markdown: &str) -> Vec<ExportActionItem> {
     parse_action_suggestions(markdown)
         .into_iter()
+        .filter(|item| !item.done)
         .map(|item| item.action)
         .collect()
 }
@@ -310,13 +311,13 @@ pub(crate) fn parse_action_suggestions(markdown: &str) -> Vec<ActionSuggestion> 
     items
 }
 
-fn source_key(text: &str) -> Option<String> {
+pub(super) fn source_key(text: &str) -> Option<String> {
     SOURCE_LINK
         .captures(text)
         .map(|captures| captures[1].to_owned())
 }
 
-fn action_suggestion(
+pub(super) fn action_suggestion(
     text: &str,
     owner: Option<&str>,
     due: Option<&str>,
@@ -494,6 +495,15 @@ fn plain_excerpt(markdown: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_export_excludes_completed_tasks_with_their_original_positions_reserved() {
+        let markdown = "## Action items\n- [x] Already sent\n- [ ] Send the revised draft";
+        let open = parse_action_items(markdown);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].task, "Send the revised draft");
+        assert_eq!(open[0].local_action_id, "action-2");
+    }
 
     #[test]
     fn parses_localized_lists_and_project_sync_tables() {

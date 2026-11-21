@@ -9,7 +9,7 @@ pub const SOURCE_INSTRUCTION: &str = "For each factual summary point, decision a
 const PASSAGE_MAX_BYTES: usize = 240;
 const PASSAGE_MAX_SECONDS: f64 = 10.0;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SummarySource {
     pub key: String,
     pub transcript_id: String,
@@ -17,6 +17,28 @@ pub struct SummarySource {
     pub transcript_ids: Vec<String>,
     fingerprint: String,
     pub timestamp: Option<f64>,
+}
+
+impl SummarySource {
+    pub(crate) fn valid_reference(&self) -> bool {
+        let fingerprint = self
+            .fingerprint
+            .strip_prefix("v2:")
+            .unwrap_or(&self.fingerprint);
+        self.ids()
+            .iter()
+            .all(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
+            && self.transcript_ids.len() <= 250
+            && self
+                .transcript_ids
+                .first()
+                .is_none_or(|first| first == &self.transcript_id)
+            && fingerprint.len() == 64
+            && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && self
+                .timestamp
+                .is_none_or(|value| value.is_finite() && value >= 0.0)
+    }
 }
 
 fn legacy_fingerprint(row: &Transcript, speaker: Option<&str>) -> String {
@@ -351,31 +373,25 @@ pub fn attach(result: &mut serde_json::Value, sources: &[SummarySource]) {
         .get("markdown")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let actions = result
+        .pointer("/structured_meeting_output/action_items")
+        .map(|value| value.to_string())
+        .unwrap_or_default();
     let cited: Vec<&SummarySource> = sources
         .iter()
-        .filter(|source| markdown.contains(&format!("#clawscribe-source-{}", source.key)))
+        .filter(|source| {
+            let anchor = format!("#clawscribe-source-{}", source.key);
+            markdown.contains(&anchor) || actions.contains(&anchor)
+        })
         .collect();
     result["summary_sources"] = serde_json::to_value(cited).expect("serializable summary sources");
 }
 
 async fn saved_sources(pool: &SqlitePool, meeting: &str) -> Result<Vec<SummarySource>, String> {
-    let result: Option<String> =
-        sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id = ?")
-            .bind(meeting)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| "Could not read summary references")?
-            .flatten();
-    let Some(raw) = result else {
+    let Some(data) = saved_result(pool, meeting).await? else {
         return Ok(Vec::new());
     };
-    let data: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|_| "Could not read saved summary")?;
-    let Some(sources) = data.get("summary_sources") else {
-        return Ok(Vec::new());
-    };
-    let sources: Vec<SummarySource> =
-        serde_json::from_value(sources.clone()).map_err(|_| "Could not read saved sources")?;
+    let sources = sources_in_result(&data)?;
     let content = data
         .get("summary_json")
         .map(|blocks| blocks.to_string())
@@ -391,6 +407,29 @@ async fn saved_sources(pool: &SqlitePool, meeting: &str) -> Result<Vec<SummarySo
         .collect())
 }
 
+pub(crate) async fn saved_result(
+    pool: &SqlitePool,
+    meeting: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let result: Option<String> =
+        sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id = ?")
+            .bind(meeting)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| "Could not read summary references")?
+            .flatten();
+    result
+        .map(|raw| serde_json::from_str(&raw).map_err(|_| "Could not read saved summary".into()))
+        .transpose()
+}
+
+pub(crate) fn sources_in_result(data: &serde_json::Value) -> Result<Vec<SummarySource>, String> {
+    let Some(sources) = data.get("summary_sources") else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_value(sources.clone()).map_err(|_| "Could not read saved sources".into())
+}
+
 #[derive(Serialize)]
 pub struct ResolvedSource {
     transcript_id: String,
@@ -403,6 +442,14 @@ pub struct ResolvedSource {
 async fn resolve(pool: &SqlitePool, meeting: &str, key: &str) -> Result<ResolvedSource, String> {
     let source = saved_sources(pool, meeting).await?.into_iter().find(|s| s.key == key)
         .ok_or("This reference was not part of the saved summary. Regenerate the summary to refresh its sources.")?;
+    resolve_passage(pool, meeting, source).await
+}
+
+pub(crate) async fn resolve_passage(
+    pool: &SqlitePool,
+    meeting: &str,
+    source: SummarySource,
+) -> Result<ResolvedSource, String> {
     let mut transaction = pool
         .begin()
         .await

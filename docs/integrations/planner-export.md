@@ -13,6 +13,8 @@ summaries can misread ownership, due dates, or action boundaries.
    If a regenerated summary contains other suggestions, **Review suggestions**
    opens the saved list. Choose **Add summary suggestions**, review the actions,
    and save before reopening the export.
+   Suggestions available only in structured summary output go through this
+   review. Completed summary checklist items stay out of export.
 4. User reviews, edits, and deselects tasks.
 5. User selects a plan and bucket, or creates a bucket when available.
 6. ClawScribe creates only the selected tasks.
@@ -59,12 +61,14 @@ Mapping rules:
 ## Duplicate Protection
 
 Planner task creation is not naturally idempotent. ClawScribe saves an attempt
-before each remote create and its result immediately afterwards. A matching
-re-export skips confirmed tasks, including successful items from a partial batch.
+before each remote create and its resulting task ID immediately afterwards.
+If the description fails, re-export the same action to repair it using that
+task ID. An existing description is preserved. This also applies to older
+history whose task ID is available but whose details status was never saved.
 Exports stop when this history cannot be read or saved.
 
-An interrupted submission can have an unknown outcome and is not automatically
-retried. Check Planner before creating another task. A saved action retains its
+If submission was interrupted, check Planner and use **Resolve outcome** in
+Export history before retrying. A saved action retains its
 identity when edited and is scoped to the Microsoft account, plan, and bucket.
 Adding a task to the selection preserves the history for tasks already submitted.
 Ambiguous matches with older suggestions are held for review. See
@@ -77,6 +81,7 @@ The ledger stores:
 - plan/bucket IDs
 - dedupe keys
 - status and sanitized error codes
+- whether the description still needs to be saved
 - timestamps
 
 It must not store Microsoft tokens or raw auth material.

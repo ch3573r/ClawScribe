@@ -1,7 +1,6 @@
 "use client";
 
 export interface ConfluenceDraftInput {
-  meetingId: string;
   meetingTitle: string;
   meetingCreatedAt?: string | null;
   summaryMarkdown: string;
@@ -23,17 +22,15 @@ function formatDateTime(value?: string | null): string {
 }
 
 export function buildConfluenceDraftMarkdown({
-  meetingId,
   meetingTitle,
   meetingCreatedAt,
   summaryMarkdown,
 }: ConfluenceDraftInput): string {
   const title = meetingTitle.trim() || "Untitled meeting";
-  const body = summaryMarkdown.replace(/\[([^\]\n]*)\]\(#clawscribe-source-[0-9a-f]+\)/g, "($1)").trim();
+  const body = summaryMarkdown.replace(/\[([^\]\n]*)\]\(#clawscribe-source-[0-9a-f]+\)/gi, "($1)").trim();
   return [
     `# ${title}`,
     "",
-    `**Meeting ID:** ${meetingId}`,
     `**Meeting date:** ${formatDateTime(meetingCreatedAt)}`,
     `**Prepared by:** ClawScribe`,
     "",
@@ -53,15 +50,13 @@ function escapeHtml(value: string): string {
 }
 
 function inlineMarkdownToHtml(value: string): string {
-  let html = escapeHtml(value);
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-  html = html.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
-    '<a href="$2">$1</a>',
-  );
-  return html;
+  return value.split(/(`[^`]+`)/g).map((part, index) => {
+    if (index % 2) return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
+    return escapeHtml(part)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
+  }).join("");
 }
 
 function splitTableRow(line: string): string[] {
@@ -90,37 +85,73 @@ function isTableDelimiter(line: string | undefined, columns: number): boolean {
   return cells.length === columns && cells.every(cell => /^:?-{3,}:?$/.test(cell));
 }
 
-export function markdownToConfluenceHtml(markdown: string): string {
-  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.+)$/;
+
+function renderBlocks(lines: string[], quoteDepth = 0): string {
   const html: string[] = [];
-  let listType: "ul" | "ol" | null = null;
-
-  const closeList = () => {
-    if (!listType) return;
-    html.push(`</${listType}>`);
-    listType = null;
+  const lists: { indent: number; tag: "ul" | "ol" }[] = [];
+  const closeItem = () => { html[html.length - 1] += "</li>"; };
+  const closeLists = (indent = -1) => {
+    while (lists.length && lists[lists.length - 1].indent > indent) {
+      closeItem();
+      html.push(`</${lists.pop()!.tag}>`);
+    }
   };
-
-  const openList = (nextType: "ul" | "ol") => {
-    if (listType === nextType) return;
-    closeList();
-    listType = nextType;
-    html.push(`<${nextType}>`);
+  const addItem = (indent: number, tag: "ul" | "ol", content: string, start?: number) => {
+    closeLists(indent);
+    const current = lists[lists.length - 1];
+    if (current?.indent === indent && current.tag !== tag) {
+      closeLists(indent - 1);
+    }
+    const sameList = lists[lists.length - 1]?.indent === indent;
+    if (sameList) closeItem();
+    else {
+      lists.push({ indent, tag });
+      html.push(`<${tag}${start !== undefined && start !== 1 ? ` start="${start}"` : ""}>`);
+    }
+    html.push(`<li>${content}`);
   };
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index].trimEnd();
     const trimmed = line.trim();
+    const leading = line.length - line.trimStart().length;
+    const indent = line.slice(0, leading).replace(/\t/g, "    ").length;
 
     if (!trimmed) {
-      closeList();
+      if (!LIST_ITEM.test(lines[index + 1] ?? "")) closeLists();
+      continue;
+    }
+
+    const fence = /^(`{3,}|~{3,})(.*)$/.exec(trimmed);
+    if (fence) {
+      closeLists(indent - 1);
+      const code: string[] = [];
+      const closeFence = new RegExp(`^${fence[1][0]}{${fence[1].length},}$`);
+      while (index + 1 < lines.length && !closeFence.test(lines[index + 1].trim())) {
+        const line = lines[++index];
+        const remove = Math.min(leading, line.length - line.trimStart().length);
+        code.push(line.slice(remove));
+      }
+      if (index + 1 < lines.length) index++;
+      html.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+      continue;
+    }
+
+    if (trimmed.startsWith(">") && quoteDepth < 32) {
+      closeLists(indent - 1);
+      const quote = [trimmed.replace(/^> ?/, "")];
+      while (lines[index + 1]?.trimStart().startsWith(">")) {
+        quote.push(lines[++index].trimStart().replace(/^> ?/, ""));
+      }
+      html.push("<blockquote>", renderBlocks(quote, quoteDepth + 1), "</blockquote>");
       continue;
     }
 
     if (trimmed.startsWith("|")) {
       const header = splitTableRow(trimmed);
       if (isTableDelimiter(lines[index + 1], header.length)) {
-        closeList();
+        closeLists(indent - 1);
         index++;
         const table = [`<table><tbody><tr>${header.map(cell => `<th>${inlineMarkdownToHtml(cell)}</th>`).join("")}</tr>`];
         while (lines[index + 1]?.trim().startsWith("|")) {
@@ -135,39 +166,39 @@ export function markdownToConfluenceHtml(markdown: string): string {
 
     const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed);
     if (heading) {
-      closeList();
+      closeLists(indent - 1);
       const level = Math.min(heading[1].length, 6);
       html.push(`<h${level}>${inlineMarkdownToHtml(heading[2])}</h${level}>`);
       continue;
     }
 
     if (/^[-*_]{3,}$/.test(trimmed)) {
-      closeList();
+      closeLists(indent - 1);
       html.push("<hr />");
       continue;
     }
 
-    const bullet = /^[-*]\s+(.+)$/.exec(trimmed);
-    if (bullet) {
-      openList("ul");
-      html.push(`<li>${inlineMarkdownToHtml(bullet[1])}</li>`);
+    const item = LIST_ITEM.exec(line);
+    if (item) {
+      const [, , marker, checked, content] = item;
+      const prefix = checked === undefined ? "" : checked === " " ? "☐ " : "☑ ";
+      const ordered = /^\d/.test(marker);
+      addItem(indent, ordered ? "ol" : "ul", prefix + inlineMarkdownToHtml(content),
+        ordered ? Number.parseInt(marker, 10) : undefined);
       continue;
     }
 
-    const numbered = /^\d+\.\s+(.+)$/.exec(trimmed);
-    if (numbered) {
-      openList("ol");
-      html.push(`<li>${inlineMarkdownToHtml(numbered[1])}</li>`);
-      continue;
-    }
-
-    closeList();
+    closeLists(indent - 1);
     html.push(`<p>${inlineMarkdownToHtml(trimmed)}</p>`);
   }
 
-  closeList();
+  closeLists();
+  return html.join("\n");
+}
 
-  return `<div data-clawscribe-confluence-draft="true">${html.join("\n")}</div>`;
+export function markdownToConfluenceHtml(markdown: string): string {
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  return `<div data-clawscribe-confluence-draft="true">${renderBlocks(lines)}</div>`;
 }
 
 export async function writeConfluenceDraftToClipboard(
@@ -181,8 +212,12 @@ export async function writeConfluenceDraftToClipboard(
       "text/html": new Blob([html], { type: "text/html" }),
       "text/plain": new Blob([markdown], { type: "text/plain" }),
     });
-    await navigator.clipboard.write([item]);
-    return "rich";
+    try {
+      await navigator.clipboard.write([item]);
+      return "rich";
+    } catch {
+      // Some editors or WebViews accept only the text clipboard format.
+    }
   }
 
   await navigator.clipboard.writeText(markdown);

@@ -5,8 +5,11 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-use crate::exports::markdown_notes::parse_action_suggestions;
+use crate::exports::markdown_notes::{
+    action_suggestion, parse_action_suggestions, source_key, ActionSuggestion,
+};
 use crate::state::AppState;
+use crate::summary::sources::{self, ResolvedSource, SummarySource};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -15,7 +18,7 @@ pub struct LegacyAction {
     pub title_hash: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReviewedAction {
     pub id: String,
@@ -25,6 +28,8 @@ pub struct ReviewedAction {
     pub done: bool,
     pub source_key: Option<String>,
     pub legacy_action: Option<LegacyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<SummarySource>,
 }
 
 pub(super) async fn load(
@@ -94,6 +99,11 @@ fn validate(actions: &mut Vec<ReviewedAction>) -> Result<(), String> {
         }) {
             return Err("Invalid action suggestion reference.".into());
         }
+        if action.source.as_ref().is_some_and(|source| {
+            action.source_key.as_deref() != Some(source.key.as_str()) || !source.valid_reference()
+        }) {
+            return Err("Invalid saved action source reference.".into());
+        }
     }
     Ok(())
 }
@@ -109,7 +119,7 @@ pub async fn get_reviewed_meeting_actions(
 }
 
 pub(super) fn remaining_suggestions(
-    markdown: &str,
+    suggestions: Vec<ActionSuggestion>,
     reviewed: &[ReviewedAction],
 ) -> Vec<ReviewedAction> {
     // Positions can move on regeneration. Consume each original title once so
@@ -121,7 +131,7 @@ pub(super) fn remaining_suggestions(
     {
         *counts.entry(legacy.title_hash.as_str()).or_insert(0usize) += 1;
     }
-    parse_action_suggestions(markdown)
+    suggestions
         .into_iter()
         .filter_map(|suggestion| {
             let hash = super::planner::action_hash(&suggestion.action);
@@ -149,17 +159,104 @@ pub(super) fn remaining_suggestions(
                 done: suggestion.done,
                 source_key: suggestion.source_key,
                 legacy_action: Some(legacy_action),
+                source: None,
             }
         })
         .collect()
 }
 
+pub(super) fn summary_suggestions(
+    markdown: &str,
+    summary: Option<&serde_json::Value>,
+) -> Vec<ActionSuggestion> {
+    let mut suggestions = parse_action_suggestions(markdown);
+    let mut seen = HashMap::<String, Vec<usize>>::new();
+    for (index, suggestion) in suggestions.iter().enumerate().rev() {
+        seen.entry(super::planner::action_hash(&suggestion.action))
+            .or_default()
+            .push(index);
+    }
+    let Some(actions) = summary
+        .and_then(|summary| summary.pointer("/structured_meeting_output/action_items"))
+        .and_then(|items| items.as_array())
+    else {
+        return suggestions;
+    };
+    for item in actions.iter().take(250) {
+        let text = |field| item.get(field).and_then(|value| value.as_str());
+        let Some(task) = text("task") else { continue };
+        let Some(mut suggestion) = action_suggestion(task, text("owner"), text("due_date"), None)
+        else {
+            continue;
+        };
+        suggestion.source_key = suggestion
+            .source_key
+            .or_else(|| text("source_timestamp").and_then(source_key));
+        let hash = super::planner::action_hash(&suggestion.action);
+        if let Some(index) = seen.get_mut(&hash).and_then(Vec::pop) {
+            let rendered = &mut suggestions[index];
+            rendered.source_key = rendered.source_key.take().or(suggestion.source_key);
+            rendered.action.owner = rendered.action.owner.take().or(suggestion.action.owner);
+            rendered.action.due_date = rendered
+                .action
+                .due_date
+                .take()
+                .or(suggestion.action.due_date);
+        } else if !seen.contains_key(&hash) {
+            suggestion.action.local_action_id = format!("action-{}", suggestions.len() + 1);
+            suggestions.push(suggestion);
+            seen.insert(hash, Vec::new());
+        }
+    }
+    suggestions
+}
+
 #[tauri::command]
-pub fn suggest_meeting_actions(
+pub async fn suggest_meeting_actions(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
     markdown: String,
     reviewed: Option<Vec<ReviewedAction>>,
-) -> Vec<ReviewedAction> {
-    remaining_suggestions(&markdown, reviewed.as_deref().unwrap_or_default())
+) -> Result<Vec<ReviewedAction>, String> {
+    let summary = sources::saved_result(state.db_manager.pool(), &meeting_id).await?;
+    Ok(remaining_suggestions(
+        summary_suggestions(&markdown, summary.as_ref()),
+        reviewed.as_deref().unwrap_or_default(),
+    ))
+}
+
+#[tauri::command]
+pub async fn resolve_reviewed_action_source(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    action_id: String,
+    key: String,
+) -> Result<ResolvedSource, String> {
+    resolve_action_source(state.db_manager.pool(), &meeting_id, &action_id, &key).await
+}
+
+async fn resolve_action_source(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    action_id: &str,
+    key: &str,
+) -> Result<ResolvedSource, String> {
+    let saved = load(pool, meeting_id)
+        .await?
+        .unwrap_or_default()
+        .into_iter()
+        .find(|action| action.id == action_id && action.source_key.as_deref() == Some(key));
+    if let Some(source) = saved.and_then(|action| action.source) {
+        return sources::resolve_passage(pool, meeting_id, source).await;
+    }
+    let summary = sources::saved_result(pool, meeting_id)
+        .await?
+        .unwrap_or_default();
+    let source = sources::sources_in_result(&summary)?
+        .into_iter()
+        .find(|source| source.key == key)
+        .ok_or("This action's original source is no longer available.")?;
+    sources::resolve_passage(pool, meeting_id, source).await
 }
 
 #[tauri::command]
@@ -176,33 +273,143 @@ async fn save(
     meeting_id: &str,
     mut actions: Vec<ReviewedAction>,
 ) -> Result<(), String> {
+    // Snapshot the existing evidence and the current generation in the same
+    // transaction. Fields supplied by the editor never replace saved evidence.
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|_| "Could not save meeting actions.")?;
+    let previous: Option<String> =
+        sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| "Could not load meeting actions.")?
+            .ok_or("Meeting no longer exists.")?;
+    let mut previous: HashMap<_, _> = previous
+        .as_deref()
+        .map(decode)
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|action| (action.id.clone(), action))
+        .collect();
+    for action in &mut actions {
+        action.source = None;
+        if let Some(original) = previous.remove(&action.id) {
+            action.source_key = original.source_key;
+            action.source = original.source;
+            action.legacy_action = original.legacy_action;
+        }
+    }
     validate(&mut actions)?;
+    if actions
+        .iter()
+        .any(|action| action.source_key.is_some() && action.source.is_none())
+    {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id = ?")
+                .bind(meeting_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|_| "Could not read action sources.")?
+                .flatten();
+        let result = raw
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default();
+        let manifest = sources::sources_in_result(&result)?;
+        for action in &mut actions {
+            if action.source.is_none() {
+                action.source = manifest
+                    .iter()
+                    .find(|source| {
+                        Some(source.key.as_str()) == action.source_key.as_deref()
+                            && source.valid_reference()
+                    })
+                    .cloned();
+            }
+        }
+    }
     let raw = serde_json::to_string(&actions).map_err(|_| "Could not prepare meeting actions.")?;
     let result = sqlx::query("UPDATE meetings SET reviewed_actions = ? WHERE id = ?")
         .bind(raw)
         .bind(meeting_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| "Could not save meeting actions.")?;
     if result.rows_affected() != 1 {
         return Err("Meeting no longer exists.".into());
     }
-    Ok(())
+    transaction
+        .commit()
+        .await
+        .map_err(|_| "Could not save meeting actions.".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn structured_suggestion_retains_its_transcript_source_after_summary_replacement() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        let snapshot = sources::prepare_snapshot(&pool, meeting, String::new(), false)
+            .await
+            .unwrap();
+        let key = snapshot.sources[0].key.as_str();
+        let mut summary = serde_json::json!({
+            "markdown":"## Decisions\nProceed with the project.",
+            "structured_meeting_output": {"action_items":[{
+                "task":"Send the project notes", "owner":"Dana", "due_date":"2026-12-04", "source_timestamp":"[S1]"
+            }]}
+        });
+        sources::attach(&mut summary, &snapshot.sources);
+        sqlx::query("INSERT INTO summary_processes (meeting_id, status, created_at, updated_at, result) VALUES (?, 'completed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
+            .bind(meeting).bind(summary.to_string()).execute(&pool).await.unwrap();
+        let rows = remaining_suggestions(
+            summary_suggestions("## Decisions\nProceed with the project.", Some(&summary)),
+            &[],
+        );
+        assert_eq!(rows[0].source_key.as_deref(), Some(key));
+        assert_eq!(rows[0].owner.as_deref(), Some("Dana"));
+        assert_eq!(rows[0].due_date.as_deref(), Some("2026-12-04"));
+        assert!(load(&pool, meeting).await.unwrap().is_none());
+        let id = rows[0].id.clone();
+        save(&pool, meeting, rows).await.unwrap();
+
+        sqlx::query("UPDATE summary_processes SET result = ? WHERE meeting_id = ?")
+            .bind(serde_json::json!({"markdown":"Replacement summary"}).to_string())
+            .bind(meeting)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut rows = load(&pool, meeting).await.unwrap().unwrap();
+        rows[0].title = "Send the reviewed notes".into();
+        save(&pool, meeting, rows).await.unwrap();
+        let passage = resolve_action_source(&pool, meeting, &id, key)
+            .await
+            .unwrap();
+        let passage = serde_json::to_value(passage).unwrap();
+        assert_eq!(passage["transcript_id"], "a");
+        assert_eq!(passage["stale"], false);
+        assert_eq!(passage["text"], "Äpfel project");
+    }
+
     #[test]
     fn reordered_actions_keep_their_review_and_new_suggestions_can_be_added() {
-        let mut reviewed =
-            remaining_suggestions("## Action items\n- Send report\n- Review plan", &[]);
+        let mut reviewed = remaining_suggestions(
+            summary_suggestions("## Action items\n- Send report\n- Review plan", None),
+            &[],
+        );
         assert_eq!(reviewed.len(), 2);
         reviewed[0].title = "Send revised report".into();
         reviewed[1].done = true;
         let remaining = remaining_suggestions(
-            "## Action items\n- Review plan\n- Confirm budget\n- Send report",
+            summary_suggestions(
+                "## Action items\n- Review plan\n- Confirm budget\n- Send report",
+                None,
+            ),
             &reviewed,
         );
         assert_eq!(remaining.len(), 1);
@@ -227,9 +434,16 @@ mod tests {
         .await
         .unwrap();
         assert!(load(&pool, "existing").await.unwrap().is_none());
-        let mut actions = suggest_meeting_actions(
-            "## Aufgaben\n- [x] Bericht senden [00:01:18](#clawscribe-source-abc123)".into(),
-            None,
+        sqlx::query("CREATE TABLE summary_processes (meeting_id TEXT PRIMARY KEY, result TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut actions = remaining_suggestions(
+            summary_suggestions(
+                "## Aufgaben\n- [x] Bericht senden [00:01:18](#clawscribe-source-abc123)",
+                None,
+            ),
+            &[],
         );
         assert!(actions[0].done);
         assert_eq!(actions[0].source_key.as_deref(), Some("abc123"));

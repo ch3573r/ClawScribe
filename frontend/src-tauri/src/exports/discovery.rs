@@ -147,11 +147,13 @@ pub(super) async fn create_section_checked<T: GraphTransport, S: Sleeper>(
         correlation_id: uuid::Uuid::new_v4().to_string(),
         headers: Vec::new(),
     };
-    let unknown = || SectionCreateError {
+    let unknown = || {
+        SectionCreateError {
         outcome_unknown: true,
         message:
-            "OneNote did not confirm the new section. Check the notebook before creating another."
+              "OneNote did not confirm the new section. Check the notebook and resolve the outcome in Export history."
                 .into(),
+    }
     };
     match client.execute_create(&request, token).await {
         GraphOutcome::Success(response) => serde_json::from_str::<SectionInfo>(&response.body)

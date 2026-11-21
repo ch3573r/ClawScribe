@@ -6,6 +6,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tauri::{AppHandle, Runtime};
+
+use super::exporter::now_rfc3339;
+use super::ledger::{artifact_key_hash, valid_remote_id, ExportLedger};
+use super::model::ExportStatus;
 
 const SERVICE_NAME: &str = "net.rismondo.openclaw.clawscribe.confluence";
 const ACCOUNT_NAME: &str = "default";
@@ -42,19 +47,9 @@ struct ConfluenceUser {
 }
 
 #[derive(Debug, Deserialize)]
-struct ConfluenceLinks {
-    #[serde(default)]
-    base: Option<String>,
-    #[serde(default)]
-    webui: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct CreatePageResponse {
     id: String,
     title: String,
-    #[serde(default, rename = "_links")]
-    links: Option<ConfluenceLinks>,
 }
 
 #[derive(Debug)]
@@ -355,18 +350,16 @@ async fn check_connection(token: &BoundPat, base_url: &str) -> Result<Option<Str
 }
 
 #[tauri::command]
-pub async fn confluence_export_page(
+pub async fn confluence_export_page<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
     base_url: String,
     space_key: String,
     parent_id: Option<String>,
     title: String,
     body_storage: String,
 ) -> Result<ConfluenceExportResponse, String> {
-    let _work = crate::updates::admit_work()?;
-    let token = load_pat_from_keyring()
-        .map_err(|e| e.to_string())?
-        .ok_or(ConfluenceError::MissingToken)
-        .map_err(|e| e.to_string())?;
+    let _guard = super::commands::export_guard()?;
     let space_key = space_key.trim();
     let title = title.trim();
     let body_storage = body_storage.trim();
@@ -400,37 +393,128 @@ pub async fn confluence_export_page(
         payload["ancestors"] = serde_json::json!([{ "id": parent }]);
     }
 
-    let allow_unencrypted = token.allow_unencrypted;
-    let token = token.token_for(&base_url).map_err(|e| e.to_string())?;
     let url = api_url(&base_url, "/rest/api/content").map_err(|e| e.to_string())?;
-    let http = http_client(&base_url, allow_unencrypted).await?;
-    let text = response_text_or_error(
-        http.post(url)
+    let base = normalize_base_url(&base_url).map_err(|e| e.to_string())?;
+    let canonical_base = url::Url::parse(&base).map_err(|_| "Invalid Confluence base URL.")?;
+    let key = format!(
+        "confluence:{}",
+        artifact_key_hash(&[
+            canonical_base.as_str(),
+            space_key,
+            parent_id.as_deref().unwrap_or("").trim()
+        ])
+    );
+    let mut ledger = super::commands::load_ledger(&app, &meeting_id).await?;
+    publish_page(&mut ledger, &key, &base, title, || async move {
+        let credential = load_pat_from_keyring()
+            .and_then(|token| token.ok_or(ConfluenceError::MissingToken))
+            .map_err(|error| PublishFailure::Preparation(error.to_string()))?;
+        let token = credential
+            .token_for(&base_url)
+            .map_err(|error| PublishFailure::Preparation(error.to_string()))?;
+        let http = http_client(&base_url, credential.allow_unencrypted)
+            .await
+            .map_err(PublishFailure::Preparation)?;
+        let response = http
+            .post(url)
             .bearer_auth(token)
             .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
             .json(&payload)
             .send()
             .await
-            .map_err(|e| ConfluenceError::Network(e.to_string()))
-            .map_err(|e| e.to_string())?,
-    )
+            .map_err(|_| PublishFailure::Unconfirmed)?;
+        let status = response.status().as_u16();
+        if status >= 500 || status == 408 || (300..400).contains(&status) {
+            return Err(PublishFailure::Unconfirmed);
+        }
+        if !response.status().is_success() {
+            return Err(PublishFailure::Rejected(status));
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|_| PublishFailure::Unconfirmed)?;
+        serde_json::from_str(&body).map_err(|_| PublishFailure::Unconfirmed)
+    })
     .await
-    .map_err(|e| e.to_string())?;
+}
 
-    let created: CreatePageResponse = serde_json::from_str(&text)
-        .map_err(|e| ConfluenceError::Parse(e.to_string()).to_string())?;
+#[derive(Debug)]
+enum PublishFailure {
+    Preparation(String),
+    Rejected(u16),
+    Unconfirmed,
+}
 
-    let base = normalize_base_url(&base_url).map_err(|e| e.to_string())?;
-    let web_url = created.links.and_then(|links| {
-        let webui = links.webui?;
-        let response_base = links.base.unwrap_or_else(|| base.clone());
-        Some(format!("{}{}", response_base.trim_end_matches('/'), webui))
-    });
-
+async fn publish_page<F, Fut>(
+    ledger: &mut ExportLedger,
+    key: &str,
+    base_url: &str,
+    title: &str,
+    submit: F,
+) -> Result<ConfluenceExportResponse, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<CreatePageResponse, PublishFailure>>,
+{
+    const REVIEW: &str = "Check Confluence for the page, then resolve the outcome in Export history before publishing again.";
+    let (id, title) = if let Some(entry) = ledger.already_succeeded(key) {
+        (entry.resource_id.clone().ok_or(REVIEW)?, title.to_owned())
+    } else {
+        if !ledger.may_attempt(key) {
+            return Err(REVIEW.into());
+        }
+        ledger.begin_attempt(key, now_rfc3339());
+        ledger.label_attempt(key, title);
+        ledger.checkpoint().await?;
+        match submit().await {
+            Ok(page) if valid_remote_id(&page.id) => {
+                ledger.record_success(key, Some(page.id.clone()), None, now_rfc3339());
+                ledger.checkpoint().await.map_err(|_| REVIEW)?;
+                (page.id, page.title)
+            }
+            Err(PublishFailure::Rejected(status)) => {
+                ledger.record_failure(
+                    key,
+                    ExportStatus::Failed,
+                    Some(format!("confluence_http_{status}")),
+                    now_rfc3339(),
+                );
+                ledger.checkpoint().await?;
+                return Err(format!("Confluence declined the request (HTTP {status})."));
+            }
+            Err(PublishFailure::Preparation(message)) => {
+                ledger.record_failure(
+                    key,
+                    ExportStatus::Failed,
+                    Some("confluence_connection_unavailable".into()),
+                    now_rfc3339(),
+                );
+                ledger.checkpoint().await?;
+                return Err(message);
+            }
+            _ => {
+                ledger.record_failure(
+                    key,
+                    ExportStatus::UnknownAfterSubmit,
+                    Some("submission_unconfirmed".into()),
+                    now_rfc3339(),
+                );
+                ledger.checkpoint().await?;
+                return Err(REVIEW.into());
+            }
+        }
+    };
+    let web_url = api_url(base_url, "/pages/viewpage.action")
+        .ok()
+        .and_then(|value| url::Url::parse(&value).ok())
+        .map(|mut url| {
+            url.query_pairs_mut().append_pair("pageId", &id);
+            url.to_string()
+        });
     Ok(ConfluenceExportResponse {
-        page_id: created.id,
-        title: created.title,
+        page_id: id,
+        title,
         web_url,
     })
 }
@@ -438,6 +522,43 @@ pub async fn confluence_export_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lost_confluence_response_is_not_replayed_until_the_user_reconciles_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        let base = "https://confluence.example.com/wiki";
+        let key = format!("confluence:{}", artifact_key_hash(&[base, "TEST", ""]));
+        assert!(publish_page(&mut ledger, &key, base, "Notes", || async {
+            Err(PublishFailure::Unconfirmed)
+        })
+        .await
+        .is_err());
+
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        assert!(
+            publish_page(&mut ledger, &key, base, "Edited notes", || async {
+                panic!("uncertain publish was re-submitted")
+            })
+            .await
+            .is_err()
+        );
+        ledger
+            .reconcile(&key, Some("318".into()), now_rfc3339())
+            .unwrap();
+        ledger.checkpoint().await.unwrap();
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        let published = publish_page(&mut ledger, &key, base, "Edited notes", || async {
+            panic!("confirmed publish was re-submitted")
+        })
+        .await
+        .unwrap();
+        assert_eq!(published.page_id, "318");
+        assert_eq!(
+            published.web_url.as_deref(),
+            Some("https://confluence.example.com/wiki/pages/viewpage.action?pageId=318")
+        );
+    }
 
     #[test]
     fn pat_is_bound_to_saved_origin() {

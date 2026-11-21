@@ -36,6 +36,7 @@ export const confluenceExportService = {
   },
 
   exportPage(args: {
+    meetingId: string;
     baseUrl: string;
     spaceKey: string;
     parentId?: string | null;

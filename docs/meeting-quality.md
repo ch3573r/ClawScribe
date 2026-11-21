@@ -418,6 +418,12 @@ discards old summary and transcript loading results. Title-only saves leave note
 unchanged, and save failures retain drafts for retry; edits made during a write
 remain available for the next save.
 
+Manual edits keep the structured action list supplied by the summary provider.
+**Add summary suggestions** brings those follow-ups into **Meeting actions**
+for review. Saving an action with an available transcript reference keeps that
+passage reference with the action, including after summary regeneration. The
+app flags passages that changed and reports when their transcript was replaced.
+
 The shared summary processor now advances chunks from their actual emitted
 boundaries, rejects failed or empty chunk results, and stops rather than presenting
 an incomplete multi-chunk result as successful. It rejects empty transcript input.
