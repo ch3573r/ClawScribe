@@ -20,10 +20,11 @@ interface TranscriptFindProps {
   focusRequest: number;
   onStep: (direction: 1 | -1) => void;
   onClose: () => void;
+  onReplace?: () => void;
 }
 
 /** Find bar for the transcript. Enter goes to the next passage, Shift+Enter to the previous one. */
-export function TranscriptFind({ bindings = DEFAULT_PLAYER_BINDINGS, query, onQueryChange, current, total, complete = true, focusRequest, onStep, onClose }: TranscriptFindProps) {
+export function TranscriptFind({ bindings = DEFAULT_PLAYER_BINDINGS, query, onQueryChange, current, total, complete = true, focusRequest, onStep, onClose, onReplace }: TranscriptFindProps) {
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => { input.current?.focus(); input.current?.select(); }, [focusRequest]);
   const searching = query.trim().length > 0;
@@ -50,6 +51,7 @@ export function TranscriptFind({ bindings = DEFAULT_PLAYER_BINDINGS, query, onQu
     <Tooltip><TooltipTrigger asChild>
       <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Next match" disabled={total === 0} onClick={() => onStep(1)}><ChevronDown /></Button>
     </TooltipTrigger><TooltipContent>Next match (Enter)</TooltipContent></Tooltip>
+    {onReplace && <Button variant="ghost" size="sm" className="shrink-0" onClick={onReplace}>Replace…</Button>}
     <Tooltip><TooltipTrigger asChild>
       <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Close find" onClick={onClose}><X /></Button>
     </TooltipTrigger><TooltipContent>Close (Esc)</TooltipContent></Tooltip>

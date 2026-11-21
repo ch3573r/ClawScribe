@@ -11,14 +11,15 @@ import { ReplaceOptions, ReplacePreview, TextReplaceDialog } from './TextReplace
 import { TranscriptSegmentData } from '@/types';
 import { readLearnVocabulary, replacementSuggestion, vocabularySuggestions } from '@/lib/vocabulary-learning';
 import { offerVocabularyWords } from '@/lib/vocabulary-offer';
+import type { TranscriptTextPatch } from '@/lib/meetingTranscripts';
 
-interface EditResult { changed: number; file_warning: boolean }
+interface EditResult { changed: number; file_warning: boolean; patches: TranscriptTextPatch[] | null }
 interface EditState { can_undo: boolean; pending_file_sync: boolean; has_edits: boolean; can_restore_previous: boolean }
 
-export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, replaceOpen, onReplaceOpenChange, renderActions }: {
-  meetingId: string; editing: TranscriptSegmentData | null; onClose: () => void; onChanged?: () => Promise<void>;
+export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, replaceOpen, replaceQuery, onReplaceOpenChange, renderActions }: {
+  meetingId: string; editing: TranscriptSegmentData | null; onClose: () => void; onChanged?: (patches: TranscriptTextPatch[] | null) => void | Promise<void>;
   renderActions?: (actions: { busy: boolean; canUndo: boolean; canRestore: boolean; undo: () => void; restore: () => void }) => ReactNode;
-  replaceOpen: boolean; onReplaceOpenChange: (open: boolean) => void;
+  replaceOpen: boolean; replaceQuery?: string; onReplaceOpenChange: (open: boolean) => void;
 }) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -46,7 +47,7 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
     if (currentMeeting.current !== meetingId) return;
     setState(previous => ({ ...previous, pending_file_sync: result.file_warning }));
     toast.success(`${result.changed} transcript ${result.changed === 1 ? 'passage' : 'passages'} updated`, { description: 'Regenerate meeting notes to use the corrected text.' });
-    try { await refresh(); await onChanged?.(); }
+    try { await onChanged?.(result.patches); await refresh(); }
     catch { setError('The correction is saved. Reopen the meeting to refresh its transcript.'); }
   };
   const change = async (command: string, args: Record<string, unknown>, afterSaved?: () => void) => {
@@ -85,6 +86,6 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
         <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={busy || !text.trim() || text === editing?.text} onClick={() => editing && void change('api_update_transcript_text', { transcriptId: editing.id, expectedText: editing.text, text }, () => { if (readLearnVocabulary()) void offerVocabularyWords(vocabularySuggestions(editing.text, text)); })}>{busy ? 'Saving…' : 'Save correction'}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
-    <TextReplaceDialog key={meetingId} open={replaceOpen} onOpenChange={onReplaceOpenChange} title="transcript" preview={preview} apply={replace} />
+    <TextReplaceDialog key={meetingId} open={replaceOpen} initialQuery={replaceQuery} offerWholeWords onOpenChange={onReplaceOpenChange} title="transcript" preview={preview} apply={replace} />
   </>;
 }

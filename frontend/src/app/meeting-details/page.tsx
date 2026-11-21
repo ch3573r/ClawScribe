@@ -65,12 +65,14 @@ function MeetingDetailsContent() {
     timelineSegments,
     timelineComplete,
     transcripts,
+    isLoading: isLoadingTranscript,
     isLoadingMore,
     hasMore,
     totalCount,
     loadedCount,
     loadMore,
     refetch,
+    patchTranscriptText,
     revealSource,
     updateSpeaker,
     applySpeakerToMatching,
@@ -242,6 +244,7 @@ function MeetingDetailsContent() {
       await refetchMeetings();
     }}
     onRefetchTranscripts={refetch}
+    onPatchTranscriptText={patchTranscriptText}
     onRevealTranscript={revealSource}
     onUpdateTranscriptSpeaker={updateSpeaker}
     onApplySpeakerToMatching={applySpeakerToMatching}
@@ -250,6 +253,7 @@ function MeetingDetailsContent() {
     timelineSegments={timelineSegments}
     timelineComplete={timelineComplete}
     hasMore={hasMore}
+    isLoadingTranscript={isLoadingTranscript && !loadedCount}
     isLoadingMore={isLoadingMore}
     totalCount={totalCount}
     loadedCount={loadedCount}

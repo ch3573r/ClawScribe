@@ -1,5 +1,5 @@
 use crate::api::{MeetingDetails, MeetingTranscript, TranscriptWord};
-use crate::database::models::{MeetingModel, Transcript};
+use crate::database::models::{MeetingModel, Transcript, TranscriptTimelineRow};
 use chrono::Utc;
 use sqlx::{Connection, Error as SqlxError, SqliteConnection, SqlitePool};
 use tracing::{error, info};
@@ -233,6 +233,22 @@ impl MeetingsRepository {
         Ok((transcripts, total.0))
     }
 
+    pub async fn get_meeting_transcript_timeline(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<Vec<TranscriptTimelineRow>, SqlxError> {
+        // The review list uses this text for whole-meeting Find and follow-along.
+        // Read word alignment and other large fields only in the paged API.
+        sqlx::query_as(
+            "SELECT id, transcript AS text, original_transcript AS original_text,
+                    audio_start_time, audio_end_time, speaker
+             FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
+        )
+        .bind(meeting_id)
+        .fetch_all(pool)
+        .await
+    }
+
     pub async fn update_meeting_title(
         pool: &SqlitePool,
         meeting_id: &str,
@@ -396,6 +412,26 @@ async fn delete_meeting_with_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn timeline_keeps_saved_text_and_timing_without_word_alignment() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let timeline = MeetingsRepository::get_meeting_transcript_timeline(&pool, "review-test")
+            .await
+            .unwrap();
+        assert_eq!(timeline.len(), 2);
+        assert_eq!(timeline[1].text, "Project confirmed");
+        assert_eq!(timeline[1].audio_start_time, Some(900.));
+        assert!(serde_json::to_value(&timeline[1])
+            .unwrap()
+            .get("word_timestamps")
+            .is_none());
+        let (page, _) =
+            MeetingsRepository::get_meeting_transcripts_paginated(&pool, "review-test", 1, 1)
+                .await
+                .unwrap();
+        assert_eq!(page[0].word_timestamps_json.as_deref(), Some("[]"));
+    }
 
     #[tokio::test]
     async fn pagination_is_bounded_and_matches_full_transcript_order() {

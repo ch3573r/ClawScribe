@@ -12,7 +12,7 @@ use crate::{
         DEFAULT_MAI_TRANSCRIBE_MODEL, PROVIDER_CLOUD_WHISPER, PROVIDER_MAI_TRANSCRIBE,
     },
     database::{
-        models::MeetingModel,
+        models::{MeetingModel, TranscriptTimelineRow},
         repositories::{
             meeting::MeetingsRepository, setting::SettingsRepository,
             transcript::TranscriptsRepository,
@@ -315,7 +315,7 @@ fn normalize_speaker_label(speaker: Option<String>) -> Option<String> {
     }
 }
 
-fn parse_word_timestamps(value: Option<&str>) -> Option<Vec<TranscriptWord>> {
+pub(crate) fn parse_word_timestamps(value: Option<&str>) -> Option<Vec<TranscriptWord>> {
     value.and_then(|json| serde_json::from_str::<Vec<TranscriptWord>>(json).ok())
 }
 
@@ -1176,7 +1176,6 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
                 total_count
             );
 
-            // Convert Transcript to MeetingTranscript
             let meeting_transcripts = transcripts
                 .into_iter()
                 .map(|t| MeetingTranscript {
@@ -1205,6 +1204,16 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             Err(format!("Failed to retrieve transcripts: {}", e))
         }
     }
+}
+
+#[tauri::command]
+pub async fn api_get_meeting_transcript_timeline(
+    meeting_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<TranscriptTimelineRow>, String> {
+    MeetingsRepository::get_meeting_transcript_timeline(state.db_manager.pool(), &meeting_id)
+        .await
+        .map_err(|_| "Could not load the meeting timeline".into())
 }
 
 #[tauri::command]

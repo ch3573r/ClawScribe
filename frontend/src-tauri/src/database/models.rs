@@ -70,6 +70,20 @@ pub struct Transcript {
     pub word_timestamps_json: Option<String>,
 }
 
+#[derive(Debug, FromRow, Serialize)]
+pub struct TranscriptTimelineRow {
+    pub id: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_start_time: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_end_time: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct SummaryProcess {
     #[sqlx(default)]

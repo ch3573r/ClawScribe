@@ -8,8 +8,8 @@ import { bookmarkTime } from '@/lib/library';
 
 type ResolvedHit = SavedHit & { note_context?: [string, string] };
 
-export function SavedSearchRoute({ token, meetingId, onBookmark }: {
-  token: string; meetingId: string; onBookmark: (id: string | null) => void;
+export function SavedSearchRoute({ token, meetingId, onBookmark, onPlay }: {
+  token: string; meetingId: string; onBookmark: (id: string | null) => void; onPlay?: (seconds: number) => void;
 }) {
   const [hit, setHit] = useState<ResolvedHit | null>(null);
   const [error, setError] = useState('');
@@ -52,6 +52,8 @@ export function SavedSearchRoute({ token, meetingId, onBookmark }: {
   return <section ref={preview} tabIndex={-1} aria-label="Search result" className="shrink-0 border-b border-border bg-card px-4 py-2 text-sm">
     {error ? <div role="alert">{error} {error === 'Could not check the saved source.' && <Button variant="ghost" size="sm" onClick={() => setRetry(value => value + 1)}>Retry</Button>}</div>
       : hit ? <><h2 className="font-medium">{sourceLabel[hit.reference.source]}{hit.seconds != null && ` · ${bookmarkTime(hit.seconds)}`}</h2>
+        {hit.reference.source === 'bookmark' && hit.seconds != null && Number.isFinite(hit.seconds) && hit.seconds >= 0 && onPlay &&
+          <Button variant="outline" size="sm" className="my-1" onClick={() => onPlay(hit.seconds!)}>Play from bookmark</Button>}
         <blockquote className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words">{hit.note_context
           ? <>{hit.note_context[0]}<mark ref={noteMatch} className="bg-accent text-accent-foreground">{hit.text}</mark>{hit.note_context[1]}</>
           : hit.text}</blockquote></>

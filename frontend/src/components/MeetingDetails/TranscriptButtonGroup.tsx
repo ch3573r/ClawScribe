@@ -46,6 +46,7 @@ interface TranscriptButtonGroupProps {
   onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
   meetingFolderPath?: string | null;
+  audioAvailable?: boolean;
   onRefetchTranscripts?: () => Promise<void>;
 }
 
@@ -60,6 +61,7 @@ export function TranscriptButtonGroup({
   onOpenMeetingFolder,
   meetingId,
   meetingFolderPath,
+  audioAvailable = true,
   onRefetchTranscripts,
 }: TranscriptButtonGroupProps) {
   const [showDiarizationDialog, setShowDiarizationDialog] = useState(false);
@@ -257,12 +259,12 @@ export function TranscriptButtonGroup({
             <TooltipTrigger asChild><span className="block" tabIndex={0}>{recordingFolderAction}</span></TooltipTrigger>
             <TooltipContent>No recording folder is attached to this meeting.</TooltipContent>
           </Tooltip>}
-          {meetingId && meetingFolderPath && <DropdownMenuItem title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'} onClick={() => { Analytics.trackButtonClick('enhance_transcript', 'meeting_details'); onTranscribeOpenChange(true); }}>{transcriptCount === 0 ? 'Transcribe saved audio' : 'Enhance or retranscribe'}</DropdownMenuItem>}
+          {meetingId && meetingFolderPath && audioAvailable && <DropdownMenuItem title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'} onClick={() => { Analytics.trackButtonClick('enhance_transcript', 'meeting_details'); onTranscribeOpenChange(true); }}>{transcriptCount === 0 ? 'Transcribe saved audio' : 'Enhance or retranscribe'}</DropdownMenuItem>}
           {onFind && <DropdownMenuItem disabled={transcriptCount === 0} onSelect={onFind}>Find in transcript<DropdownMenuShortcut>{playerKeycaps(bindings.find).join('+')}</DropdownMenuShortcut></DropdownMenuItem>}
           {onAddBookmark && <DropdownMenuItem onSelect={onAddBookmark}>Add bookmark<DropdownMenuShortcut>{playerKeycaps(bindings.bookmark).join('+')}</DropdownMenuShortcut></DropdownMenuItem>}
           {correctionActions?.canUndo && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.undo}>Undo last correction</DropdownMenuItem>}
           {correctionActions?.canRestore && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.restore}>Restore previous transcript</DropdownMenuItem>}
-          {meetingId && canDetectSpeakers(hasRecordingFolder, transcriptCount) && <>
+          {meetingId && audioAvailable && canDetectSpeakers(hasRecordingFolder, transcriptCount) && <>
             <DropdownMenuSeparator /><DropdownMenuLabel>{isDiarizing ? diarizationMessage ?? 'Detecting speakers…' : 'Detect speakers'}</DropdownMenuLabel>
             <DropdownMenuItem disabled={speakerDetectionDisabled} onSelect={() => void handleRunSpeakerDiarization(null)}>Auto detect</DropdownMenuItem>
             {[2, 3, 4, 5, 6].map(count => <DropdownMenuItem key={count} disabled={speakerDetectionDisabled} onSelect={() => void handleRunSpeakerDiarization(count)}>{count} speakers</DropdownMenuItem>)}
@@ -272,7 +274,7 @@ export function TranscriptButtonGroup({
       </DropdownMenu>
 
 
-      {meetingId && meetingFolderPath && (
+      {meetingId && meetingFolderPath && audioAvailable && (
         <RetranscribeDialog
           open={transcribeOpen}
           onOpenChange={onTranscribeOpenChange}
