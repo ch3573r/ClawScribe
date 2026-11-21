@@ -156,7 +156,7 @@ export interface UseTranscriptRecoveryReturn {
   keepRecoverableMeeting: (meetingId: string) => Promise<void>;
   recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount?: number }>;
   loadMeetingTranscripts: (meetingId: string) => Promise<TranscriptPreview[]>;
-  saveOfflineTranscript: (meetingId: string) => Promise<OfflineTranscriptSaveResult>;
+  saveOfflineTranscript: (meetingId: string, fileCopy?: boolean) => Promise<OfflineTranscriptSaveResult>;
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
 }
 
@@ -230,7 +230,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     }
   }, [currentCandidate]);
 
-  const saveOfflineTranscript = useCallback(async (meetingId: string): Promise<OfflineTranscriptSaveResult> => {
+  const saveOfflineTranscript = useCallback(async (meetingId: string, fileCopy = false): Promise<OfflineTranscriptSaveResult> => {
     const candidate = currentCandidate(meetingId);
     if (!candidate.folderUnverified) throw new Error('Check the recording again before saving the transcript.');
     let transcripts;
@@ -243,7 +243,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     if (currentCandidate(meetingId) !== candidate) throw new Error('The recording list changed. Review the draft again.');
 
     try {
-      if (hasStableRecordingId(meetingId)) {
+      if (!fileCopy && hasStableRecordingId(meetingId)) {
         await invoke('save_offline_recording_transcript', {
           meetingId, meetingTitle: candidate.title, startedAt: candidate.startTime, transcripts,
         });

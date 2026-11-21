@@ -578,7 +578,7 @@ cached transcript. Reconnect the location or let OneDrive finish downloading,
 then choose **Retry scan** in the recovery dialog or under **Settings → General**.
 For a draft with a stable recording ID, **Save transcript to library** saves the
 full cached transcript. When the audio returns, retry the scan and recover it
-into the same meeting. For older drafts, **Save transcript copy** saves a local
+into the same meeting. For any unverified draft, **Save transcript copy** saves a local
 text file and keeps the draft linked to its original folder. Both options keep
 the original recovery data. A scan that confirms the original folder is absent
 or belongs to a different recording can offer transcript-only recovery.

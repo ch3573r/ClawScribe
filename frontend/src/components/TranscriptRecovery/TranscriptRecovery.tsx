@@ -38,7 +38,7 @@ interface TranscriptRecoveryProps {
   /** "Keep, do not ask again" for a recording found on disk. */
   onKeep?: (meetingId: string) => Promise<void>;
   onLoadPreview: (meetingId: string) => Promise<TranscriptPreview[]>;
-  onSaveOfflineTranscript: (meetingId: string) => Promise<OfflineTranscriptSaveResult>;
+  onSaveOfflineTranscript: (meetingId: string, fileCopy?: boolean) => Promise<OfflineTranscriptSaveResult>;
 }
 
 export function TranscriptRecovery({
@@ -109,12 +109,12 @@ export function TranscriptRecovery({
     }
   };
 
-  const handleSaveTranscript = async () => {
+  const handleSaveTranscript = async (fileCopy = false) => {
     if (!selectedMeetingId || busy || savingTranscript.current) return;
     savingTranscript.current = true;
     setIsSavingTranscript(true);
     try {
-      const result = await onSaveOfflineTranscript(selectedMeetingId);
+      const result = await onSaveOfflineTranscript(selectedMeetingId, fileCopy);
       if (result === 'library') {
         toast.success('Transcript saved to your library');
         onClose();
@@ -386,9 +386,16 @@ export function TranscriptRecovery({
             </Button>
           )}
           {folderUnverified && (isLoadingPreview || preview?.hasTranscript) && (
-            <Button onClick={handleSaveTranscript} disabled={busy || isLoadingPreview}>
-              {isSavingTranscript ? 'Saving transcript…' : canSaveToLibrary ? 'Save transcript to library' : 'Save transcript copy…'}
-            </Button>
+            <>
+              {canSaveToLibrary && (
+                <Button variant="outline" onClick={() => handleSaveTranscript(true)} disabled={busy || isLoadingPreview}>
+                  Save transcript copy…
+                </Button>
+              )}
+              <Button onClick={() => handleSaveTranscript()} disabled={busy || isLoadingPreview}>
+                {isSavingTranscript ? 'Saving transcript…' : canSaveToLibrary ? 'Save transcript to library' : 'Save transcript copy…'}
+              </Button>
+            </>
           )}
           {!folderUnverified && (
             <>

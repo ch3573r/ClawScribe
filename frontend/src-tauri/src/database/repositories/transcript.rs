@@ -561,6 +561,41 @@ impl TranscriptsRepository {
                 .fetch_one(&mut *transaction)
                 .await?;
         if existing {
+            if has_recording_id && folder_path.is_none() {
+                use futures_util::TryStreamExt;
+                let mut saved = sqlx::query_as::<_, (String, String, Option<f64>, Option<f64>, Option<f64>, Option<String>, Option<String>)>(
+                    "SELECT t.transcript,t.timestamp,t.audio_start_time,t.audio_end_time,t.duration,t.speaker,t.word_timestamps_json
+                     FROM transcripts t JOIN meetings m ON m.id=t.meeting_id
+                     JOIN recording_outcomes o ON o.meeting_id=m.id
+                     WHERE m.id=? AND m.folder_path IS NULL AND m.recording_source='recording'
+                       AND o.audio_save_failed=1 ORDER BY t.rowid",
+                ).bind(&meeting_id).fetch(&mut *transaction);
+                let conflict =
+                    || SqlxError::Protocol("The saved meeting differs from this draft".into());
+                for segment in transcripts {
+                    let (text, time, start, end, duration, speaker, words) =
+                        saved.try_next().await?.ok_or_else(conflict)?;
+                    let word_json = segment
+                        .word_timestamps
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|_| conflict())?;
+                    if text != segment.text
+                        || time != segment.timestamp
+                        || start != segment.audio_start_time
+                        || end != segment.audio_end_time
+                        || duration != segment.duration
+                        || speaker != segment.speaker
+                        || words != word_json
+                    {
+                        return Err(conflict());
+                    }
+                }
+                if saved.try_next().await?.is_some() {
+                    return Err(conflict());
+                }
+            }
             transaction.commit().await?;
             return Ok(meeting_id);
         }

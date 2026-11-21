@@ -392,6 +392,13 @@ fn classify_folder_with_deletions(
     if registered.is_some_and(|owner| stamped.or(recording_id).is_some_and(|id| id != owner)) {
         return None;
     }
+    if registered.is_none()
+        && recording_id.is_some_and(|id| {
+            pending_audio_ids.contains(id) && stamped.is_some_and(|owner| owner != id)
+        })
+    {
+        return None;
+    }
     let pending_audio = registered.is_none()
         && is_recording_marker(&marker)
         && recording_id.is_some_and(|id| pending_audio_ids.contains(id) && !deleted.contains(id));
@@ -1165,7 +1172,12 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
                     .filter(|marker| {
                         !meeting_files::has_invalid_marker_id(marker) && is_recording_marker(marker)
                     })
-                    .and_then(meeting_files::recording_id)
+                    .and_then(|marker| {
+                        let id = meeting_files::recording_id(marker)?;
+                        meeting_files::stamped_meeting_id(marker)
+                            .is_none_or(|owner| owner == id)
+                            .then_some(id)
+                    })
                     .filter(|id| pending.contains(*id))
                     .ok_or("This recording does not match a saved meeting.")?;
                 verify_pending_audio_inputs(Path::new(&authorised)).map_err(|_| {
@@ -2381,6 +2393,18 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(saved, (1, authorised.clone()));
+        assert!(
+            TranscriptsRepository::save_offline_recording_transcript(
+                &pool,
+                id,
+                "Synthetic meeting",
+                std::slice::from_ref(&segment),
+                1_795_260_000_000,
+            )
+            .await
+            .is_err(),
+            "an already attached meeting cannot acknowledge a later offline draft"
+        );
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?")
                 .bind(id)
