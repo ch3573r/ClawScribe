@@ -89,7 +89,10 @@ impl CallSettings {
 fn ended_on_scan(call: &CallWindow, scan: &CallScan) -> bool {
     scan.supported
         && scan.complete
-        && !scan.active.iter().any(|active| active.key == call.key)
+        && !scan.active.iter().any(|active| {
+            active.key == call.key
+                || (call.teams_room.is_some() && active.teams_room == call.teams_room)
+        })
         && (scan.ended.iter().any(|ended| ended.key == call.key)
             || !scan.open_windows.contains(&call.window))
 }
@@ -1186,6 +1189,16 @@ mod tests {
             matches!(tracker.observe(revision, Some(&next), IDLE), Decision::Start { call, .. }
             if call == next_call)
         );
+    }
+
+    #[test]
+    fn a_known_teams_room_survives_moving_to_a_new_call_window() {
+        let mut original = call(Provider::Teams, "first-window", "first-call");
+        original.teams_room = Some([3; 32]);
+        let mut moved = call(Provider::Teams, "second-window", "second-call");
+        moved.teams_room = original.teams_room;
+        let scan = snapshot(&[moved], &["second-window"], &[]);
+        assert!(!ended_on_scan(&original, &scan));
     }
 
     #[test]
