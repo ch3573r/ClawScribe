@@ -419,10 +419,13 @@ can read notes, transcripts, and recording paths. Both use local standard
 input and output and start off. [Local assistant access](docs/local-library.md#local-assistant-access)
 
 **Backup and restore** saves a portable archive of meeting data, transcript history,
-recordings, custom templates, vocabulary, and linked calendar series preferences.
-Restore adds missing meetings and keeps existing IDs and preferences. Backups
-continue when recording folders are missing and report affected meetings,
-excluded recovery files, unavailable audio, and skipped custom template items.
+recordings, custom templates, vocabulary, approved series notes, and linked
+calendar series preferences. It includes explicitly saved live answers when their
+recording supplied all the source material. Restore adds missing meetings and
+keeps existing meetings and preferences. Backups continue when recording
+folders are missing and report affected meetings,
+excluded recovery files, unavailable audio, skipped custom template items, and
+excluded saved live answers.
 Archives exclude credentials and models and are not encrypted.
 Daily backups are optional and keep three recent copies in a chosen local folder.
 Recordings take priority over scheduled backups, which retry when the library is idle.

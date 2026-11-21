@@ -18,7 +18,7 @@ for (const restore of [false, true]) {
     let invokeFails = false;
     let invokes = 0;
     let expectedRestore = restore;
-    let report = { meetings: 3, skipped: 1, files: 2, incomplete_meetings: [
+    let report = { meetings: 3, skipped: 1, files: 2, omitted_saved_live_answers: 2, incomplete_meetings: [
       { meeting_id: 'recovered', title: 'Recovered meeting', recovery_files_excluded: true, audio_unavailable: false, recording_folder_missing: false },
       { meeting_id: 'pending', title: 'Pending recovery', recovery_files_excluded: true, audio_unavailable: true, recording_folder_missing: false },
       { meeting_id: 'missing', title: 'Missing recording', recovery_files_excluded: false, audio_unavailable: true, recording_folder_missing: true },
@@ -56,20 +56,27 @@ for (const restore of [false, true]) {
     assert.match(text(alert), /Pending recovery: recovery files excluded; saved audio unavailable/);
     assert.match(text(alert), /Missing recording: recording folder missing; saved audio unavailable/);
     assert.match(text(alert), /keep a separate copy/);
+    assert.match(text(render()), /2 saved live answers were excluded/);
     assert.equal(refreshes, restore ? 2 : 0);
     // Cancelling either picker preserves the last completed report.
     pickerPath = null;
     await run(!restore);
     assert.equal(invokes, 1);
     assert.equal(text(flatten(render()).find(node => node.props?.role === 'alert')), text(alert));
+    assert.match(text(render()), /2 saved live answers were excluded/);
     // A selected file starts a fresh operation, even when that operation fails.
     pickerPath = 'synthetic.zip'; invokeFails = true;
     await run(!restore);
     assert.equal(notifications.at(-1).kind, 'error');
     assert.equal(flatten(render()).find(node => node.props?.role === 'alert'), undefined);
+    assert.doesNotMatch(text(render()), /saved live answers were excluded/);
     invokeFails = false;
     await run();
     assert.ok(flatten(render()).find(node => node.props?.role === 'alert'));
+    report = { meetings: 3, files: 3, skipped: 0, omitted_saved_live_answers: 1 };
+    await run();
+    assert.equal(notifications.at(-1).kind, 'warning');
+    assert.match(text(flatten(render()).find(node => node.props?.role === 'alert')), /1 saved live answer was excluded/);
     // A later complete operation replaces the old warning instead of leaving it stale.
     report = { meetings: 3, files: 3, skipped: 0, incomplete_meetings: [] };
     await run();

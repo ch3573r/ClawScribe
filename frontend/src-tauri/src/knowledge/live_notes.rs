@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction};
 use std::collections::BTreeSet;
 
+#[path = "live_notes/portable.rs"]
+mod portable;
+pub(crate) use portable::is_portable_live_answer;
+
 const SAVE_ERROR: &str = "Could not save this answer to meeting notes.";
 const READ_ERROR: &str = "Could not load saved live answers.";
 const SOURCE_CHANGED: &str = "Saved evidence used for this answer changed or was removed.";

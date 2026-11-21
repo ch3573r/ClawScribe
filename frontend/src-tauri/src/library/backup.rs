@@ -17,6 +17,8 @@ use zip::write::SimpleFileOptions;
 mod archive_documents;
 #[path = "backup/exports.rs"]
 mod archive_exports;
+#[path = "backup/follow_through.rs"]
+mod archive_follow_through;
 #[path = "backup/preferences.rs"]
 mod preferences;
 #[path = "backup/records.rs"]
@@ -181,6 +183,11 @@ struct Manifest {
     table_records: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "preferences::Portable::is_empty")]
     portable: preferences::Portable,
+    #[serde(
+        default,
+        skip_serializing_if = "archive_follow_through::Portable::is_empty"
+    )]
+    follow_through: archive_follow_through::Portable,
     // Index into the meetings array -> leaf filenames. Never contains source paths.
     files: BTreeMap<usize, Vec<String>>,
     // Optional in V1; omissions remain visible when this archive is restored.
@@ -217,6 +224,7 @@ pub struct BackupReport {
     pub unreadable_calendar_links: usize,
     pub skipped_template_items: usize,
     pub incomplete_meetings: Vec<IncompleteMeeting>,
+    pub omitted_saved_live_answers: u64,
 }
 
 fn incomplete_meetings(
@@ -450,9 +458,18 @@ async fn snapshot_tables_impl(
     }
     let mut portable = preferences::Portable::default();
     backup_checkpoint(scheduled)?;
-    if record_files.is_some() {
+    let follow_through = if record_files.is_some() {
         portable.series = preferences::capture_series(&mut tx, &tables["meetings"]).await?;
-    }
+        archive_follow_through::Portable::capture(
+            &mut tx,
+            &tables["meetings"],
+            &mut budget,
+            scheduled,
+        )
+        .await?
+    } else {
+        archive_follow_through::Portable::default()
+    };
     tx.commit().await.map_err(failure)?;
     let mut folders = Vec::new();
     for row in tables.get_mut("meetings").unwrap() {
@@ -485,6 +502,7 @@ async fn snapshot_tables_impl(
             tables,
             table_records,
             portable,
+            follow_through,
             files: BTreeMap::new(),
             incomplete_audio: BTreeMap::new(),
             document_files: BTreeMap::new(),
@@ -573,6 +591,7 @@ fn prepare_archive(
         unreadable_calendar_links: 0,
         skipped_template_items: 0,
         incomplete_meetings: incomplete_meetings(&manifest, None),
+        omitted_saved_live_answers: manifest.follow_through.omitted_answers(None),
     };
     Ok(PreparedBackup { output, report })
 }
@@ -589,6 +608,7 @@ fn write_archive_contents(
     archive_documents::set_file_references(manifest)?;
     let documents = archive_documents::validate(manifest)?;
     manifest.portable.validate(&manifest.tables["meetings"])?;
+    manifest.follow_through.validate(manifest, scheduled)?;
     let staged_bytes = record_files.map_or(Ok(0), records::SnapshotFiles::bytes)?;
     let limit = scheduled.and_then(|backup| backup.archive_budget(staged_bytes));
     if limit.is_some_and(|limit| staged_bytes > limit) {
@@ -831,6 +851,7 @@ fn unpack(
     }
     let documents = archive_documents::validate(&manifest)?;
     manifest.portable.validate(&manifest.tables["meetings"])?;
+    manifest.follow_through.validate(&manifest, None)?;
     if manifest
         .incomplete_audio
         .keys()
@@ -1544,6 +1565,7 @@ async fn import_manifest_impl(
     let documents = archive_documents::validate(&manifest)?;
     archive_exports::validate(&manifest)?;
     manifest.portable.validate(&manifest.tables["meetings"])?;
+    manifest.follow_through.validate(&manifest, None)?;
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut selected = HashSet::new();
     let mut known = HashSet::new();
@@ -1795,6 +1817,10 @@ async fn import_manifest_impl(
         .portable
         .restore_series(&mut tx, &manifest.tables["meetings"], &selected)
         .await?;
+    let omitted_saved_live_answers = manifest
+        .follow_through
+        .restore(&mut tx, &manifest.tables["meetings"], &selected)
+        .await?;
     let document_restore = archive_documents::restore_rows(
         &mut tx,
         &manifest,
@@ -1927,6 +1953,7 @@ async fn import_manifest_impl(
         unreadable_calendar_links,
         skipped_template_items,
         incomplete_meetings: incomplete_meetings(&manifest, Some(&selected)),
+        omitted_saved_live_answers,
     })
 }
 
@@ -1979,6 +2006,10 @@ async fn import_manifest_with_documents(
 #[cfg(test)]
 #[path = "backup/document_tests.rs"]
 mod document_tests;
+
+#[cfg(test)]
+#[path = "backup/follow_through_tests.rs"]
+mod follow_through_tests;
 
 #[tauri::command]
 pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport, String> {
@@ -2304,7 +2335,6 @@ mod tests {
     async fn archive_policy_accounts_for_every_database_table() {
         // Every new table must be explicitly portable or profile-local.
         let excluded = [
-            "approved_series_notes",
             "knowledge_chunks",
             "knowledge_document_fts",
             "knowledge_document_permissions",
@@ -2322,9 +2352,7 @@ mod tests {
             "recording_calendar_drafts",
             "recording_library_deletions",
             "recording_summary_bookmarks",
-            "recurring_meeting_preferences",
             "retranscription_notes_retry",
-            "saved_live_answers",
             "saved_live_answer_attachment_instances",
             "saved_live_answer_dependencies",
             "settings",
@@ -2339,6 +2367,7 @@ mod tests {
             .map(String::as_str)
             .chain(manifest.table_records.keys().map(String::as_str))
             .chain(["calendar_series_templates"]) // only series linked by an archived meeting
+            .chain(archive_follow_through::TABLES.iter().copied())
             .chain(excluded)
             .collect::<std::collections::BTreeSet<_>>();
         let actual: Vec<String> = sqlx::query_scalar(
