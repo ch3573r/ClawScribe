@@ -176,7 +176,7 @@ test('an open lane rename survives optimistic merge until explicitly closed', ()
   hooks.unmount();
 });
 
-async function page(attribution, segments, updatedSegments) {
+async function page(attribution, segments, updatedSegments, { playback, toastError = () => {} } = {}) {
   // Keep fixture logging out of node:test's subprocess output stream.
   const previousLog = console.log;
   console.log = () => {};
@@ -184,10 +184,11 @@ async function page(attribution, segments, updatedSegments) {
   let summaryOptions, copyOptions;
   const previousWindow = globalThis.window;
   globalThis.window = { addEventListener() {}, removeEventListener() {} };
-  const audio = { currentTime: 0, duration: 600, error: null, isPlaying: false, play() {}, pause() {}, seek() {} };
+  const audio = { currentTime: 0, duration: 600, error: null, isPlaying: false, play() {}, pause() {}, seek() {}, ...playback };
   const { default: PageContent } = loadTsModule(source('app/meeting-details/page-content'), {
     react: hooks.react,
     'framer-motion': { motion: { div: 'div' } },
+    sonner: { toast: { error: toastError } },
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
     '@/lib/analytics': { trackPageView() {} },
     '@tauri-apps/api/core': { invoke: async command => { assert.equal(command, 'resolve_meeting_audio_file'); return 'synthetic/audio.wav'; } },
@@ -262,6 +263,20 @@ test('refreshed speaker labels appear without changing the Beta toggle', async (
   assert.equal(result.transcript.props.showSpeakerAttribution, true);
   assert.equal(result.summaryOptions.includeSpeakerLabels, true);
   assert.equal(result.copyOptions.includeSpeakerLabels, true);
+});
+
+test('passage playback reports a failure when the player returns false', async () => {
+  const actions = [];
+  const result = await page(false, longSegments, undefined, {
+    playback: {
+      seek: async seconds => actions.push(['seek', seconds]),
+      play: async () => { actions.push(['play']); return false; },
+    },
+    toastError: message => actions.push(['error', message]),
+  });
+  result.transcript.props.onSeekToTime(12);
+  await flush();
+  assert.deepEqual(actions, [['seek', 12], ['play'], ['error', 'Could not play that part of the recording.']]);
 });
 
 test('removing the last label keeps speaker controls available with Beta disabled', async () => {

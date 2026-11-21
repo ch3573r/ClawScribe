@@ -1012,6 +1012,14 @@ pub(super) async fn stage_index_chunk(
             if alias.rows_affected() != 1 {
                 return Err(KnowledgeError::Superseded);
             }
+            // Move dependent aliases before deleting the old vector cascades to them.
+            sqlx::query(
+                "UPDATE knowledge_vector_aliases SET vector_chunk_id=? WHERE vector_chunk_id=?",
+            )
+            .bind(owner)
+            .bind(&reference.chunk_id)
+            .execute(&mut *tx)
+            .await?;
             sqlx::query("DELETE FROM knowledge_vectors WHERE chunk_id=?")
                 .bind(&reference.chunk_id)
                 .execute(&mut *tx)
@@ -1781,6 +1789,85 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn converting_a_vector_owner_to_an_alias_keeps_the_existing_hits() {
+        use super::super::{embedding, retrieval};
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = database().await;
+        meeting(&pool, "one").await;
+        sqlx::raw_sql(
+            "INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES
+             ('first','one','Ja.','00:01'), ('second','one','Ja.','00:02'), ('third','one','Ja.','00:03')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let job = next_job(&pool).await.unwrap().unwrap();
+        let mut refs = Vec::new();
+        for row in rows_page(&pool, &job, None).await.unwrap() {
+            let span = TextSpan {
+                transcript_id: row.id.clone(),
+                start_byte: 0,
+                end_byte: row.transcript.len(),
+            };
+            refs.push(evidence(&job, &row, &span).unwrap());
+        }
+        let vector = embedding::normalize(vec![1.0; 384]).unwrap();
+        stage_evidence(&pool, &job, &refs[0], "Ja.", 0, &vector, "space")
+            .await
+            .unwrap();
+        stage_index_chunk(
+            &pool,
+            &job,
+            &refs[1],
+            "Ja.",
+            1,
+            StagedVector::Shared(&refs[0].chunk_id),
+            "space",
+        )
+        .await
+        .unwrap();
+        stage_evidence(&pool, &job, &refs[2], "Ja.", 2, &vector, "space")
+            .await
+            .unwrap();
+        stage_index_chunk(
+            &pool,
+            &job,
+            &refs[0],
+            "Ja.",
+            0,
+            StagedVector::Shared(&refs[2].chunk_id),
+            "space",
+        )
+        .await
+        .unwrap();
+        publish(&pool, &job, "space").await.unwrap();
+
+        let scope = retrieval::freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let hits =
+            retrieval::search_channels(&pool, &scope, "unmatched query", Some(("space", &vector)))
+                .await
+                .unwrap();
+        assert_eq!(hits.len(), refs.len());
+        for reference in refs {
+            assert!(hits
+                .iter()
+                .any(|hit| hit.evidence.chunk_id == reference.chunk_id));
+        }
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM knowledge_vectors").await,
+            1
         );
     }
 

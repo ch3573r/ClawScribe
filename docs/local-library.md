@@ -113,6 +113,8 @@ Open **Meetings → Archive** to search saved titles, current transcript
 passages, visible saved summaries, personal notes and timestamped bookmarks.
 All unquoted terms must appear in the same title or text entry, in any order.
 Put an exact phrase in double quotes, for example `"offene Punkte" Budget`.
+An opening quote without a closing quote is ignored, so the words match as
+separate terms.
 Search ignores letter case, including German umlauts and capital sharp S, and
 treats punctuation such as `%` and `_` literally. Projects, inclusive dates and **Needs attention**
 apply to every source. Archive and Meeting memory date filters use the day shown

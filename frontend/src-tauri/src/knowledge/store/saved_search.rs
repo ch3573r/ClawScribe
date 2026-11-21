@@ -455,6 +455,17 @@ mod tests {
         assert_eq!(results.titles.len(), 1);
         assert_eq!(results.passages.len(), 1);
         assert!(results.saved.is_empty());
+
+        for query in [
+            "\"50%_ Straße Äpfel",
+            "„50%_ Straße Äpfel",
+            "“50%_ Straße Äpfel",
+        ] {
+            let results = search_archive(&pool, query, None, false).await.unwrap();
+            assert_eq!(results.titles.len(), 1, "{query}");
+            assert_eq!(results.passages.len(), 1, "{query}");
+            assert_eq!(results.saved.len(), 1, "{query}");
+        }
     }
 
     #[tokio::test]

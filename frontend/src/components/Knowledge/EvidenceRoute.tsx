@@ -5,6 +5,14 @@ import { Button } from '@/components/ui/button';
 import { evidenceIntent, finishEvidenceIntent, navigateEvidence } from '@/lib/knowledge-navigation';
 import { knowledgeService } from '@/services/knowledgeService';
 
+type TranscriptReveal = {
+  token: string;
+  id: string;
+  index: number;
+  done: boolean;
+  promise: Promise<void>;
+};
+
 export function EvidenceRoute({ token, meetingId, audioReady, audioStatus, audioError, onReveal, onPlay }: {
   token: string | null | undefined;
   meetingId: string;
@@ -15,11 +23,15 @@ export function EvidenceRoute({ token, meetingId, audioReady, audioStatus, audio
   onPlay: (seconds: number, current: () => boolean) => Promise<void>;
 }) {
   const completed = useRef('');
-  const revealed = useRef('');
+  const reveal = useRef<TranscriptReveal | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [retry, setRetry] = useState(0);
   const [waitExpired, setWaitExpired] = useState(false);
+
+  // The reveal belongs to the route. Audio state can restart verification while
+  // the paginator is still fetching the same transcript rows.
+  useEffect(() => () => { reveal.current = null; }, [token, meetingId, onReveal, retry]);
 
   useEffect(() => {
     setWaitExpired(false);
@@ -38,13 +50,14 @@ export function EvidenceRoute({ token, meetingId, audioReady, audioStatus, audio
     }
 
     const waitingForAudio = intent.play && !audioReady && !audioError && audioStatus !== 'missing' && !waitExpired;
-    if (waitingForAudio && revealed.current === token) {
+    if (waitingForAudio && reveal.current?.done) {
       setError('');
       setBusy(true);
       return;
     }
     let active = true;
-    const current = () => active;
+    let verified = false;
+    const current = () => active && evidenceIntent(token, meetingId) === intent;
     setError('');
     setBusy(true);
 
@@ -52,10 +65,21 @@ export function EvidenceRoute({ token, meetingId, audioReady, audioStatus, audio
     void navigateEvidence(intent.reference, intent.play && !waitingForAudio, {
       current,
       resolve: knowledgeService.resolve,
-      reveal: async (id, index, stillCurrent) => {
-        if (revealed.current === token) return;
-        await onReveal(id, index, stillCurrent);
-        if (stillCurrent()) revealed.current = token;
+      reveal: (id, index) => {
+        verified = true;
+        const prior = reveal.current;
+        if (prior?.id === id && prior.index === index) return prior.promise;
+        const stillCurrent = () => reveal.current === next && evidenceIntent(token, meetingId) === intent;
+        const next: TranscriptReveal = {
+          token, id, index, done: false,
+          promise: Promise.resolve().then(async () => {
+            if (!stillCurrent()) return;
+            await onReveal(id, index, stillCurrent);
+            if (stillCurrent()) next.done = true;
+          }),
+        };
+        reveal.current = next;
+        return next.promise;
       },
       play: onPlay,
     }, intent.contextReference).then(result => {
@@ -65,6 +89,7 @@ export function EvidenceRoute({ token, meetingId, audioReady, audioStatus, audio
       setBusy(false);
     }).catch(failure => {
       if (!current()) return;
+      if (!verified || !reveal.current?.done) reveal.current = null;
       setBusy(false);
       setError(failure instanceof Error ? failure.message : 'Could not open the source. Retry.');
     });
@@ -73,13 +98,13 @@ export function EvidenceRoute({ token, meetingId, audioReady, audioStatus, audio
 
   if (!token || (!busy && !error)) return null;
   const intent = evidenceIntent(token, meetingId);
-  const waitingForAudio = revealed.current === token && intent?.play && !audioReady;
+  const waitingForAudio = reveal.current?.token === token && reveal.current.done && intent?.play && !audioReady;
   return <div className="flex flex-wrap items-center gap-3 border-b border-border bg-card px-4 py-3 text-sm">
     {busy && <p role="status">{waitingForAudio ? 'Waiting for saved audio…' : 'Opening transcript passage…'}</p>}
     {error && <>
       <p role="alert" className="text-destructive">{error}</p>
       {intent && <Button variant="outline" size="sm" onClick={() => {
-        revealed.current = '';
+        reveal.current = null;
         setRetry(value => value + 1);
       }}>Retry opening passage</Button>}
     </>}

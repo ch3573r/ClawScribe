@@ -34,17 +34,24 @@ impl LiteralQuery {
             return Err(KnowledgeError::InvalidInput);
         }
         let mut patterns = Vec::new();
-        while !text.is_empty() {
+        while let Some(first) = text.chars().next() {
             let (term, rest) = if archive {
-                let quote = match text.chars().next() {
-                    Some('"') => Some('"'),
-                    Some('„') => Some('“'),
-                    Some('“') => Some('”'),
+                let quote = match first {
+                    '"' => Some('"'),
+                    '„' => Some('“'),
+                    '“' => Some('”'),
                     _ => None,
                 };
-                quote
-                    .and_then(|end| text[text.chars().next()?.len_utf8()..].split_once(end))
-                    .unwrap_or_else(|| text.split_once(char::is_whitespace).unwrap_or((text, "")))
+                if let Some(end) = quote {
+                    let after_open = &text[first.len_utf8()..];
+                    let Some(phrase) = after_open.split_once(end) else {
+                        text = after_open.trim_start();
+                        continue;
+                    };
+                    phrase
+                } else {
+                    text.split_once(char::is_whitespace).unwrap_or((text, ""))
+                }
             } else {
                 (text, "")
             };
