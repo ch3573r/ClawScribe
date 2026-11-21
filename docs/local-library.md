@@ -83,7 +83,9 @@ passage preview per matching meeting.
 Queries accept up to 256 characters. The desktop shows up to 50 title matches
 and 50 passage matches. Searches stop at a scan or time limit and tell you
 when results are limited. Browse or narrow the query and filters to search
-a smaller set. Literal search needs no index download or answer provider.
+a smaller set. Literal search uses a local substring index to find candidates,
+then checks the saved text and its exact offset. Short searches and terms without
+an indexable substring use a bounded scan. No download or answer provider is required.
 
 ## Meeting memory
 
@@ -92,7 +94,9 @@ searchable picker lets you select meetings and remove selected chips, or check
 **Search all saved meetings**. Project filters and inclusive dates constrain
 that conversation's sources. All-meetings mode searches every meeting eligible under those filters;
 turning it off restores your previous meeting selection. Empty constrained meeting selections never broaden into a library
-search. Ranked results show the canonical excerpt, original title/date/speaker,
+search. You can draft a question before choosing its sources. Leaving Meetings
+and returning in the same window restores the selected meetings and filters.
+Ranked results show the canonical excerpt, original title/date/speaker,
 and actual keyword or semantic + keyword mode. Keyword search stays usable
 without enabling or downloading an embedding model.
 
@@ -135,6 +139,9 @@ source reference instead of reusing a previous navigation URL.
 Under **Settings → Meeting memory**, enable the optional local embedding model,
 download it, inspect ready/pending/failed index counts, Pause,
 Retry/resume, or Rebuild. Foreground recording and inference take priority.
+After upgrade, an edit in a different transcript row leaves verified passages navigable, and
+the indexer reuses vectors for unchanged passages. Broad library questions
+rank matches across the selected scope within the model's input budget.
 Index rebuilds do not renumber saved citations. Downloads never start
 automatically from a search. The download contains the pinned E5 ONNX model
 and tokenizer, about 465 MiB combined. Transfer progress shows bytes and the
@@ -227,6 +234,7 @@ and clipboard fallback all use the same selected content.
 
 ## Project tags
 
+In the archive, open a meeting row’s menu and choose **Edit project tags**.
 Use **Project tags** in a saved meeting to choose existing labels from a searchable
 list or create new ones. Suggestions show the most-used tags first and preserve
 existing spelling. Enter or a comma adds a tag; comma-separated lists can also
@@ -349,6 +357,10 @@ This is a saved-library archive, not a replacement for crash recovery or a syste
 backup. Test restoring a backup before relying on it as your only copy.
 
 ## Deleting meetings
+
+Choose **Delete meeting** in an archive row’s menu or use the sidebar delete
+button. The confirmation names the meeting and lets you choose whether to
+remove its recording files.
 
 Deletion removes the meeting's database records, including transcript revisions,
 previous summaries, context, notes, chat, tags, and bookmarks. App-managed export

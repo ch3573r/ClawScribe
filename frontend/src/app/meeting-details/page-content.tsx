@@ -159,6 +159,8 @@ export default function PageContent({
 
   // Custom hooks
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
+  const editorRef = meetingData.blockNoteSummaryRef;
+  const getSummaryMarkdown = useCallback(async () => (await editorRef.current?.getMarkdown()) ?? '', [editorRef]);
   const hasSpeakerAttribution = shouldShowSpeakerAttribution(
     sourceAttributionEnabled, hasRecordingFolder, timelineSegments, segments, meetingData.transcripts,
   );
@@ -206,6 +208,7 @@ export default function PageContent({
   };
 
   const summaryGeneration = useSummaryGeneration({
+    hasExistingSummary: !!meetingData.aiSummary,
     beforeGeneration: meetingData.flushPendingChanges,
     meeting,
     modelConfig: modelConfig,
@@ -313,13 +316,13 @@ export default function PageContent({
   // Ctrl/⌘+G — generate / regenerate the summary (dispatched by AppShortcuts).
   useEffect(() => {
     const onGenerate = () => {
-      if (meetingData.transcripts.length > 0) {
+      if (!summaryBusy && !summaryRunning && !contextLoading && meetingData.transcripts.length > 0) {
         void summaryGeneration.handleGenerateSummary('');
       }
     };
     window.addEventListener('shortcut:generate-summary', onGenerate);
     return () => window.removeEventListener('shortcut:generate-summary', onGenerate);
-  }, [meetingData.transcripts.length, summaryGeneration]);
+  }, [meetingData.transcripts.length, summaryGeneration, summaryBusy, summaryRunning, contextLoading]);
 
   return (
     <motion.div
@@ -336,7 +339,7 @@ export default function PageContent({
         onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}
         duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
         disabled={summaryBusy}
-        getMarkdown={async () => (await meetingData.blockNoteSummaryRef.current?.getMarkdown()) ?? ''} onOpenFolder={meetingOperations.handleOpenMeetingFolder}
+        getMarkdown={getSummaryMarkdown} onOpenFolder={meetingOperations.handleOpenMeetingFolder}
         attendance={<SavedMeetingAttendance key={meeting.id} meetingId={meeting.id} createdAt={meeting.created_at}
           durationSeconds={audioPlayer.duration || undefined} disabled={summaryBusy}
           templates={templates.availableTemplates} remembered={templates.seriesTemplate} />} />
@@ -398,6 +401,7 @@ export default function PageContent({
           onBookmarksChange={setBookmarks}
         />
         <SummaryPanel
+          details={meetingData.details}
           onRevealSource={async (source) => {
             await onRevealTranscript?.(source.transcript_id, source.transcript_index);
             setFocusedSource({ id: source.transcript_id, request: Date.now() });

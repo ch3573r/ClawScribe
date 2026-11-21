@@ -683,6 +683,7 @@ pub async fn list_onenote_resumes<R: Runtime>(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingExportHistory {
+    action_id: Option<uuid::Uuid>,
     destination: &'static str,
     status: ExportStatus,
     at: Option<String>,
@@ -706,6 +707,13 @@ pub async fn get_meeting_export_history<R: Runtime>(
                 _ => return None,
             };
             Some(MeetingExportHistory {
+                action_id: if matches!(destination, "Planner" | "Microsoft To Do") {
+                    key.rsplit(':')
+                        .next()
+                        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                } else {
+                    None
+                },
                 destination,
                 status: item.status,
                 at: item.last_attempt_at,
@@ -722,6 +730,7 @@ pub async fn get_meeting_export_history<R: Runtime>(
             .into_values()
             .filter(|section| section.section_id.is_none())
             .map(|section| MeetingExportHistory {
+                action_id: None,
                 destination: "OneNote section",
                 status: ExportStatus::UnknownAfterSubmit,
                 at: Some(section.started_at),
@@ -804,6 +813,13 @@ pub struct PlannerTaskPreview {
     pub due_date: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingTaskPreview {
+    items: Vec<PlannerTaskPreview>,
+    suggestion_count: usize,
+}
+
 /// Parse a meeting summary's action items for the Planner export preview, so the
 /// user can review, edit, deselect, and route them to buckets before anything is
 /// created in Planner.
@@ -813,14 +829,16 @@ pub async fn preview_planner_tasks(
     meeting_id: String,
     meeting_title: String,
     markdown: String,
-) -> Result<Vec<PlannerTaskPreview>, String> {
+) -> Result<MeetingTaskPreview, String> {
     let mut meeting_export = crate::exports::markdown_notes::meeting_export_for_planner(
         &meeting_id,
         &meeting_title,
         None,
         &markdown,
     );
+    let mut suggestion_count = 0;
     if let Some(actions) = super::actions::load(state.db_manager.pool(), &meeting_id).await? {
+        suggestion_count = super::actions::remaining_suggestions(&markdown, &actions).len();
         meeting_export.action_items = actions
             .into_iter()
             .filter(|action| !action.done)
@@ -852,7 +870,10 @@ pub async fn preview_planner_tasks(
             due_date: action.due_date.clone(),
         })
         .collect();
-    Ok(previews)
+    Ok(MeetingTaskPreview {
+        items: previews,
+        suggestion_count,
+    })
 }
 
 #[tauri::command]
@@ -861,7 +882,7 @@ pub async fn preview_todo_tasks(
     meeting_id: String,
     meeting_title: String,
     markdown: String,
-) -> Result<Vec<PlannerTaskPreview>, String> {
+) -> Result<MeetingTaskPreview, String> {
     preview_planner_tasks(state, meeting_id, meeting_title, markdown).await
 }
 

@@ -19,24 +19,35 @@ pub struct SummarySource {
     pub timestamp: Option<f64>,
 }
 
-fn fingerprint(row: &Transcript) -> String {
+fn legacy_fingerprint(row: &Transcript, speaker: Option<&str>) -> String {
     let data = serde_json::to_vec(&(
         &row.id,
         &row.transcript,
         row.audio_start_time,
         row.audio_end_time,
-        &row.speaker,
+        speaker,
     ))
     .expect("serializable transcript fields");
     format!("{:x}", Sha256::digest(data))
 }
 
-fn passage_fingerprint(rows: &[Transcript]) -> String {
-    let fingerprints: Vec<String> = rows.iter().map(fingerprint).collect();
-    format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&fingerprints).unwrap())
-    )
+fn passage_fingerprint<'a>(rows: impl IntoIterator<Item = &'a Transcript>) -> String {
+    let fingerprints = rows.into_iter().map(|row| {
+        let fields = serde_json::to_vec(&(
+            &row.id,
+            &row.transcript,
+            row.audio_start_time,
+            row.audio_end_time,
+        ))
+        .expect("serializable transcript fields");
+        format!("{:x}", Sha256::digest(fields))
+    });
+    grouped_fingerprint(fingerprints)
+}
+
+fn grouped_fingerprint(hashes: impl Iterator<Item = String>) -> String {
+    let hashes: Vec<_> = hashes.collect();
+    format!("{:x}", Sha256::digest(serde_json::to_vec(&hashes).unwrap()))
 }
 
 fn source_label(timestamp: Option<f64>) -> String {
@@ -95,11 +106,108 @@ fn annotate(rows: Vec<Transcript>, include_speaker_labels: bool) -> (String, Vec
             key: fingerprint[..24].to_string(),
             transcript_id: first.id.clone(),
             transcript_ids: rows.iter().map(|r| r.id.clone()).collect(),
-            fingerprint,
+            fingerprint: format!("v2:{fingerprint}"),
             timestamp,
         });
     }
     (text, sources)
+}
+
+fn matches_source(source: &SummarySource, rows: &[&Transcript]) -> bool {
+    if let Some(hash) = source.fingerprint.strip_prefix("v2:") {
+        return passage_fingerprint(rows.iter().copied()) == hash;
+    }
+    // Older versions included the speaker. For a summary saved before anyone
+    // was named, the original all-unlabelled passage is also exactly verifiable.
+    [true, false].into_iter().any(|use_current_speaker| {
+        let mut hashes = rows.iter().map(|row| {
+            let speaker = if use_current_speaker {
+                row.speaker.as_deref()
+            } else {
+                None
+            };
+            legacy_fingerprint(row, speaker)
+        });
+        if source.transcript_ids.is_empty() {
+            hashes.next().as_deref() == Some(source.fingerprint.as_str())
+        } else {
+            grouped_fingerprint(hashes) == source.fingerprint
+        }
+    })
+}
+
+/// Upgrade only proven legacy references before a speaker edit. Keep existing link keys.
+pub(crate) async fn preserve_legacy_speaker_links(
+    connection: &mut sqlx::SqliteConnection,
+    meeting: &str,
+) -> Result<(), sqlx::Error> {
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id=?")
+            .bind(meeting)
+            .fetch_optional(&mut *connection)
+            .await?
+            .flatten();
+    let Some(mut data) = raw.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    else {
+        return Ok(());
+    };
+    let Some(entries) = data
+        .get_mut("summary_sources")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return Ok(());
+    };
+    let legacy: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let source: SummarySource = serde_json::from_value(entry.clone()).ok()?;
+            (!source.fingerprint.starts_with("v2:")).then_some((index, source))
+        })
+        .collect();
+    if legacy.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<_> = legacy.iter().flat_map(|(_, source)| source.ids()).collect();
+    let rows: Vec<Transcript> = sqlx::query_as(
+        "SELECT * FROM transcripts WHERE meeting_id=? AND id IN(SELECT value FROM json_each(?))",
+    )
+    .bind(meeting)
+    .bind(serde_json::json!(ids).to_string())
+    .fetch_all(&mut *connection)
+    .await?;
+    let rows: std::collections::HashMap<_, _> =
+        rows.iter().map(|row| (row.id.as_str(), row)).collect();
+    let mut changed = false;
+    for (index, source) in legacy {
+        let passage: Option<Vec<_>> = source
+            .ids()
+            .iter()
+            .map(|id| rows.get(id.as_str()).copied())
+            .collect();
+        if let Some(passage) = passage.filter(|rows| matches_source(&source, rows)) {
+            entries[index]["fingerprint"] = format!("v2:{}", passage_fingerprint(passage)).into();
+            changed = true;
+        }
+    }
+    if changed {
+        sqlx::query("UPDATE summary_processes SET result=? WHERE meeting_id=?")
+            .bind(data.to_string())
+            .bind(meeting)
+            .execute(connection)
+            .await?;
+    }
+    Ok(())
+}
+
+impl SummarySource {
+    fn ids(&self) -> &[String] {
+        if self.transcript_ids.is_empty() {
+            std::slice::from_ref(&self.transcript_id)
+        } else {
+            &self.transcript_ids
+        }
+    }
 }
 
 /// Keep readable source labels in exports without exposing app-only link targets.
@@ -295,27 +403,18 @@ pub struct ResolvedSource {
 async fn resolve(pool: &SqlitePool, meeting: &str, key: &str) -> Result<ResolvedSource, String> {
     let source = saved_sources(pool, meeting).await?.into_iter().find(|s| s.key == key)
         .ok_or("This reference was not part of the saved summary. Regenerate the summary to refresh its sources.")?;
-    let ids = if source.transcript_ids.is_empty() {
-        vec![source.transcript_id.clone()]
-    } else {
-        source.transcript_ids.clone()
-    };
     let mut transaction = pool
         .begin()
         .await
         .map_err(|_| "Could not read source passage")?;
     let mut rows = Vec::new();
-    for id in ids {
+    for id in source.ids() {
         let row: Transcript = sqlx::query_as("SELECT * FROM transcripts WHERE meeting_id = ? AND id = ?")
             .bind(meeting).bind(id).fetch_optional(&mut *transaction).await.map_err(|_| "Could not read the source passage")?
             .ok_or("The source transcript has been replaced. Regenerate the summary to refresh its references.")?;
         rows.push(row);
     }
-    let stale = if source.transcript_ids.is_empty() {
-        fingerprint(&rows[0])
-    } else {
-        passage_fingerprint(&rows)
-    } != source.fingerprint;
+    let stale = !matches_source(&source, &rows.iter().collect::<Vec<_>>());
     let transcript_index: i64 = sqlx::query_scalar("SELECT position FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY audio_start_time, id) - 1 AS position FROM transcripts WHERE meeting_id = ?) WHERE id = ?")
         .bind(meeting).bind(&source.transcript_id).fetch_one(&mut *transaction).await.map_err(|_| "Could not locate the source passage")?;
     transaction
@@ -450,7 +549,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        let hash = fingerprint(&row);
+        let hash = legacy_fingerprint(&row, row.speaker.as_deref());
         let key = &hash[..24];
         let result = serde_json::json!({"markdown": format!("Old [source](#clawscribe-source-{key})"),
             "summary_sources": [{"key": key, "transcript_id": row.id, "fingerprint": hash, "timestamp": row.audio_start_time}]});
@@ -458,6 +557,9 @@ mod tests {
         let resolved = resolve(&pool, "review-test", key).await.unwrap();
         assert!(!resolved.stale);
         assert_eq!(resolved.text, row.transcript);
+        crate::database::repositories::transcript::TranscriptsRepository::update_transcript_speaker(
+            &pool, "review-test", &row.id, Some("Named participant")).await.unwrap();
+        assert!(!resolve(&pool, "review-test", key).await.unwrap().stale);
     }
 
     #[tokio::test]
@@ -472,6 +574,16 @@ mod tests {
         let mut result = serde_json::json!({"markdown": "Agreed [S1 00:00:00]"});
         attach(&mut result, &sources);
         sqlx::query("INSERT INTO summary_processes (meeting_id,status,created_at,updated_at,result) VALUES ('review-test','completed',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,?)").bind(result.to_string()).execute(&pool).await.unwrap();
+        assert!(
+            !resolve(&pool, "review-test", &sources[0].key)
+                .await
+                .unwrap()
+                .stale
+        );
+        sqlx::query("UPDATE transcripts SET speaker='Named participant' WHERE id='b'")
+            .execute(&pool)
+            .await
+            .unwrap();
         assert!(
             !resolve(&pool, "review-test", &sources[0].key)
                 .await

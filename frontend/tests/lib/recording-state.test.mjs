@@ -42,7 +42,7 @@ function createView(delaySubscriptions = false, snapshotOverride) {
       '@/services/knowledgeService': { knowledgeService: { liveSnapshot: () => snapshotOverride
         ? snapshotOverride() : Promise.resolve(liveSnapshot(backendSessionId)) } },
       '@tauri-apps/api/core': { invoke: async () => 'live' },
-      '@tauri-apps/api/event': { listen: async () => () => {} },
+      '@tauri-apps/api/event': { listen: async (name, callback) => { callbacks[name] = callback; return () => {}; } },
     }));
   } finally {
     globalThis.setInterval = originalSet;
@@ -58,6 +58,31 @@ function createView(delaySubscriptions = false, snapshotOverride) {
 }
 
 const recording = { session_id: 'session-current', recording_generation: '2', is_recording: true, is_paused: false, is_active: true, recording_duration: 10, active_duration: 10, recording_mode: 'live' };
+
+test('a native stop shows progress until the matching library commit and ignores late progress', async () => {
+  const view = createView();
+  view.render();
+  await flush();
+  try {
+    view.callbacks.Started('live', 'session-current');
+    await flush();
+    const progress = (stage, session_id = 'session-current', recording_generation = '2') =>
+      view.callbacks['recording-shutdown-progress']({ payload: { identity: { session_id, recording_generation }, stage, chunks_remaining: 3 } });
+    progress('processing_transcripts', 'old', '1');
+    assert.equal(view.render().isStopping, false);
+    progress('processing_transcripts');
+    assert.equal(view.render().isStopping, true);
+    assert.match(view.render().statusMessage, /3 segments/);
+    progress('finalizing');
+    assert.match(view.render().statusMessage, /Saving/);
+    progress('complete');
+    assert.equal(view.render().isStopping, true);
+    view.callbacks.Stopped({ session_id: 'session-current', library_save_failed: false });
+    progress('finalizing');
+    assert.equal(view.render().status, 'idle');
+    assert.equal(view.render().statusMessage, undefined);
+  } finally { view.unmount(); }
+});
 
 test('listeners resolving after unmount are immediately removed and cannot start polling', async () => {
   const view = createView(true);

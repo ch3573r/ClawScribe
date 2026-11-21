@@ -4,6 +4,33 @@ import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
 import { createHookHarness } from './hook-harness.mjs';
 
+const messages = banner => Array.from(banner.props.children[1].props.children, item => item.props.children);
+
+test('the global saving banner scopes the next start and cancellation to the displayed session', async () => {
+  const commands = [], notices = [];
+  const state = { isStopping: true, sessionId: 'stopping-session', statusMessage: 'Saving the recording to your library…' };
+  const { default: MainContent } = loadTsModule('src/components/MainContent/index.tsx', {
+    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ sidebarOffset: 40, isSidebarResizing: false }) },
+    '@/contexts/RecordingStateContext': { useRecordingState: () => state },
+    '@/components/RecordingHealthBanner': { RecordingHealthBanner: 'Health' },
+    '@/components/ui/button': { Button: 'button' },
+    '@tauri-apps/api/core': { invoke: async (name, args) => { commands.push([name, { ...args }]); return true; } },
+    sonner: { toast: { info: (...args) => notices.push(args) } },
+  });
+  const banner = () => MainContent({ children: 'current page' }).props.children[1].type();
+  const [stage, start] = banner().props.children;
+  assert.equal(stage.props.children, state.statusMessage);
+  await start.props.onClick();
+  state.sessionId = 'replacement';
+  notices[0][1].action.onClick();
+  assert.deepEqual(commands, [
+    ['queue_recording_after_save', { sessionId: 'stopping-session', enabled: true }],
+    ['queue_recording_after_save', { sessionId: 'stopping-session', enabled: false }],
+  ]);
+  state.isStopping = false;
+  assert.equal(banner(), null);
+});
+
 test('repeated segment warnings keep the recording banner visible', () => {
   const hooks = createHookHarness();
   const listeners = new Map();
@@ -17,7 +44,9 @@ test('repeated segment warnings keep the recording banner visible', () => {
   for (let i = 0; i < 10; i++) listeners.get('transcription-warning')({ payload: 'Synthetic failure' });
   const banner = hooks.render(RecordingHealthBanner);
   assert.equal(banner.props.role, 'alert');
-  assert.match(banner.props.children[1].props.children, /Live transcription is incomplete/);
+  assert.equal(messages(banner).length, 2);
+  assert.match(messages(banner)[0], /Live transcription failed/);
+  assert.match(messages(banner)[1], /Live transcription is incomplete/);
   listeners.get('recording-started')({});
   assert.equal(hooks.render(RecordingHealthBanner), null);
   hooks.unmount();
@@ -40,7 +69,7 @@ test('late system audio clears the matching recording warning', () => {
   try {
     view.render();
     view.listeners.get('recording-warning')({ payload: systemWarning });
-    assert.equal(view.render().props.children[1].props.children, systemWarning);
+    assert.deepEqual(messages(view.render()), [systemWarning]);
     view.listeners.get('recording-warning-cleared')?.({ payload: systemWarning });
     assert.equal(view.render(), null, 'Recovered system audio must remove its stale warning');
   } finally {
@@ -57,8 +86,20 @@ test('system audio recovery cannot hide a newer capture warning', () => {
     view.listeners.get('recording-warning')({ payload: systemWarning });
     view.listeners.get('recording-warning')({ payload: captureWarning });
     view.listeners.get('recording-warning-cleared')?.({ payload: systemWarning });
-    assert.equal(view.render().props.children[1].props.children, captureWarning);
+    assert.deepEqual(messages(view.render()), [captureWarning]);
   } finally {
     view.unmount();
   }
+});
+
+test('clearing the most recent microphone warning still shows the earlier system warning', () => {
+  const view = createWarningView();
+  try {
+    view.render();
+    view.listeners.get('recording-warning')({ payload: 'System samples missing' });
+    view.listeners.get('recording-warning')({ payload: 'Microphone samples stopped' });
+    assert.deepEqual(messages(view.render()), ['System samples missing', 'Microphone samples stopped']);
+    view.listeners.get('recording-warning-cleared')({ payload: 'Microphone samples stopped' });
+    assert.deepEqual(messages(view.render()), ['System samples missing']);
+  } finally { view.unmount(); }
 });

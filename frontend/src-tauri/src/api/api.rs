@@ -1,7 +1,7 @@
 use log::{error as log_error, info as log_info, warn as log_warn};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::credentials::SecretStatus;
 use crate::{
@@ -1300,7 +1300,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
 
 #[tauri::command]
 pub async fn api_update_transcript_speaker<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     transcript_id: String,
@@ -1318,10 +1318,13 @@ pub async fn api_update_transcript_speaker<R: Runtime>(
     .await
     {
         Ok(0) => Err(format!("Transcript {} was not found", transcript_id)),
-        Ok(updated) => Ok(serde_json::json!({
-            "updated": updated,
-            "speaker": speaker,
-        })),
+        Ok(updated) => {
+            let _ = app.emit(
+                "transcript-speaker-updated",
+                serde_json::json!({"meeting_id": meeting_id}),
+            );
+            Ok(serde_json::json!({"updated": updated, "speaker": speaker}))
+        }
         Err(e) => {
             log_error!("Failed to update speaker for transcript in meeting");
             Err(format!("Failed to update speaker label: {}", e))
@@ -1331,7 +1334,7 @@ pub async fn api_update_transcript_speaker<R: Runtime>(
 
 #[tauri::command]
 pub async fn api_update_transcript_speakers_matching<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     from_speaker: Option<String>,
@@ -1349,10 +1352,15 @@ pub async fn api_update_transcript_speakers_matching<R: Runtime>(
     )
     .await
     {
-        Ok(updated) => Ok(serde_json::json!({
-            "updated": updated,
-            "speaker": speaker,
-        })),
+        Ok(updated) => {
+            if updated > 0 {
+                let _ = app.emit(
+                    "transcript-speaker-updated",
+                    serde_json::json!({"meeting_id": meeting_id}),
+                );
+            }
+            Ok(serde_json::json!({"updated": updated, "speaker": speaker}))
+        }
         Err(e) => {
             log_error!("Failed to update matching speaker labels in meeting");
             Err(format!("Failed to update matching speaker labels: {}", e))

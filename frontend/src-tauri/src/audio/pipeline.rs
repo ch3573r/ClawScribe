@@ -20,6 +20,33 @@ use super::vad::ContinuousVadProcessor;
 /// recording start; the pipeline reads it when creating the VAD. Default 6s.
 static LIVE_MAX_SEGMENT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(6_000);
 const TRANSCRIPTION_QUEUE_WARNING_THRESHOLD: u32 = 3;
+const MICROPHONE_STREAM_WARNING: &str =
+    "Microphone samples stopped arriving. Check the microphone connection and recording devices.";
+
+#[derive(Default)]
+struct MicrophoneStreamWatch {
+    last_samples: Option<std::time::Instant>,
+    warned: bool,
+}
+
+impl MicrophoneStreamWatch {
+    /// A silent microphone still delivers samples. Judge delivery rather than amplitude.
+    fn update(&mut self, now: std::time::Instant, active: bool, received: bool) -> Option<bool> {
+        if !active {
+            self.last_samples = None;
+        } else if received {
+            self.last_samples = Some(now);
+        }
+        let stalled = self.last_samples.is_some_and(|last| {
+            now.saturating_duration_since(last) >= std::time::Duration::from_secs(15)
+        });
+        if self.warned == stalled {
+            return None;
+        }
+        self.warned = stalled;
+        Some(stalled)
+    }
+}
 const SYSTEM_AUDIO_SILENCE_WARNING: &str = "No system audio detected. The selected system-audio device may not be the one your sound plays through — some outputs (e.g. a digital/S-PDIF output) can't be captured. Pick the output device your meeting audio actually uses (Settings → audio device).";
 
 #[derive(Default)]
@@ -1085,6 +1112,7 @@ impl AudioPipeline {
         // once so it isn't a silent failure.
         let run_start = std::time::Instant::now();
         let mut system_audio_warning = SystemAudioWarningTracker::default();
+        let mut microphone_stream = MicrophoneStreamWatch::default();
 
         // Speaker attribution ("Me" = mic, "Participants" = system). We compare
         // each source's energy *relative to its own rolling noise floor* (an
@@ -1103,6 +1131,7 @@ impl AudioPipeline {
             if self.state.live_transcription_disabled() {
                 self.vad_processor = None;
             }
+            let mut microphone_samples = false;
             // Receive audio chunks with timeout
             match tokio::time::timeout(
                 std::time::Duration::from_millis(50), // Shorter timeout for responsiveness
@@ -1126,6 +1155,8 @@ impl AudioPipeline {
                     // PERFORMANCE OPTIMIZATION: Eliminate per-chunk logging overhead
                     // Logging in hot paths causes severe performance degradation
                     self.processed_chunks += 1;
+                    microphone_samples =
+                        chunk.device_type == DeviceType::Microphone && !chunk.data.is_empty();
 
                     // CRITICAL: Log summary only every 200 chunks OR every 60 seconds (99.5% reduction)
                     // This eliminates I/O overhead in the audio processing hot path
@@ -1260,6 +1291,18 @@ impl AudioPipeline {
                 Err(_) => {
                     // Timeout - no chunk this tick. Fall through to the silence
                     // check so a dead/silent system stream is still detected.
+                }
+            }
+
+            if let Some(stalled) = microphone_stream.update(
+                std::time::Instant::now(),
+                self.state.is_active(),
+                microphone_samples,
+            ) {
+                if stalled {
+                    self.state.report_warning(MICROPHONE_STREAM_WARNING);
+                } else {
+                    self.state.clear_warning(MICROPHONE_STREAM_WARNING);
                 }
             }
 
@@ -1698,6 +1741,23 @@ mod source_attribution_tests {
 mod system_audio_warning_tests {
     use super::{DeviceType, SystemAudioWarningTracker};
     use std::time::Duration;
+
+    #[test]
+    fn a_stalled_microphone_warns_once_and_silent_samples_or_pause_clear_it() {
+        let mut watch = super::MicrophoneStreamWatch::default();
+        let start = std::time::Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        assert_eq!(watch.update(at(0), true, false), None);
+        assert_eq!(watch.update(at(30), true, false), None); // no mic has supplied samples
+        assert_eq!(watch.update(at(31), true, true), None);
+        assert_eq!(watch.update(at(45), true, false), None);
+        assert_eq!(watch.update(at(46), true, false), Some(true));
+        assert_eq!(watch.update(at(47), true, false), None);
+        assert_eq!(watch.update(at(48), true, true), Some(false));
+        assert_eq!(watch.update(at(63), true, false), Some(true));
+        assert_eq!(watch.update(at(64), false, false), Some(false));
+        assert_eq!(watch.update(at(600), true, false), None);
+    }
 
     #[test]
     fn late_system_audio_resolves_the_silence_warning_once() {

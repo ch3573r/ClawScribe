@@ -96,11 +96,12 @@ export async function flushMeetingDrafts() {
 
 export async function confirmSummaryRegeneration(
   flush: () => Promise<void>,
-  read: () => Promise<{ data?: { user_edited_at?: unknown } }>,
+  read: () => Promise<{ status?: string; data?: { user_edited_at?: unknown } }>,
   confirm: (message: string) => Promise<boolean>,
 ) {
   await flush();
   const current = await read();
+  if (busy(current?.status)) return false;
   return !current?.data?.user_edited_at || await confirm('Regenerate will replace your edited summary. You can restore it afterwards.');
 }
 

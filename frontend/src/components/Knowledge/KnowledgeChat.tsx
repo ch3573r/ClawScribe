@@ -14,7 +14,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { citationParts, contextLinks, scopeReady, MAX_EVIDENCE_ENTRIES } from "@/lib/knowledge-state";
 import { documentAnchor } from "@/lib/knowledge-documents";
 import { friendlyModel } from "@/lib/friendly-model";
-import { knowledgeService } from "@/services/knowledgeService";
 import { openExternal } from "@/lib/openExternal";
 import type { KnowledgeSearchState } from "@/hooks/useKnowledgeSearch";
 import type { AssistantReply, ConversationOwner, HistoryMessage, SearchMode } from "@/types/knowledge";
@@ -74,23 +73,23 @@ export function CitedAnswer({ reply, state }: { reply: AssistantReply; state: Pi
 function conversationName(messages: HistoryMessage[]) {
   const first = messages.find(message => message.role === "user" && message.content.trim());
   if (!first) return "New conversation";
-  const date = new Date(first.created_at);
-  const label = first.content.replace(/\s+/g, " ").trim().slice(0, 60);
+  return conversationLabel(first.content, first.created_at);
+}
+function conversationLabel(question?: string | null, createdAt?: string) {
+  if (!question?.trim()) return "New conversation";
+  const date = new Date(createdAt ?? "");
+  const label = question.replace(/\s+/g, " ").trim().slice(0, 60);
   return `${label}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}`;
 }
-export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachments, suggestions, headerMenuExtra, emptyState, inputDisabled = false }: {
+export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachments, suggestions, headerMenuExtra, emptyState }: {
   state: KnowledgeSearchState; mode: SearchMode; provider?: string; model?: string; title?: string; secondary?: ReactNode; compact?: boolean; headerActions?: ReactNode;
   contextBar?: ReactNode; composerStart?: ReactNode; attachments?: ReactNode; suggestions?: readonly string[]; headerMenuExtra?: ReactNode;
-  emptyState?: ReactNode; inputDisabled?: boolean;
+  emptyState?: ReactNode;
 }) {
   const [question, setQuestion] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [clearTarget, setClearTarget] = useState<ConversationOwner | null>(null);
   useEffect(() => setClearTarget(null), [state.owner?.kind, state.owner?.id]);
-  const [names, setNames] = useState<Record<string, string>>({});
-  const [namesLoading, setNamesLoading] = useState(false);
-  const [namesError, setNamesError] = useState(false);
-  const [namesRetry, setNamesRetry] = useState(0);
   const [settled, setSettled] = useState(0);
   const end = useRef<HTMLDivElement>(null);
   const menuTrigger = useRef<HTMLButtonElement>(null);
@@ -100,7 +99,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const scope = JSON.stringify({scope:state.scope,documents:state.selectedDocumentIds});
   const externalReferences = !!state.selectedDocumentIds?.length && provider !== "builtin-ai";
   const needsSharing = externalReferences && !state.sharingEnabled;
-  const ready = !inputDisabled && !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
+  const ready = !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
   // Draft keystrokes must not rebuild the Markdown/citation tree for the entire history.
   const messages = useMemo(() => state.messages.map(message => <article key={message.id} className={`rounded-lg p-3 ${message.role === "user" ? "ml-6 bg-primary/10" : "bg-muted"}`}>
     <div className="mb-1 flex items-center justify-between gap-2">
@@ -127,25 +126,6 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
     if (state.error || last?.status === "failed" || last?.status === "cancelled") setQuestion(current => current || request.text);
     pending.current = null;
   }, [state.sending, state.creating, state.error, state.messages, scope, state.owner?.id, provider, model, settled]);
-  useEffect(() => {
-    if (!menuOpen || state.scope.kind !== "library") return;
-    let active = true;
-    setNamesLoading(true); setNamesError(false);
-    void (async () => {
-      for (const owner of state.threads) {
-        if (!active) return;
-        if (owner.id === state.owner?.id || names[owner.id]) continue;
-        try {
-          const history = await knowledgeService.history(owner);
-          if (active) setNames(current => ({ ...current, [owner.id]: conversationName(history) }));
-        } catch { if (active) setNamesError(true); }
-      }
-      if (active) setNamesLoading(false);
-    })();
-    return () => { active = false; };
-    // Cached names do not restart an in-flight menu read.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [menuOpen, state.threads, state.owner?.id, namesRetry, state.scope.kind]);
   const submit = () => {
     if (!question.trim() || !ready || state.sending || pending.current) return;
     const request = { text: question, scope, owner: state.owner?.id, provider, model, started: false, finished: false };
@@ -154,23 +134,21 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
       request.finished = true; if (pending.current === request) setSettled(current => current + 1);
     });
   };
-  const questionInput = <Textarea ref={questionRef} id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} onChange={event => setQuestion(event.target.value)} disabled={inputDisabled} rows={1} placeholder={compact ? "Ask about this meeting…" : "Ask about decisions, action items or what was said"} className={`${compact ? "min-h-10" : "min-h-11"} resize-none`}
+  const questionInput = <Textarea ref={questionRef} id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} onChange={event => setQuestion(event.target.value)} rows={1} placeholder={compact ? "Ask about this meeting…" : "Ask about decisions, action items or what was said"} className={`${compact ? "min-h-10" : "min-h-11"} resize-none`}
     onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); submit(); } }} />;
   return <PageSection className="flex h-full min-h-0 flex-col overflow-hidden" aria-label={title}>
     <header className={`flex shrink-0 items-center gap-2 border-b border-border py-3 ${compact ? "px-3" : "px-5"}`}>
       <h2 className={`min-w-0 flex-1 font-semibold ${compact ? "text-sm" : ""}`}>{title}</h2>
       <TooltipProvider><Tooltip><TooltipTrigger asChild><span tabIndex={0} className="max-w-48 truncate rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{friendlyModel(model)}</span></TooltipTrigger><TooltipContent>{model || "Choose a model"}</TooltipContent></Tooltip></TooltipProvider>
-      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}><DropdownMenuTrigger asChild><Button ref={menuTrigger} variant="ghost" size="icon" aria-label={compact ? "More options" : "Conversations"} disabled={busy}><MoreHorizontal /></Button></DropdownMenuTrigger>
+      <DropdownMenu open={menuOpen} onOpenChange={open => { setMenuOpen(open); if (open && state.scope.kind === "library") void state.reloadThreads(); }}><DropdownMenuTrigger asChild><Button ref={menuTrigger} variant="ghost" size="icon" aria-label={compact ? "More options" : "Conversations"} disabled={busy}><MoreHorizontal /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="max-w-sm">
           {compact && headerMenuExtra}
           <DropdownMenuLabel>Conversations</DropdownMenuLabel>
           {state.scope.kind === "library" && <DropdownMenuItem onSelect={() => void state.newConversation()}>New conversation</DropdownMenuItem>}
           <DropdownMenuItem disabled={!state.messages.length || !state.owner || busy} onSelect={() => setClearTarget(state.owner)}>Clear conversation</DropdownMenuItem>
           {state.scope.kind === "library" && <><DropdownMenuSeparator />
-            {state.threads.map(owner => <DropdownMenuItem key={owner.id} className="max-w-xs truncate" onSelect={() => state.selectConversation(owner)}>{owner.id === state.owner?.id ? conversationName(state.messages) : names[owner.id] ?? "Loading conversation…"}</DropdownMenuItem>)}
+            {state.threads.map(owner => <DropdownMenuItem key={owner.id} className="max-w-xs truncate" onSelect={() => state.selectConversation(owner)}>{owner.id === state.owner?.id ? conversationName(state.messages) : conversationLabel(owner.first_question, owner.created_at)}</DropdownMenuItem>)}
             {!state.threads.length && <DropdownMenuLabel>No saved conversations</DropdownMenuLabel>}
-            {namesLoading && <DropdownMenuLabel>Loading names…</DropdownMenuLabel>}
-            {namesError && <DropdownMenuItem onSelect={event => { event.preventDefault(); setNamesRetry(value => value + 1); }}>Retry loading names</DropdownMenuItem>}
           </>}
         </DropdownMenuContent>
       </DropdownMenu>
@@ -185,7 +163,6 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
           // Stay open instead of closing with nothing done.
           if (busy) return;
           setClearTarget(null);
-          setNames(current => { const next = { ...current }; delete next[clearTarget.id]; return next; });
           void state.clear();
         }}
       />}

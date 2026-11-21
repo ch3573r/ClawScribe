@@ -77,6 +77,7 @@ export function PlannerExportPreview({
   const { modelConfig } = useConfig();
   const [rows, setRows] = useState<Row[]>([]);
   const [previewCandidates, setPreviewCandidates] = useState<readonly TaskPreviewCandidate[]>([]);
+  const [pendingSuggestions, setPendingSuggestions] = useState(0);
   const [buckets, setBuckets] = useState<BucketInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [polishing, setPolishing] = useState(false);
@@ -92,10 +93,11 @@ export function PlannerExportPreview({
     setReviewIds(new Set());
     setRows([]);
     setPreviewCandidates([]);
+    setPendingSuggestions(0);
     setBuckets([]);
     (async () => {
       try {
-        const [items, bucketList] = await Promise.all([
+        const [{ items, suggestionCount }, bucketList] = await Promise.all([
           getMarkdown().then((md) =>
             microsoftExportService.previewPlannerTasks(meetingId, meetingTitle, md),
           ),
@@ -103,6 +105,7 @@ export function PlannerExportPreview({
         ]);
         if (cancelled) return;
         setPreviewCandidates(taskPreviewCandidates(items));
+        setPendingSuggestions(suggestionCount);
         setBuckets(bucketList);
         // Default each task to the bucket chosen in Settings (fall back to first).
         const fallbackBucket =
@@ -231,6 +234,10 @@ export function PlannerExportPreview({
           </DialogDescription>
         </DialogHeader>
 
+        {!loading && !error && pendingSuggestions > 0 && onReviewActions && <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+          <span>{pendingSuggestions} summary {pendingSuggestions === 1 ? "suggestion is" : "suggestions are"} outside your saved action list.</span>
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => { onOpenChange(false); onReviewActions(); }}>Review suggestions</Button>
+        </div>}
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />

@@ -17,6 +17,7 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
     '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'fixture',model:'fixture'}})},
     '@/components/LibraryBackup':{LibraryBackup:'backup'},'@/components/Knowledge/KnowledgeArchive':{KnowledgeArchive:'memory'},
     '@/components/Archive/ArchiveMeetingRows':{ArchiveMeetingRows:'archive-rows'},'@/components/Archive/ArchiveStorageButton':{ArchiveStorageButton:'storage'},
+    '@/components/MeetingDetails/ProjectTags':{ProjectTags:'project-tags'},
     './ArchiveAudioRemoval':{ArchiveAudioRemoval:'audio-removal'},
     '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
     '@/components/MeetingDetails/AttachReferenceButton':{AttachReferenceButton:'attach'},
@@ -128,17 +129,33 @@ test('archive shows titles and passages and restores date and query when returni
 test('memory empty-state action opens the existing chooser without expanding the scope',()=>{
   const app=surface('src/components/Knowledge/KnowledgeArchive.tsx','KnowledgeArchive',{meetings,projectFilter:{tags:[],untagged:false,mode:'any'}});
   let tree=app.render();const chat=nodes(tree).find(node=>node.type==='chat');
-  assert.equal(chat.props.inputDisabled,true);
   assert.match(text(chat.props.emptyState),/Choose meetings to ask about/);
   nodes(chat.props.emptyState).find(node=>node.type==='button').props.onClick();
   tree=app.render();assert.equal(nodes(tree).find(node=>node.type==='popover').props.open,true);
   assert.equal(nodes(tree).find(node=>node.type==='chat').props.state.scope.filter.all_meetings,false);app.unmount();
 });
 
-test('memory question input stays visible and disabled until sources are chosen',()=>{
+test('memory remembers its source selection and dates across route navigation',()=>{
+  const app=surface('src/components/Knowledge/KnowledgeArchive.tsx','KnowledgeArchive',{meetings,projectFilter:{tags:[],untagged:false,mode:'any'}});
+  let tree=app.render();
+  nodes(tree).find(node=>node.type==='checkbox').props.onCheckedChange(true);
+  nodes(tree).find(node=>node.props?.type==='date').props.onChange({target:{value:'2026-02-01'}});
+  tree=app.render();
+  const selected=nodes(tree).find(node=>node.type==='chat').props.state.scope.filter;
+  assert.deepEqual([...selected.meeting_ids],[meetings[0].id]);
+  app.reset();
+  const restored=nodes(app.render()).find(node=>node.type==='chat').props.state.scope.filter;
+  assert.deepEqual([...restored.meeting_ids],[meetings[0].id]);
+  assert.equal(restored.from,'2026-02-01');
+  assert.equal(restored.all_meetings,false);
+  app.unmount();
+});
+
+test('memory lets the user draft a question before authorizing sources',()=>{
   const state={scope:{kind:'library',filter:{all_meetings:false,meeting_ids:[],tags:[],tag_mode:'any',untagged:false,from:null,to:null}},owner:null,messages:[],threads:[]};
-  const app=surface('src/components/Knowledge/KnowledgeChat.tsx','KnowledgeChat',{state,mode:'keyword',provider:'fixture',model:'fixture',inputDisabled:true,emptyState:jsx('p',{children:'Choose meetings'})});
-  const tree=app.render();assert.equal(nodes(tree).find(node=>node.type==='textarea').props.disabled,true);
+  const app=surface('src/components/Knowledge/KnowledgeChat.tsx','KnowledgeChat',{state,mode:'keyword',provider:'fixture',model:'fixture',emptyState:jsx('p',{children:'Choose meetings'})});
+  const tree=app.render();const field=nodes(tree).find(node=>node.type==='textarea');assert.ok(!field.props.disabled);
+  field.props.onChange({target:{value:'Draft question'}});assert.equal(nodes(app.render()).find(node=>node.type==='textarea').props.value,'Draft question');
   assert.equal(nodes(tree).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,true);app.unmount();
 });
 

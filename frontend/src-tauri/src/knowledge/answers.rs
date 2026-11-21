@@ -256,9 +256,10 @@ where
     }
     let frozen = tokio::select! { biased; _=token.cancelled()=>return Err("Answer cancelled".into()), _=tokio::time::sleep_until(deadline)=>return Err("Answer deadline expired".into()), result=conversations::frozen_scope(pool, &request.request_id)=>result? };
     let preparation = async {
-        let response = retrieval::retrieve_frozen(pool, runtime, &request.search, &frozen)
-            .await
-            .map_err(|error| error.to_string())?;
+        let (response, query_vector) =
+            retrieval::retrieve_with_vector(pool, runtime, &request.search, &frozen)
+                .await
+                .map_err(|error| error.to_string())?;
         let budget = resolved
             .budget
             .input(&resolved.provider, &resolved.model, SYSTEM.len() + 512)?
@@ -294,11 +295,10 @@ where
         } else {
             let (passages, required) = balanced_selection(
                 pool,
-                runtime,
                 &request.search,
                 &frozen,
                 response.passages,
-                response.mode,
+                query_vector.as_deref(),
             )
             .await?;
             let (prompt, selected) = selection_prompt(
@@ -416,11 +416,28 @@ async fn small_selection_context(
     }
     let mut context = Vec::new();
     let mut used = build_prompt(question, &[], history, budget)?.0.len() + 1;
-    for meeting in &frozen.meeting_ids {
-        let job:Option<store::SourceJob>=sqlx::query_as("SELECT id AS source_id,meeting_id,revision,generation FROM knowledge_sources WHERE meeting_id=? AND kind='meeting'").bind(meeting).fetch_optional(pool).await.map_err(|_|"Evidence storage unavailable")?;
-        let Some(job) = job else {
-            return Err("Selected source was deleted".into());
-        };
+    let allowed =
+        serde_json::to_string(&frozen.meeting_ids).map_err(|_| "Invalid meeting selection")?;
+    if !has_meeting_coverage_budget(frozen) {
+        // Keep complete short selections, even across many meetings. Reject
+        // oversized ones before hashing, loading labels or reading bodies.
+        let (rows, bytes): (i64, i64) = sqlx::query_as(
+            "SELECT count(*),COALESCE(sum(bytes),0) FROM (SELECT length(CAST(transcript AS BLOB)) AS bytes
+             FROM transcripts WHERE meeting_id IN (SELECT value FROM json_each(?)) LIMIT ?)")
+            .bind(&allowed).bind(super::evidence::MAX_EVIDENCE_ENTRIES as i64 + 1).fetch_one(pool)
+            .await.map_err(|_| "Evidence storage unavailable")?;
+        if rows as usize > super::evidence::MAX_EVIDENCE_ENTRIES
+            || bytes as usize > budget.saturating_sub(used)
+        {
+            return Ok(None);
+        }
+    }
+    let jobs: Vec<store::SourceJob> = sqlx::query_as(
+        "SELECT id AS source_id,meeting_id,revision,generation FROM knowledge_sources s
+         WHERE meeting_id IN(SELECT value FROM json_each(?)) AND kind='meeting'
+         AND EXISTS(SELECT 1 FROM transcripts t WHERE t.meeting_id=s.meeting_id) ORDER BY meeting_id")
+        .bind(allowed).fetch_all(pool).await.map_err(|_| "Evidence storage unavailable")?;
+    for job in jobs {
         let mut after = None;
         loop {
             let ids = store::row_ids_page(pool, &job, after.as_deref())
@@ -491,16 +508,27 @@ async fn small_selection_context(
     Ok(Some(context))
 }
 
+// A small comparison can reserve three passages per meeting inside the global
+// shortlist. Broader library questions use a single scope-wide ranked search.
+fn has_meeting_coverage_budget(frozen: &retrieval::FrozenScope) -> bool {
+    frozen.meeting_ids.len() <= retrieval::RESULT_LIMIT / 3
+}
+
 /// Reserve matches per meeting before global rank can crowd a source out.
 async fn balanced_selection(
     pool: &SqlitePool,
-    runtime: &super::KnowledgeState,
     request: &SearchRequest,
     frozen: &retrieval::FrozenScope,
     mut candidates: Vec<Passage>,
-    mode: SearchMode,
+    vector: Option<&[f32]>,
 ) -> Result<(Vec<Passage>, usize), String> {
-    for meeting in &frozen.meeting_ids {
+    let coverage: &[String] = if has_meeting_coverage_budget(frozen) {
+        &frozen.meeting_ids
+    } else {
+        &[]
+    };
+    let space = super::model::PINS.space();
+    for meeting in coverage {
         if candidates
             .iter()
             .filter(|row| {
@@ -515,24 +543,19 @@ async fn balanced_selection(
         let scope = KnowledgeScope::Meeting {
             meeting_id: meeting.clone(),
         };
-        let response = retrieval::retrieve_frozen(
+        let matches = retrieval::search_channels(
             pool,
-            runtime,
-            &SearchRequest {
-                scope: scope.clone(),
-                query: request.query.clone(),
-                document_ids: vec![],
-                mode,
-            },
             &retrieval::FrozenScope {
                 scope,
                 meeting_ids: vec![meeting.clone()],
                 document_ids: Vec::new(),
             },
+            &request.query,
+            vector.map(|value| (space.id.as_str(), value)),
         )
         .await
         .map_err(|error| error.to_string())?;
-        for row in response.passages {
+        for row in matches {
             if !candidates
                 .iter()
                 .any(|existing| existing.evidence == row.evidence)
@@ -547,7 +570,7 @@ async fn balanced_selection(
             .then_with(|| a.evidence.chunk_id.cmp(&b.evidence.chunk_id))
     });
     let mut selected = Vec::new();
-    for meeting in &frozen.meeting_ids {
+    for meeting in coverage {
         selected.extend(
             candidates
                 .iter()
@@ -595,6 +618,9 @@ async fn selection_prompt(
     history: &str,
     budget: usize,
 ) -> Result<(String, Vec<Passage>), String> {
+    if !has_meeting_coverage_budget(frozen) {
+        return build_prompt(question, passages, history, budget);
+    }
     let mut overviews = Vec::new();
     let summary_limit = (budget / frozen.meeting_ids.len().max(1) / 8).min(2048);
     for meeting in &frozen.meeting_ids {
@@ -793,16 +819,9 @@ mod tests {
             );
         }
         let documents: Vec<_> = candidates.iter().map(|row| row.evidence.clone()).collect();
-        let (selected, _) = balanced_selection(
-            &pool,
-            &super::super::KnowledgeState::default(),
-            &request.search,
-            &frozen,
-            candidates,
-            SearchMode::Keyword,
-        )
-        .await
-        .unwrap();
+        let (selected, _) = balanced_selection(&pool, &request.search, &frozen, candidates, None)
+            .await
+            .unwrap();
         assert!(
             selected.iter().any(|row| {
                 row.meeting_id == "aster"
@@ -1378,6 +1397,43 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn archive_answer_uses_global_matches_within_the_model_budget() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let (pool, mut request, dir) = answer_fixture().await;
+        for i in 0..60 {
+            let id = format!("archive-{i}");
+            sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES(?,?,'2026-09-01','2026-09-01')")
+                .bind(&id).bind(&id).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES (?,?,?,'00:00')")
+                .bind(&id).bind(&id).bind("Launch ".repeat(70)).execute(&pool).await.unwrap();
+        }
+        request.search.query = "Launch".into();
+        let mut configuration = resolved(&pool, dir.path()).await;
+        configuration.budget.context_tokens = 8192;
+        configuration.budget.output_tokens = 1024;
+        let reply = ask_resolved(
+            &pool,
+            &super::super::KnowledgeState::default(),
+            &request,
+            configuration,
+            &CancellationToken::new(),
+            |resolved, _, prompt, _| async move {
+                let envelope: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+                assert_eq!(envelope["retrieval_incomplete"], true);
+                assert!(envelope.get("overview_context").is_none());
+                Ok(ConfiguredTextReply {
+                    text: "Launch [K1].".into(),
+                    provider: llm_client::canonical_provider(&resolved.provider).into(),
+                    model: resolved.model,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert!((1..=retrieval::RESULT_LIMIT).contains(&reply.evidence.len()));
     }
 
     #[tokio::test]

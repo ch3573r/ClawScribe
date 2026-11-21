@@ -48,7 +48,10 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
 fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
     match item_id {
-        "toggle_recording" => toggle_recording_handler(app, StartSource::Tray),
+        "toggle_recording" => recording_intent_handler(app, Some(true), StartSource::Tray),
+        "start_after_save" => {
+            handle_saving_intent(app, Some(true));
+        }
         "pause_recording" => pause_recording_handler(app),
         "resume_recording" => resume_recording_handler(app),
         "stop_recording" => stop_recording_handler(app),
@@ -97,12 +100,12 @@ pub(crate) fn recording_intent_handler<R: Runtime>(
     want_recording: Option<bool>,
     source: StartSource,
 ) {
-    if crate::audio::recording_commands::is_stopping() {
+    if handle_saving_intent(app, want_recording) {
         return;
     }
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        if crate::audio::recording_commands::is_stopping() {
+        if handle_saving_intent(&app_clone, want_recording) {
             return;
         }
         let recording = crate::is_recording().await;
@@ -121,10 +124,50 @@ pub(crate) fn recording_intent_handler<R: Runtime>(
     });
 }
 
+fn handle_saving_intent<R: Runtime>(app: &AppHandle<R>, intent: Option<bool>) -> bool {
+    if !crate::audio::recording_commands::set_start_after_save(intent, None) {
+        return false;
+    }
+    let message = match intent {
+        Some(true) => {
+            "New recording queued for after this save. The request expires in one minute."
+        }
+        Some(false) => "Saving this recording. No new recording is queued.",
+        None => "Saving this recording. Use Start after saving in the tray to record again.",
+    };
+    start_feedback(app, message);
+    true
+}
+
+fn start_feedback<R: Runtime>(app: &AppHandle<R>, message: &str) {
+    let _ = app.emit("recording-start-feedback", message);
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(message));
+    }
+}
+
+pub(crate) fn queued_start_failed<R: Runtime>(app: &AppHandle<R>) {
+    start_feedback(app, "The queued recording did not start. Check the recording status and start again when ready.");
+    let _ = app.emit("recording-queued-start-failed", ());
+}
+
+pub(crate) async fn start_after_save<R: Runtime>(
+    app: &AppHandle<R>,
+    epoch: u64,
+    requested: std::time::Instant,
+) {
+    request_start(app, StartSource::AfterSave { epoch, requested }).await;
+}
+
 /// Asks the window to start a recording and shows the outcome in the tray.
 async fn request_start<R: Runtime>(app: &AppHandle<R>, source: StartSource) {
     match crate::start_request::request_and_wait(app, source, None).await {
         None => {
+            if matches!(source, StartSource::AfterSave { .. }) {
+                queued_start_failed(app);
+            } else {
+                handle_saving_intent(app, None);
+            }
             log::info!(
                 "Recording request ignored: another start is under way or capture is running"
             );
@@ -132,10 +175,21 @@ async fn request_start<R: Runtime>(app: &AppHandle<R>, source: StartSource) {
         }
         Some(StartOutcome::Started { .. }) => {}
         Some(StartOutcome::Busy) => {
+            if matches!(source, StartSource::AfterSave { .. }) {
+                queued_start_failed(app);
+            } else {
+                start_feedback(
+                    app,
+                    "Recording is busy. Check its status before starting again.",
+                );
+            }
             log::info!("Recording request ignored: the window is busy with another recording step");
             update_tray_menu_async(app).await;
         }
         Some(StartOutcome::Failed { .. }) | Some(StartOutcome::TimedOut) => {
+            if matches!(source, StartSource::AfterSave { .. }) {
+                queued_start_failed(app);
+            }
             log::warn!("A recording start requested from the tray did not complete");
             update_tray_menu_async(app).await;
             // The window explains why; bring it forward so the reason is seen.
@@ -415,8 +469,7 @@ fn build_menu<R: Runtime>(
             }
             RecordingState::Stopping => {
                 builder = builder.item(
-                    &MenuItemBuilder::new("⏹ Stopping...")
-                        .enabled(false)
+                    &MenuItemBuilder::with_id("start_after_save", "Start after saving")
                         .build(app)?,
                 );
             }
@@ -480,6 +533,7 @@ pub fn start_lifecycle<R: Runtime>(app: &AppHandle<R>) {
     if LIFECYCLE_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
+    crate::notifications::commands::listen_for_background_alerts(app);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         lifecycle_loop(app).await;

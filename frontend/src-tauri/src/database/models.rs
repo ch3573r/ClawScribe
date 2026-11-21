@@ -45,6 +45,9 @@ pub struct Transcript {
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct SummaryProcess {
+    #[sqlx(default)]
+    #[serde(skip)]
+    pub current_content_revision: Option<i64>,
     pub meeting_id: String,
     pub status: String,
     pub created_at: chrono::DateTime<chrono::Utc>,

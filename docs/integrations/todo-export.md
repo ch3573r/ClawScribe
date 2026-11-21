@@ -10,6 +10,8 @@ tasks only in the signed-in user's selected To Do list.
 2. User chooses a To Do list in Settings → Microsoft 365.
 3. User opens To Do export from a meeting summary.
 4. ClawScribe loads open reviewed meeting actions or suggests tasks from the summary.
+   **Review suggestions** opens the action list when the summary contains
+   additional suggestions. Review and save any additions before reopening the export.
 5. User edits titles/notes and deselects anything that should not be created.
 6. ClawScribe creates the selected tasks through Microsoft Graph.
 

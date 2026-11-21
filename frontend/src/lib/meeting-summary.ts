@@ -1,7 +1,28 @@
 import type { Block, EditorSummary, MeetingSummary, Section, SummaryDataResponse } from '@/types';
+import { stripSourceAnchors } from './clipboard-format';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function summaryDetails(input: string | SummaryDataResponse | null | undefined) {
+  let data: unknown = input;
+  if (typeof input === 'string') {
+    try { data = JSON.parse(input); } catch { data = null; }
+  }
+  const record = isRecord(data) ? data : {};
+  const cache = isRecord(record.english_cache) && isRecord(record.english_cache.source) ? record.english_cache.source : {};
+  const generation = isRecord(record.generation) ? record.generation : {};
+  const model = generation.model ?? cache.model_name;
+  const template = generation.template ?? cache.template_id;
+  const structured = isRecord(record.structured_meeting_output) ? record.structured_meeting_output : {};
+  const email = record.follow_up_email ?? structured.follow_up_email;
+  return {
+    model: typeof model === 'string' ? model : '',
+    template: typeof template === 'string' ? template.replace(/_/g, ' ') : '',
+    email: isRecord(email) && typeof email.body_markdown === 'string' && email.body_markdown.trim()
+      ? { subject: typeof email.subject === 'string' ? stripSourceAnchors(email.subject) : '', body: stripSourceAnchors(email.body_markdown) } : null,
+  };
 }
 
 export function isEditorSummary(summary: MeetingSummary): summary is EditorSummary {

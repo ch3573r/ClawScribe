@@ -92,6 +92,17 @@ struct Candidate {
     generation: Option<i64>,
 }
 
+/// An ASCII substring of the folded query is a necessary condition for a match.
+/// The index expands the two non-ASCII letters whose lowercase contains ASCII
+/// (dotted I and Kelvin sign). Exact Unicode folding and offsets stay canonical.
+fn indexed_anchor(folded: &str) -> Option<String> {
+    folded
+        .split(|ch: char| !ch.is_ascii() || ch == '\0')
+        .filter(|part| part.len() >= 3)
+        .max_by_key(|part| part.len())
+        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+}
+
 pub(crate) async fn search(
     conn: &mut SqliteConnection,
     query: &str,
@@ -110,6 +121,11 @@ pub(crate) async fn search(
     }
     let pattern = [literal_fold(text)];
     let mut tx = conn.begin().await?;
+    // The standalone read-only tool can open a library before desktop migration.
+    let mut anchor = indexed_anchor(&pattern[0]);
+    if anchor.is_some() && !sqlx::query_scalar::<_, bool>(
+        "SELECT count(*)=2 FROM sqlite_schema WHERE type='table' AND name IN ('knowledge_title_literal','knowledge_transcript_literal')"
+    ).fetch_one(&mut *tx).await? { anchor = None; }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     let allowed = match scope {
         Some(scope) => match tokio::time::timeout_at(
@@ -153,37 +169,46 @@ pub(crate) async fn search(
             let page = PAGE.min(MAX_ROWS - rows_read);
             // Separate title and passage bounds keep a busy transcript from hiding title matches.
             // Keyset batching reads metadata only and avoids building an unbounded result set.
-            let statement = if title {
-                "SELECT m.rowid,m.id AS meeting_id,m.rowid AS meeting_rowid,NULL AS transcript_id,
-                        0 AS speaker_present,NULL AS start_seconds,NULL AS revision,NULL AS generation
-                 FROM meetings m WHERE m.rowid <= ?1
-                   AND (?2 IS NULL OR m.id IN (SELECT value FROM json_each(?2)))
-                 ORDER BY m.rowid DESC LIMIT ?3"
+            let (columns, tables, rowid) = if title {
+                (
+                    "m.rowid,m.id AS meeting_id,m.rowid AS meeting_rowid,NULL AS transcript_id,
+                  0 AS speaker_present,NULL AS start_seconds,NULL AS revision,NULL AS generation",
+                    "meetings m",
+                    "m.rowid",
+                )
             } else {
-                "SELECT t.rowid,m.id AS meeting_id,m.rowid AS meeting_rowid,t.id AS transcript_id,
-                        t.speaker IS NOT NULL AS speaker_present,t.audio_start_time AS start_seconds,
-                        s.revision,s.generation
-                 FROM transcripts t JOIN meetings m ON m.id=t.meeting_id
-                 LEFT JOIN knowledge_sources s ON s.meeting_id=m.id
-                 WHERE t.rowid <= ?1 AND (?2 IS NULL OR m.id IN (SELECT value FROM json_each(?2)))
-                 ORDER BY t.rowid DESC LIMIT ?3"
+                ("t.rowid,m.id AS meeting_id,m.rowid AS meeting_rowid,t.id AS transcript_id,
+                  t.speaker IS NOT NULL AS speaker_present,t.audio_start_time AS start_seconds,s.revision,s.generation",
+                 "transcripts t JOIN meetings m ON m.id=t.meeting_id LEFT JOIN knowledge_sources s ON s.meeting_id=m.id", "t.rowid")
             };
-            let rows: Vec<Candidate> = match tokio::time::timeout_at(
-                deadline,
-                sqlx::query_as(statement)
-                    .bind(before.unwrap_or(i64::MAX))
-                    .bind(allowed.as_deref())
-                    .bind(page as i64)
-                    .fetch_all(&mut *tx),
-            )
-            .await
-            {
-                Ok(rows) => rows?,
-                Err(_) => {
-                    hits.limited = true;
-                    return Ok(hits);
-                }
+            let statement = if anchor.is_some() {
+                let index = if title {
+                    "knowledge_title_literal"
+                } else {
+                    "knowledge_transcript_literal"
+                };
+                format!("SELECT {columns} FROM {index}(?4) hit CROSS JOIN {tables}
+                    WHERE {rowid}=hit.rowid AND hit.rowid<=?1 AND (?2 IS NULL OR m.id IN(SELECT value FROM json_each(?2)))
+                    ORDER BY hit.rowid DESC LIMIT ?3")
+            } else {
+                format!("SELECT {columns} FROM {tables} WHERE {rowid}<=?1 AND (?2 IS NULL OR m.id IN(SELECT value FROM json_each(?2)))
+                    ORDER BY {rowid} DESC LIMIT ?3")
             };
+            let mut query = sqlx::query_as(&statement)
+                .bind(before.unwrap_or(i64::MAX))
+                .bind(allowed.as_deref())
+                .bind(page as i64);
+            if let Some(expression) = &anchor {
+                query = query.bind(expression);
+            }
+            let rows: Vec<Candidate> =
+                match tokio::time::timeout_at(deadline, query.fetch_all(&mut *tx)).await {
+                    Ok(rows) => rows?,
+                    Err(_) => {
+                        hits.limited = true;
+                        return Ok(hits);
+                    }
+                };
             if rows.is_empty() {
                 break;
             }

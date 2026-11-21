@@ -14,8 +14,11 @@ doing in ClawScribe.
   Automatic calendar matching runs after capture starts.
 - Only one start can be under way. A repeated shortcut, a second command-line
   start or a detected call that arrives at the same moment does not start a
-  second recording. A start while a recording is running or being saved is
-  ignored. An unanswered request expires. A detected call also needs current
+  second recording. During a save, **Start after saving** in the window or tray
+  menu, or an explicit `--start-recording`, requests one new recording after
+  the library commit. The request expires after one minute. A subsequent
+  `--stop-recording` during the save cancels it. A toggle during the save
+  explains how to request the next recording. A detected call needs current
   evidence before ClawScribe opens the audio streams.
 - If the start fails, for example with a full disk or a missing microphone, the
   window is brought forward and says why.
@@ -24,6 +27,17 @@ doing in ClawScribe.
   window is brought forward and says why.
 
 ## What the tray shows
+
+The window shows the current Stop stage during capture shutdown, transcription
+drain and the library save. Separate capture warnings stay visible until each
+condition clears or the recording ends. If microphone samples stop arriving
+for 15 seconds after previously arriving, check the microphone connection.
+Quiet samples still count as a working stream. A newly started or resumed
+meter continues to flag a microphone with no audible signal after 10 seconds.
+
+While the window is hidden or minimized, call prompts and recording problems
+can also show a Windows notification. These alerts contain generic text and
+use the existing meeting reminder and system error notification preferences.
 
 | State | Icon | Tooltip |
 | --- | --- | --- |

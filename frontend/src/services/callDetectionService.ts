@@ -10,7 +10,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { CallProvider, CallSettings } from '@/lib/autoRecord';
 
-export type StartRequestSource = 'tray' | 'shortcut' | 'cli' | 'call';
+export type StartRequestSource = 'tray' | 'shortcut' | 'cli' | 'call' | 'after_save';
 
 export interface StartRequest {
   requestId: string;

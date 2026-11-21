@@ -56,7 +56,7 @@ import {
 type SortMode = "newest" | "oldest" | "title";
 const noProjectFilter: ProjectFilter = { tags: [], untagged: false, mode: "any" };
 // Keep this view's filters in memory when a meeting route replaces it.
-let archiveView = { query: "", from: "", to: "", sortMode: "newest" as SortMode, projectFilter: noProjectFilter };
+let archiveView = { tab: "archive" as "archive" | "memory", memoryProject: noProjectFilter, query: "", from: "", to: "", sortMode: "newest" as SortMode, projectFilter: noProjectFilter };
 
 function timeValue(value?: string): number {
   if (!value) return 0;
@@ -83,12 +83,12 @@ export default function MeetingsPage() {
   const [query, setQuery] = useState(archiveView.query);
   const [from, setFrom] = useState(archiveView.from);
   const [to, setTo] = useState(archiveView.to);
-  const [tab, setTab] = useState<"archive" | "memory">("archive");
+  const [tab, setTab] = useState(archiveView.tab);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [sortMode, setSortMode] = useState(archiveView.sortMode);
   const [projectFilter, setProjectFilter] = useState(archiveView.projectFilter);
-  const [memoryProject, setMemoryProject] = useState(noProjectFilter);
-  useEffect(() => { archiveView = { query, from, to, sortMode, projectFilter }; }, [query, from, to, sortMode, projectFilter]);
+  const [memoryProject, setMemoryProject] = useState(archiveView.memoryProject);
+  useEffect(() => { archiveView = { query, from, to, sortMode, projectFilter, tab, memoryProject }; }, [query, from, to, sortMode, projectFilter, tab, memoryProject]);
   const [archiveRevision, setArchiveRevision] = useState(0);
   const tagOptions = useMemo(() => [...new Map(projectTags.map(row => [row.tag.toLowerCase(), row.tag])).values()].sort((a, b) => a.localeCompare(b)), [projectTags]);
 

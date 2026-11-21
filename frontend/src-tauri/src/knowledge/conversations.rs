@@ -27,19 +27,43 @@ pub async fn create_library(pool: &SqlitePool) -> Result<ConversationOwner, Stri
         .map_err(failure)?;
     Ok(ConversationOwner::Library(id))
 }
-pub async fn list_libraries(pool: &SqlitePool) -> Result<Vec<ConversationOwner>, String> {
-    let ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM knowledge_owners WHERE kind='library' ORDER BY created_at,id",
+#[derive(serde::Serialize)]
+pub struct LibraryConversation {
+    #[serde(flatten)]
+    pub owner: ConversationOwner,
+    first_question: Option<String>,
+    created_at: String,
+}
+
+pub async fn library_list(pool: &SqlitePool) -> Result<Vec<LibraryConversation>, String> {
+    let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT o.id,substr(trim(first.question),1,100),COALESCE(first.created_at,o.created_at)
+         FROM knowledge_owners o LEFT JOIN knowledge_requests first ON first.id=(
+            SELECT r.id FROM knowledge_requests r WHERE r.owner_id=o.id AND r.question!=''
+            ORDER BY r.created_at,r.id LIMIT 1)
+         WHERE o.kind='library' ORDER BY o.created_at,o.id",
     )
     .fetch_all(pool)
     .await
     .map_err(failure)?;
-    Ok(ids
+    Ok(rows
         .into_iter()
-        .filter_map(|id| {
-            id.strip_prefix("library:")
-                .map(|id| ConversationOwner::Library(id.to_owned()))
+        .filter_map(|(key, first_question, created_at)| {
+            Some(LibraryConversation {
+                owner: ConversationOwner::Library(key.strip_prefix("library:")?.to_owned()),
+                first_question,
+                created_at,
+            })
         })
+        .collect())
+}
+
+#[cfg(test)]
+pub async fn list_libraries(pool: &SqlitePool) -> Result<Vec<ConversationOwner>, String> {
+    Ok(library_list(pool)
+        .await?
+        .into_iter()
+        .map(|entry| entry.owner)
         .collect())
 }
 
@@ -335,40 +359,16 @@ pub async fn prepare(
     retrieval::recheck_scope_in_connection(&mut tx, frozen)
         .await
         .map_err(|e| e.to_string())?;
-    let reserved: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT source_id,revision FROM knowledge_request_sources WHERE request_id=?",
-    )
-    .bind(id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(failure)?;
-    for (source, revision) in reserved {
-        if dependencies
-            .insert(source, revision)
-            .is_some_and(|other| other != revision)
-        {
-            return Err("Selected source changed during retrieval".into());
-        }
-    }
-    for (source, revision) in dependencies {
-        let current: Option<i64> =
-            sqlx::query_scalar("SELECT revision FROM knowledge_sources WHERE id=?")
-                .bind(&source)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(failure)?;
-        if current != Some(revision) {
-            return Err("Evidence changed before provider dispatch".into());
-        }
-        sqlx::query(
-            "INSERT INTO knowledge_request_sources(request_id,source_id,revision) VALUES (?,?,?) ON CONFLICT(request_id,source_id) DO NOTHING",
-        )
-        .bind(id)
-        .bind(source)
-        .bind(revision)
-        .execute(&mut *tx)
-        .await
-        .map_err(failure)?;
+    // Verify all reserved revisions in one query, including meetings without
+    // a ranked match. Inherited and selected evidence must agree with reservation.
+    let invalid: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM knowledge_request_sources d LEFT JOIN knowledge_sources s ON s.id=d.source_id
+         WHERE d.request_id=?1 AND (s.id IS NULL OR s.revision!=d.revision))
+         OR EXISTS(SELECT 1 FROM json_each(?2) dep WHERE NOT EXISTS(
+         SELECT 1 FROM knowledge_request_sources d WHERE d.request_id=?1 AND d.source_id=dep.key AND d.revision=dep.value))")
+        .bind(id).bind(json(&dependencies)?).fetch_one(&mut *tx).await.map_err(failure)?;
+    if invalid {
+        return Err("Evidence changed before provider dispatch".into());
     }
     for (index, passage) in passages.iter().enumerate() {
         let display = serde_json::json!({"title":passage.title,"date":passage.date,"speaker":passage.speaker,"metadata_truncated":passage.metadata_truncated,"preceding_question_tag":contexts[index]});
@@ -607,15 +607,11 @@ async fn withheld_titles(
         .iter()
         .filter_map(|source| source.get::<Option<String>, _>("meeting_id"))
         .collect();
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT substr(title,1,1024), calendar_link FROM meetings WHERE id IN(SELECT value FROM json_each(?)) ORDER BY id")
+        .bind(json(&meetings)?).fetch_all(pool).await.map_err(failure)?;
     let mut titles = Vec::new();
-    for meeting in meetings {
-        let row: Option<(String, Option<String>)> =
-            sqlx::query_as("SELECT substr(title,1,1024),calendar_link FROM meetings WHERE id=?")
-                .bind(&meeting)
-                .fetch_optional(pool)
-                .await
-                .map_err(failure)?;
-        let Some((title, link)) = row else { continue };
+    for (title, link) in rows {
         let shown = title.split_whitespace().collect::<Vec<_>>().join(" ");
         if !shown.is_empty()
             && crate::library::calendar::stored_title_policy(link.as_deref())
@@ -1141,7 +1137,9 @@ pub(crate) mod tests {
             history(&pool, &library).await.unwrap()[1].content,
             "Expanded answer"
         );
-        assert_eq!(list_libraries(&pool).await.unwrap().len(), 1);
+        let entries = library_list(&pool).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].first_question.as_deref().unwrap().is_empty());
     }
     #[tokio::test]
     async fn duplicate_request_returns_same_reply() {

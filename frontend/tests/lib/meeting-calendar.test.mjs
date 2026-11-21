@@ -28,7 +28,7 @@ test('a fresh invitation and a legacy checked invitee both require attendance re
   assert.equal(links.calendarLinkFromEvent(event('next')).attendees[0].attendance, 'unreviewed');
 });
 
-test('automatic matching uses only a unique, ongoing timed event across sources', () => {
+test('automatic matching uses only a unique, timed event across sources', () => {
   const { matchOngoingCalendar } = loadTsModule('src/lib/meetingCalendar.ts');
   const matching = [event('live'), event('future', { start: end }), event('ended', { end: start }),
     event('holiday', { allDay: true }), event('cancelled', { isCancelled: true })];
@@ -38,6 +38,20 @@ test('automatic matching uses only a unique, ongoing timed event across sources'
   assert.equal(overlap.matches.length, 2);
   assert.equal(overlap.status, 'ambiguous');
   assert.equal(matchOngoingCalendar(matching, now, true).status, 'unavailable');
+});
+
+test('an early join offers a nearby invitation for review and leaves competing invitations unlinked', () => {
+  const { matchOngoingCalendar, EARLY_JOIN_WINDOW_MS } = loadTsModule('src/lib/meetingCalendar.ts');
+  const early = event('early', { start: new Date(now + EARLY_JOIN_WINDOW_MS - 1).toISOString() });
+  const far = event('far', { start: new Date(now + EARLY_JOIN_WINDOW_MS).toISOString() });
+  const next = matchOngoingCalendar([early, far], now, false);
+  assert.equal(next.status, 'upcoming');
+  assert.equal(next.matches[0].eventId, 'early');
+  assert.equal(next.matches[0].reviewed, undefined);
+  assert.equal(next.matches[0].attendees[0].attendance, 'unreviewed');
+  assert.equal(matchOngoingCalendar([early, event('running')], now, false).status, 'ambiguous');
+  assert.equal(matchOngoingCalendar([early, { ...early, sourceId: 'second' }], now, false).status, 'ambiguous');
+  assert.equal(matchOngoingCalendar([early], now, true).status, 'unavailable');
 });
 
 function withStorage(t) {
@@ -316,7 +330,7 @@ test('recording lookup asks for a complete Graph result and avoids guessing when
     } },
   });
   const lookup = await api.findOngoingRecordingCalendar(now);
-  assert.deepEqual(requests, [['2030-04-15T10:14:00.000Z', '2030-04-15T10:16:00.000Z', true]]);
+  assert.deepEqual(requests, [['2030-04-15T10:14:00.000Z', '2030-04-15T10:20:00.000Z', true]]);
   assert.equal(lookup.status, 'unavailable');
   assert.equal(lookup.matches[0].eventId, 'file-event');
   assert.deepEqual(Array.from(lookup.unavailable), ['Microsoft 365']);
@@ -355,6 +369,44 @@ test('a disconnected Microsoft calendar cannot hold up an imported match', async
   const lookup = await api.findOngoingRecordingCalendar(now);
   assert.equal(lookup.status, 'matched');
   assert.equal(lookup.matches[0].eventId, 'file-event');
+});
+
+test('a connected calendar with missing permission leaves other sources available for manual review', async () => {
+  const api = loadTsModule('src/services/recordingCalendarService.ts', {
+    '@/services/icalService': {
+      refreshICalendars: async () => {},
+      getICalendarSnapshot: () => ({ events: [event('local', { sourceId: 'file' })], issues: {} }),
+    },
+    '@/services/microsoftExportService': { microsoftExportService: {
+      connectionStatus: async () => ({ state: 'connected', unavailableExports: ['Calendar lookup'] }),
+      listCalendarEvents: () => assert.fail('unexpected Graph request'),
+    } },
+  });
+  const result = await api.findOngoingRecordingCalendar(now);
+  assert.equal(result.status, 'unavailable');
+  assert.deepEqual(Array.from(result.unavailable), ['Microsoft 365']);
+  assert.equal(result.matches[0].eventId, 'local');
+});
+
+test('an early calendar candidate reaches the active recording without writing a link', async t => {
+  const links = withStorage(t);
+  const initial = { sessionId: 'early-join', revision: 0, link: null, status: 'none', matches: [] };
+  links.setActiveRecordingCalendar(initial);
+  const writes = [];
+  const api = loadTsModule('src/services/recordingCalendarService.ts', {
+    '@/lib/meetingCalendar': links,
+    '@tauri-apps/api/core': { invoke: async (...args) => { writes.push(args); return 1; } },
+    '@/services/icalService': { refreshICalendars: async () => {}, getICalendarSnapshot: () => ({
+      events: [event('nearby', { sourceId: 'file', start: new Date(now + 120_000).toISOString() })], issues: {},
+    }) },
+    '@/services/microsoftExportService': { microsoftExportService: { connectionStatus: async () => ({ state: 'not_connected' }) } },
+  });
+  await api.resolveRecordingCalendar(initial, now, links.microsoftCalendarRevision);
+  const active = links.getActiveRecordingCalendar(initial.sessionId);
+  assert.equal(active.status, 'upcoming');
+  assert.equal(active.matches[0].eventId, 'nearby');
+  assert.equal(active.link, null);
+  assert.deepEqual(writes, []);
 });
 
 test('a stalled subscription stays within the recording lookup budget', async t => {
@@ -602,7 +654,7 @@ test('a partial calendar result can be checked again from the recording review',
   render().find(node => node.type === 'Button').props.onClick();
   await flush();
   const view = render();
-  assert.match(text(view), /Found an ongoing calendar event/);
+  assert.match(text(view), /Found a matching calendar event/);
   // The event is only a candidate until the person chooses it; nothing was linked or retitled.
   assert.equal(links.getActiveRecordingCalendar('active').link, null);
   assert.equal(links.getActiveRecordingCalendar('active').matches[0].eventId, 'found');

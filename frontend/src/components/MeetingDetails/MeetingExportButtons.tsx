@@ -126,6 +126,10 @@ function defaultConfluencePageTitle(title: string, createdAt?: string): string {
 function historyStatus(status: string): string {
   switch (status) {
     case "succeeded": return "Exported";
+    case "pending": return "Awaiting confirmation";
+    case "access_denied": return "Access denied";
+    case "tenant_blocked": return "Blocked by organization policy";
+    case "partial_failure": return "Partially exported";
     case "unknown_after_submit": return "Outcome unknown";
     case "failed_auth": return "Sign-in expired";
     case "destination_not_found": return "Destination unavailable";
@@ -219,38 +223,6 @@ export function MeetingExportButtons({
     };
   }, [meetingId]);
 
-  const reportToast = useCallback(
-    (
-      label: string,
-      report: {
-        overall: string;
-        items: Array<{ webUrl: string | null; code: string | null; status: string }>;
-      },
-    ) => {
-      const webUrl = report.items.find((i) => i.webUrl)?.webUrl ?? null;
-      // The backend serializes ExportStatus via Debug-lowercase, so success is
-      // "succeeded" (not "success").
-      if (report.overall === "succeeded") {
-        toast.success(`${label} export complete`, {
-          description: webUrl ? "Open in Microsoft 365" : undefined,
-          action: webUrl
-            ? { label: "Open", onClick: () => openExternal(webUrl) }
-            : undefined,
-        });
-      } else {
-        const description = report.items.some(item => item.status === "unknownaftersubmit")
-          ? "Check Microsoft before retrying an export with an unknown outcome."
-          : report.items.some(item => item.code === TASK_IDENTITY_REVIEW_CODE)
-            ? "Check the tasks marked for review before exporting again."
-            : "Open Export history to review the results.";
-        toast.warning(`${label} export finished with issues`, {
-          description,
-        });
-      }
-    },
-    [],
-  );
-
   useEffect(() => {
     if (!oneNoteOpen || !connected || !showNewSection) return;
     void loadOneNoteNotebooks();
@@ -289,6 +261,47 @@ export function MeetingExportButtons({
       setHistoryError(errorText(error));
     }
   }, [meetingId]);
+
+  const reportToast = useCallback(
+    (
+      label: string,
+      report: {
+        overall: string;
+        items: Array<{ webUrl: string | null; code: string | null; status: string; graphCalled: boolean }>;
+      },
+    ) => {
+      const webUrl = report.items.find((i) => i.webUrl)?.webUrl ?? null;
+      // The backend serializes ExportStatus via Debug-lowercase, so success is
+      // "succeeded" (not "success").
+      if (report.overall === "succeeded") {
+        const created = report.items.filter(item => item.graphCalled).length;
+        const existing = report.items.length - created;
+        toast.success(`${label} export complete`, {
+          description: [created > 0 && `${created} created`, existing > 0 && `${existing} already exported`].filter(Boolean).join(" · "),
+          action: webUrl
+            ? { label: "Open", onClick: () => openExternal(webUrl) }
+            : undefined,
+        });
+      } else {
+        const description = report.items.some(item => item.status === "unknownaftersubmit")
+          ? "Check Microsoft before retrying an export with an unknown outcome."
+          : report.items.some(item => item.code === TASK_IDENTITY_REVIEW_CODE)
+            ? "Check the tasks marked for review before exporting again."
+            : report.items.some(item => item.status === "failedauth")
+              ? "Reconnect Microsoft in Settings, then retry."
+              : report.items.some(item => item.status === "accessdenied" || item.status === "tenantblocked")
+                ? "Check the account’s access to this destination in Microsoft 365."
+                : report.items.some(item => item.status === "destinationnotfound")
+                  ? "Choose an available destination in Microsoft 365 settings."
+                  : "Open export history to review the results.";
+        toast.warning(`${label} export finished with issues`, {
+          description,
+          action: { label: "View history", onClick: () => void openHistory() },
+        });
+      }
+    },
+    [openHistory],
+  );
 
   const loadResumes = useCallback(async () => {
     setResumeError("");

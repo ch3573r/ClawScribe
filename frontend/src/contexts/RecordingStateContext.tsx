@@ -65,6 +65,13 @@ interface RecordingStateContextType extends RecordingState {
 
 type RecordingStoppedListener = (payload: RecordingStoppedPayload, isCurrent: () => boolean) => void;
 
+const shutdownStages = {
+  stopping_audio: 'Stopping audio capture…',
+  processing_transcripts: 'Finishing live transcription…',
+  unloading_model: 'Closing the transcription model…',
+  finalizing: 'Saving the recording to your library…',
+} as const;
+
 const RecordingStateContext = createContext<RecordingStateContextType | null>(null);
 
 export const useRecordingState = () => {
@@ -186,7 +193,8 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         const status = backend.is_recording && lifecycleStatus.current === RecordingStatus.IDLE
           ? RecordingStatus.RECORDING : lifecycleStatus.current;
         lifecycleStatus.current = status;
-        const sessionId = backend.is_recording ? (backendSession?.id ?? metadata?.id ?? null) : null;
+        const activeId = backendSession?.id ?? metadata?.id ?? (status === RecordingStatus.STOPPING ? lifecycleOwner?.id : null);
+        const sessionId = backend.is_recording ? activeId ?? null : null;
         setState(prev => {
           if (
             prev.status === status &&
@@ -270,6 +278,21 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     };
     // Register all events before the initial snapshot, including after a WebView reload.
     void Promise.all([
+      subscribe(listen<{ identity?: { session_id: string; recording_generation: string }; stage: keyof typeof shutdownStages; chunks_remaining?: number }>(
+        'recording-shutdown-progress', ({ payload }) => {
+          const identity = recordingIdentity(payload.identity?.session_id, payload.identity?.recording_generation);
+          if (!active || !identity || !Object.hasOwn(shutdownStages, payload.stage) ||
+            (stoppedGeneration && compareGeneration(identity.generation, stoppedGeneration) <= 0) ||
+            (lifecycleOwner && !sameIdentity(lifecycleOwner, identity))) return;
+          lifecycleOwner = identity;
+          const message = payload.stage === 'processing_transcripts' && typeof payload.chunks_remaining === 'number' && payload.chunks_remaining > 0
+            ? `Finishing live transcription (${payload.chunks_remaining} segments remaining)…` : shutdownStages[payload.stage];
+          if (lifecycleStatus.current !== RecordingStatus.STOPPING) setStatus(RecordingStatus.STOPPING, message);
+          setState(prev => prev.statusMessage === message && prev.sessionId === identity.id ? prev : {
+            ...prev, statusMessage: message, sessionId: identity.id,
+          });
+        }
+      )),
       subscribe(recordingService.onRecordingStarted((mode, sessionId, generation) => {
         if (!active) return;
         const identity = recordingIdentity(sessionId, generation);
@@ -349,7 +372,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       stopPolling();
       unsubscribers.forEach(unsubscribe => unsubscribe());
     };
-  }, []);
+  }, [setStatus]);
 
   // NEW: Computed helpers from status
   useEffect(() => {

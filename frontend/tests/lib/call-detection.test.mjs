@@ -69,15 +69,34 @@ function app(options = {}) {
       confirmCallPrompt: async key => { confirmed.push(key); },
     },
   });
-  hooks.render(() => RecordingRequests({ ready: options.ready ?? true }));
+  const render = () => hooks.render(() => RecordingRequests({ ready: options.ready ?? true }));
+  render();
   return {
-    hooks, prefs, state, statuses, starts, answers, toasts, dismissed, confirmed, failures, corePushed, navigation,
+    render, hooks, prefs, state, statuses, starts, answers, toasts, dismissed, confirmed, failures, corePushed, navigation,
     emit: async (name, payload) => { await handlers.get(name)({ payload }); await flush(); },
     has: name => handlers.has(name), unlistened,
   };
 }
 
 const request = (source, requestId = 'request-1', provider = null) => ({ requestId, source, provider });
+
+test('a queued start arriving before the Stop render waits and rechecks native ownership', async () => {
+  for (const expired of [true, false]) {
+    const pending = request('after_save', 'after-commit');
+    const options = { pendingRequest: pending, state: { isStopping: true, isRecording: true } };
+    const view = app(options);
+    try {
+      await flush();
+      assert.deepEqual(view.starts, []);
+      if (expired) options.pendingRequest = null;
+      view.state.isRecording = false;
+      view.state.isStopping = false;
+      view.render();
+      await flush();
+      assert.deepEqual(view.starts, expired ? [] : [['remote_request', pending.requestId]]);
+    } finally { view.hooks.unmount(); }
+  }
+});
 
 test('a start from the tray, a shortcut or the command line forwards each native request once', async () => {
   const window_ = app();

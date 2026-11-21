@@ -27,6 +27,8 @@ export interface CurrentMeeting {
 }
 
 interface SidebarContextType extends ReturnType<typeof useSummaryPolling> {
+  deleteTarget: CurrentMeeting | null;
+  setDeleteTarget: (meeting: CurrentMeeting | null) => void;
   projectTags: MeetingTag[];
   projectTagsError: string | null;
   projectTagsLoading: boolean;
@@ -71,6 +73,7 @@ export const useSidebar = () => {
 };
 
 export function SidebarProvider({ children }: { children: React.ReactNode }) {
+  const [deleteTarget, setDeleteTarget] = useState<CurrentMeeting | null>(null);
   const [projectTags, setProjectTags] = useState<MeetingTag[]>([]);
   const [projectTagsError, setProjectTagsError] = useState<string | null>(null);
   const [projectTagsLoading, setProjectTagsLoading] = useState(true);
@@ -227,6 +230,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <SidebarContext.Provider value={{
+      deleteTarget, setDeleteTarget,
       projectTags,
       projectTagsError,
       projectTagsLoading,

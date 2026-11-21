@@ -935,6 +935,7 @@ pub fn run() {
             teams_detection::monitor::confirm_call_detection_prompt,
             start_request::finish_recording_start,
             start_request::get_pending_start_request,
+            audio::recording_commands::queue_recording_after_save,
             // Audio recovery commands (for transcript recovery feature)
             audio::incremental_saver::recover_audio_from_checkpoints,
             audio::incremental_saver::cleanup_checkpoints,

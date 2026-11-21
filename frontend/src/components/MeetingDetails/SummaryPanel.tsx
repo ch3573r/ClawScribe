@@ -20,6 +20,9 @@ import { useEffect, useRef, useState, RefObject } from 'react';
 import { toast } from 'sonner';
 import { Languages, ChevronDown, ChevronUp, Search, Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Copy } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import type { summaryDetails } from '@/lib/meeting-summary';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
 import { useRecentLanguages } from '@/hooks/useRecentLanguages';
@@ -33,6 +36,7 @@ import {
 import type { SummaryDraft, SaveState } from '@/lib/meetingDrafts';
 
 interface SummaryPanelProps {
+  details: ReturnType<typeof summaryDetails> & { transcriptChanged: boolean };
   saveState: SaveState;
   hasPreviousSummary: boolean;
   summaryRevision: number;
@@ -82,6 +86,7 @@ type SummaryTextMatch = {
 };
 
 export function SummaryPanel({
+  details,
   saveState, hasPreviousSummary, summaryRevision, onRestorePrevious, onSummaryDraft,
   onRevealSource,
   onPlaySource,
@@ -134,6 +139,7 @@ export function SummaryPanel({
   const [summaryLangStorage, setSummaryLangStorage] = useState<SummaryLanguageStorage>('metadata');
   const [langPickerOpen, setLangPickerOpen] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
+  const [emailOpen, setEmailOpen] = useState(false);
   const [isFindOpen, setIsFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
   const [findMatchCount, setFindMatchCount] = useState(0);
@@ -399,6 +405,7 @@ export function SummaryPanel({
               {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Save failed — edits retained' : 'Unsaved changes'}
             </span>}
           </div>
+          {aiSummary && !isSummaryLoading && <Button variant="ghost" size="sm" aria-label="Copy summary" title="Copy summary" onClick={() => void onCopySummary()}><Copy aria-hidden="true" />{!compactToolbar && 'Copy summary'}</Button>}
           <SummaryGeneratorButtonGroup compact={compactToolbar} generateRef={generateRef} onCheckingChange={setCheckingModels} secondaryGenerate={!aiSummary && !isSummaryLoading && transcripts.length > 0} modelConfig={modelConfig} setModelConfig={setModelConfig} onSaveModelConfig={onSaveModelConfig}
             onActionsCloseAutoFocus={event => {
               if (retainFindFocusRef.current) event.preventDefault();
@@ -407,7 +414,7 @@ export function SummaryPanel({
             onGenerateSummary={onGenerateSummary} onStopGeneration={onStopGeneration} customPrompt={customPrompt} summaryStatus={summaryStatus}
             availableTemplates={availableTemplates} selectedTemplate={selectedTemplate} onTemplateSelect={onTemplateSelect}
             hasTranscripts={transcripts.length > 0} hasSummary={!!aiSummary} isModelConfigLoading={isModelConfigLoading} onOpenModelSettings={onOpenModelSettings} languageSlot={languageSlot}
-            actionsSlot={<SummaryUpdaterButtonGroup isSaving={isSaving} isDirty={saveState !== 'saved' || isTitleDirty} onSave={onSaveAll} onCopy={onCopySummary}
+            actionsSlot={<SummaryUpdaterButtonGroup isSaving={isSaving} isDirty={saveState !== 'saved' || isTitleDirty} onSave={onSaveAll}
               onFind={openSummaryFind} onOpenFolder={onOpenFolder} hasSummary={!!aiSummary} disabled={isSummaryLoading} onReplace={() => setReplaceOpen(true)}
               onRestore={hasPreviousSummary ? () => void onRestorePrevious() : undefined} />} />
         </div>
@@ -422,6 +429,20 @@ export function SummaryPanel({
           summaryRef.current.replaceText(options, token);
           toast.success('Summary text replaced', { description: 'Changes save automatically. Use Ctrl+Z in the editor to undo.' });
         }} />
+      {aiSummary && !isSummaryLoading && details && (details.model || details.email || details.transcriptChanged) && <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1 text-xs text-muted-foreground">
+        {details.model && <span>Generated with {details.model}{details.template && ` · ${details.template}`}</span>}
+        {details.transcriptChanged && <span role="status" className="font-medium text-warning-foreground">Transcript changed since generation</span>}
+        {details.email && <Button variant="ghost" size="sm" className="ml-auto text-xs" onClick={() => setEmailOpen(true)}>Follow-up email</Button>}
+      </div>}
+      {details?.email && <Dialog open={emailOpen} onOpenChange={setEmailOpen}><DialogContent className="max-h-[80vh] overflow-y-auto" aria-describedby={undefined}>
+        <DialogHeader><DialogTitle>Follow-up email draft</DialogTitle></DialogHeader>
+        {details.email.subject && <p className="font-medium">{details.email.subject}</p>}
+        <p className="whitespace-pre-wrap break-words text-sm">{details.email.body}</p>
+        <DialogFooter><Button onClick={async () => {
+          try { await navigator.clipboard.writeText([details.email?.subject, details.email?.body].filter(Boolean).join('\n\n')); toast.success('Email draft copied'); }
+          catch { toast.error('Could not copy the email draft'); }
+        }}>Copy draft</Button></DialogFooter>
+      </DialogContent></Dialog>}
       {isFindOpen && aiSummary && !isSummaryLoading && (
         <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
           <Search className="h-4 w-4 text-muted-foreground" />

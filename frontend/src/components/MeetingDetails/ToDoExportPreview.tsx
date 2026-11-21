@@ -59,6 +59,7 @@ export function ToDoExportPreview({
 }: ToDoExportPreviewProps) {
   const [rows, setRows] = useState<Row[]>([]);
   const [previewCandidates, setPreviewCandidates] = useState<readonly TaskPreviewCandidate[]>([]);
+  const [pendingSuggestions, setPendingSuggestions] = useState(0);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -72,16 +73,18 @@ export function ToDoExportPreview({
     setReviewIds(new Set());
     setRows([]);
     setPreviewCandidates([]);
+    setPendingSuggestions(0);
     (async () => {
       try {
         const md = await getMarkdown();
-        const items = await microsoftExportService.previewToDoTasks(
+        const { items, suggestionCount } = await microsoftExportService.previewToDoTasks(
           meetingId,
           meetingTitle,
           md,
         );
         if (cancelled) return;
         setPreviewCandidates(taskPreviewCandidates(items));
+        setPendingSuggestions(suggestionCount);
         setRows(
           items.map((item) => ({
             localId: item.localId,
@@ -162,6 +165,10 @@ export function ToDoExportPreview({
           </DialogDescription>
         </DialogHeader>
 
+        {!loading && !error && pendingSuggestions > 0 && onReviewActions && <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+          <span>{pendingSuggestions} summary {pendingSuggestions === 1 ? "suggestion is" : "suggestions are"} outside your saved action list.</span>
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => { onOpenChange(false); onReviewActions(); }}>Review suggestions</Button>
+        </div>}
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />

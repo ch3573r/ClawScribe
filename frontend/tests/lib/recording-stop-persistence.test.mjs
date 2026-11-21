@@ -7,7 +7,9 @@ test('native Stop commits its authoritative transcript before notifying the webv
   const stop = source.slice(source.indexOf('async fn stop_recording_session'), source.indexOf('/// Check if recording is active'));
   assert.ok(stop.indexOf('manager.library_transcripts()') < stop.indexOf('save_recording_handoff'));
   assert.ok(stop.indexOf('save_recording_handoff') < stop.indexOf('"recording-stopped"'));
-  assert.ok(stop.indexOf('drop(_stop_state)') < stop.indexOf('RECORDING_JOB.lock().unwrap().take()'));
+  assert.ok(stop.indexOf('"recording-stopped"') < stop.indexOf('RECORDING_JOB.lock().unwrap().take()'));
+  assert.ok(stop.indexOf('RECORDING_JOB.lock().unwrap().take()') < stop.indexOf('_stop_state.close()'));
+  assert.ok(stop.indexOf('_stop_state.close()') < stop.indexOf('crate::tray::start_after_save'));
   assert.ok(stop.indexOf('RECORDING_JOB.lock().unwrap().take()') < stop.indexOf('wake_saved_recording_summary(&app, id)'));
   assert.match(stop, /"meeting_id": meeting_id/);
   assert.match(stop, /"library_save_failed": library_save_failed/);

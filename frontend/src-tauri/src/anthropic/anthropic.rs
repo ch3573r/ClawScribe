@@ -50,16 +50,16 @@ pub async fn get_anthropic_models(
 }
 
 /// The model list for a key the core already holds.
-pub async fn fetch_anthropic_models(
-    api_key: Option<String>,
-) -> Result<Vec<AnthropicModel>, String> {
+async fn fetch_anthropic_models(api_key: Option<String>) -> Result<Vec<AnthropicModel>, String> {
     let api_key = api_key
-        .filter(|key| !key.trim().is_empty())
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
         .ok_or("missing_api_key")?;
     let client = model_catalog::client()?;
     let request = client
         .get("https://api.anthropic.com/v1/models")
-        .header("x-api-key", &api_key)
+        .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01");
     let api_response: AnthropicApiResponse = model_catalog::read(request).await?;
 

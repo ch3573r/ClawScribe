@@ -75,6 +75,17 @@ test('shortcuts and the command line go through the same gated start path as the
   assert.match(gate, /START_TIMEOUT/, 'an unanswered request ends');
 });
 
+test('hidden capture alerts use generic desktop messages and the existing notification preferences', () => {
+  assert.match(rust('tray.rs'), /listen_for_background_alerts\(app\)/);
+  const alerts = functionBody(rust('notifications/commands.rs'), 'pub(crate) fn listen_for_background_alerts');
+  for (const name of ['call-detection-prompt', 'recording-warning', 'recording-error', 'transcription-warning', 'recording-disk-space-low']) {
+    assert.ok(alerts.includes('"' + name + '"'), name);
+  }
+  assert.match(alerts, /window\.is_visible\(\)[\s\S]*window\.is_minimized\(\)/);
+  assert.match(alerts, /manager\s*\.show_notification/);
+  assert.doesNotMatch(alerts, /\.payload\(|focus_main_window|request_permission/);
+});
+
 test('the power request is narrow, bounded and released on every way out', () => {
   const power = rust('power.rs');
   assert.match(power, /ES_SYSTEM_REQUIRED/);

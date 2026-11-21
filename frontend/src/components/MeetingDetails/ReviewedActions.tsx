@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { ResolvedSummarySource } from "./SummarySources";
+import type { MeetingExportHistory } from "@/services/microsoftExportService";
 
 interface ReviewedAction {
   id: string;
@@ -32,6 +33,8 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
 }) {
   const [actions, setActions] = useState<ReviewedAction[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [history, setHistory] = useState<MeetingExportHistory[]>([]);
+  const [historyError, setHistoryError] = useState(false);
   const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -47,6 +50,11 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
     setError("");
     setNotice("");
     setSource(null);
+    setHistory([]);
+    setHistoryError(false);
+    void invoke<MeetingExportHistory[]>("get_meeting_export_history", { meetingId }).then(items => {
+      if (active) setHistory(items);
+    }).catch(() => { if (active) setHistoryError(true); });
     void invoke<ReviewedAction[]>("get_reviewed_meeting_actions", { meetingId }).then(rows => {
       if (!active) return;
       setActions(rows);
@@ -75,12 +83,11 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
 
   function importSuggestions() {
     void run(async () => {
-      const suggestions = await invoke<ReviewedAction[]>("suggest_meeting_actions", { markdown: await getMarkdown() });
-      const identity = (action: ReviewedAction) => action.legacyAction && `${action.legacyAction.id}:${action.legacyAction.titleHash}`;
-      const assigned = new Set(actions.map(identity));
-      const additional = suggestions.filter(action => !assigned.has(identity(action))).slice(0, 250 - actions.length);
+      const suggestions = await invoke<ReviewedAction[]>("suggest_meeting_actions", { markdown: await getMarkdown(), reviewed: actions });
+      const additional = suggestions.slice(0, 250 - actions.length);
       setActions([...actions, ...additional]);
       if (!additional.length) setNotice("No new action suggestions found in the meeting summary.");
+      else setNotice(`${additional.length} suggestions added. Review them and save your actions.`);
     });
   }
 
@@ -123,9 +130,12 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
           <Button type="button" variant="outline" disabled={busy || actions.length >= 250} onClick={importSuggestions}>Add summary suggestions</Button>
         </div>
         {notice && <p role="status" className="text-sm text-muted-foreground">{notice}</p>}
+        {historyError && <p role="status" className="text-sm text-muted-foreground">Export history is unavailable. You can still edit your actions.</p>}
         {!actions.length && <p className="text-sm text-muted-foreground">No actions saved for this meeting.</p>}
         {actions.map(action => <fieldset key={action.id} disabled={busy} className="space-y-2 rounded-md border border-border p-3">
           <Label htmlFor={`action-title-${action.id}`}>Task</Label>
+          {[...new Set(history.filter(item => item.actionId === action.id && item.status === "succeeded").map(item => item.destination))]
+            .map(destination => <p key={destination} className="text-xs text-muted-foreground">Exported to {destination}</p>)}
           <Input id={`action-title-${action.id}`} required maxLength={255} value={action.title} onChange={event => update(action.id, { title: event.target.value })} />
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">

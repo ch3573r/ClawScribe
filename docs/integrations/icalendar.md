@@ -17,8 +17,9 @@ configured calendars for the coming week. The Calendars page lists more
 occurrences. **Use for next recording** takes priority over automatic matching.
 Without a selection, capture starts first. ClawScribe then looks for a single
 timed event that was in progress at the start across enabled Microsoft 365 and
-iCalendar sources. Choose an available event during recording if events overlap
-or a source is unavailable. You can unlink a wrong match or use **Skip calendar
+iCalendar sources. For an early join, **Choose event** offers timed invitations
+starting within the next five minutes. If several events are plausible, or a
+source is unavailable, you choose which event to link. You can unlink a wrong match or use **Skip calendar
 for next recording** on Home.
 
 Open **Review attendance** while recording or **Attendance** in the saved

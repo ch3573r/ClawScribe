@@ -300,6 +300,8 @@ impl TranscriptsRepository {
         crate::database::transcript_edits::assert_editable(&mut transaction, meeting_id)
             .await
             .map_err(SqlxError::Protocol)?;
+        crate::summary::sources::preserve_legacy_speaker_links(&mut transaction, meeting_id)
+            .await?;
         let now = Utc::now();
 
         let result =
@@ -333,6 +335,8 @@ impl TranscriptsRepository {
         crate::database::transcript_edits::assert_editable(&mut transaction, meeting_id)
             .await
             .map_err(SqlxError::Protocol)?;
+        crate::summary::sources::preserve_legacy_speaker_links(&mut transaction, meeting_id)
+            .await?;
         let now = Utc::now();
 
         let result = match from_speaker {

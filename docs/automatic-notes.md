@@ -30,3 +30,10 @@ replacing a passage while generation is in progress prevents publication of
 outdated results. Renaming or changing the meeting date does not invalidate
 notes. If a provider fails after generating some excerpts, the meeting shows
 the available partial notes while they still match the saved transcript.
+
+The summary shows its recorded model and template. Editing the notes preserves
+that information. **Transcript changed since generation** means a saved passage,
+speaker label, or timestamp has changed since the displayed notes were generated.
+Regenerating the notes updates their revision. Older notes may lack revision or
+model information. **Follow-up email** shows the draft when the provider included
+one in its original response.

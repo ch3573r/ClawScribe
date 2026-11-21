@@ -1,4 +1,4 @@
-import type { SummaryJobSnapshot } from '@/lib/summary-job-status';
+import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { confirmSummaryRegeneration } from '@/lib/meetingDrafts';
 import { openExternal } from '@/lib/openExternal';
@@ -20,6 +20,7 @@ type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'c
 
 interface UseSummaryGenerationProps {
   beforeGeneration?: () => Promise<void>;
+  hasExistingSummary?: boolean;
   meeting: MeetingMetadata;
   modelConfig: ModelConfig;
   isModelConfigLoading: boolean;
@@ -33,6 +34,7 @@ interface UseSummaryGenerationProps {
 
 export function useSummaryGeneration({
   beforeGeneration,
+  hasExistingSummary = false,
   meeting,
   modelConfig,
   isModelConfigLoading,
@@ -48,6 +50,7 @@ export function useSummaryGeneration({
 
   const { startSummaryPolling, attachSummaryPolling } = useSidebar();
   const [jobUpdate, setJobUpdate] = useState<SummaryJobSnapshot | null>(null);
+  const starting = useRef(false);
   // Lets go of a run this page attached to when the page goes away. A background
   // poll (the automatic summary) then carries on and finishes on its own.
   const detachSummary = useRef<(() => void) | null>(null);
@@ -75,6 +78,11 @@ export function useSummaryGeneration({
   // run this page started and a run it attached to.
   const handleSummaryUpdate = useCallback(async (pollingResult: SummaryJobSnapshot, isRegeneration: boolean) => {
     setJobUpdate(pollingResult);
+    if (pollingResult.status === 'skipped') {
+      setSummaryStatus('idle');
+      setSummaryError(null);
+      return;
+    }
 
     // Handle cancellation
     if (pollingResult.status === 'cancelled') {
@@ -204,7 +212,7 @@ export function useSummaryGeneration({
       setSummaryStatus('completed');
 
       // Show success toast
-      toast.success('Summary ready', { id: `summary-ready:${meeting.id}`, duration: 4000 });
+      toast.success('Summary ready', { id: `summary-ready:${meeting.id}`, description: meetingName || meeting.title, duration: 4000 });
 
       await Analytics.trackSummaryGenerationCompleted(
         modelConfig.provider,
@@ -218,6 +226,7 @@ export function useSummaryGeneration({
     }
   }, [
     meeting.id,
+    meeting.title,
     modelConfig,
     setAiSummary,
     updateMeetingTitle,
@@ -226,7 +235,7 @@ export function useSummaryGeneration({
   ]);
 
   // Unified summary processing logic
-  const processSummary = useCallback(async ({
+  const startSummary = useCallback(async ({
     customPrompt = '',
     isRegeneration = false,
   }: {
@@ -295,8 +304,13 @@ export function useSummaryGeneration({
       // the same run (see attachToRunningSummary).
       startSummaryPolling(meeting.id, process_id, pollingResult => handleSummaryUpdate(pollingResult, isRegeneration));
     } catch (error) {
-      console.error(`Failed to ${isRegeneration ? 'regenerate' : 'generate'} summary:`, error);
       const errorMessage = typeof error === 'string' ? error : error instanceof Error ? error.message : 'Could not start summary generation';
+      if (errorMessage.includes('already has a summary in progress')) {
+        detachSummary.current?.();
+        detachSummary.current = attachSummaryPolling(meeting.id, result => handleSummaryUpdate(result, isRegeneration));
+        return;
+      }
+      console.error(`Failed to ${isRegeneration ? 'regenerate' : 'generate'} summary:`, error);
       setSummaryError(errorMessage);
       setSummaryStatus('error');
       // Note: We don't clear the summary here because the backend has already restored from backup
@@ -314,6 +328,7 @@ export function useSummaryGeneration({
       );
     }
   }, [
+    attachSummaryPolling,
     beforeGeneration,
     meeting.id,
     meeting.created_at,
@@ -324,6 +339,15 @@ export function useSummaryGeneration({
     handleSummaryUpdate,
   ]);
 
+  const processSummary = useCallback(async (request: Parameters<typeof startSummary>[0]) => {
+    if (starting.current || isActiveSummary(summaryStatus)) return;
+    starting.current = true;
+    try {
+      await startSummary(request);
+    } finally {
+      starting.current = false;
+    }
+  }, [startSummary, summaryStatus]);
 
   // Public API: Generate summary from transcripts
   const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
@@ -470,8 +494,8 @@ export function useSummaryGeneration({
       }
     }
 
-    await processSummary({ customPrompt });
-  }, [meeting.id, processSummary, modelConfig, isModelConfigLoading, onOpenModelSettings]);
+    await processSummary({ customPrompt, isRegeneration: hasExistingSummary });
+  }, [meeting.id, processSummary, hasExistingSummary, modelConfig, isModelConfigLoading, onOpenModelSettings]);
 
   // Public API: Regenerate summary from the current saved transcript
   const handleRegenerateSummary = useCallback(async (customPrompt: string = '') => {

@@ -908,6 +908,10 @@ impl SummaryService {
                 OpenAICompatibleProcessingProvider::new(provider_config)
             };
 
+            let generation_model = openai_provider
+                .as_ref()
+                .ok()
+                .map(|provider| provider.model_name().to_owned());
             let result = match openai_provider {
                 Ok(openai_provider) => {
                     openai_provider
@@ -949,6 +953,7 @@ impl SummaryService {
                     let mut result_json = serde_json::json!({
                         "markdown": strip_title_if_present(&api_result.markdown),
                         "structured_meeting_output": api_result.structured_output,
+                        "generation": { "model": generation_model, "template": template.name, "transcript_fingerprint": stable_text_fingerprint(&text) },
                     });
                     if execution.is_none() {
                         result_json["openai_compatible"] = serde_json::json!({
@@ -1019,7 +1024,12 @@ impl SummaryService {
             let meeting_title =
                 meeting_metadata.and_then(|meeting| summary_title.for_provider(meeting.title));
 
-            let result = match provider_from_app(&_app) {
+            let codex_provider = provider_from_app(&_app);
+            let generation_model = codex_provider
+                .as_ref()
+                .ok()
+                .map(|provider| provider.config.model.clone());
+            let result = match codex_provider {
                 Ok(codex_provider) => {
                     super::llm_client::with_cancellation(
                         Some(cancellation_token),
@@ -1063,6 +1073,7 @@ impl SummaryService {
                     let mut result_json = serde_json::json!({
                         "markdown": strip_title_if_present(&codex_result.markdown),
                         "structured_meeting_output": codex_result.structured_output,
+                        "generation": { "model": generation_model, "template": template.name, "transcript_fingerprint": stable_text_fingerprint(&text) },
                         "codex": {
                             "scratch_dir": codex_result.scratch_dir,
                             "output_json_path": codex_result.output_json_path,
@@ -1205,12 +1216,14 @@ impl SummaryService {
                     return;
                 }
 
+                let generation = serde_json::json!({"model": model_name, "template": template.name, "transcript_fingerprint": cache_source.transcript_fingerprint});
                 let mut result_json = build_summary_result_json(
                     &final_markdown,
                     &english_markdown,
                     cache_source,
                     summary_language.as_deref(),
                 );
+                result_json["generation"] = generation;
 
                 super::sources::attach(&mut result_json, &summary_sources);
                 // Update database with completed status

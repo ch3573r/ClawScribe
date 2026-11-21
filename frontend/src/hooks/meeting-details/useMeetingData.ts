@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { EditorSummary, MeetingDetails, MeetingSummary, Summary, SummaryDataResponse } from '@/types';
-import { readMeetingSummary } from '@/lib/meeting-summary';
+import { readMeetingSummary, summaryDetails } from '@/lib/meeting-summary';
+import { listen } from '@tauri-apps/api/event';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
@@ -19,6 +20,7 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [aiSummary, setAiSummary] = useState<MeetingSummary | null>(() => readMeetingSummary(draft.edits.summary).summary ?? summaryData);
   const [hasPreviousSummary, setHasPreviousSummary] = useState(false);
+  const [details, setDetails] = useState(() => ({ ...summaryDetails(null), transcriptChanged: false }));
   const [summaryRevision, setSummaryRevision] = useState(0);
   const [, refresh] = useState(0);
   const manualSave = useRef(false);
@@ -36,9 +38,19 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
   }, [summaryData, draft]);
   useEffect(() => {
     let active = true;
-    void invoke<{ has_previous_result: boolean }>('api_get_summary', { meetingId: meeting.id })
-      .then(result => { if (active) setHasPreviousSummary(result.has_previous_result); }).catch(() => {});
-    return () => { active = false; };
+    let version = 0;
+    const refresh = async () => {
+      const request = ++version;
+      const result = await invoke<{ data?: SummaryDataResponse | string | null; transcript_changed?: boolean; has_previous_result: boolean }>('api_get_summary', { meetingId: meeting.id });
+      if (active && request === version) {
+        setHasPreviousSummary(result.has_previous_result);
+        setDetails({ ...summaryDetails(result.data), transcriptChanged: result.transcript_changed === true });
+      }
+    };
+    const subscriptions = ['transcript-text-edited', 'retranscription-complete', 'speaker-diarization-complete', 'transcript-speaker-updated'].map(event =>
+      listen<{ meeting_id: string }>(event, ({ payload }) => { if (payload.meeting_id === meeting.id) void refresh().catch(() => {}); }));
+    void Promise.allSettled(subscriptions).then(() => { if (active) void refresh().catch(() => {}); });
+    return () => { active = false; subscriptions.forEach(sub => void sub.then(off => off()).catch(() => {})); };
   }, [meeting.id, aiSummary]);
 
   const updateSidebar = useCallback((title: string) => {
@@ -95,7 +107,7 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
   return {
     transcripts: meeting.transcripts, meetingTitle, isEditingTitle,
     isTitleDirty: draft.edits.title !== undefined, aiSummary, isSaving: isRestoring || draft.state === 'saving',
-    saveState: draft.state, hasPreviousSummary, summaryRevision, blockNoteSummaryRef,
+    saveState: draft.state, hasPreviousSummary, details, summaryRevision, blockNoteSummaryRef,
     setMeetingTitle, setIsEditingTitle, setAiSummary,
     handleTitleChange, handleSummaryChange, handleSummaryDraft, handleSaveSummary,
     handleSaveMeetingTitle: flushPendingChanges, flushPendingChanges, saveAllChanges,

@@ -28,7 +28,11 @@ export const START_BUSY = 'recording_start_busy';
 export function reportStartFailure(error: unknown): void {
   const message = startErrorText(error);
   const modelFailure = liveModelStartFailure(error);
-  if (message === START_REQUEST_EXPIRED || message === START_BUSY) return;
+  if (message === START_REQUEST_EXPIRED) return;
+  if (message === START_BUSY) {
+    toast.info('Recording is busy. During a save, choose Start after saving to record again.');
+    return;
+  }
   if (isDiskSpaceRefusal(error)) {
     toast.error('Not enough disk space', {
       description: message,
@@ -115,6 +119,7 @@ export function useRecordingStart() {
     try {
       await start('home_page');
     } catch (error) {
+      if (error === START_BUSY) reportStartFailure(error);
       if (!liveModelStartFailure(error) && error !== START_BUSY) throw error;
     }
   }, [start]);

@@ -14,6 +14,59 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn editing_notes_preserves_their_generation_revision_and_email_without_reusing_cached_text(
+    ) {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        let revision: i64 =
+            sqlx::query_scalar("SELECT summary_content_revision FROM meetings WHERE id = ?")
+                .bind(meeting)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        SummaryProcessesRepository::create_or_reset_process(&pool, meeting)
+            .await
+            .unwrap();
+        let result = serde_json::json!({
+            "markdown":"Generated",
+            "english_cache":{"markdown":"Previous English text"},
+            "generation":{"model":"example-model","template":"Standard","transcript_fingerprint":"original"},
+            "structured_meeting_output":{"follow_up_email":{"subject":"Next steps","body_markdown":"Send draft"}}
+        });
+        assert!(SummaryProcessesRepository::complete_for_revision(
+            &pool,
+            meeting,
+            result,
+            1,
+            0.0,
+            Some(revision)
+        )
+        .await
+        .unwrap());
+        sqlx::query("UPDATE transcripts SET transcript = 'Revised' WHERE id = 'a'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        SummaryProcessesRepository::update_meeting_summary(
+            &pool,
+            meeting,
+            &serde_json::json!({"markdown":"Edited notes"}),
+        )
+        .await
+        .unwrap();
+        let row = SummaryProcessesRepository::get_summary_data_for_meeting(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
+        let saved: Value = serde_json::from_str(row.result.as_deref().unwrap()).unwrap();
+        assert_eq!(saved["transcript_content_revision"], revision);
+        assert_ne!(row.current_content_revision, Some(revision));
+        assert_eq!(saved["generation"]["model"], "example-model");
+        assert_eq!(saved["follow_up_email"]["subject"], "Next steps");
+        assert!(saved.get("english_cache").is_none());
+    }
+
+    #[tokio::test]
     async fn repaired_recording_can_claim_only_the_recoverable_skip_once() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let meeting = "review-test";
@@ -461,7 +514,8 @@ impl SummaryProcessesRepository {
             ));
         }
 
-        // User edits invalidate the English generation cache but retain source identities.
+        // Editing replaces the document, not its generation provenance or companion email.
+        // Never reuse the English generation cache after an edit.
         let previous: Option<String> =
             sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id = ?")
                 .bind(meeting_id)
@@ -469,11 +523,29 @@ impl SummaryProcessesRepository {
                 .await?
                 .flatten();
         let mut saved = summary.clone();
-        if let Some(sources) = previous
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .and_then(|value| value.get("summary_sources").cloned())
-        {
-            saved["summary_sources"] = sources;
+        if let Some(previous) = previous.and_then(|raw| serde_json::from_str::<Value>(&raw).ok()) {
+            for key in [
+                "summary_sources",
+                "generation",
+                "transcript_content_revision",
+                "follow_up_email",
+            ] {
+                if let Some(value) = previous.get(key) {
+                    saved[key] = value.clone();
+                }
+            }
+            if let Some(email) = previous.pointer("/structured_meeting_output/follow_up_email") {
+                saved["follow_up_email"] = email.clone();
+            }
+            if saved.get("generation").is_none() {
+                if let Some(source) = previous.pointer("/english_cache/source") {
+                    saved["generation"] = serde_json::json!({
+                        "model": source.get("model_name"),
+                        "template": source.get("template_id"),
+                        "transcript_fingerprint": source.get("transcript_fingerprint"),
+                    });
+                }
+            }
         }
         let result_json = serde_json::to_string(&saved);
         if result_json.is_err() {
@@ -521,7 +593,7 @@ impl SummaryProcessesRepository {
         // Return notes, status, and revision validity from the same snapshot.
         // Legacy partials keep their original revision check until regenerated.
         let row = sqlx::query(r#"
-            SELECT p.*, CASE WHEN LOWER(p.status) = 'failed' AND json_valid(p.metadata) THEN CASE
+            SELECT p.*, m.summary_content_revision AS current_content_revision, CASE WHEN LOWER(p.status) = 'failed' AND json_valid(p.metadata) THEN CASE
                 WHEN json_type(p.metadata, '$.partial_notes') = 'text' AND (
                     json_extract(p.metadata, '$.transcript_content_revision') = m.summary_content_revision
                     OR (json_type(p.metadata, '$.transcript_content_revision') IS NULL AND EXISTS (
@@ -695,6 +767,9 @@ impl SummaryProcessesRepository {
         let now = Utc::now();
         if let Some(object) = result.as_object_mut() {
             object.remove("user_edited_at");
+            if let Some(revision) = revision {
+                object.insert("transcript_content_revision".into(), revision.into());
+            }
         }
         let result_str = serde_json::to_string(&result)
             .map_err(|e| sqlx::Error::Protocol(format!("Failed to serialize result: {}", e)))?;

@@ -27,6 +27,7 @@ test('reviewed actions edit and save offline with stable IDs and provenance', as
     '@/components/ui/dialog': names('Dialog DialogContent DialogDescription DialogFooter DialogHeader DialogTitle'),
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push([command, args]);
+      if (command === 'get_meeting_export_history') return [{ actionId: 'saved-id', destination: 'Planner', status: 'succeeded' }];
       if (command === 'get_reviewed_meeting_actions') return persisted;
       if (command === 'suggest_meeting_actions') return [{ ...suggested, legacyAction: { id: 'action-1', titleHash: '0'.repeat(16) } }];
       if (command === 'save_reviewed_meeting_actions') persisted = args.actions;
@@ -62,5 +63,7 @@ test('reviewed actions edit and save offline with stable IDs and provenance', as
   render();
   await flush();
   assert.equal(item('Input', 'action-title-saved-id').props.value, 'Bericht morgen senden');
-  assert.deepEqual(calls.map(([command]) => command), ['get_reviewed_meeting_actions', 'suggest_meeting_actions', 'save_reviewed_meeting_actions', 'get_reviewed_meeting_actions']);
+  assert.equal(calls.filter(([command]) => command === 'get_meeting_export_history').length, 2);
+  assert.ok(render().some(node => node.type === 'p' && node.props.children?.includes('Planner')));
+  assert.deepEqual(calls.filter(([command]) => command !== 'get_meeting_export_history').map(([command]) => command), ['get_reviewed_meeting_actions', 'suggest_meeting_actions', 'save_reviewed_meeting_actions', 'get_reviewed_meeting_actions']);
 });

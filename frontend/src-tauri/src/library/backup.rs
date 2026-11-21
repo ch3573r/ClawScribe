@@ -1709,6 +1709,7 @@ mod tests {
             .unwrap();
         let actions = crate::exports::actions::suggest_meeting_actions(
             "## Aufgaben\n- Bericht senden".into(),
+            None,
         );
         assert_eq!(actions.len(), 1);
         let actions_json = serde_json::to_string(&actions).unwrap();

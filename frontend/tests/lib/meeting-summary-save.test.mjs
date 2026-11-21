@@ -5,6 +5,18 @@ import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
 import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
+test('saved notes show their original model, template and available email draft after edits', () => {
+  const { summaryDetails } = loadTsModule('src/lib/meeting-summary.ts');
+  const email = { subject: 'Follow-up', body_markdown: 'Send the draft [00:12](#clawscribe-source-abc123).' };
+  const before = summaryDetails({ structured_meeting_output: { follow_up_email: email }, english_cache: { source: { model_name: 'example', template_id: 'project_review' } } });
+  const after = summaryDetails(JSON.stringify({ follow_up_email: email, generation: { model: 'example', template: 'project review' } }));
+  assert.deepEqual(after, before);
+  assert.equal(before.model, 'example');
+  assert.equal(before.template, 'project review');
+  assert.equal(before.email.body, 'Send the draft (00:12).');
+  assert.equal(summaryDetails({ markdown: 'Older notes' }).email, null);
+});
+
 function createHook(invoke) {
   const messages = [];
   const harness = createHookHarness();

@@ -246,8 +246,8 @@ pub async fn knowledge_create_library_conversation(
 #[tauri::command]
 pub async fn knowledge_list_library_conversations(
     state: State<'_, AppState>,
-) -> Result<Vec<ConversationOwner>, String> {
-    conversations::list_libraries(state.db_manager.pool()).await
+) -> Result<Vec<conversations::LibraryConversation>, String> {
+    conversations::library_list(state.db_manager.pool()).await
 }
 #[tauri::command]
 pub async fn knowledge_library_conversation_scope(

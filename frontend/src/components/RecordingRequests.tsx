@@ -32,6 +32,17 @@ export function RecordingRequests({ ready }: { ready: boolean }) {
   const start = useStartRecordingSession();
   const current = useRef({ state, start, ready });
   current.current = { state, start, ready };
+  const afterSave = useRef<(() => void) | null>(null);
+
+  // The native commit and next request can arrive in one render. Let the
+  // stopped event update the shared state before trying the newly issued ID.
+  useEffect(() => {
+    if (!state.isRecording && !state.isStarting && !state.isStopping && !state.isProcessing && !state.isSaving) {
+      const resume = afterSave.current;
+      afterSave.current = null;
+      resume?.();
+    }
+  }, [state.isRecording, state.isStarting, state.isStopping, state.isProcessing, state.isSaving]);
 
   useEffect(() => {
     let disposed = false;
@@ -74,8 +85,19 @@ export function RecordingRequests({ ready }: { ready: boolean }) {
       if (handled.size > 32) handled.delete(handled.values().next().value!);
       const answer = (status: StartStatus) => finishStartRequest(request.requestId, status).catch(() => false);
       if (!current.current.ready) { await answer("refused"); return; }
-      // A step of another recording is still under way: nothing to start now.
-      if (busy()) { await answer("busy"); return; }
+      if (busy()) {
+        if (request.source === "after_save" && !current.current.state.isStarting) {
+          afterSave.current = () => {
+            handled.delete(request.requestId);
+            void getPendingStartRequest().then(pending => {
+              if (pending?.requestId === request.requestId) void run(pending);
+            }).catch(() => {});
+          };
+        } else {
+          await answer("busy");
+        }
+        return;
+      }
       try {
         await current.current.start(request.source === "call" ? "detected_call" : "remote_request", request.requestId);
       } catch (error) {
@@ -87,6 +109,7 @@ export function RecordingRequests({ ready }: { ready: boolean }) {
 
     const listeners = [
       listen<StartRequest>("recording-start-requested", event => { void run(event.payload); }),
+      listen<string>("recording-start-feedback", event => { if (!disposed) toast(event.payload, { id: "recording-start-feedback" }); }),
       listen<CallPrompt>("call-detection-prompt", event => showPrompt(event.payload)),
       listen("call-detection-prompt-cleared", dismissPrompt),
       listen<CallNotice>("call-detection-notice", event => showNotice(event.payload)),
@@ -106,6 +129,7 @@ export function RecordingRequests({ ready }: { ready: boolean }) {
 
     return () => {
       disposed = true;
+      afterSave.current = null;
       dismissPrompt();
       unlisten.forEach(fn => fn());
     };

@@ -6,31 +6,34 @@ import { AlertTriangle } from 'lucide-react';
 
 /** Keep degraded capture visible after a toast expires, including across navigation. */
 export function RecordingHealthBanner() {
-  const [warning, setWarning] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
   useEffect(() => {
     let disposed = false;
+    const add = (warning: string) => {
+      if (!disposed && warning) setWarnings(current => current.includes(warning) ? current : [...current, warning]);
+    };
     const subscriptions = [
-      listen<string>('recording-warning', ({ payload }) => { if (!disposed) setWarning(payload); }),
+      listen<string>('recording-warning', ({ payload }) => add(payload)),
       listen<string>('recording-warning-cleared', ({ payload }) => {
-        if (!disposed) setWarning(current => current === payload ? null : current);
+        if (!disposed) setWarnings(current => current.filter(warning => warning !== payload));
       }),
       listen<string>('transcription-warning', () => {
-        if (!disposed) setWarning('Live transcription is incomplete. After stopping, check the saved audio and use Retranscribe to recover missing speech.');
+        add('Live transcription is incomplete. After stopping, check the saved audio and use Retranscribe to recover missing speech.');
       }),
       listen('transcription-error', () => {
-        if (!disposed) setWarning('Live transcription failed. Recording may still be running. Stop when ready, then check the saved audio and use Retranscribe.');
+        add('Live transcription failed. Recording may still be running. Stop when ready, then check the saved audio and use Retranscribe.');
       }),
-      listen('recording-started', () => { if (!disposed) setWarning(null); }),
-      listen('recording-stopped', () => { if (!disposed) setWarning(null); }),
+      listen('recording-started', () => { if (!disposed) setWarnings([]); }),
+      listen('recording-stopped', () => { if (!disposed) setWarnings([]); }),
     ];
     return () => {
       disposed = true;
       subscriptions.forEach(subscription => { void subscription.then(unlisten => unlisten()).catch(() => {}); });
     };
   }, []);
-  if (!warning) return null;
+  if (!warnings.length) return null;
   return <div role="alert" className="flex shrink-0 items-start gap-2 border-b border-warning-border/40 bg-warning px-4 py-3 text-sm text-foreground">
     <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-    <p>{warning}</p>
+    <ul className="space-y-1">{warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>
   </div>;
 }

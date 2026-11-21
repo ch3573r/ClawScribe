@@ -21,6 +21,10 @@ import { AttachReferenceButton } from "@/components/MeetingDetails/AttachReferen
 import type { ProjectFilter } from "@/lib/library";
 import type { IndexStatus, MeetingFilter, SearchMode } from "@/types/knowledge";
 
+// Route navigation unmounts the archive; keep only the user's explicit source
+// choices in this window. Document selection and sharing remain owner-scoped.
+let memorySources = { all: false, selected: [] as string[], from: "", to: "" };
+
 export function KnowledgeArchive({ active = true, meetings, meetingTitles = meetings, projectFilter, setProjectFilter, projectControl }: {
   active?: boolean; meetings: { id: string; title: string; created_at?: string }[]; meetingTitles?: { id: string; title: string }[]; projectFilter: ProjectFilter; setProjectFilter?: (filter: ProjectFilter) => void; projectControl?: ReactNode;
 }) {
@@ -29,12 +33,13 @@ export function KnowledgeArchive({ active = true, meetings, meetingTitles = meet
   const [chosenMode, setChosenMode] = useState<SearchMode | null>(null);
   const [index, setIndex] = useState<IndexStatus | null>(null);
   const [indexError, setIndexError] = useState(false);
-  const [all, setAll] = useState(false);
-  const [selected, setSelected] = useState<string[]>([]);
+  const [all, setAll] = useState(memorySources.all);
+  const [selected, setSelected] = useState(memorySources.selected);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [meetingQuery, setMeetingQuery] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  const [from, setFrom] = useState(memorySources.from);
+  const [to, setTo] = useState(memorySources.to);
+  useEffect(() => { memorySources = { all, selected, from, to }; }, [all, selected, from, to]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [referenceReveal, setReferenceReveal] = useState(0);
@@ -155,7 +160,6 @@ export function KnowledgeArchive({ active = true, meetings, meetingTitles = meet
       {invalidDates && <p role="alert" className="text-sm text-destructive">The start date must be on or before the end date.</p>}
     </fieldset>
     <div className="min-h-0 flex-1"><KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model} secondary={secondary}
-      inputDisabled={!sourcesReady}
       emptyState={!state.owner && !all && !selected.length ? <div className="flex flex-col items-center gap-2 text-center">
         <h3 className="text-lg font-semibold">Choose meetings to ask about</h3>
         <p className="text-sm text-muted-foreground">Pick one or more meetings, or search all saved meetings</p>

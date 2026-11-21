@@ -164,6 +164,10 @@ pub struct OpenAICompatibleMeetingProcessRequest {
 }
 
 impl OpenAICompatibleProcessingProvider {
+    pub(super) fn model_name(&self) -> &str {
+        &self.config.model
+    }
+
     pub fn new(config: OpenAICompatibleProviderConfig) -> Result<Self, String> {
         Self::with_client(config, Client::builder())
     }

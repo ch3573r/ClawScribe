@@ -407,7 +407,7 @@ async fn launch<R: Runtime>(
         drop(job);
         let _ = app.emit(CHANGED_EVENT, &meeting);
         if ready {
-            notify_ready(&app).await;
+            notify_ready(&app, &pool, &meeting).await;
         }
     })))
 }
@@ -485,7 +485,7 @@ async fn prepare<R: Runtime>(
     Ok((context, language))
 }
 
-async fn notify_ready<R: Runtime>(app: &AppHandle<R>) {
+async fn notify_ready<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool, meeting: &str) {
     use crate::notifications::{
         commands::NotificationManagerState,
         types::{Notification, NotificationType},
@@ -493,13 +493,18 @@ async fn notify_ready<R: Runtime>(app: &AppHandle<R>) {
     if let Some(state) = app.try_state::<NotificationManagerState<R>>() {
         let manager = state.read().await;
         if let Some(manager) = manager.as_ref() {
-            let _ = manager
-                .show_notification(Notification::new(
-                    "ClawScribe",
-                    "Meeting notes are ready.",
-                    NotificationType::TranscriptionComplete,
-                ))
-                .await;
+            let title: Option<String> =
+                sqlx::query_scalar("SELECT title FROM meetings WHERE id = ?")
+                    .bind(meeting)
+                    .fetch_optional(pool)
+                    .await
+                    .unwrap_or_default();
+            let notification = Notification::new(
+                "Meeting notes are ready",
+                title.unwrap_or_else(|| "Open the saved meeting in ClawScribe.".into()),
+                NotificationType::TranscriptionComplete,
+            );
+            let _ = manager.show_notification(notification).await;
         }
     }
 }

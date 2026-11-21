@@ -91,6 +91,10 @@ fn gate() -> std::sync::MutexGuard<'static, ExitGate> {
     GATE.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+pub(crate) fn exit_in_progress() -> bool {
+    gate().state != GateState::Idle
+}
+
 /// What happened when the recording was stopped for an exit.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StopOutcome {

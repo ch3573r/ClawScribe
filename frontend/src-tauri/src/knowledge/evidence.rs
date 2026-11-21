@@ -121,13 +121,15 @@ pub async fn resolve(
     {
         return outcome(EvidenceStatus::Invalid);
     }
-    let source=sqlx::query("SELECT revision,generation FROM knowledge_sources WHERE id=? AND meeting_id=? AND kind='meeting'")
+    let source=sqlx::query("SELECT revision,generation,metadata_revision FROM knowledge_sources WHERE id=? AND meeting_id=? AND kind='meeting'")
         .bind(&reference.source_id).bind(meeting_id).fetch_optional(pool).await?;
     let Some(source) = source else {
         return outcome(EvidenceStatus::Missing);
     };
     let revision: i64 = source.get("revision");
-    if revision != reference.source_revision {
+    if reference.source_revision < source.get::<i64, _>("metadata_revision")
+        || reference.source_revision > revision
+    {
         return outcome(EvidenceStatus::Stale);
     }
     let selected = super::store::SelectedRow {
@@ -146,7 +148,16 @@ pub async fn resolve(
     if passage.evidence.fingerprint != reference.fingerprint {
         return outcome(EvidenceStatus::Stale);
     }
-    if &passage.evidence != reference {
+    // Revision is an index snapshot. Verify the original identity against the same
+    // canonical span, including its speaker, timing and word metadata.
+    if passage.evidence.locator != reference.locator
+        || super::store::transcript_chunk_id(
+            &reference.source_id,
+            reference.source_revision,
+            &spans[0],
+            &reference.fingerprint,
+        )? != reference.chunk_id
+    {
         return outcome(EvidenceStatus::Invalid);
     }
     // The scalar lookup uses the transcript paginator's exact order. Its source
@@ -663,27 +674,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let stale = serde_json::to_value(resolve(&pool, &passage.evidence).await.unwrap()).unwrap();
-        assert_eq!(stale["status"], "stale");
-        assert!(stale["navigation"].is_null());
-        let current = retrieval::search_channels(
-            &pool,
-            &retrieval::freeze_scope(
-                &pool,
-                &KnowledgeScope::Meeting {
-                    meeting_id: "fixture".into(),
-                },
-            )
-            .await
-            .unwrap(),
-            "Test",
-            None,
-        )
-        .await
-        .unwrap()
-        .remove(0);
         let resolved =
-            serde_json::to_value(resolve(&pool, &current.evidence).await.unwrap()).unwrap();
+            serde_json::to_value(resolve(&pool, &passage.evidence).await.unwrap()).unwrap();
+        assert_eq!(resolved["status"], "current");
         assert_eq!(resolved["navigation"]["transcript_index"], 204);
     }
 

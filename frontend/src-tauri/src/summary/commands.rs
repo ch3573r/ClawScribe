@@ -26,6 +26,7 @@ pub struct SummaryResponse {
     pub data: Option<serde_json::Value>,
     pub error: Option<String>,
     pub has_previous_result: bool,
+    pub transcript_changed: Option<bool>,
     pub(crate) progress: Option<super::context_budget::ReductionProgress>,
     pub partial_notes: Option<String>,
 }
@@ -313,6 +314,11 @@ pub async fn api_get_summary<R: Runtime>(
                 };
 
             let response = SummaryResponse {
+                transcript_changed: data
+                    .as_ref()
+                    .and_then(|result| result.get("transcript_content_revision")?.as_i64())
+                    .zip(process.current_content_revision)
+                    .map(|(generated, current)| generated != current),
                 progress: SummaryService::progress(&meeting_id),
                 partial_notes,
                 has_previous_result: process.previous_result.is_some(),
@@ -344,6 +350,7 @@ pub async fn api_get_summary<R: Runtime>(
                 };
 
             Ok(SummaryResponse {
+                transcript_changed: None,
                 has_previous_result: false,
                 status: "idle".to_string(),
                 progress: None,

@@ -72,6 +72,19 @@ function chatSurface(extra={}) {
   return {...hooks,state,render:()=>hooks.render(()=>KnowledgeChat({state,mode:'keyword',provider:'codex',model:'fixture',...extra}))};
 }
 
+test('saved conversation labels use the list metadata when the menu opens', () => {
+  const app = chatSurface();
+  let listReads = 0;
+  app.state.reloadThreads = async () => { listReads++; };
+  app.state.threads = [{kind:'library',id:'other',first_question:'Which rollout?',created_at:'2026-09-01'}];
+  try {
+    nodes(app.render()).find(node => node.props?.onOpenChange).props.onOpenChange(true);
+    assert.equal(listReads, 1);
+    const entry = nodes(app.render()).find(node => node.props?.onSelect && text(node).includes('Which rollout?'));
+    assert.ok(entry);
+  } finally { app.unmount(); }
+});
+
 test('clearing history requires confirmation for the same conversation', () => {
   const app = chatSurface();
   app.state.messages = [{role:'user', id:'q', content:'Launch checklist', created_at:'2026-09-01'}];

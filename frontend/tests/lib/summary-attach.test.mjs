@@ -56,6 +56,17 @@ test('attaching to a regeneration says so', t => {
   assert.equal(app.render().summaryStatus, 'regenerating');
 });
 
+test('generating while attached leaves the active poll and its progress intact', async t => {
+  const app = setup();
+  t.after(() => app.hooks.unmount());
+  app.render().attachToRunningSummary(false);
+  await app.render().handleGenerateSummary();
+  assert.equal(app.polls.length, 1);
+  assert.equal(app.render().summaryStatus, 'processing');
+  await app.polls[0].onUpdate({ status: 'skipped' });
+  assert.equal(app.render().summaryStatus, 'idle');
+});
+
 test('the result of an attached run is taken when it finishes', async t => {
   const app = setup();
   t.after(() => app.hooks.unmount());

@@ -10,11 +10,11 @@ import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover
 import { Command, CommandInput, CommandList, CommandItem, CommandEmpty } from '@/components/ui/command';
 import { addTag, suggestTags, removeLastTag } from '@/lib/library';
 
-export function ProjectTags({ meetingId, compact = false }: { meetingId: string; compact?: boolean }) {
+export function ProjectTags({ meetingId, compact = false, onClose }: { meetingId: string; compact?: boolean; onClose?: () => void }) {
   const { projectTags, projectTagsError, projectTagsLoading, refreshProjectTags } = useSidebar();
   const tags = projectTags.filter(tag => tag.meeting_id === meetingId).map(tag => tag.tag);
-  const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState<string[]>([]);
+  const [open, setOpen] = useState(!!onClose);
+  const [draft, setDraft] = useState<string[]>(onClose ? tags : []);
   const [query, setQuery] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState('');
@@ -35,15 +35,15 @@ export function ProjectTags({ meetingId, compact = false }: { meetingId: string;
     pending.current = true; setBusy(true);
     try {
       await invoke('set_meeting_tags', { meetingId, tags: draft });
-      await refreshProjectTags(); setOpen(false); toast.success('Project tags saved');
+      await refreshProjectTags(); setOpen(false); onClose?.(); toast.success('Project tags saved');
     } catch (error) { toast.error('Could not save tags', { description: String(error) }); }
     finally { pending.current = false; setBusy(false); }
   };
   return <>
-    <Button variant={compact ? "ghost" : "outline"} size="sm" className={compact ? "h-6 min-w-0 max-w-64 px-1 text-xs font-normal text-muted-foreground" : "max-w-64"} disabled={projectTagsLoading} title={tags.join(', ')} onClick={() => { if (projectTagsError) { void refreshProjectTags(); return; } setDraft(tags); setQuery(''); setError(''); setPickerOpen(false); setOpen(true); }}>
+    {!onClose && <Button variant={compact ? "ghost" : "outline"} size="sm" className={compact ? "h-6 min-w-0 max-w-64 px-1 text-xs font-normal text-muted-foreground" : "max-w-64"} disabled={projectTagsLoading} title={tags.join(', ')} onClick={() => { if (projectTagsError) { void refreshProjectTags(); return; } setDraft(tags); setQuery(''); setError(''); setPickerOpen(false); setOpen(true); }}>
       <span className="truncate">{projectTagsLoading ? 'Loading project tags…' : projectTagsError ? 'Retry loading tags' : tags.length ? `Tags: ${tags.join(', ')}` : 'Project tags'}</span>
-    </Button>
-    <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}><DialogContent>
+    </Button>}
+    <Dialog open={open} onOpenChange={value => { if (!busy) { setOpen(value); if (!value) onClose?.(); } }}><DialogContent>
       <DialogHeader><DialogTitle>Project tags</DialogTitle><DialogDescription>Choose existing tags or create new ones. Up to 20 tags, each up to 60 characters.</DialogDescription></DialogHeader>
       <ul aria-label="Selected tags" className="flex flex-wrap gap-2">
         {draft.map(tag => <li key={tag.toLowerCase()} className="inline-flex max-w-full items-center gap-1 rounded-full bg-muted py-1 pl-3 pr-1 text-sm">

@@ -55,9 +55,11 @@ pub async fn get_groq_models(
 }
 
 /// The model list for a key the core already holds.
-pub async fn fetch_groq_models(api_key: Option<String>) -> Result<Vec<GroqModel>, String> {
+async fn fetch_groq_models(api_key: Option<String>) -> Result<Vec<GroqModel>, String> {
     let api_key = api_key
-        .filter(|key| !key.trim().is_empty())
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
         .ok_or("missing_api_key")?;
     let client = model_catalog::client()?;
     let request = client

@@ -64,7 +64,7 @@ export function sameCalendarEvent(a: MeetingCalendarLink | null, b: MeetingCalen
 }
 
 export interface OngoingCalendarMatch {
-  status: "matched" | "ambiguous" | "unavailable" | "none";
+  status: "matched" | "upcoming" | "ambiguous" | "unavailable" | "none";
   matches: MeetingCalendarLink[];
   /** Calendar sources that could not be read, such as "Microsoft 365". */
   unavailable?: string[];
@@ -75,24 +75,26 @@ export function overlappingCalendarLinks(events: Invitation[], from: number, to:
   const links = new Map<string, MeetingCalendarLink>();
   for (const event of events) {
     if (event.allDay || event.isCancelled || !event.start || !event.end) continue;
-    if (!(Date.parse(event.start) < to && Date.parse(event.end) > from)) continue;
+    const start = Date.parse(event.start);
+    const end = Date.parse(event.end);
+    if (!(start < end && start < to && end > from)) continue;
     const link = calendarLinkFromEvent(event);
     links.set(JSON.stringify([link.source, link.sourceId, link.eventId]), link);
   }
   return [...links.values()].sort((a, b) => (a.start ?? "").localeCompare(b.start ?? ""));
 }
 
+export const EARLY_JOIN_WINDOW_MS = 5 * 60_000;
+
 export function matchOngoingCalendar(events: Invitation[], now: number, incomplete: boolean): OngoingCalendarMatch {
-  const matches = new Map<string, MeetingCalendarLink>();
-  for (const event of events) {
-    if (event.allDay || event.isCancelled || !event.start || !event.end ||
-        !(Date.parse(event.start) <= now && now < Date.parse(event.end))) continue;
-    const link = calendarLinkFromEvent(event);
-    matches.set(JSON.stringify([link.source, link.sourceId, link.eventId]), link);
-  }
+  const matches = overlappingCalendarLinks(events, now, now + EARLY_JOIN_WINDOW_MS);
+  let status: OngoingCalendarMatch["status"] = "none";
+  if (incomplete) status = "unavailable";
+  else if (matches.length > 1) status = "ambiguous";
+  else if (matches.length === 1) status = Date.parse(matches[0].start!) > now ? "upcoming" : "matched";
   return {
-    status: incomplete ? "unavailable" : matches.size > 1 ? "ambiguous" : matches.size === 1 ? "matched" : "none",
-    matches: [...matches.values()],
+    status,
+    matches,
   };
 }
 

@@ -90,10 +90,20 @@ static TEST_REMOTE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::n
 
 #[cfg(test)]
 pub(crate) fn mark_remote_for_tests(folder: &Path) {
-    TEST_REMOTE
+    let given = comparable_text(&folder.to_string_lossy());
+    // The runner's TEMP can contain a Windows short name. Production callers
+    // check both the supplied spelling and the path returned by canonicalize.
+    let resolved = folder
+        .canonicalize()
+        .ok()
+        .map(|path| comparable_text(&path.to_string_lossy()));
+    let mut roots = TEST_REMOTE
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .push(comparable_text(&folder.to_string_lossy()));
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(resolved) = resolved.filter(|path| path != &given) {
+        roots.push(resolved);
+    }
+    roots.push(given);
 }
 
 fn marked_remote(text: &str) -> bool {

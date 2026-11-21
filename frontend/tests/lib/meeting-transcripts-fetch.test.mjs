@@ -82,6 +82,7 @@ function caller(kind, failOffset = -1) {
     '@/lib/analytics': { trackCopy: async () => {}, trackSummaryGenerationStarted: async () => {}, trackCustomPromptUsed: async () => {} },
     '@/lib/meetingTranscripts': { fetchAllMeetingTranscripts },
     '@/lib/meeting-summary': loadTsModule(sourcePath('lib/meeting-summary')),
+    '@/lib/summary-job-status': loadTsModule(sourcePath('lib/summary-job-status')),
     '@/lib/transcriptFormatting': loadTsModule(sourcePath('lib/transcriptFormatting')),
     '@/lib/meetingDrafts': loadTsModule(sourcePath('lib/meetingDrafts'), { '@tauri-apps/api/core': { invoke } }),
     '@/lib/openExternal': {},
@@ -149,3 +150,11 @@ for (const kind of ['generate', 'regenerate']) {
     view.hooks.unmount();
   });
 }
+
+test('two generation requests during preflight start one job', async () => {
+  const view = caller('generate');
+  await Promise.all([view.action(), view.action()]);
+  assert.deepEqual(view.errors, []);
+  assert.equal(view.generated.length, 1);
+  view.hooks.unmount();
+});

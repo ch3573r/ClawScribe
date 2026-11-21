@@ -7,6 +7,8 @@ import { ChevronRight, Ellipsis } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ProjectTags } from "@/components/MeetingDetails/ProjectTags";
+import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -46,6 +48,8 @@ export function ArchiveMeetingRows({
 }) {
   const [metadata, setMetadata] = useState<Map<string, ArchiveRow> | null>(null);
   const [error, setError] = useState(false);
+  const { setDeleteTarget, projectTagsLoading, projectTagsError, refreshProjectTags } = useSidebar();
+  const [tagMeeting, setTagMeeting] = useState<ArchiveMeeting | null>(null);
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [removal, setRemoval] = useState<ArchiveMeeting[] | null>(null);
@@ -181,11 +185,16 @@ export function ArchiveMeetingRows({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           <DropdownMenuItem asChild><Link href={href} onClick={open}>Open meeting</Link></DropdownMenuItem>
+          <DropdownMenuItem disabled={projectTagsLoading} onSelect={() => {
+            if (projectTagsError) void refreshProjectTags();
+            else setTagMeeting(meeting);
+          }}>{projectTagsError ? 'Retry loading project tags' : 'Edit project tags'}</DropdownMenuItem>
           {review && review.action !== "review" && <DropdownMenuItem asChild><Link href={taskHref} onClick={open}>{label}</Link></DropdownMenuItem>}
           {row?.has_folder && <DropdownMenuItem onSelect={() => {
             removalOpener.current = document.getElementById(menuId);
             setRemoval([meeting]);
           }}>Review saved audio</DropdownMenuItem>}
+          <DropdownMenuItem className="text-destructive" onSelect={() => setDeleteTarget(meeting)}>Delete meeting…</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </li>;
@@ -239,5 +248,9 @@ export function ArchiveMeetingRows({
         </>
     }
     {removal && <ArchiveAudioRemoval meetings={removal} onClose={closeRemoval} onRemoved={handleRemoved} />}
+    {tagMeeting && <ProjectTags key={tagMeeting.id} meetingId={tagMeeting.id} onClose={() => {
+      setTagMeeting(null);
+      requestAnimationFrame(() => document.getElementById(`archive-actions-${encodeURIComponent(tagMeeting.id)}`)?.focus());
+    }} />}
   </TooltipProvider>;
 }

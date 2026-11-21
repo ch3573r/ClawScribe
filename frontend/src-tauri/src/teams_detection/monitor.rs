@@ -493,7 +493,7 @@ async fn context() -> Context {
     let busy = crate::audio::recording_commands::capture_active() || start_request::is_pending();
     Context {
         idle: !busy,
-        recording,
+        recording: recording && !crate::audio::recording_commands::is_stopping(),
     }
 }
 
@@ -512,6 +512,7 @@ async fn begin<R: Runtime>(
         tracker.may_begin(&call, serial, revision, ctx.idle, confirmed)
     };
     if !allowed {
+        tracker().start_deferred(&call, serial);
         return;
     }
     // Even a click on a prompt that is still visible, or a retry, needs fresh
@@ -529,6 +530,7 @@ async fn begin<R: Runtime>(
         tracker.may_begin(&call, serial, revision, ctx.idle, confirmed)
     };
     if !same_call || ctx.recording || !allowed {
+        tracker().start_deferred(&call, serial);
         return;
     }
 
@@ -543,7 +545,8 @@ async fn begin<R: Runtime>(
         start_request::request_and_wait(app, StartSource::Call(call.provider), Some(evidence))
             .await
     else {
-        // Another start is already under way; this one is not needed.
+        // Reconsider only on a later completed scan with fresh evidence.
+        tracker().start_deferred(&call, serial);
         return;
     };
     match outcome {

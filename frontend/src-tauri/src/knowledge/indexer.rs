@@ -123,10 +123,18 @@ pub async fn index_source(
                         start_byte: base + span.start_byte,
                         end_byte: base + span.end_byte,
                     };
-                    let passage = store::materialize(pool, &selected, span, true).await?;
-                    let vector = runtime
-                        .embed(passage.text.clone(), EmbeddingPurpose::Passage)
-                        .await?;
+                    let passage = store::materialize(pool, &selected, span.clone(), true).await?;
+                    let vector =
+                        match store::reusable_vector(pool, job, &span, &passage.text, &space.id)
+                            .await?
+                        {
+                            Some(vector) => vector,
+                            None => {
+                                runtime
+                                    .embed(passage.text.clone(), EmbeddingPurpose::Passage)
+                                    .await?
+                            }
+                        };
                     store::stage_evidence(
                         pool,
                         job,

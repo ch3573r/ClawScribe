@@ -297,7 +297,7 @@ impl<R: Runtime> NotificationManager<R> {
 
     /// Check if we should show a specific notification based on settings
     async fn should_show_notification(&self, notification: &Notification) -> bool {
-        let settings = self.settings.read().await;
+        let settings = self.settings.read().await.clone();
 
         // Check basic consent and permissions
         if !settings.consent_given || !settings.system_permission_granted {
@@ -305,7 +305,9 @@ impl<R: Runtime> NotificationManager<R> {
         }
 
         // Check DND status
-        if self.is_dnd_active().await {
+        if settings.manual_dnd_mode
+            || (settings.respect_do_not_disturb && self.system_handler.is_dnd_active().await)
+        {
             // Only show critical notifications when DND is active
             match notification.priority {
                 crate::notifications::types::NotificationPriority::Critical => {}

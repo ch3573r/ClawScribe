@@ -79,17 +79,30 @@ pub(super) async fn freeze_scope_rows(
         return Err(KnowledgeError::InvalidInput);
     }
     let mut ids = std::collections::BTreeMap::<String, (String, Vec<String>)>::new();
-    let rows = sqlx::query(
+    let selection = if filter.meeting_ids.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&filter.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?)
+    };
+    let restriction = if selection.is_some() {
+        "AND m.id IN (SELECT value FROM json_each(?4))"
+    } else {
+        ""
+    };
+    let statement = format!(
         "SELECT m.id,m.created_at,t.tag FROM meetings m LEFT JOIN meeting_tags t ON t.meeting_id=m.id
          WHERE (?1 IS NULL OR substr(m.created_at,1,10)>=?1) AND (?2 IS NULL OR substr(m.created_at,1,10)<=?2)
-         ORDER BY m.id LIMIT ?3",
-    )
-    // Leave saved-answer scope semantics intact for older date formats.
-    .bind(row_limit.and(filter.from.as_deref()))
-    .bind(row_limit.and(filter.to.as_deref()))
-    .bind(row_limit.map_or(-1, |limit| limit + 1))
-    .fetch_all(&mut *connection)
-    .await?;
+         {restriction} ORDER BY m.id LIMIT ?3"
+    );
+    let mut query = sqlx::query(&statement)
+        // Leave saved-answer scope semantics intact for older date formats.
+        .bind(row_limit.and(filter.from.as_deref()))
+        .bind(row_limit.and(filter.to.as_deref()))
+        .bind(row_limit.map_or(-1, |limit| limit + 1));
+    if let Some(selection) = selection {
+        query = query.bind(selection);
+    }
+    let rows = query.fetch_all(&mut *connection).await?;
     if row_limit.is_some_and(|limit| rows.len() > limit as usize) {
         return Err(KnowledgeError::Busy);
     }
@@ -103,12 +116,11 @@ pub(super) async fn freeze_scope_rows(
     }
     let meeting_ids = ids
         .into_iter()
-        .filter(|(id, (date, tags))| {
-            (filter.meeting_ids.is_empty() || filter.meeting_ids.contains(id))
-                && filter
-                    .from
-                    .as_ref()
-                    .is_none_or(|from| date.get(..10).unwrap_or(date) >= from.as_str())
+        .filter(|(_, (date, tags))| {
+            filter
+                .from
+                .as_ref()
+                .is_none_or(|from| date.get(..10).unwrap_or(date) >= from.as_str())
                 && filter
                     .to
                     .as_ref()
@@ -164,7 +176,7 @@ pub async fn recheck_scope_in_connection(
     if frozen
         .meeting_ids
         .iter()
-        .any(|id| !current.meeting_ids.contains(id))
+        .any(|id| current.meeting_ids.binary_search(id).is_err())
     {
         return Err(KnowledgeError::Superseded);
     }
@@ -588,6 +600,15 @@ pub async fn retrieve_frozen(
     request: &SearchRequest,
     scope: &FrozenScope,
 ) -> Result<SearchResponse, KnowledgeError> {
+    Ok(retrieve_with_vector(pool, runtime, request, scope).await?.0)
+}
+
+pub(super) async fn retrieve_with_vector(
+    pool: &SqlitePool,
+    runtime: &super::KnowledgeState,
+    request: &SearchRequest,
+    scope: &FrozenScope,
+) -> Result<(SearchResponse, Option<Vec<f32>>), KnowledgeError> {
     if request.query.trim().is_empty()
         || request.query.len() > 1024
         || request.scope != scope.scope
@@ -604,9 +625,9 @@ pub async fn retrieve_frozen(
         serde_json::to_string(&scope.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?;
     let documents =
         serde_json::to_string(&scope.document_ids).map_err(|_| KnowledgeError::InvalidInput)?;
-    let scoped_ready: bool = sqlx::query_scalar(&format!("{SCOPE_CTE} SELECT EXISTS(SELECT 1 FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE {SCOPED_SOURCE} AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space)"))
+    let scoped_ready = request.mode == SearchMode::Hybrid && sqlx::query_scalar::<_, bool>(&format!("{SCOPE_CTE} SELECT EXISTS(SELECT 1 FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE {SCOPED_SOURCE} AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space)"))
         .bind(allowed).bind(documents).bind(&space.id).fetch_one(pool).await?;
-    let embedding = if request.mode == SearchMode::Hybrid && scoped_ready {
+    let embedding = if scoped_ready {
         Some(
             runtime
                 .scheduler
@@ -643,16 +664,18 @@ pub async fn retrieve_frozen(
         vector.as_ref().map(|v| (space.id.as_str(), v.as_slice())),
     )
     .await?;
-    recheck_scope(pool, scope).await?;
-    Ok(SearchResponse {
-        passages,
-        mode: if vector.is_some() {
-            SearchMode::Hybrid
-        } else {
-            SearchMode::Keyword
+    Ok((
+        SearchResponse {
+            passages,
+            mode: if vector.is_some() {
+                SearchMode::Hybrid
+            } else {
+                SearchMode::Keyword
+            },
+            index_status: status,
         },
-        index_status: status,
-    })
+        vector,
+    ))
 }
 
 #[cfg(test)]

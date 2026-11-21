@@ -43,7 +43,10 @@ meeting apps under **Settings → Recording → Call detection**.
 **Test mic** in Recording settings shows the microphone actually tested. If a
 preferred Windows microphone is unavailable, the test identifies its fallback
 to the current default. A system-audio silence warning clears when sound later
-arrives; verify both sources in saved playback before relying on the recording.
+arrives. A separate warning appears if microphone samples stop arriving for
+15 seconds. Verify both sources in saved playback before relying on the recording.
+During Stop, the window shows what is being saved. Choose **Start after saving**
+to request the next recording once the previous one is in the library.
 
 Review names, numbers, decisions, owners, and deadlines before sharing notes or
 exporting tasks. Obtain the recording permissions required for your meeting.
@@ -280,7 +283,10 @@ changes, which save automatically. Use the editor's undo command to revert chang
 
 Meeting titles and summary edits save automatically. Regenerating edited notes
 asks for confirmation, and **Restore previous summary** lets you return to the
-previous version after a successful generation.
+previous version after a successful generation. Newly generated notes show the
+model and template used, and flag later changes to the saved transcript. When
+the provider produces a follow-up email, open **Follow-up email** to read or
+copy the draft.
 
 Saving a title leaves unchanged notes alone. Failed saves retain drafts, and
 edits made during a save remain available to save again. Switching meetings
@@ -298,7 +304,8 @@ completion status, and any available source reference. This works offline.
 **Settings → Calendars** lets you import an `.ics` file or add a read-only
 subscription from a calendar provider. Upcoming meetings appear on Home, and
 the sidebar shows the next one. Choose **Use for next recording** or let
-ClawScribe link a single timed event in progress. Review attendance while
+ClawScribe link a single timed event in progress. For early joins, choose an event
+starting in the next five minutes. Review attendance while
 recording or from the saved meeting. Summaries receive only calendar names you
 confirm. In a saved recurring meeting, open **Attendance** to choose a summary
 template for the series. This works with Microsoft 365 and iCalendar. iCalendar

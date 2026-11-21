@@ -625,14 +625,8 @@ pub async fn materialize(
         }
         hash.update(b"]");
         let fingerprint = format!("{:x}", hash.finalize());
-        let identity = serde_json::to_vec(&(
-            "evidence-v1",
-            &selected.source_id,
-            selected.revision,
-            &span,
-            &fingerprint,
-        ))
-        .map_err(|_| KnowledgeError::InvalidInput)?;
+        let chunk_id =
+            transcript_chunk_id(&selected.source_id, selected.revision, &span, &fingerprint)?;
         let (title, title_clipped) =
             display(handle, c"meetings", c"title", row.meeting_rowid, context)?;
         let (date, date_clipped) = display(
@@ -653,7 +647,7 @@ pub async fn materialize(
                 historical: false,
                 source_id: selected.source_id,
                 source_revision: selected.revision,
-                chunk_id: format!("{:x}", Sha256::digest(identity)),
+                chunk_id,
                 fingerprint,
                 locator: EvidenceLocator::Transcript {
                     meeting_id: selected.meeting_id.clone(),
@@ -823,6 +817,17 @@ pub fn fingerprint(row: &CanonicalRow, span: &TextSpan) -> Result<String, Knowle
     .map_err(|_| KnowledgeError::InvalidInput)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
+pub(super) fn transcript_chunk_id(
+    source: &str,
+    revision: i64,
+    span: &TextSpan,
+    fingerprint: &str,
+) -> Result<String, KnowledgeError> {
+    let identity = serde_json::to_vec(&("evidence-v1", source, revision, span, fingerprint))
+        .map_err(|_| KnowledgeError::InvalidInput)?;
+    Ok(format!("{:x}", Sha256::digest(identity)))
+}
+
 pub fn evidence(
     job: &SourceJob,
     row: &CanonicalRow,
@@ -832,19 +837,12 @@ pub fn evidence(
         return Err(KnowledgeError::InvalidInput);
     }
     let fingerprint = fingerprint(row, span)?;
-    let identity = serde_json::to_vec(&(
-        "evidence-v1",
-        &job.source_id,
-        job.revision,
-        span,
-        &fingerprint,
-    ))
-    .map_err(|_| KnowledgeError::InvalidInput)?;
+    let chunk_id = transcript_chunk_id(&job.source_id, job.revision, span, &fingerprint)?;
     Ok(EvidenceRef {
         historical: false,
         source_id: job.source_id.clone(),
         source_revision: job.revision,
-        chunk_id: format!("{:x}", Sha256::digest(identity)),
+        chunk_id,
         fingerprint,
         locator: EvidenceLocator::Transcript {
             meeting_id: row.meeting_id.clone(),
@@ -899,6 +897,38 @@ pub async fn stage(
     )
     .await
 }
+/// Only the exact text and pinned embedding space affect passage inference.
+pub(super) async fn reusable_vector(
+    pool: &SqlitePool,
+    job: &SourceJob,
+    span: &TextSpan,
+    text: &str,
+    space: &str,
+) -> Result<Option<Vec<f32>>, KnowledgeError> {
+    let bytes: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT v.vector FROM knowledge_chunks c JOIN knowledge_vectors v ON v.chunk_id=c.id
+         WHERE c.source_id=? AND c.transcript_id=? AND c.start_byte=? AND c.end_byte=?
+           AND c.revision<? AND c.text=? AND v.space=? AND v.dimensions=384
+         ORDER BY c.revision DESC LIMIT 1",
+    )
+    .bind(&job.source_id)
+    .bind(&span.transcript_id)
+    .bind(span.start_byte as i64)
+    .bind(span.end_byte as i64)
+    .bind(job.revision)
+    .bind(text)
+    .bind(space)
+    .fetch_optional(pool)
+    .await?;
+    Ok(bytes.and_then(|bytes| {
+        let vector: Vec<_> = bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        super::embedding::normalize(vector).ok()
+    }))
+}
+
 pub async fn stage_evidence(
     pool: &SqlitePool,
     job: &SourceJob,
@@ -1657,6 +1687,49 @@ mod tests {
         );
         assert!(current(&pool, &new).await.unwrap());
     }
+    #[tokio::test]
+    async fn vector_reuse_requires_identical_text_and_space_from_an_earlier_revision() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = database().await;
+        meeting(&pool, "one").await;
+        transcript(&pool).await;
+        let job = next_job(&pool).await.unwrap().unwrap();
+        let row = rows_page(&pool, &job, None).await.unwrap().remove(0);
+        let span = TextSpan {
+            transcript_id: row.id.clone(),
+            start_byte: 0,
+            end_byte: row.transcript.len(),
+        };
+        stage(&pool, &job, &row, &span, 0, &[1.0; 384], "space")
+            .await
+            .unwrap();
+        publish(&pool, &job, "space").await.unwrap();
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES('other','one','Another row','00:02')").execute(&pool).await.unwrap();
+        let next = next_job(&pool).await.unwrap().unwrap();
+        assert!(
+            reusable_vector(&pool, &next, &span, &row.transcript, "space")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(reusable_vector(&pool, &next, &span, "Edited text", "space")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            reusable_vector(&pool, &next, &span, &row.transcript, "another-space")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            reusable_vector(&pool, &job, &span, &row.transcript, "space")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn evidence_identity_survives_cache_rebuild_and_tracks_speaker_timing() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;

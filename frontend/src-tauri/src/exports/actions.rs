@@ -1,6 +1,6 @@
 //! User-confirmed follow-ups stored with the saved meeting.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -108,15 +108,35 @@ pub async fn get_reviewed_meeting_actions(
         .unwrap_or_default())
 }
 
-#[tauri::command]
-pub fn suggest_meeting_actions(markdown: String) -> Vec<ReviewedAction> {
-    parse_action_suggestions(&markdown)
+pub(super) fn remaining_suggestions(
+    markdown: &str,
+    reviewed: &[ReviewedAction],
+) -> Vec<ReviewedAction> {
+    // Positions can move on regeneration. Consume each original title once so
+    // a renamed or completed action stays reviewed, including repeated titles.
+    let mut counts = HashMap::new();
+    for legacy in reviewed
+        .iter()
+        .filter_map(|action| action.legacy_action.as_ref())
+    {
+        *counts.entry(legacy.title_hash.as_str()).or_insert(0usize) += 1;
+    }
+    parse_action_suggestions(markdown)
         .into_iter()
+        .filter_map(|suggestion| {
+            let hash = super::planner::action_hash(&suggestion.action);
+            if let Some(remaining) = counts.get_mut(hash.as_str()).filter(|count| **count > 0) {
+                *remaining -= 1;
+                None
+            } else {
+                Some((suggestion, hash))
+            }
+        })
         .take(250)
-        .map(|suggestion| {
+        .map(|(suggestion, hash)| {
             let action = suggestion.action;
             let legacy_action = LegacyAction {
-                title_hash: super::planner::action_hash(&action),
+                title_hash: hash,
                 id: action.local_action_id,
             };
             ReviewedAction {
@@ -132,6 +152,14 @@ pub fn suggest_meeting_actions(markdown: String) -> Vec<ReviewedAction> {
             }
         })
         .collect()
+}
+
+#[tauri::command]
+pub fn suggest_meeting_actions(
+    markdown: String,
+    reviewed: Option<Vec<ReviewedAction>>,
+) -> Vec<ReviewedAction> {
+    remaining_suggestions(&markdown, reviewed.as_deref().unwrap_or_default())
 }
 
 #[tauri::command]
@@ -166,6 +194,21 @@ async fn save(
 mod tests {
     use super::*;
 
+    #[test]
+    fn reordered_actions_keep_their_review_and_new_suggestions_can_be_added() {
+        let mut reviewed =
+            remaining_suggestions("## Action items\n- Send report\n- Review plan", &[]);
+        assert_eq!(reviewed.len(), 2);
+        reviewed[0].title = "Send revised report".into();
+        reviewed[1].done = true;
+        let remaining = remaining_suggestions(
+            "## Action items\n- Review plan\n- Confirm budget\n- Send report",
+            &reviewed,
+        );
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].title, "Confirm budget");
+    }
+
     #[tokio::test]
     async fn empty_review_and_edited_actions_survive_reload_and_upgrade() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -186,6 +229,7 @@ mod tests {
         assert!(load(&pool, "existing").await.unwrap().is_none());
         let mut actions = suggest_meeting_actions(
             "## Aufgaben\n- [x] Bericht senden [00:01:18](#clawscribe-source-abc123)".into(),
+            None,
         );
         assert!(actions[0].done);
         assert_eq!(actions[0].source_key.as_deref(), Some("abc123"));

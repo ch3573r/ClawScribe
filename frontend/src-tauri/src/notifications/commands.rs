@@ -3,12 +3,95 @@ use crate::notifications::{manager::NotificationManager, settings::NotificationS
 use anyhow::Result;
 use log::{error as log_error, info as log_info};
 use std::sync::Arc;
-use tauri::{AppHandle, Runtime, State, Wry};
+use tauri::{AppHandle, Listener, Manager, Runtime, State, Wry};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::RwLock;
 
 /// Shared notification manager state
 pub type NotificationManagerState<R> = Arc<RwLock<Option<NotificationManager<R>>>>;
+
+/// The tray remains actionable even when Windows notifications are silenced.
+/// Never include the event payload (paths, calendar subjects or device names)
+/// in a desktop notification that could also be shown on the lock screen.
+pub(crate) fn listen_for_background_alerts<R: Runtime>(app: &AppHandle<R>) {
+    use crate::notifications::types::{Notification, NotificationType};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    for (event, body, kind) in [
+        (
+            "call-detection-prompt",
+            "A call was detected. Open the tray menu to record it.",
+            NotificationType::MeetingReminder(0),
+        ),
+        (
+            "recording-warning",
+            "Check the recording warning in ClawScribe.",
+            NotificationType::SystemError(String::new()),
+        ),
+        (
+            "recording-error",
+            "Audio capture needs attention. Open ClawScribe to check the recording.",
+            NotificationType::SystemError(String::new()),
+        ),
+        (
+            "transcription-warning",
+            "Live transcription is incomplete. Open ClawScribe for details.",
+            NotificationType::SystemError(String::new()),
+        ),
+        (
+            "transcription-error",
+            "Live transcription needs attention. Open ClawScribe for details.",
+            NotificationType::SystemError(String::new()),
+        ),
+        (
+            "recording-disk-space-low",
+            "Disk space for this recording is low. Open ClawScribe to review storage.",
+            NotificationType::SystemError(String::new()),
+        ),
+        (
+            "recording-stop-failed",
+            "Recording could not stop. Open ClawScribe to retry.",
+            NotificationType::SystemError(String::new()),
+        ),
+        (
+            "recording-queued-start-failed",
+            "The queued recording did not start. Open ClawScribe to check the recording status.",
+            NotificationType::SystemError(String::new()),
+        ),
+    ] {
+        let target = app.clone();
+        let last_attempt = Mutex::new(None::<Instant>);
+        app.listen(event, move |_| {
+            // Segment and device warnings can repeat rapidly. Bound work before
+            // scheduling it, and keep window queries off the audio pipeline.
+            if event != "call-detection-prompt" {
+                let mut last = last_attempt.lock().unwrap();
+                if last.is_some_and(|when| when.elapsed() < Duration::from_secs(30)) {
+                    return;
+                }
+                *last = Some(Instant::now());
+            }
+            let app = target.clone();
+            let kind = kind.clone();
+            tauri::async_runtime::spawn(async move {
+                let Some(window) = app.get_webview_window("main") else {
+                    return;
+                };
+                if window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false) {
+                    return;
+                }
+                if let Some(state) = app.try_state::<NotificationManagerState<R>>() {
+                    let manager = state.read().await;
+                    if let Some(manager) = manager.as_ref() {
+                        let _ = manager
+                            .show_notification(Notification::new("ClawScribe", body, kind))
+                            .await;
+                    }
+                }
+            });
+        });
+    }
+}
 
 /// Initialize the notification manager (called during app setup)
 pub async fn initialize_notification_manager<R: Runtime>(

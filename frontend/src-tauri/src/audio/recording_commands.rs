@@ -324,9 +324,84 @@ pub(crate) fn calendar_recording_id(session_id: &str) -> Result<String, String> 
 }
 
 struct StopState;
+// The Stop owner opens admission after it has validated the session and closes
+// it under the same lock when the save commits or the Stop unwinds.
+struct SavingRecording {
+    session_id: Option<String>,
+    start_requested: Option<Instant>,
+}
+
+impl SavingRecording {
+    fn update(
+        &mut self,
+        want_recording: Option<bool>,
+        session_id: Option<&str>,
+        now: Instant,
+    ) -> bool {
+        if session_id.is_some() && self.session_id.as_deref() != session_id {
+            return false;
+        }
+        match want_recording {
+            Some(true) => self.start_requested = Some(now),
+            Some(false) => self.start_requested = None,
+            None => {}
+        }
+        true
+    }
+}
+
+static SAVING_RECORDING: Mutex<Option<SavingRecording>> = Mutex::new(None);
+
+pub(crate) fn set_start_after_save(want_recording: Option<bool>, session_id: Option<&str>) -> bool {
+    let mut saving = SAVING_RECORDING.lock().unwrap();
+    saving
+        .as_mut()
+        .is_some_and(|owner| owner.update(want_recording, session_id, Instant::now()))
+}
+
+#[tauri::command]
+pub fn queue_recording_after_save(session_id: String, enabled: bool) -> bool {
+    set_start_after_save(Some(enabled), Some(&session_id))
+}
+
+pub(crate) fn same_recording_epoch(epoch: u64) -> bool {
+    RECORDING_EPOCH.load(Ordering::Acquire) == epoch
+}
+
+#[cfg(test)]
+mod save_intent_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_requests_coalesce_for_one_save_and_can_be_canceled() {
+        let now = Instant::now();
+        let mut saving = SavingRecording {
+            session_id: Some("current".into()),
+            start_requested: None,
+        };
+        assert!(!saving.update(Some(true), Some("old"), now));
+        assert!(saving.update(None, None, now)); // shortcut toggle
+        assert!(saving.start_requested.is_none());
+        assert!(saving.update(Some(true), Some("current"), now));
+        assert!(saving.update(Some(true), None, now)); // a second explicit CLI start
+        assert_eq!(saving.start_requested, Some(now));
+        assert!(!saving.update(Some(false), Some("old"), now));
+        assert_eq!(saving.start_requested, Some(now));
+        assert!(saving.update(Some(false), Some("current"), now));
+        assert!(saving.start_requested.is_none());
+    }
+}
+
+impl StopState {
+    fn close(&self) -> Option<Instant> {
+        let mut saving = SAVING_RECORDING.lock().unwrap();
+        IS_STOPPING.store(false, Ordering::Release);
+        saving.take().and_then(|owner| owner.start_requested)
+    }
+}
 impl Drop for StopState {
     fn drop(&mut self) {
-        IS_STOPPING.store(false, Ordering::Release);
+        self.close();
     }
 }
 
@@ -911,6 +986,9 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     start_allowed()?;
     let _starting = StartingState::claim()?;
     info!("Starting recording with selected devices");
+    if let Some(request) = options.request {
+        request.check_call()?;
+    }
 
     let mode = super::recording_mode::load(&app)?;
     // A recording pre-empts a local summary or a cancellable batch job
@@ -1287,9 +1365,18 @@ async fn stop_recording_session<R: Runtime>(
             return Ok(false);
         }
     }
-    IS_STOPPING.store(true, Ordering::Release);
-    let stopped_live_identity =
-        stop_live_assistance(&app.state::<crate::knowledge::KnowledgeState>());
+    let stopped_live_identity = {
+        let mut saving = SAVING_RECORDING.lock().unwrap();
+        IS_STOPPING.store(true, Ordering::Release);
+        let identity = stop_live_assistance(&app.state::<crate::knowledge::KnowledgeState>());
+        *saving = Some(SavingRecording {
+            session_id: identity
+                .as_ref()
+                .map(|identity| identity.session_id.clone()),
+            start_requested: None,
+        });
+        identity
+    };
     let _stop_state = StopState;
     crate::tray::set_tray_state(&app, crate::tray::RecordingState::Stopping);
 
@@ -1298,6 +1385,7 @@ async fn stop_recording_session<R: Runtime>(
         "recording-shutdown-progress",
         serde_json::json!({
             "stage": "stopping_audio",
+            "identity": stopped_live_identity,
             "message": "Stopping audio capture...",
             "progress": 20
         }),
@@ -1356,6 +1444,7 @@ async fn stop_recording_session<R: Runtime>(
             "recording-shutdown-progress",
             serde_json::json!({
                 "stage": "processing_transcripts",
+                "identity": stopped_live_identity,
                 "message": "Processing remaining transcript chunks...",
                 "progress": 40
             }),
@@ -1381,6 +1470,7 @@ async fn stop_recording_session<R: Runtime>(
 
         // Enhanced progress monitoring during shutdown
         let progress_app = app.clone();
+        let progress_identity = stopped_live_identity.clone();
         let progress_task = tokio::spawn(async move {
             let last_update = std::time::Instant::now();
 
@@ -1402,6 +1492,7 @@ async fn stop_recording_session<R: Runtime>(
                     "recording-shutdown-progress",
                     serde_json::json!({
                         "stage": "processing_transcripts",
+                        "identity": progress_identity,
                         "message": format!("Processing {} remaining transcript chunks...", remaining),
                         "progress": 40,
                         "detailed": true,
@@ -1475,6 +1566,7 @@ async fn stop_recording_session<R: Runtime>(
             "recording-shutdown-progress",
             serde_json::json!({
                 "stage": "unloading_model",
+                "identity": stopped_live_identity,
                 "message": "Unloading speech recognition model...",
                 "progress": 70
             }),
@@ -1591,6 +1683,7 @@ async fn stop_recording_session<R: Runtime>(
         "recording-shutdown-progress",
         serde_json::json!({
             "stage": "finalizing",
+            "identity": stopped_live_identity,
             "message": "Finalizing recording and cleaning up resources...",
             "progress": 90
         }),
@@ -1727,6 +1820,7 @@ async fn stop_recording_session<R: Runtime>(
         "recording-shutdown-progress",
         serde_json::json!({
             "stage": "complete",
+            "identity": stopped_live_identity,
             "message": if outcome.needs_recovery() || library_save_failed { "Recording stopped; review needed" } else { "Recording stopped" },
             "progress": 100
         }),
@@ -1774,9 +1868,24 @@ async fn stop_recording_session<R: Runtime>(
         );
     }
 
-    // Clear Stop ownership before allowing another recording to claim the job.
-    drop(_stop_state);
+    // Release the old job before admitting another start. Take the request
+    // under the admission lock so a request racing the commit cannot vanish.
     RECORDING_JOB.lock().unwrap().take();
+    let queued = _stop_state.close();
+    if let Some(requested) = queued {
+        if !library_save_failed
+            && suspend_attempt.is_none()
+            && !crate::exit_guard::exit_in_progress()
+            && requested.elapsed() < crate::start_request::START_TIMEOUT
+        {
+            let next_app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::tray::start_after_save(&next_app, epoch_at_request, requested).await;
+            });
+        } else {
+            crate::tray::queued_start_failed(&app);
+        }
+    }
     crate::tray::update_tray_menu(&app);
 
     if let Some(id) = meeting_id {

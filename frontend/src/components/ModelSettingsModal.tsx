@@ -1592,7 +1592,7 @@ export function ModelSettingsModal({
       if (provider === 'openrouter') return openRouterError
         ? { tone: 'warning', text: 'Public model list unavailable' }
         : { tone: 'neutral', text: 'API key not verified by the public model list' };
-      if (catalog.provider !== provider) return { tone: 'neutral', text: 'Checking provider…' };
+      if (catalog.provider !== provider) return { tone: 'neutral', text: 'Checking providerâ€¦' };
       switch (catalog.status) {
         case 'invalid': return { tone: 'error', text: 'The provider rejected this API key. Replace it and try again.' };
         case 'forbidden': return { tone: 'warning', text: 'This key cannot list models. Check its permissions.' };

@@ -1,7 +1,7 @@
 import { getICalendarSnapshot, refreshICalendars } from "@/services/icalService";
 import { microsoftExportService, type CalendarEvent } from "@/services/microsoftExportService";
 import {
-  getActiveRecordingCalendar, matchOngoingCalendar, microsoftCalendarRevision, overlappingCalendarLinks, setActiveRecordingCalendar,
+  EARLY_JOIN_WINDOW_MS, getActiveRecordingCalendar, matchOngoingCalendar, microsoftCalendarRevision, overlappingCalendarLinks, setActiveRecordingCalendar,
   type MeetingCalendarLink, type OngoingCalendarMatch, type RecordingCalendar,
 } from "@/lib/meetingCalendar";
 import { invoke } from "@tauri-apps/api/core";
@@ -55,8 +55,10 @@ async function readCalendars(from: number, to: number, budgetMs: number) {
       graph = await microsoftExportService.listCalendarEvents(
         new Date(from).toISOString(), new Date(to).toISOString(), true,
       );
+      graphComplete = true;
+    } else {
+      graphComplete = connection.state === "not_connected";
     }
-    graphComplete = connection.state !== "expired";
   })();
   const icalWork = refreshICalendars().then(() => { icalComplete = true; });
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -78,7 +80,7 @@ async function readCalendars(from: number, to: number, budgetMs: number) {
 }
 
 export async function findOngoingRecordingCalendar(now: number): Promise<OngoingCalendarMatch> {
-  const { events, unavailable } = await readCalendars(now - 60_000, now + 60_000, CALENDAR_START_BUDGET_MS);
+  const { events, unavailable } = await readCalendars(now - 60_000, now + EARLY_JOIN_WINDOW_MS, CALENDAR_START_BUDGET_MS);
   return { ...matchOngoingCalendar(events, now, unavailable.length > 0), unavailable };
 }
 

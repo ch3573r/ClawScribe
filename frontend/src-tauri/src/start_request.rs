@@ -29,6 +29,7 @@ pub enum StartSource {
     Shortcut,
     Cli,
     Call(Provider),
+    AfterSave { epoch: u64, requested: Instant },
 }
 
 impl StartSource {
@@ -38,6 +39,7 @@ impl StartSource {
             StartSource::Shortcut => "shortcut",
             StartSource::Cli => "cli",
             StartSource::Call(_) => "call",
+            StartSource::AfterSave { .. } => "after_save",
         }
     }
 
@@ -94,6 +96,14 @@ impl ClaimedStart {
     }
 
     pub(crate) fn check_call(&self) -> Result<(), String> {
+        if let StartSource::AfterSave { epoch, requested } = self.source {
+            if requested.elapsed() >= START_TIMEOUT
+                || !crate::audio::recording_commands::same_recording_epoch(epoch)
+                || crate::exit_guard::exit_in_progress()
+            {
+                return Err(EXPIRED.into());
+            }
+        }
         if self
             .call
             .as_ref()

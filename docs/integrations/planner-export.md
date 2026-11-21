@@ -10,6 +10,9 @@ summaries can misread ownership, due dates, or action boundaries.
 2. User opens Planner export from a meeting.
 3. ClawScribe uses open reviewed meeting actions when available. Before an action
    list has been saved, it can suggest actions from summary lists or tables.
+   If a regenerated summary contains other suggestions, **Review suggestions**
+   opens the saved list. Choose **Add summary suggestions**, review the actions,
+   and save before reopening the export.
 4. User reviews, edits, and deselects tasks.
 5. User selects a plan and bucket, or creates a bucket when available.
 6. ClawScribe creates only the selected tasks.

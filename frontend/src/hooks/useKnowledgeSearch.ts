@@ -9,6 +9,7 @@ import type {
   EvidenceRef,
   HistoryMessage,
   KnowledgeScope,
+  LibraryConversation,
   MeetingFilter,
   ResolvedEvidence,
   SearchMode,
@@ -48,7 +49,7 @@ export function useKnowledgeSearch(
     initialOwner?.kind === "library" ? initialOwner : null,
   );
   const owner = initialOwner ?? savedOwner;
-  const [threads, setThreads] = useState<ConversationOwner[]>([]);
+  const [threads, setThreads] = useState<LibraryConversation[]>([]);
   const [response, setResponse] = useState<SearchResponse | null>(null);
   const [messages, setMessages] = useState<HistoryMessage[]>([]);
   const [loading, setLoading] = useState(false);
@@ -496,7 +497,8 @@ export function useKnowledgeSearch(
       if (current()) setPreviewBusy(false);
     }
   }
-  async function selectConversation(value: ConversationOwner) {
+  async function selectConversation({kind, id}: ConversationOwner) {
+    const value = {kind, id};
     if (!surfaceActive || scopeSwitchPending.current || owner?.id === value.id) return;
     reset();
     if (!options?.restoreScope) {

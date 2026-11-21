@@ -77,6 +77,7 @@ const Sidebar: React.FC = () => {
   const router = useRouter();
   const pathname = usePathname();
   const {
+    deleteTarget, setDeleteTarget,
     currentMeeting,
     setCurrentMeeting,
     sidebarItems,
@@ -127,10 +128,7 @@ const Sidebar: React.FC = () => {
 
   const [deleteFiles, setDeleteFiles] = useState(true);
   const deletingMeeting = useRef(false);
-  const [deleteModalState, setDeleteModalState] = useState<{
-    isOpen: boolean;
-    itemId: string | null;
-  }>({ isOpen: false, itemId: null });
+  useEffect(() => { setDeleteFiles(true); }, [deleteTarget]);
 
   const [editModalState, setEditModalState] = useState<{
     isOpen: boolean;
@@ -171,10 +169,7 @@ const Sidebar: React.FC = () => {
         toast.warning('Meeting deleted, but its cached recovery copy could not be removed.');
       }
       console.log("Meeting deleted successfully");
-      const updatedMeetings = meetings.filter(
-        (m: CurrentMeeting) => m.id !== itemId,
-      );
-      setMeetings(updatedMeetings);
+      setMeetings(previous => previous.filter(meeting => meeting.id !== itemId));
 
       // Track meeting deletion
       Analytics.trackMeetingDeleted(itemId);
@@ -189,7 +184,7 @@ const Sidebar: React.FC = () => {
       // If deleting the active meeting, navigate to home
       if (currentMeeting?.id === itemId) {
         setCurrentMeeting({ id: "intro-call", title: "+ New Call" });
-        router.push("/");
+        if (pathname === "/meeting-details") router.push("/");
       }
     } catch (error) {
       console.error("Failed to delete meeting:", error);
@@ -202,10 +197,8 @@ const Sidebar: React.FC = () => {
   };
 
   const handleDeleteConfirm = () => {
-    if (deleteModalState.itemId) {
-      handleDelete(deleteModalState.itemId);
-    }
-    setDeleteModalState({ isOpen: false, itemId: null });
+    if (deleteTarget) void handleDelete(deleteTarget.id);
+    setDeleteTarget(null);
   };
 
   // Handle modal editing of meeting names
@@ -489,7 +482,7 @@ const Sidebar: React.FC = () => {
                 variant="ghost"
                 onClick={() => {
                   setDeleteFiles(true);
-                  setDeleteModalState({ isOpen: true, itemId: item.id });
+                  setDeleteTarget({ id: item.id, title: item.title });
                 }}
                 className="whitespace-normal h-auto gap-0 [&_svg]:size-3.5 rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                 aria-label={`Delete ${item.title}`}
@@ -769,10 +762,11 @@ const Sidebar: React.FC = () => {
 
       {/* Confirmation Modal for Delete */}
       <ConfirmationModal
-        isOpen={deleteModalState.isOpen}
+        isOpen={!!deleteTarget}
+        title={`Delete “${deleteTarget?.title ?? 'meeting'}”?`}
         text="Delete this meeting and its transcript, notes, export history, and temporary Codex files? This action cannot be undone."
         onConfirm={handleDeleteConfirm}
-        onCancel={() => setDeleteModalState({ isOpen: false, itemId: null })}
+        onCancel={() => setDeleteTarget(null)}
       >
         <label className="mb-6 flex items-start gap-2 text-sm"><Checkbox checked={deleteFiles} onCheckedChange={checked => setDeleteFiles(checked === true)} className="mt-1 h-[13px] w-[13px]" />Also delete the recording files (audio, transcript copy, metadata, and generated documents).</label>
       </ConfirmationModal>

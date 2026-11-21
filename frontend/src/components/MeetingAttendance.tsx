@@ -97,8 +97,8 @@ function AttendanceDialog({ link, options = [], label, onSave, disabled, childre
         <DialogHeader>
           <DialogTitle>{link ? "Review attendance" : "Link calendar event"}</DialogTitle>
           <DialogDescription>
-            {link ? "Check the people who attended. Saving shares the event title with your AI provider, and the names of checked people when you summarize. Email addresses stay on this device."
-              : "Choose the event this recording belongs to."}
+            {link ? "Check the people who attended." : "Choose the event this recording belongs to."}
+            {" "}Saving lets your AI provider use the event title and checked names when you summarize. Email addresses stay on this device.
           </DialogDescription>
         </DialogHeader>
         {lookup?.loading && options.length === 0 && <p role="status" className="text-sm text-muted-foreground">Looking for calendar events…</p>}
@@ -206,10 +206,11 @@ export function RecordingCalendarReview({ disabled, sessionId }: {
   if (loadFailed) return <p role="status" className="text-sm text-muted-foreground">Could not load this recording’s calendar.</p>;
   if (!active || active.sessionId !== sessionId || (!active.link && active.status === "none")) return null;
   const status = active.link ? eventTitle(active.link)
-    : active.status === "ambiguous" ? "Multiple ongoing calendar events"
+    : active.status === "ambiguous" ? "Multiple calendar events match this recording"
+    : active.status === "upcoming" ? "A calendar event starts in the next five minutes"
     : active.status === "unavailable"
       ? active.unavailable?.length ? `Could not read ${active.unavailable.join(" and ")}` : "Some calendar information was unavailable"
-    : active.matches.length > 0 ? "Found an ongoing calendar event"
+    : active.matches.length > 0 ? "Found a matching calendar event"
     : "No calendar event linked";
   // A partial result is not final: look again for the sources that failed.
   async function checkAgain() {

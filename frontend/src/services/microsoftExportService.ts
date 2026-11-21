@@ -53,6 +53,7 @@ export interface OneNoteResume {
 }
 
 export interface MeetingExportHistory {
+  actionId?: string | null;
   destination: string;
   status: string;
   at: string | null;
@@ -142,6 +143,11 @@ export interface PlannerTaskPreview {
 export interface TaskPreviewCandidate {
   readonly localId: string;
   readonly originalTitleHash: string;
+}
+
+interface MeetingTaskPreview {
+  items: PlannerTaskPreview[];
+  suggestionCount: number;
 }
 
 export function taskPreviewCandidates(
@@ -374,8 +380,8 @@ export const microsoftExportService = {
     meetingId: string,
     meetingTitle: string,
     markdown: string,
-  ): Promise<PlannerTaskPreview[]> {
-    return invoke<PlannerTaskPreview[]>("preview_planner_tasks", {
+  ): Promise<MeetingTaskPreview> {
+    return invoke<MeetingTaskPreview>("preview_planner_tasks", {
       meetingId,
       meetingTitle,
       markdown,
@@ -402,8 +408,8 @@ export const microsoftExportService = {
     meetingId: string,
     meetingTitle: string,
     markdown: string,
-  ): Promise<PlannerTaskPreview[]> {
-    return invoke<PlannerTaskPreview[]>("preview_todo_tasks", {
+  ): Promise<MeetingTaskPreview> {
+    return invoke<MeetingTaskPreview>("preview_todo_tasks", {
       meetingId,
       meetingTitle,
       markdown,

@@ -90,7 +90,9 @@ the next event list, including:
 - event type and the series master ID for recurring occurrences and exceptions
 
 The app uses a selected event for the next recording or links a single timed
-event in progress across enabled sources. The event body is excluded. The
+event in progress across enabled sources. Upcoming events in the next five
+minutes are offered for review. Competing matches stay unlinked until chosen.
+The event body is excluded. The
 meeting's attendance checklist starts unchecked and summaries receive only
 calendar names confirmed in that checklist. Recording works without a link if
 calendar data is unavailable. Calendar lookup uses the existing read permission.
