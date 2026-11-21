@@ -376,6 +376,7 @@ pub(super) struct MeetingSummaryContext {
     pub(super) prompt: String,
     pub(super) title: crate::library::calendar::ProviderTitle,
     pub(super) template: String,
+    pub(super) series_language: Option<String>,
 }
 
 pub(super) async fn meeting_summary_context<R: Runtime>(
@@ -407,10 +408,15 @@ pub(super) async fn meeting_summary_context<R: Runtime>(
         }
     };
 
+    let series_language = match calendar.as_ref() {
+        Some(link) => crate::library::follow_through::summary_language(pool, link).await?,
+        None => None,
+    };
     Ok(MeetingSummaryContext {
         prompt: final_prompt,
         title: summary_title,
         template: final_template_id,
+        series_language,
     })
 }
 
@@ -452,14 +458,16 @@ pub async fn api_process_transcript<R: Runtime>(
     .await?;
 
     // Normalise empty / whitespace-only to None so "" and null behave identically
-    let summary_language = summary_language.and_then(|s| {
-        let t = s.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t.to_string())
-        }
-    });
+    let summary_language = summary_language
+        .and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        })
+        .or_else(|| context.series_language.clone());
 
     let job = SummaryService::register_job(&m_id, &model)?;
 
@@ -538,6 +546,7 @@ pub async fn api_generate_meeting_summary<R: Runtime>(
         None => crate::library::context::read(&pool, &meeting_id).await?,
     };
     let context = meeting_summary_context(&app, &pool, &meeting_id, context, template_id).await?;
+    let summary_language = summary_language.or_else(|| context.series_language.clone());
     SummaryProcessesRepository::create_or_reset_process(&pool, &meeting_id)
         .await
         .map_err(|_| "Could not start summary generation")?;

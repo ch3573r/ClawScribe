@@ -328,8 +328,11 @@ ClawScribe link a single timed event in progress. For early joins, choose an eve
 starting in the next five minutes. Review attendance while
 recording or from the saved meeting. Summaries receive only calendar names you
 confirm. In a saved recurring meeting, open **Attendance** to choose a summary
-template for the series. This works with Microsoft 365 and iCalendar. iCalendar
-works without a Microsoft account. See [Calendar sources and attendance](docs/integrations/icalendar.md).
+template for the series. Open **Recurring meeting** in the meeting menu to set a
+series language, select a preferred follow-up, or approve notes for later
+preparation briefs. **Upcoming meetings** on Home can show a recurring meeting's
+brief from earlier reviewed occurrences. This works with Microsoft 365 and
+iCalendar. [Calendar sources and attendance](docs/integrations/icalendar.md)
 
 Microsoft sign-in supports calendar context and exports. Windows call detection
 can prompt or start recording for the Teams, Zoom, Webex and Google Meet
@@ -343,6 +346,8 @@ See [call detection](docs/teams-detection.md).
   sections.
 - **Planner and Microsoft To Do** export selected, reviewed actions. Repeat
   the export to repair missing notes or due dates on tasks already created.
+- **Follow-up email** lets you edit a draft, select confirmed attendees, and
+  open the draft in your default email client.
 - **OneDrive or SharePoint** saves Word and optional PDF files. Repeating a
   partial export reuses confirmed files and retries unfinished steps.
 - **Confluence** copies nested lists, code, quotes, and checklist status into a
@@ -373,11 +378,19 @@ transcripts, and failed summaries. Use
 audio copies can be removed while keeping their transcripts and notes.
 See [Archive review and storage](docs/local-library.md#archive-review-and-storage).
 
-**Settings → Assistant access** lets an MCP client read the
-saved meeting library. Enable the switch, copy the configuration, and add it
-to your assistant. It can search meetings, read their notes and transcripts,
-and locate saved recordings. The connection uses local standard input and
-output. Access is off by default. See [local assistant access](docs/local-library.md#local-assistant-access).
+**Meetings → Open actions** lists unfinished reviewed actions across meetings.
+Filter by owner, due date, or recurring series, then open the source meeting
+to complete the action or review an export.
+
+During recording, choose **Save answer to meeting notes** on a live answer to
+keep it and its cited finalized speech. Find it under **Saved live answers** in
+the saved meeting. Other live answers clear at Stop.
+
+**Settings → Assistant access** offers separate permissions for an MCP client.
+Follow-through access reads open reviewed actions and basic metadata for a
+meeting reference you provide. Library access supports broader searches and
+can read notes, transcripts, and recording paths. Both use local standard
+input and output and start off. [Local assistant access](docs/local-library.md#local-assistant-access)
 
 **Backup and restore** saves a portable archive of meeting data, summary context,
 and recordings. Restore adds missing meetings and skips existing IDs. Backups

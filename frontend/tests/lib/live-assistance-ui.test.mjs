@@ -9,7 +9,7 @@ const text = node => typeof node === 'string' || typeof node === 'number' ? Stri
 const liveSnapshot = { session_id: 'session-ui', recording_generation: '1', finalized_through_seconds: 3540, segments: [{ sequence_id: 700, text: 'Public finalized fixture', start_seconds: 3535, end_seconds: 3540 }], transcription_incomplete: true, transcription_available: true };
 const reply = request => ({ request_id: request.request_id, message_id: 'assistant-ui', content: 'The rollout remains open.', evidence: [], evidence_metadata: [], cited_tags: [], context_links: [], retrieval_mode: 'keyword', provider: 'custom-openai', model: 'actual-model', live_context: { session_id: 'session-ui', finalized_through_seconds: 3500, transcription_incomplete: true } });
 
-async function panel({ sharing = true, available = true, provider = 'custom-openai', ask, snapshotRead, recordingState, status = 'recording' } = {}) {
+async function panel({ sharing = true, available = true, provider = 'custom-openai', ask, snapshotRead, recordingState, status = 'recording', save } = {}) {
   const requests = []; const cancelled = [];
   const events = new Map();
   const { createLiveAssistanceStore } = loadTsModule('src/lib/live-assistance-state.ts');
@@ -23,6 +23,7 @@ async function panel({ sharing = true, available = true, provider = 'custom-open
   await flush();
   const hooks = createHookHarness(); const { LiveAssistancePanel } = loadTsModule('src/components/LiveAssistancePanel.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@tauri-apps/api/core': { invoke: save ?? (async () => assert.fail('live assistance sent an unexpected persistence request')) },
     '@/hooks/useLiveAssistance': { useLiveAssistance: () => ({ state: owner.getSnapshot(), actions: owner }) },
     '@/contexts/RecordingStateContext': { useRecordingState: () => recordingState ?? ({ isRecording: true, sessionMode: available ? 'live' : 'audio_only' }) },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ meetings: [{ id: 'saved-ui', title: 'Public meeting' }], currentMeeting: null }) },
@@ -41,6 +42,35 @@ async function panel({ sharing = true, available = true, provider = 'custom-open
   const expand = () => { const toggle = nodes(render()).find(node => node.type === 'button' && node.props['aria-controls'] === 'live-assistance-body'); assert.ok(toggle, 'a keyboard-accessible collapse toggle exists'); toggle.props.onClick(); };
   return { owner, requests, cancelled, render, button, expand, dispose() { hooks.unmount(); disconnect(); } };
 }
+
+test('a completed live reply is saved only on selection and Stop invalidates its pending UI state', async () => {
+  const pending = deferred();
+  const saves = [];
+  const app = await panel({ save: (command, args) => {
+    saves.push([command, { ...args }]);
+    return pending.promise;
+  } });
+  try {
+    app.expand();
+    app.button('List open questions').props.onClick();
+    await flush();
+    assert.equal(saves.length, 0);
+    const select = app.button('Save answer to meeting notes');
+    select.props.onClick();
+    select.props.onClick();
+    assert.deepEqual(saves, [['save_selected_live_answer', { sessionId: 'session-ui', answerId: 'assistant-ui' }]]);
+    assert.equal(app.button('Saving answer…').props.disabled, true);
+    app.owner.setRecording('stopping');
+    select.props.onClick();
+    pending.resolve();
+    await flush();
+    assert.equal(saves.length, 1);
+    assert.equal(app.button('Saved to meeting notes'), undefined);
+    assert.equal(app.owner.getSnapshot().messages.length, 0);
+  } finally {
+    app.dispose();
+  }
+});
 
 test('existing Retry status shows global verification failure and retries both owners during Starting', async () => {
   let reads = 0; let contextRetries = 0;

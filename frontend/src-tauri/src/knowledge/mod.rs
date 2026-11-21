@@ -15,6 +15,7 @@ pub mod evidence;
 pub mod indexer;
 pub mod live;
 pub mod live_context;
+pub(crate) mod live_notes;
 pub mod model;
 pub(crate) mod note_review;
 pub mod retrieval;

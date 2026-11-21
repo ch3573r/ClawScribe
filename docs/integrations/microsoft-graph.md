@@ -78,6 +78,15 @@ OpenClaw, and Confluence browser draft export must remain usable.
 
 ## Calendar
 
+**Follow-up email** in the meeting's **Export** menu creates an editable draft
+from open reviewed actions. A summary's email button starts with the provider's
+draft. Attendees become eligible after you mark them present in **Attendance**.
+Choose recipients for each draft and select **Open in email client**. ClawScribe
+rechecks attendance and opens the operating system's compose handler. You send
+from the email client. This flow uses local calendar snapshots and needs no
+additional Graph permission. Use **Copy draft** if there is no default client,
+an address format is unsupported, or the compose request is too long.
+
 Calendar integration is read-only. It requests current/next meeting context and
 the next event list, including:
 

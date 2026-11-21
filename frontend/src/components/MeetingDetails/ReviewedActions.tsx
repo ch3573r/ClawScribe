@@ -24,15 +24,17 @@ function message(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, onReturnFocus }: {
+export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, onReturnFocus, targetActionId }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   meetingId: string;
   getMarkdown: () => Promise<string>;
   onReturnFocus?: () => void;
+  targetActionId?: string | null;
 }) {
   const [actions, setActions] = useState<ReviewedAction[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [revision, setRevision] = useState("");
   const [history, setHistory] = useState<MeetingExportHistory[]>([]);
   const [historyError, setHistoryError] = useState(false);
   const [reload, setReload] = useState(0);
@@ -55,13 +57,19 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
     void invoke<MeetingExportHistory[]>("get_meeting_export_history", { meetingId }).then(items => {
       if (active) setHistory(items);
     }).catch(() => { if (active) setHistoryError(true); });
-    void invoke<ReviewedAction[]>("get_reviewed_meeting_actions", { meetingId }).then(rows => {
+    void invoke<{ actions: ReviewedAction[]; revision: string }>("get_reviewed_action_editor", { meetingId }).then(result => {
       if (!active) return;
-      setActions(rows);
+      setActions(result.actions);
+      setRevision(result.revision);
       setLoaded(true);
     }).catch(error => { if (active) setError(message(error)); });
     return () => { active = false; };
   }, [open, meetingId, reload]);
+
+  useEffect(() => {
+    if (!open || !loaded || !targetActionId) return;
+    document.getElementById(`action-done-${targetActionId}`)?.focus();
+  }, [open, loaded, targetActionId]);
 
   function update(id: string, patch: Partial<ReviewedAction>) {
     setActions(previous => previous.map(action => action.id === id ? { ...action, ...patch } : action));
@@ -121,7 +129,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
       {loaded && <form className="space-y-4" onSubmit={event => {
         event.preventDefault();
         void run(async () => {
-          await invoke("save_reviewed_meeting_actions", { meetingId, actions });
+          await invoke("save_reviewed_meeting_actions", { meetingId, actions, expectedRevision: revision });
           onOpenChange(false);
         });
       }}>
@@ -131,6 +139,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
         </div>
         {notice && <p role="status" className="text-sm text-muted-foreground">{notice}</p>}
         {historyError && <p role="status" className="text-sm text-muted-foreground">Export history is unavailable. You can still edit your actions.</p>}
+        {targetActionId && !actions.some(action => action.id === targetActionId) && <p role="status" className="text-sm text-muted-foreground">The selected action is no longer saved.</p>}
         {!actions.length && <p className="text-sm text-muted-foreground">No actions saved for this meeting.</p>}
         {actions.map(action => <fieldset key={action.id} disabled={busy} className="space-y-2 rounded-md border border-border p-3">
           <Label htmlFor={`action-title-${action.id}`}>Task</Label>

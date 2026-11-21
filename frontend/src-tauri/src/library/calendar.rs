@@ -229,12 +229,27 @@ impl CalendarLink {
         }
     }
 
-    fn series_key(&self) -> Option<(&str, &str)> {
+    pub(crate) fn series_key(&self) -> Option<(&str, &str)> {
         match self.source {
             CalendarSource::Ical => Some((self.source_id.as_deref()?, self.series_id.as_deref()?)),
             // The account scope is already part of the Graph series digest.
             CalendarSource::Microsoft => Some(("microsoft", self.series_id.as_deref()?)),
         }
+    }
+
+    pub(crate) fn reviewed_series_key(&self) -> Option<(&str, &str)> {
+        self.is_reviewed().then(|| self.series_key()).flatten()
+    }
+
+    pub(crate) fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    pub(crate) fn confirmed_emails(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.attendees
+            .iter()
+            .filter(|person| person.attendance == Attendance::Present)
+            .filter_map(|person| Some((person.email.as_deref()?, person.name())))
     }
 }
 

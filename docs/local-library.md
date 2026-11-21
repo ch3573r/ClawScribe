@@ -40,6 +40,26 @@ recording-folder support files, and existing backups remain available.
 Imported originals outside the meeting folder remain where they were.
 ClawScribe only removes audio after confirmation.
 
+## Open actions and saved live answers
+
+In **Meetings → Open actions**, filter unfinished reviewed actions by owner
+text, inclusive due dates, or a reviewed recurring series. Due-date filters
+hide actions without a date. **Review action** opens its saved meeting and
+focuses its **Done** control. Choose **Save actions** to commit an edit or
+completion. Open the meeting's **Export** menu to review selected tasks for
+Planner or Microsoft To Do. The action source is available when the reviewed
+action was saved with a citation.
+
+During live assistance, choose **Save answer to meeting notes** on a completed
+reply. **Saved live answers** in the saved meeting shows the provider, the
+finalized-through time, and the original excerpts from the recording. Citations
+to other saved meetings or documents display only while the original references
+still verify. Choose **Remove** to delete a saved answer from the meeting.
+Unselected live chat clears at Stop. Saved answers attach to that specific
+recording at Stop or during local recovery and can be removed from **Manage
+pending notes** if the recording was never saved. Portable archives currently
+exclude saved live answers, approved series notes, and the new series defaults.
+
 ## Local assistant access
 
 Open **Settings → Assistant access** and enable **Allow
@@ -61,16 +81,28 @@ and [Codex MCP configuration](https://developers.openai.com/codex/mcp).
 | `get_transcript` | Current transcript text in recording order with available speaker labels and timestamps. |
 | `get_audio` | A local path for a verified saved audio file, or null when unavailable. |
 
+Enable **Allow read-only follow-through** for two narrower tools. You can enable
+this scope by itself. In a saved meeting, choose **Copy meeting reference** in
+the meeting menu and provide that value as `meeting_id` to the client.
+
+| Tool | Result |
+| --- | --- |
+| `get_meeting_metadata` | Created date, recording duration when known, and title when permitted by the calendar review rules. |
+| `list_reviewed_actions` | Open reviewed action IDs, titles, user-entered owners, and due dates for that meeting. Use the returned offset to continue. |
+
+The follow-through scope omits attendee records, calendar identifiers,
+transcripts, recordings, notes, citations, and export history.
+
 Use the meeting ID from a list or search result. For passage matches, use
 the segment ID when reading the transcript. If passage search reports
 `limited`, narrow the query or date and project filters. Follow the returned
 offsets for long transcripts and notes. Calendar invitations stored in the desktop
 calendar picker and attached reference documents are outside this interface.
 
-Enabling this setting grants access to local clients running under your user
-account. A client may send retrieved content to its own provider. Turning the
-switch off blocks new reads, including from clients already connected. Copies
-already read are under the client's control.
+Each permission grants its scope to local clients running under your user
+account. A client may send retrieved content to its own provider. Turning a
+switch off blocks delivery for that scope, including from clients already
+connected. Copies already read are under the client's control.
 
 ## Archive search
 

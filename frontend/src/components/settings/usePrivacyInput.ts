@@ -99,7 +99,10 @@ export function usePrivacyInput(): PrivacyInput {
     };
   }, tick);
 
-  const assistant = useLoadable(async () => (await invoke<{ enabled: boolean }>("get_mcp_access")).enabled, tick);
+  const assistant = useLoadable(async () => {
+    const access = await invoke<{ enabled: boolean; follow_through: boolean }>("get_mcp_access");
+    return access.enabled === true || access.follow_through === true;
+  }, tick);
   const semanticSearch = useLoadable(async () => (await knowledgeService.modelStatus()).enabled, tick);
   // Only whether handoff is on and where it points; the token never leaves the backend.
   const handoff = useLoadable(async () => {

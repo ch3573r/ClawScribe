@@ -4,6 +4,7 @@ pub mod backup;
 pub mod calendar;
 pub mod context;
 pub(crate) mod file_cleanup;
+pub mod follow_through;
 pub mod pending_recording_notes;
 pub(crate) mod recording_calendar;
 pub(crate) mod saved_text;
@@ -279,6 +280,10 @@ pub(crate) async fn discard_recording_drafts(
     let mut tx = pool.begin().await?;
     remove_pending_bookmarks(&mut tx, recording_id).await?;
     sqlx::query("DELETE FROM recording_calendar_drafts WHERE recording_id = ?")
+        .bind(recording_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM saved_live_answers WHERE recording_id = ? AND meeting_id IS NULL")
         .bind(recording_id)
         .execute(&mut *tx)
         .await?;

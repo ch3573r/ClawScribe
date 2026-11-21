@@ -21,7 +21,8 @@ import { toast } from 'sonner';
 import { Languages, ChevronDown, ChevronUp, Search, Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Copy } from 'lucide-react';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { FollowUpEmail } from './FollowUpEmail';
+import { SavedLiveAnswers } from './SavedLiveAnswers';
 import type { summaryDetails } from '@/lib/meeting-summary';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
@@ -36,6 +37,7 @@ import {
 import type { SummaryDraft, SaveState } from '@/lib/meetingDrafts';
 
 interface SummaryPanelProps {
+  seriesLanguage?: string | null;
   details: ReturnType<typeof summaryDetails> & { transcriptChanged: boolean };
   saveState: SaveState;
   hasPreviousSummary: boolean;
@@ -87,6 +89,7 @@ type SummaryTextMatch = {
 
 export function SummaryPanel({
   details,
+  seriesLanguage,
   saveState, hasPreviousSummary, summaryRevision, onRestorePrevious, onSummaryDraft,
   onRevealSource,
   onPlaySource,
@@ -163,9 +166,9 @@ export function SummaryPanel({
   activeMeetingIdRef.current = meeting.id;
   const { addRecent } = useRecentLanguages();
 
-  const effectiveLangLabel = summaryLang ? labelForCode(summaryLang) : 'Auto';
+  const effectiveLangLabel = summaryLang ? labelForCode(summaryLang) : seriesLanguage ? labelForCode(seriesLanguage) : 'Auto';
   const isLocalFallbackLanguage = summaryLangStorage === 'local_fallback';
-  const autoSubtitle = isLocalFallbackLanguage
+  const autoSubtitle = seriesLanguage ? `Use the series setting · ${labelForCode(seriesLanguage)}` : isLocalFallbackLanguage
     ? 'Saved on this device for folderless meetings'
     : 'Uses dominant transcript language';
 
@@ -434,15 +437,7 @@ export function SummaryPanel({
         {details.transcriptChanged && <span role="status" className="font-medium text-warning-foreground">Transcript changed since generation</span>}
         {details.email && <Button variant="ghost" size="sm" className="ml-auto text-xs" onClick={() => setEmailOpen(true)}>Follow-up email</Button>}
       </div>}
-      {details?.email && <Dialog open={emailOpen} onOpenChange={setEmailOpen}><DialogContent className="max-h-[80vh] overflow-y-auto" aria-describedby={undefined}>
-        <DialogHeader><DialogTitle>Follow-up email draft</DialogTitle></DialogHeader>
-        {details.email.subject && <p className="font-medium">{details.email.subject}</p>}
-        <p className="whitespace-pre-wrap break-words text-sm">{details.email.body}</p>
-        <DialogFooter><Button onClick={async () => {
-          try { await navigator.clipboard.writeText([details.email?.subject, details.email?.body].filter(Boolean).join('\n\n')); toast.success('Email draft copied'); }
-          catch { toast.error('Could not copy the email draft'); }
-        }}>Copy draft</Button></DialogFooter>
-      </DialogContent></Dialog>}
+      {emailOpen && details?.email && <FollowUpEmail key={meeting.id} meetingId={meeting.id} initialDraft={details.email} close={() => setEmailOpen(false)} />}
       {isFindOpen && aiSummary && !isSummaryLoading && (
         <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
           <Search className="h-4 w-4 text-muted-foreground" />
@@ -484,6 +479,7 @@ export function SummaryPanel({
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+          <SavedLiveAnswers key={meeting.id} meetingId={meeting.id} />
           {isSummaryLoading ? <div role="status" className="flex h-full min-h-48 items-center justify-center gap-3 p-8 text-sm text-muted-foreground"><span className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />Generating summary…</div>
           : !aiSummary ? <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 p-8 text-center">
               <h3 className="text-base font-semibold">{transcripts.length ? 'No summary yet' : 'No transcript yet'}</h3>

@@ -125,8 +125,105 @@ pub(super) async fn call(
         "get_meeting" => meeting(&mut conn, identifier()?, text_offset as usize).await,
         "get_transcript" => transcript(&mut conn, identifier()?, limit, offset, text_offset).await,
         "get_audio" => audio(&mut conn, app_data, identifier()?).await,
+        "get_meeting_metadata" => limited_metadata(&mut conn, identifier()?).await,
+        "list_reviewed_actions" => reviewed_actions(&mut conn, identifier()?, limit, offset).await,
         _ => Err("Unknown meeting tool."),
     }
+}
+
+async fn limited_metadata(conn: &mut SqliteConnection, id: &str) -> Result<Value, &'static str> {
+    let (title, created_at, duration, link): (String, String, Option<f64>, Option<String>) = sqlx::query_as(
+        "SELECT substr(title,1,1024), substr(created_at,1,64), recording_duration_s,
+                CASE WHEN length(CAST(calendar_link AS BLOB)) <= ?2 THEN calendar_link ELSE 'null' END
+         FROM meetings WHERE id = ?1",
+    )
+    .bind(id).bind(MAX_STORED_JSON)
+    .fetch_optional(conn).await.map_err(|_| DB_ERROR)?.ok_or(NOT_FOUND)?;
+    let title =
+        crate::library::calendar::stored_title_policy(link.as_deref()).for_clipped(title, true);
+    Ok(json!({
+        "meeting_id":id, "title":title, "created_at":created_at, "duration_seconds":duration
+    }))
+}
+
+async fn reviewed_actions(
+    conn: &mut SqliteConnection,
+    id: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Value, &'static str> {
+    let (stored, oversized): (Option<String>, bool) = sqlx::query_as(
+        "SELECT CASE WHEN length(CAST(reviewed_actions AS BLOB)) <= ?2 THEN reviewed_actions END,
+                coalesce(length(CAST(reviewed_actions AS BLOB)),0) > ?2
+         FROM meetings WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(MAX_STORED_JSON)
+    .fetch_optional(conn)
+    .await
+    .map_err(|_| DB_ERROR)?
+    .ok_or(NOT_FOUND)?;
+    if oversized {
+        return Err(DB_ERROR);
+    }
+    let mut rows = stored.as_deref().map(crate::exports::actions::decode)
+        .transpose().map_err(|_| DB_ERROR)?.unwrap_or_default()
+        .into_iter().filter(|action| !action.done)
+        .skip(offset as usize).take(limit as usize + 1)
+        .map(|action| json!({
+            "action_id":action.id, "title":action.title, "owner":action.owner, "due_date":action.due_date
+        })).collect::<Vec<_>>();
+    let next_offset = (rows.len() > limit as usize).then_some(offset + limit);
+    rows.truncate(limit as usize);
+    Ok(json!({ "meeting_id":id, "actions":rows, "next_offset":next_offset }))
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn follow_through_reads_only_open_actions_and_filtered_metadata_for_the_requested_meeting() {
+    let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE meetings(id TEXT, title TEXT, created_at TEXT, recording_duration_s REAL,
+            calendar_link TEXT, reviewed_actions TEXT);
+        INSERT INTO meetings VALUES('other','Other title','2026-12-01',10,NULL,NULL);",
+    )
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    let raw = json!([
+        {"id":uuid::Uuid::from_u128(1).to_string(),"title":"Open item","owner":"Dana","dueDate":"2026-12-02","done":false,"sourceKey":"12ab"},
+        {"id":uuid::Uuid::from_u128(2).to_string(),"title":"Closed item","done":true}
+    ]);
+    let link = json!({"eventId":"private-event","subject":"Calendar-only title",
+        "attendees":[{"email":"attendee@example.com","attendance":"unreviewed"}]});
+    sqlx::query("INSERT INTO meetings VALUES ('a','Calendar-only title','2026-12-01',20,?,?)")
+        .bind(link.to_string())
+        .bind(raw.to_string())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    let info = limited_metadata(&mut conn, "a").await.unwrap();
+    assert_eq!(
+        info,
+        json!({"meeting_id":"a","title":null,"created_at":"2026-12-01","duration_seconds":20.0})
+    );
+    let rows = reviewed_actions(&mut conn, "a", 1, 0).await.unwrap();
+    assert_eq!(
+        rows,
+        json!({"meeting_id":"a","actions":[
+        {"action_id":uuid::Uuid::from_u128(1).to_string(),"title":"Open item","owner":"Dana","due_date":"2026-12-02"}
+    ],"next_offset":null})
+    );
+    assert_eq!(
+        reviewed_actions(&mut conn, "other", 1, 0).await.unwrap()["actions"],
+        json!([])
+    );
+    assert_eq!(
+        reviewed_actions(&mut conn, "absent", 1, 0)
+            .await
+            .unwrap_err(),
+        NOT_FOUND
+    );
 }
 
 fn passage_scope(args: &Map<String, Value>) -> Result<Option<KnowledgeScope>, &'static str> {

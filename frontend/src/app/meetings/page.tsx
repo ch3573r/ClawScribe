@@ -21,6 +21,7 @@ import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { LibraryBackup } from "@/components/LibraryBackup";
 import { ArchiveMeetingRows, useArchiveMetadata } from "@/components/Archive/ArchiveMeetingRows";
 import { ArchiveStorageButton } from "@/components/Archive/ArchiveStorageButton";
+import { OpenMeetingActions } from "@/components/Archive/OpenMeetingActions";
 import { archiveDateKey, archiveReview, formatArchiveDate, parseArchiveDate } from "@/lib/archive-review";
 import { receiveMatchScope, savedPassageUrl, sourceLabel, type MatchScope } from "@/lib/archive-search";
 import { KnowledgeArchive } from "@/components/Knowledge/KnowledgeArchive";
@@ -58,7 +59,7 @@ import {
 type SortMode = "newest" | "oldest" | "title";
 const noProjectFilter: ProjectFilter = { tags: [], untagged: false, mode: "any" };
 // Keep this view's filters in memory when a meeting route replaces it.
-let archiveView = { tab: "archive" as "archive" | "memory", memoryProject: noProjectFilter, query: "", from: "", to: "", attentionOnly: false, sortMode: "newest" as SortMode, projectFilter: noProjectFilter };
+let archiveView = { tab: "archive" as "archive" | "memory" | "actions", memoryProject: noProjectFilter, query: "", from: "", to: "", attentionOnly: false, sortMode: "newest" as SortMode, projectFilter: noProjectFilter };
 
 export default function MeetingsPage() {
   const router = useRouter();
@@ -235,13 +236,17 @@ export default function MeetingsPage() {
           </div>}
         </header>
 
-        <Tabs value={tab} onValueChange={value => setTab(value as "archive" | "memory")} className="flex min-h-0 flex-1 flex-col gap-4">
+        <Tabs value={tab} onValueChange={value => setTab(value as typeof tab)} className="flex min-h-0 flex-1 flex-col gap-4">
           <TabsList aria-label="Meetings views" className="w-fit shrink-0">
             <TabsTrigger value="archive" id="meetings-archive-tab" aria-controls="meetings-archive-panel">Archive</TabsTrigger>
             <TabsTrigger value="memory" id="meetings-memory-tab" aria-controls="meeting-memory-panel">Meeting memory</TabsTrigger>
+            <TabsTrigger value="actions" id="meetings-actions-tab" aria-controls="meetings-actions-panel">Open actions</TabsTrigger>
           </TabsList>
           <TabsContent value="memory" forceMount id="meeting-memory-panel" hidden={tab !== "memory"} className={tab === "memory" ? "m-0 min-h-0 flex-1" : "hidden"}>
             <KnowledgeArchive key={matchSession?.key ?? 0} initialMatches={matchSession?.scope} active={tab === "memory"} meetings={memoryMeetings} meetingTitles={meetings} projectFilter={memoryProject} setProjectFilter={setMemoryProject} projectControl={projectControl(memoryProject, setMemoryProject)} />
+          </TabsContent>
+          <TabsContent value="actions" id="meetings-actions-panel" className="m-0 min-h-0 flex-1 overflow-y-auto">
+            <OpenMeetingActions />
           </TabsContent>
           <TabsContent value="archive" forceMount id="meetings-archive-panel" hidden={tab !== "archive"} className={tab === "archive" ? "m-0 min-h-0 flex-1 space-y-4 overflow-y-auto" : "hidden"}>
         {meetings.length > 0 && (

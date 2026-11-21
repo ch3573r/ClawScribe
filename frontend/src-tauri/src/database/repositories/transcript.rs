@@ -599,6 +599,15 @@ impl TranscriptsRepository {
             transaction.rollback().await?;
             return Err(e);
         }
+        if has_recording_id {
+            sqlx::query(
+                "UPDATE saved_live_answers SET meeting_id = ?1
+                WHERE recording_id = ?1 AND meeting_id IS NULL",
+            )
+            .bind(&meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
 
         info!("Successfully created meeting with id: {}", meeting_id);
 

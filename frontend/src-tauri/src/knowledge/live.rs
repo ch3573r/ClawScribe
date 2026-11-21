@@ -1,5 +1,5 @@
 //! Recording-scoped, ephemeral assistance; saved conversations are independent.
-use super::types::*;
+use super::{live_notes, types::*};
 use crate::audio::transcription::TranscriptUpdate;
 use crate::summary::llm_client::ConfiguredTextReply;
 use std::{
@@ -86,11 +86,13 @@ struct Session {
     document_sharing: bool,
     request: Option<(String, CancellationToken)>,
     history: VecDeque<HistoryMessage>,
+    note_candidates: VecDeque<live_notes::SelectedAnswer>,
 }
 const CONTEXT_SECONDS: f64 = 600.;
 const MAX_SEGMENTS: usize = 1024;
 const MAX_CONTEXT_BYTES: usize = 256 * 1024;
 const MAX_HISTORY_BYTES: usize = 64 * 1024;
+const MAX_NOTE_CANDIDATES: usize = 32;
 #[derive(Debug)]
 pub struct LiveLease {
     pub session_id: String,
@@ -181,6 +183,7 @@ impl LiveState {
             document_sharing: false,
             request: None,
             history: VecDeque::new(),
+            note_candidates: VecDeque::new(),
         });
         Ok(RecordingIdentity {
             session_id: id,
@@ -474,7 +477,30 @@ impl LiveState {
         }
         let count = session.history.len() as u64;
         session.history.clear();
+        session.note_candidates.clear();
         Ok(count)
+    }
+
+    pub(super) fn select_note(
+        &self,
+        session_id: &str,
+        answer_id: &str,
+    ) -> Result<live_notes::SelectedAnswer, String> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| "Live recording state unavailable")?;
+        let session = inner
+            .session
+            .as_ref()
+            .filter(|session| session.id == session_id)
+            .ok_or("This recording session has ended")?;
+        session
+            .note_candidates
+            .iter()
+            .find(|note| note.id == answer_id && note.context.session_id == session_id)
+            .cloned()
+            .ok_or_else(|| "This answer is no longer available to save.".into())
     }
     pub fn resolve(
         &self,
@@ -524,6 +550,7 @@ impl LiveState {
         lease: &LiveLease,
         request: &AskRequest,
         reply: &AssistantReply,
+        citations: Vec<live_notes::Citation>,
     ) -> Result<(), String> {
         if lease.token.is_cancelled() || tokio::time::Instant::now() >= lease.deadline {
             return Err("Live request cancelled or deadline expired".into());
@@ -540,6 +567,12 @@ impl LiveState {
             .as_mut()
             .ok_or("This recording session has ended")?;
         let timestamp = chrono::Utc::now().to_rfc3339();
+        if let Some(candidate) = live_notes::SelectedAnswer::from_reply(reply, citations) {
+            if session.note_candidates.len() == MAX_NOTE_CANDIDATES {
+                session.note_candidates.pop_front();
+            }
+            session.note_candidates.push_back(candidate);
+        }
         for (id, role, content, result) in [
             (
                 uuid::Uuid::new_v4().to_string(),
@@ -692,7 +725,7 @@ where
             provider: output.provider,
             model: output.model,
             live_context: Some(LiveReplyContext {
-                session_id: snapshot.session_id,
+                session_id: snapshot.session_id.clone(),
                 finalized_through_seconds: snapshot.finalized_through_seconds,
                 transcription_incomplete: snapshot.transcription_incomplete,
             }),
@@ -710,7 +743,8 @@ where
                 })
             })
             .collect();
-        state.complete(&lease, &request, &reply)?;
+        let citations = live_notes::citations(&reply, &snapshot, &selected);
+        state.complete(&lease, &request, &reply, citations)?;
         Ok(reply)
     };
     tokio::select! {biased;
@@ -1002,7 +1036,7 @@ mod tests {
                     resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
                 }));
             });
-            complete_state.complete(&lease, &ask, &reply)
+            complete_state.complete(&lease, &ask, &reply, vec![])
         });
         checked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         // Completion has passed its first token check. Hold the actual state
@@ -1482,6 +1516,11 @@ mod tests {
         assert_eq!(context.finalized_through_seconds, 7.);
         assert!(!context.transcription_incomplete);
         assert_eq!(state.history(&id).unwrap().len(), 2);
+        let selected = state.select_note(&id, &reply.message_id).unwrap();
+        assert_eq!(selected.provider, "openai");
+        assert_eq!(selected.context.finalized_through_seconds, 7.);
+        assert_eq!(selected.citations.len(), 1);
+        assert!(state.select_note(&id, &request_id).is_err());
         for table in [
             "knowledge_owners",
             "knowledge_requests",
@@ -1489,6 +1528,7 @@ mod tests {
             "knowledge_request_evidence",
             "knowledge_request_sources",
             "knowledge_document_permissions",
+            "saved_live_answers",
         ] {
             let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
                 .fetch_one(&pool)
@@ -1498,8 +1538,10 @@ mod tests {
         }
         let _ = state.stop();
         assert!(state.history(&id).is_err());
+        assert!(state.select_note(&id, &reply.message_id).is_err());
         let second = state.start(true).unwrap();
         assert!(state.history(&second).unwrap().is_empty());
+        assert!(state.select_note(&second, &reply.message_id).is_err());
     }
     #[tokio::test]
     async fn remembered_consent_is_off_by_default_persists_and_reloads_independently() {
@@ -1939,5 +1981,36 @@ mod tests {
         assert!(history.len() <= 32);
         assert!(serde_json::to_vec(&history).unwrap().len() <= 64 * 1024);
         assert!(!history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_completed_answer_remains_selectable_after_native_chat_history_eviction() {
+        let (state, id) = ready();
+        let pool = enabled_pool(&state).await;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let lease = state.claim(&id, &request_id, "openai").unwrap();
+        let reply = answer(
+            &pool,
+            &state,
+            request(&id, &request_id),
+            lease,
+            8192,
+            |_, _| async {
+                Ok(ConfiguredTextReply {
+                    text: "\"".repeat(30 * 1024),
+                    provider: "openai".into(),
+                    model: "synthetic".into(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert!(state.history(&id).unwrap().is_empty());
+        assert_eq!(
+            state.select_note(&id, &reply.message_id).unwrap().content,
+            reply.content
+        );
+        state.clear_history(&id).unwrap();
+        assert!(state.select_note(&id, &reply.message_id).is_err());
     }
 }

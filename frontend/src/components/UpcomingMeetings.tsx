@@ -1,12 +1,14 @@
 "use client";
 
 import { openExternal } from '@/lib/openExternal';
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useUpcomingEvents } from "@/hooks/useUpcomingEvents";
 import { supportsJoinRecording, useJoinRecording } from "@/hooks/useJoinRecording";
 import { CalendarClock, Video } from "lucide-react";
 import { toast } from "sonner";
-import { setPendingCalendar } from "@/lib/meetingCalendar";
+import { calendarLinkFromEvent, setPendingCalendar, type MeetingCalendarLink } from "@/lib/meetingCalendar";
+import { UpcomingSeriesPreparation } from "@/components/MeetingDetails/SeriesPreparation";
 
 function formatWhen(iso: string | null, allDay: boolean): string {
   if (!iso) return "";
@@ -46,6 +48,7 @@ function NextRecordingCalendar({ hasCalendars, choice }: {
 export function UpcomingMeetings() {
   const { entries: events, choice, isSelected, select, hasCalendars } = useUpcomingEvents(5);
   const recording = useJoinRecording();
+  const [brief, setBrief] = useState<MeetingCalendarLink | null>(null);
   if (!events.length && !hasCalendars && !recording.pending && !choice.link && !choice.skip) return null;
 
   return (
@@ -70,6 +73,10 @@ export function UpcomingMeetings() {
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                {ev.seriesId && ev.start && <Button size="sm" variant="ghost" onClick={() => {
+                  const link = calendarLinkFromEvent({ ...ev, sourceId });
+                  setBrief({ ...link, attendees: [] });
+                }}>Preparation brief</Button>}
                 <Button size="sm" variant="ghost" onClick={() => select(entry)} disabled={selected}>
                   {selected ? "Selected for next recording" : "Use for next recording"}
                 </Button>
@@ -99,6 +106,7 @@ export function UpcomingMeetings() {
         </div>
       )}
       <NextRecordingCalendar hasCalendars={hasCalendars} choice={choice} />
+      {brief && <UpcomingSeriesPreparation event={brief} close={() => setBrief(null)} />}
     </section>
   );
 }

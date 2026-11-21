@@ -118,6 +118,36 @@ pub async fn get_reviewed_meeting_actions(
         .unwrap_or_default())
 }
 
+#[derive(Serialize)]
+pub(crate) struct ActionReview {
+    actions: Vec<ReviewedAction>,
+    revision: String,
+}
+
+fn revision(raw: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    raw.map(|raw| format!("{:x}", Sha256::digest(raw)))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub(crate) async fn get_reviewed_action_editor(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<ActionReview, String> {
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(state.db_manager.pool())
+            .await
+            .map_err(|_| "Could not load meeting actions.")?
+            .ok_or("Meeting no longer exists.")?;
+    Ok(ActionReview {
+        revision: revision(raw.as_deref()),
+        actions: raw.as_deref().map(decode).transpose()?.unwrap_or_default(),
+    })
+}
+
 pub(super) fn remaining_suggestions(
     suggestions: Vec<ActionSuggestion>,
     reviewed: &[ReviewedAction],
@@ -264,19 +294,36 @@ pub async fn save_reviewed_meeting_actions(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     actions: Vec<ReviewedAction>,
+    expected_revision: Option<String>,
 ) -> Result<(), String> {
-    save(state.db_manager.pool(), &meeting_id, actions).await
+    save_checked(
+        state.db_manager.pool(),
+        &meeting_id,
+        actions,
+        expected_revision.as_deref(),
+    )
+    .await
 }
 
+#[cfg(test)]
 async fn save(
     pool: &SqlitePool,
     meeting_id: &str,
+    actions: Vec<ReviewedAction>,
+) -> Result<(), String> {
+    save_checked(pool, meeting_id, actions, None).await
+}
+
+async fn save_checked(
+    pool: &SqlitePool,
+    meeting_id: &str,
     mut actions: Vec<ReviewedAction>,
+    expected_revision: Option<&str>,
 ) -> Result<(), String> {
     // Snapshot the existing evidence and the current generation in the same
     // transaction. Fields supplied by the editor never replace saved evidence.
     let mut transaction = pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|_| "Could not save meeting actions.")?;
     let previous: Option<String> =
@@ -286,6 +333,9 @@ async fn save(
             .await
             .map_err(|_| "Could not load meeting actions.")?
             .ok_or("Meeting no longer exists.")?;
+    if expected_revision.is_some_and(|expected| revision(previous.as_deref()) != expected) {
+        return Err("Meeting actions changed. Reload the latest actions before saving.".into());
+    }
     let mut previous: HashMap<_, _> = previous
         .as_deref()
         .map(decode)
@@ -349,6 +399,46 @@ async fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stale_action_editor_cannot_reopen_a_completed_action() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let mut action = ReviewedAction {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: "Send review".into(),
+            owner: None,
+            due_date: None,
+            done: false,
+            source_key: None,
+            legacy_action: None,
+            source: None,
+        };
+        save(&pool, "review-test", vec![action.clone()])
+            .await
+            .unwrap();
+        let raw: String =
+            sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = 'review-test'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let old_revision = revision(Some(&raw));
+        action.done = true;
+        save_checked(
+            &pool,
+            "review-test",
+            vec![action.clone()],
+            Some(&old_revision),
+        )
+        .await
+        .unwrap();
+        action.done = false;
+        assert!(
+            save_checked(&pool, "review-test", vec![action], Some(&old_revision))
+                .await
+                .is_err()
+        );
+        assert!(load(&pool, "review-test").await.unwrap().unwrap()[0].done);
+    }
 
     #[tokio::test]
     async fn structured_suggestion_retains_its_transcript_source_after_summary_replacement() {

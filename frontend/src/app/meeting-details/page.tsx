@@ -233,6 +233,7 @@ function MeetingDetailsContent() {
     savedSourceToken={searchParams.get('savedSource')}
     fromArchive={fromArchive}
     archiveAction={archiveAction}
+    actionId={searchParams.get('actionId')}
     summaryData={meetingSummary}
     summaryJob={summaryJob}
     onMeetingUpdated={async () => {

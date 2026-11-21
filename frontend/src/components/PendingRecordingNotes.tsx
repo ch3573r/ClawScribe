@@ -12,6 +12,7 @@ interface PendingNotes {
   folder_name: string | null;
   first_note: string | null;
   note_count: number;
+  live_answer_count: number;
   include_in_summary: boolean;
 }
 
@@ -21,7 +22,7 @@ interface PendingNotesPage {
 }
 
 function entryName(entry: PendingNotes) {
-  return entry.folder_name || (entry.note_count ? "Recording with no folder name" : "Summary preference only");
+  return entry.folder_name || (entry.note_count || entry.live_answer_count ? "Recording with no folder name" : "Summary preference only");
 }
 
 export function PendingRecordingNotes({ disabled }: { disabled: boolean }) {
@@ -57,6 +58,7 @@ export function PendingRecordingNotes({ disabled }: { disabled: boolean }) {
       await invoke("delete_pending_recording_notes", {
         recordingId: selection.recording_id,
         noteCount: selection.note_count,
+        liveAnswerCount: selection.live_answer_count,
         includeInSummary: selection.include_in_summary,
       });
       setSelection(null);
@@ -114,6 +116,7 @@ export function PendingRecordingNotes({ disabled }: { disabled: boolean }) {
                     <div className="min-w-0">
                       <p className="break-words font-medium" title={entry.recording_id}>{entryName(entry)}</p>
                       <p className="text-muted-foreground">{entry.note_count} {entry.note_count === 1 ? "note" : "notes"}{entry.include_in_summary ? " · Summary priorities enabled" : ""}</p>
+                      {entry.live_answer_count > 0 && <p className="text-muted-foreground">{entry.live_answer_count} saved live {entry.live_answer_count === 1 ? "answer" : "answers"}</p>}
                       {entry.first_note && <p className="line-clamp-2 break-words">{entry.first_note}</p>}
                     </div>
                     <Button variant="outline" size="sm" disabled={disabled} onClick={() => setSelection(entry)}>Review removal</Button>
