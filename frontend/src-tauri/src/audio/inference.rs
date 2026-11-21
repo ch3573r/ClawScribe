@@ -48,6 +48,27 @@ pub(crate) fn claim_job() -> Result<OwnedSemaphorePermit, String> {
     claim_job_checked().map_err(|(_, message)| message)
 }
 
+/// Background notes can wait for foreground work to release both permits.
+pub(crate) async fn wait_for_job(
+    token: &tokio_util::sync::CancellationToken,
+) -> Result<OwnedSemaphorePermit, String> {
+    crate::summary::llm_client::with_cancellation(Some(token), async {
+        loop {
+            let permit = JOBS
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| "The inference queue is unavailable")?;
+            if NATIVE.available_permits() > 0 {
+                return Ok(permit);
+            }
+            drop(permit);
+            wait_for_native_idle().await;
+        }
+    })
+    .await
+}
+
 /// A caller already holding the exclusive job may need to restore a model
 /// after cancelling a native load/decode. The native permit outlives its waiter.
 pub(crate) async fn wait_for_native_idle() {
@@ -297,15 +318,18 @@ async fn claim_job_for_recording_with(
     batch_wait: std::time::Duration,
     on_preempt: &(dyn Fn(BatchJob) + Sync),
 ) -> Result<OwnedSemaphorePermit, String> {
-    claim_with_preemption(
+    let (permit, _) = claim_with_preemption(
         reason,
         None,
         Some(on_preempt),
         LOCAL_SUMMARY_PREEMPT_WAIT,
         batch_wait,
     )
-    .await
-    .map(|(permit, _)| permit)
+    .await?;
+    // A summary can still be active between native requests. Stop it before
+    // it begins another prompt against a recording-owned inference slot.
+    crate::summary::SummaryService::cancel_local_summaries(reason);
+    Ok(permit)
 }
 
 fn emit_batch_preempted<R: tauri::Runtime>(app: &tauri::AppHandle<R>, job: BatchJob) {

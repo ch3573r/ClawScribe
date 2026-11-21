@@ -301,6 +301,7 @@ impl OpenAICompatibleProcessingProvider {
         let transcript = normalize_transcript_markdown(&request.transcript);
         let system_prompt = build_system_prompt(false);
         let overhead = system_prompt.len()
+            + super::context_budget::CONCISE_RETRY.len()
             + json_schema_response_format().to_string().len()
             + build_user_prompt(
                 &request.meeting_id,
@@ -328,7 +329,11 @@ impl OpenAICompatibleProcessingProvider {
         let mut extraction = self.clone();
         extraction.config.max_tokens = Some(limits.extraction().output_tokens as u32);
         let extraction = &extraction;
-        let (transcript, _) = super::context_budget::reduce(
+        let system_prompt = system_prompt.as_str();
+        let meeting_id = &request.meeting_id;
+        let meeting_title = &request.meeting_title;
+        let custom_prompt = request.custom_prompt.as_deref();
+        let (raw_json, _) = super::context_budget::generate_report(
             &transcript,
             budget,
             piece_budget,
@@ -347,18 +352,17 @@ impl OpenAICompatibleProcessingProvider {
                         super::processor::require_summary_markdown(&text, "Meeting excerpt")
                     })
             },
+            |content, retry| async move {
+                let mut user_prompt =
+                    build_user_prompt(meeting_id, meeting_title, &content, custom_prompt);
+                if retry {
+                    user_prompt.push_str(super::context_budget::CONCISE_RETRY);
+                }
+                self.send_meeting_request(system_prompt, &user_prompt, cancellation_token)
+                    .await
+            },
         )
         .await?;
-        let user_prompt = build_user_prompt(
-            &request.meeting_id,
-            &request.meeting_title,
-            &transcript,
-            request.custom_prompt.as_deref(),
-        );
-
-        let raw_json = self
-            .send_meeting_request(&system_prompt, &user_prompt, cancellation_token)
-            .await?;
         let structured_output = match parse_meeting_output(&raw_json) {
             Ok(output) => output,
             Err(first_error) => {
@@ -656,16 +660,14 @@ pub fn config_from_openai_api_key(
     api_key: Option<String>,
     model: String,
 ) -> OpenAICompatibleProviderConfig {
+    let model = clean_model(model);
+    let limits =
+        super::context_budget::resolve(&super::llm_client::LLMProvider::OpenAI, &model, None, None);
     OpenAICompatibleProviderConfig {
         api_key: clean_optional(api_key),
-        context_window: super::context_budget::resolve(
-            &super::llm_client::LLMProvider::OpenAI,
-            &model,
-            None,
-            None,
-        )
-        .context_tokens,
-        model: clean_model(model),
+        context_window: limits.context_tokens,
+        max_tokens: Some(limits.output_tokens as u32),
+        model,
         ..OpenAICompatibleProviderConfig::default()
     }
 }
@@ -766,10 +768,14 @@ pub(crate) fn build_user_prompt(
     transcript: &str,
     custom_prompt: Option<&str>,
 ) -> String {
+    let title = serde_json::Value::from(meeting_title.as_deref().unwrap_or(""))
+        .to_string()
+        .replace('<', r"\u003c")
+        .replace('>', r"\u003e");
     let mut prompt = format!(
         "Process this meeting transcript into the required JSON schema.\n\n<metadata>\nmeeting_id: {}\nmeeting_title: {}\n</metadata>\n\n<untrusted_transcript>\n{}\n</untrusted_transcript>",
         meeting_id,
-        meeting_title.as_deref().unwrap_or(""),
+        title,
         transcript
     );
 
@@ -1180,7 +1186,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("before finishing"));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(!directory.path().join("meeting-output.json").exists());
     }
 

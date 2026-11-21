@@ -782,6 +782,9 @@ impl ParakeetEngine {
             .get(model_name)
             .cloned()
             .ok_or_else(|| anyhow!("Unknown Parakeet model"))?;
+        if let Some(callback) = &progress_callback {
+            callback(DownloadProgress::new(0, 0, 0.0));
+        }
         if let Some(model) = self.available_models.write().await.get_mut(model_name) {
             model.status = ModelStatus::Downloading { progress: 0 };
         }

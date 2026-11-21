@@ -194,7 +194,9 @@ fn parse_version(bytes: &[u8]) -> Result<String, String> {
 
 fn map_error(reason: &str) -> String {
     let reason = reason.to_ascii_lowercase();
-    if reason.contains("rate limit")
+    if reason.contains("context window exceeded") || reason.contains("context_length_exceeded") {
+        super::context_budget::MODEL_LIMIT.into()
+    } else if reason.contains("rate limit")
         || reason.contains("usage limit")
         || reason.contains("rate_limit")
     {
@@ -236,6 +238,12 @@ fn parse_result(bytes: &[u8]) -> Result<String, String> {
         _ => None,
     }
     .ok_or("Claude Code returned an empty result")?;
+    if matches!(
+        result.get("stop_reason").and_then(Value::as_str),
+        Some("max_tokens" | "model_context_window_exceeded")
+    ) {
+        return Err(super::context_budget::MODEL_LIMIT.into());
+    }
     if result.get("is_error").and_then(Value::as_bool) == Some(true) {
         let reason = result
             .get("result")

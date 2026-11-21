@@ -186,6 +186,7 @@ pub async fn complete_onboarding<R: Runtime>(
     state: tauri::State<'_, AppState>,
     mode: RecordingMode,
     local_notes_model: Option<String>,
+    automatic_notes: Option<bool>,
 ) -> Result<(), String> {
     let mut status = load_onboarding_status(&app)
         .await
@@ -236,6 +237,18 @@ pub async fn complete_onboarding<R: Runtime>(
     }
 
     recording_mode::set_recording_mode(app.clone(), mode).await?;
+    if let Some(enabled) = automatic_notes {
+        if status.model_status.selected_summary_model.is_none() {
+            return Err("The local notes model is unavailable.".into());
+        }
+        crate::summary::automatic::set_automatic_summary_preference(
+            app.clone(),
+            state,
+            enabled,
+            None,
+        )
+        .await?;
+    }
     status.completed = true;
     status.current_step = 4;
     save_onboarding_status(&app, &status)

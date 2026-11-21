@@ -268,10 +268,14 @@ pub(crate) async fn read_snapshot(
             .await
             .map_err(|_| "Could not load the calendar link.".to_string())?
             .flatten();
-    Ok(match stored {
-        Some(stored) => interpret(&stored),
+    Ok(summary_snapshot(stored.as_deref()))
+}
+
+pub(crate) fn summary_snapshot(stored: Option<&str>) -> (Option<CalendarLink>, ProviderTitle) {
+    match stored {
+        Some(stored) => interpret(stored),
         None => (None, ProviderTitle::Include),
-    })
+    }
 }
 
 pub(crate) async fn read(

@@ -259,7 +259,7 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
                 <div className="min-w-0">
                   <label htmlFor="import-summarize" className="text-sm font-medium">Generate a summary for each meeting</label>
                   <p className="break-all text-xs text-muted-foreground">{summaryDestination ? summaryDestination.external
-                    ? `Sends transcripts and notes context to ${providerLabel(summaryDestination.provider)} (${summaryDestination.endpoint}).`
+                    ? `Sends the transcripts and notes context, including the meeting date and available details, to ${providerLabel(summaryDestination.provider)} (${summaryDestination.endpoint}).`
                     : `Generates summaries locally with ${providerLabel(summaryDestination.provider)}.`
                     : summaryError ?? 'Checking the summary provider…'}</p>
                 </div>

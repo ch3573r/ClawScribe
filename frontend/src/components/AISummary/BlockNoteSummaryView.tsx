@@ -22,6 +22,7 @@ import type { SummaryDraft, SaveState } from '@/lib/meetingDrafts';
 interface BlockNoteSummaryViewProps {
   onDraftChange?: (draft: SummaryDraft, read: () => Promise<SummaryDraft>) => void;
   saveState?: SaveState;
+  readOnly?: boolean;
   summaryData: MeetingSummary | null;
   onSave?: (data: EditorSummary) => void | Promise<void>;
   onSummaryChange?: (summary: Summary) => void;
@@ -51,6 +52,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   meeting,
   onDraftChange,
   saveState,
+  readOnly = false,
 }, ref) => {
   const theme = useAppTheme();
   const saveInFlight = useRef(false);
@@ -97,7 +99,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
 
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
-    if (isContentLoaded.current) {
+    if (isContentLoaded.current && !readOnly) {
       setCurrentBlocks(blocks);
       setIsDirty(true);
       // Retain immutable blocks immediately; navigation may destroy the editor ref.
@@ -107,10 +109,10 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         return { summary_json: snapshot, ...(result.markdown === undefined ? {} : { markdown: result.markdown }) };
       });
     }
-  }, [editor, onDraftChange]);
+  }, [editor, onDraftChange, readOnly]);
 
   const handleSave = useCallback(async () => {
-    if (!onSave || !isDirty || saveInFlight.current) return;
+    if (readOnly || !onSave || !isDirty || saveInFlight.current) return;
     saveInFlight.current = true;
 
     setIsSaving(true);
@@ -137,7 +139,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       saveInFlight.current = false;
       setIsSaving(false);
     }
-  }, [onSave, isDirty, currentBlocks, editor]);
+  }, [onSave, isDirty, currentBlocks, editor, readOnly]);
 
   // Expose methods to parent via ref
   useImperativeHandle(ref, () => ({
@@ -201,6 +203,14 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
 
   // Render legacy format
   if (format === 'legacy') {
+    if (readOnly && summaryData && !isEditorSummary(summaryData)) {
+      return Object.entries(summaryData).map(([key, section]) => (
+        <section key={key} className="mb-4 space-y-1">
+          <h3 className="font-semibold">{section.title}</h3>
+          {section.blocks.map(block => <p key={block.id} className="whitespace-pre-wrap">{block.content}</p>)}
+        </section>
+      ));
+    }
     return (
       <AISummary
         summary={hasEditorData ? null : summaryData}
@@ -222,7 +232,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
             summaryPresentation
             onEditorReady={onEditorReady}
             onChange={handleEditorChange}
-            editable={!isSaving}
+            editable={!isSaving && !readOnly}
           />
         </div>
       </div>
@@ -236,7 +246,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         <div className="w-full">
           <BlockNoteView
             editor={editor}
-            editable={!isSaving}
+            editable={!isSaving && !readOnly}
             onChange={() => {
               if (isContentLoaded.current) {
                 handleEditorChange(editor.document);

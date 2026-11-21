@@ -198,8 +198,11 @@ impl AutomaticRequest {
                     client,
                 }
             }
-            LLMProvider::Codex | LLMProvider::ClaudeCode => {
-                return Err("This provider manages its own connection. Generate notes from the saved meeting.".into());
+            LLMProvider::Codex => {
+                return Err("Automatic notes are unavailable with Codex because ClawScribe cannot verify which ChatGPT workspace will receive the transcript. Generate notes from the saved meeting.".into());
+            }
+            LLMProvider::ClaudeCode => {
+                return Err("Automatic notes are unavailable with Claude Code because ClawScribe cannot verify which account will receive the transcript. Generate notes from the saved meeting.".into());
             }
         };
         if let Execution::Compatible(compatible) = &execution {
