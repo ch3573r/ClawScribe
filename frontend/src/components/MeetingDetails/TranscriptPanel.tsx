@@ -13,6 +13,7 @@ import { MeetingBookmarks } from './MeetingBookmarks';
 import { Button } from '@/components/ui/button';
 
 interface TranscriptPanelProps {
+  focusedBookmark?: string | null;
   openTranscription?: boolean;
   speakerSegments?: TranscriptSegmentData[];
   timelineComplete?: boolean;
@@ -55,6 +56,7 @@ interface TranscriptPanelProps {
 }
 
 export function TranscriptPanel({
+  focusedBookmark,
   openTranscription = false,
   focusedSource,
   speakerSegments,
@@ -209,7 +211,7 @@ export function TranscriptPanel({
         renderActions={renderToolbar} /> : renderToolbar()}
       {findOpen && <TranscriptFind query={findQuery} onQueryChange={setFindQuery} current={findIndex} total={findMatches.length} complete={searchComplete} focusRequest={findFocus}
         onStep={direction => void goToMatch(stepMatch(findIndex, findMatches.length, direction))} onClose={closeFind} />}
-      {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} currentTime={activeTime} onSeek={onSeekToTime} addOpen={bookmarkOpen} onAddOpenChange={setBookmarkOpen} onBookmarksChange={onBookmarksChange} />}
+      {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} focusedBookmark={focusedBookmark} currentTime={activeTime} onSeek={onSeekToTime} addOpen={bookmarkOpen} onAddOpenChange={setBookmarkOpen} onBookmarksChange={onBookmarksChange} />}
       {/* Transcript content - use virtualized view for better performance */}
       <div className="flex-1 overflow-hidden pb-4">
         <VirtualizedTranscriptView

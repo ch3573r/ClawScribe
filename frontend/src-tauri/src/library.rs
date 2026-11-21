@@ -5,6 +5,7 @@ pub mod calendar;
 pub mod context;
 pub mod pending_recording_notes;
 pub(crate) mod recording_calendar;
+pub(crate) mod saved_text;
 pub mod summary_bookmarks;
 
 use crate::state::AppState;

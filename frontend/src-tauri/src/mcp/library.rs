@@ -4,6 +4,7 @@ use crate::knowledge::{
     store::literal,
     types::{KnowledgeError, KnowledgeScope, MeetingFilter, TagMatch},
 };
+use crate::library::saved_text::block_text;
 use crate::summary::{processor::validate_saved_summary, sources::strip_source_links};
 use futures_util::TryStreamExt;
 use serde::Serialize;
@@ -70,7 +71,7 @@ pub(super) async fn call(
             .ok_or("Invalid meeting ID.")
     };
     match name {
-        "list_meetings" => list_meetings(&mut conn, None, limit, offset).await,
+        "list_meetings" => list_meetings(&mut conn, limit, offset).await,
         "search_meetings" => {
             let query = args
                 .get("query")
@@ -78,7 +79,17 @@ pub(super) async fn call(
                 .map(str::trim)
                 .filter(|s| !s.is_empty() && s.chars().count() <= 256)
                 .ok_or("Invalid search text.")?;
-            list_meetings(&mut conn, Some(query), limit, offset).await
+            let permit = literal::search_permit()
+                .await
+                .map_err(|_| "A library search is in progress.")?;
+            let query = query.to_owned();
+            let runtime = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                runtime.block_on(search_meetings(&mut conn, &query, limit, offset))
+            })
+            .await
+            .map_err(|_| DB_ERROR)?
         }
         "search_passages" => {
             let query = args
@@ -186,61 +197,125 @@ struct Meeting {
 
 async fn list_meetings(
     conn: &mut SqliteConnection,
-    query: Option<&str>,
     limit: i64,
     offset: i64,
 ) -> Result<Value, &'static str> {
-    let mut meetings = sqlx::query_as::<_, Meeting>(
+    let meetings = sqlx::query_as::<_, Meeting>(
         "SELECT substr(m.id,1,256) id, substr(m.title,1,1024) title, substr(m.created_at,1,64) created_at,
                 substr(m.updated_at,1,64) updated_at FROM meetings m
-         WHERE ?1 IS NULL OR instr(lower(m.title),lower(?1))>0 OR EXISTS (
-             SELECT 1 FROM transcripts t WHERE t.meeting_id=m.id AND instr(lower(t.transcript),lower(?1))>0)
-         ORDER BY m.created_at DESC, m.id ASC LIMIT ?2 OFFSET ?3",
+         ORDER BY m.created_at DESC, m.id ASC LIMIT ?1 OFFSET ?2",
     )
-    .bind(query)
     .bind(limit + 1)
     .bind(offset)
     .fetch_all(conn)
     .await
     .map_err(|_| DB_ERROR)?;
-    let next = (meetings.len() > limit as usize).then_some(offset + limit);
-    meetings.truncate(limit as usize);
-    Ok(json!({ "meetings": meetings, "next_offset": next }))
+    Ok(meeting_page(meetings, limit, offset))
 }
 
-// BlockNote occasionally saves the editable blocks without a Markdown representation.
-// Read only visible text and children. Links, document IDs, styles and storage paths are private.
-fn block_text(node: &Value, output: &mut String) {
-    match node {
-        Value::Array(nodes) => nodes.iter().for_each(|n| block_text(n, output)),
-        Value::String(text) => output.push_str(text),
-        Value::Object(fields) => {
-            if let Some(text) = fields.get("text").and_then(Value::as_str) {
-                output.push_str(text);
-            } else if let Some(content) = fields.get("content") {
-                block_text(content, output);
-            } else if let Some(rows) = fields.get("rows").and_then(Value::as_array) {
-                for row in rows {
-                    if let Some(cells) = row.get("cells").and_then(Value::as_array) {
-                        for (index, cell) in cells.iter().enumerate() {
-                            if index != 0 {
-                                output.push('\t');
-                            }
-                            block_text(cell, output);
-                        }
-                        output.push('\n');
+fn meeting_page(mut meetings: Vec<Meeting>, limit: i64, offset: i64) -> Value {
+    let next = (meetings.len() > limit as usize).then_some(offset + limit);
+    meetings.truncate(limit as usize);
+    json!({ "meetings": meetings, "next_offset": next })
+}
+
+async fn search_meetings(
+    conn: &mut SqliteConnection,
+    query: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Value, &'static str> {
+    let mut tx = conn.begin().await.map_err(|_| DB_ERROR)?;
+    let anchor = literal::available_anchor(&mut tx, query)
+        .await
+        .map_err(|_| DB_ERROR)?;
+    let candidates = if anchor.is_some() {
+        "WHERE meetings.rowid IN (SELECT rowid FROM knowledge_title_literal(?2))
+         OR meetings.id IN (SELECT t.meeting_id FROM knowledge_transcript_literal(?2) hit
+                            CROSS JOIN transcripts t WHERE t.rowid=hit.rowid)"
+    } else {
+        ""
+    };
+    let meeting_sql = format!("SELECT meetings.rowid,substr(id,1,256) id,substr(title,1,1024) title,
+        substr(created_at,1,64) created_at,substr(updated_at,1,64) updated_at FROM meetings {candidates}
+        ORDER BY meetings.created_at DESC,meetings.id ASC LIMIT 64 OFFSET ?1");
+    let transcript_filter = if anchor.is_some() {
+        "AND t.rowid IN (SELECT rowid FROM knowledge_transcript_literal(?3))"
+    } else {
+        ""
+    };
+    let segment_sql = format!("SELECT t.rowid FROM transcripts t WHERE t.meeting_id=(SELECT id FROM meetings WHERE rowid=?1)
+        AND (?2 IS NULL OR t.rowid>?2) {transcript_filter} ORDER BY t.rowid LIMIT 128");
+    let mut matcher = literal::MeetingMatcher::new(query);
+    let mut page = Vec::new();
+    let mut skip = offset;
+    let mut scanned = 0_i64;
+    let search_error = |error| match error {
+        KnowledgeError::Busy => {
+            "Meeting search reached its limit. Narrow the search or use passage filters."
+        }
+        _ => DB_ERROR,
+    };
+    loop {
+        let mut query = sqlx::query_as::<_, MeetingCandidate>(&meeting_sql).bind(scanned);
+        if let Some(anchor) = &anchor {
+            query = query.bind(anchor);
+        }
+        let rows = query.fetch_all(&mut *tx).await.map_err(|_| DB_ERROR)?;
+        if rows.is_empty() {
+            break;
+        }
+        scanned += rows.len() as i64;
+        for MeetingCandidate { rowid, meeting } in rows {
+            let mut matched = matcher
+                .matches(
+                    &mut tx.lock_handle().await.map_err(|_| DB_ERROR)?,
+                    rowid,
+                    true,
+                )
+                .map_err(search_error)?;
+            let mut after = None::<i64>;
+            while !matched {
+                let mut query = sqlx::query_scalar(&segment_sql).bind(rowid).bind(after);
+                if let Some(anchor) = &anchor {
+                    query = query.bind(anchor);
+                }
+                let ids: Vec<i64> = query.fetch_all(&mut *tx).await.map_err(|_| DB_ERROR)?;
+                let mut handle = tx.lock_handle().await.map_err(|_| DB_ERROR)?;
+                for &id in &ids {
+                    if matcher
+                        .matches(&mut handle, id, false)
+                        .map_err(search_error)?
+                    {
+                        matched = true;
+                        break;
                     }
                 }
+                if ids.len() < 128 {
+                    break;
+                }
+                after = ids.last().copied();
             }
-            if fields.contains_key("children") || fields.contains_key("blocks") {
-                output.push('\n');
-            }
-            if let Some(children) = fields.get("children") {
-                block_text(children, output);
+            if matched {
+                if skip > 0 {
+                    skip -= 1;
+                } else {
+                    page.push(meeting);
+                }
+                if page.len() > limit as usize {
+                    return Ok(meeting_page(page, limit, offset));
+                }
             }
         }
-        _ => {}
     }
+    Ok(meeting_page(page, limit, offset))
+}
+
+#[derive(FromRow)]
+struct MeetingCandidate {
+    rowid: i64,
+    #[sqlx(flatten)]
+    meeting: Meeting,
 }
 
 fn visible_summary(raw: &str) -> Option<String> {
@@ -655,6 +730,49 @@ mod tests {
                 .unwrap_err(),
             NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn meeting_search_pages_unicode_title_and_current_transcript_matches_only() {
+        let (root, mut writer) = fixture().await;
+        sqlx::raw_sql("UPDATE meetings SET title='ÄPFEL 50%_' WHERE id='b';
+            UPDATE transcripts SET transcript='📘 Äpfel 50%_', original_transcript='history only' WHERE id='second';
+            INSERT INTO summary_processes VALUES ('b','{\"markdown\":\"summary only\"}');
+            INSERT INTO meetings VALUES ('c','Other','2026-01-01','2026-01-01',NULL);
+            INSERT INTO meeting_notes VALUES ('c','ÄPFEL 50%_',NULL);
+            CREATE TABLE meeting_bookmarks(id TEXT, meeting_id TEXT, label TEXT);
+            INSERT INTO meeting_bookmarks VALUES ('mark','c','bookmark only');")
+            .execute(&mut writer).await.unwrap();
+        let old: i64 = sqlx::query_scalar("SELECT instr(lower('ÄPFEL 50%_'), lower('äpfel 50%_'))")
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+        assert_eq!(old, 0);
+        for (offset, id, next) in [(0, "a", json!(1)), (1, "b", Value::Null)] {
+            let page = run(
+                root.path(),
+                "search_meetings",
+                json!({"query":"äpfel 50%_","limit":1,"offset":offset}),
+            )
+            .await;
+            assert_eq!(page["meetings"][0]["id"], id);
+            assert_eq!(page["next_offset"], next);
+            assert_eq!(page.as_object().unwrap().len(), 2);
+            assert_eq!(page["meetings"][0].as_object().unwrap().len(), 4);
+        }
+        for query in [
+            "history only",
+            "summary only",
+            "Existing meeting note",
+            "bookmark only",
+            "Attached reference",
+            "50%x",
+        ] {
+            assert_eq!(
+                run(root.path(), "search_meetings", json!({"query":query})).await["meetings"],
+                json!([])
+            );
+        }
     }
 
     #[tokio::test]

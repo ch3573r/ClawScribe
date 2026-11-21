@@ -11,6 +11,7 @@ import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { MeetingHeader } from '@/components/MeetingDetails/MeetingHeader';
 import { SavedMeetingAttendance } from '@/components/MeetingAttendance';
 import { EvidenceRoute } from '@/components/Knowledge/EvidenceRoute';
+import { SavedSearchRoute } from '@/components/MeetingDetails/SavedSearchRoute';
 import { SpeakerLaneTimeline } from '@/components/MeetingDetails/SpeakerLaneTimeline';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 
@@ -36,6 +37,7 @@ import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-stat
 export default function PageContent({
   meeting,
   evidenceToken,
+  savedSourceToken,
   fromArchive,
   archiveAction,
   summaryData,
@@ -57,6 +59,7 @@ export default function PageContent({
 }: {
   meeting: MeetingDetails;
   evidenceToken?: string | null;
+  savedSourceToken?: string | null;
   fromArchive?: boolean;
   archiveAction?: string | null;
   summaryData: MeetingSummary | null;
@@ -76,6 +79,7 @@ export default function PageContent({
   loadedCount?: number;
   onLoadMore?: () => void;
 }) {
+  const [focusedBookmark, setFocusedBookmark] = useState<string | null>(null);
   console.log('📄 PAGE CONTENT: Initializing with data:', {
     meetingId: meeting.id,
     hasSummary: !!summaryData,
@@ -335,6 +339,7 @@ export default function PageContent({
         <Button variant="ghost" size="sm" asChild><Link href="/meetings"><ChevronLeft />Back to archive</Link></Button>
       </div>}
       <EvidenceRoute token={evidenceToken} meetingId={meeting.id} audioReady={isAudioReady} audioStatus={audioStatus} audioError={audioPlayer.error} onReveal={revealEvidence} onPlay={playEvidence} />
+      {savedSourceToken && <SavedSearchRoute key={savedSourceToken} token={savedSourceToken} meetingId={meeting.id} onBookmark={setFocusedBookmark} />}
       <MeetingHeader meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
         onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}
         duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
@@ -365,6 +370,7 @@ export default function PageContent({
       )}
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
         <TranscriptPanel
+          focusedBookmark={focusedBookmark}
           openTranscription={archiveAction === 'transcribe'}
           focusedSource={focusedSource}
           speakerSegments={timelineSegments}

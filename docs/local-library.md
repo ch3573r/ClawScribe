@@ -74,21 +74,36 @@ already read are under the client's control.
 
 ## Archive search
 
-Open **Meetings → Archive** to browse saved meetings or search titles and
-transcripts together. Search ignores letter case and treats punctuation like
-`%` and `_` literally. Choose a Project filter or inclusive date range to
-narrow both kinds of results. Select **Show in transcript** to open the
-verified segment, including segments on later transcript pages. **Back to
-archive** restores the search text, project filters, dates, and sort order
-for the current app session. The sidebar offers the same search with one
-passage preview per matching meeting.
+Open **Meetings → Archive** to search saved titles, current transcript
+passages, visible saved summaries, personal notes and timestamped bookmarks.
+Search ignores letter case, including German umlauts, and treats punctuation
+such as `%` and `_` literally. Projects, inclusive dates and **Needs attention**
+apply to every source. The sidebar shows a preview for each matching source
+type in a meeting.
 
-Queries accept up to 256 characters. The desktop shows up to 50 title matches
-and 50 passage matches. Searches stop at a scan or time limit and tell you
-when results are limited. Browse or narrow the query and filters to search
+Open a match to see its source. Transcript passages open at their verified
+position, including later pages. Summary and note matches show a verified
+excerpt. Saved notes open with their surrounding text, and bookmark matches
+open the marker in the meeting. A changed or
+deleted source prompts a new search. **Back to archive** restores your search,
+filters and sort order for the current app session.
+
+Queries accept up to 256 characters. The desktop shows up to 50 matches
+per source type. Saved summaries, notes and bookmark labels are checked
+locally with a 512 KiB limit per stored entry. Searches reaching a size, row,
+result or time limit display a notice. Browse or narrow the query and filters to search
 a smaller set. Literal search uses a local substring index to find candidates,
 then checks the saved text and its exact offset. Short searches and terms without
 an indexable substring use a bounded scan. No download or answer provider is required.
+
+**Ask about these results** opens a fresh Meeting memory conversation scoped
+to the displayed matching meetings, including when results are limited.
+The Archive also carries over project and date filters. Review the selected
+meetings, compose a question, and choose **Ask** to use the configured summary
+provider. Answers use the existing transcript evidence and eligible saved
+summary overviews. Personal note text, bookmark labels and the search phrase
+stay out of the handoff. The local assistant's `search_meetings` tool continues
+to match only titles and current transcripts.
 
 ## Meeting memory
 

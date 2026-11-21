@@ -77,7 +77,7 @@ enum MeetingFolderResolution {
 /// Expected format: { "markdown": "...", "summary_json": [...BlockNote blocks...] }
 #[tauri::command]
 pub async fn api_save_meeting_summary<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     mut summary: serde_json::Value,
@@ -99,6 +99,7 @@ pub async fn api_save_meeting_summary<R: Runtime>(
         );
     match SummaryProcessesRepository::update_meeting_summary(pool, &meeting_id, &summary).await {
         Ok(true) => {
+            let _ = app.emit(super::automatic::CHANGED_EVENT, &meeting_id);
             log_info!("Summary saved successfully for meeting_id: {}", meeting_id);
             Ok(serde_json::json!({
                 "message": "Meeting summary saved successfully"
@@ -127,6 +128,7 @@ pub async fn api_restore_previous_summary<R: Runtime>(
     SummaryProcessesRepository::restore_previous_summary(state.db_manager.pool(), &meeting_id)
         .await
         .map_err(|error| error.to_string())?;
+    let _ = app.emit(super::automatic::CHANGED_EVENT, &meeting_id);
     api_get_summary(app, state, meeting_id, None).await
 }
 

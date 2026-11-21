@@ -58,7 +58,7 @@ test('library search debounces literal Unicode, sends the current scope and skip
   assert.equal(time.timers.size, 1);
   await time.fire();
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].command, 'api_search_library');
+  assert.equal(calls[0].command, 'search_saved_meetings');
   assert.equal(calls[0].args.query, 'Äpfel 50%_ 📘');
   assert.equal(calls[0].args.scope.filter.tags[0], 'Öffnung');
   assert.equal(render(' Äpfel 50%_ 📘 ').results.titles[0].id, 'fixture');

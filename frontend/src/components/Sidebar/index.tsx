@@ -38,6 +38,7 @@ import { toast } from "sonner";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
 import { useLibrarySearch } from "@/hooks/useLibrarySearch";
+import { openMatchScope, savedPassageUrl, sourceLabel, type SavedHit } from "@/lib/archive-search";
 import { transcriptPassageUrl } from "@/lib/knowledge-navigation";
 
 import {
@@ -123,6 +124,15 @@ const Sidebar: React.FC = () => {
   const [searchQuery, handleSearchChange] = useState("");
   const { results: searchResults, searching: isSearching, error: searchError } = useLibrarySearch(searchQuery, !isCollapsed && pathname !== "/settings", undefined, true, meetings);
   const passageMatches = useMemo(() => new Map(searchResults?.passages.map(hit => [hit.meeting_id, hit])), [searchResults]);
+  const titleMatches = useMemo(() => new Set(searchResults?.titles.map(hit => hit.id)), [searchResults]);
+  const savedMatches = useMemo(() => {
+    const grouped = new Map<string, SavedHit[]>();
+    for (const hit of searchResults?.saved ?? []) {
+      const id = hit.reference.meeting_id;
+      grouped.set(id, [...(grouped.get(id) ?? []), hit]);
+    }
+    return grouped;
+  }, [searchResults]);
   const [showAllMeetings, setShowAllMeetings] = useState(false);
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "";
 
@@ -145,11 +155,12 @@ const Sidebar: React.FC = () => {
     const ids = new Set([
       ...(searchResults?.titles.map(hit => hit.id) ?? []),
       ...(searchResults?.passages.map(hit => hit.meeting_id) ?? []),
+      ...savedMatches.keys(),
     ]);
     return sidebarItems.flatMap(item => item.type === "folder"
       ? [{ ...item, children: item.children?.filter(child => ids.has(child.id)) }]
       : ids.has(item.id) ? [item] : []);
-  }, [sidebarItems, searchQuery, searchResults]);
+  }, [sidebarItems, searchQuery, searchResults, savedMatches]);
 
   const handleDelete = async (itemId: string) => {
     if (deletingMeeting.current) return;
@@ -433,7 +444,7 @@ const Sidebar: React.FC = () => {
     const isMeetingItem =
       item.id.includes("-") && !item.id.startsWith("intro-call");
     const matchingResult = passageMatches.get(item.id);
-    const hasTranscriptMatch = !!matchingResult;
+    const hasContentMatch = !!matchingResult || savedMatches.has(item.id);
 
     if (isCollapsed || item.type === "folder") return null;
 
@@ -451,7 +462,7 @@ const Sidebar: React.FC = () => {
           className={`group relative flex h-9 items-center rounded-md border transition ${
             isActive
               ? "border-primary/25 bg-primary/10 text-sidebar-foreground"
-              : hasTranscriptMatch
+              : hasContentMatch
                 ? "border-warning-border/30 bg-warning text-sidebar-foreground"
                 : "border-transparent text-sidebar-foreground hover:bg-sidebar-hover"
           }`}
@@ -463,7 +474,7 @@ const Sidebar: React.FC = () => {
             className="flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-md px-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <File className={`h-4 w-4 shrink-0 ${isActive ? "text-primary" : "text-muted-foreground"}`} aria-hidden="true" />
-            <span className="min-w-0 flex-1 truncate text-sm text-sidebar-foreground" title={item.title}>{item.title}</span>
+            <span className="min-w-0 flex-1 truncate text-sm text-sidebar-foreground" title={item.title}>{titleMatches.has(item.id) && <span className="text-xs text-muted-foreground">Title · </span>}{item.title}</span>
             <Meta className={`shrink-0 ${isMeetingItem ? "group-focus-within:invisible group-hover:invisible" : ""}`}>
               {shortMeetingDate(item.created_at)}
             </Meta>
@@ -501,9 +512,14 @@ const Sidebar: React.FC = () => {
               setCurrentMeeting({ id: item.id, title: item.title });
               router.push(url);
             }}>
-            <span className="line-clamp-3 break-words">{matchingResult.text}</span>
+            <span className="line-clamp-3 break-words">Transcript · {matchingResult.text}</span>
           </Button>
         )}
+        {savedMatches.get(item.id)?.map(hit => <Button key={hit.reference.source} variant="ghost" className="mt-1 block h-auto w-full whitespace-normal p-2 text-left text-xs leading-5"
+          aria-label={`Open ${sourceLabel[hit.reference.source].toLowerCase()} match in ${item.title}`} onClick={() => {
+            setCurrentMeeting({ id: item.id, title: item.title });
+            router.push(savedPassageUrl(hit.reference));
+          }}><span className="line-clamp-3 break-words">{sourceLabel[hit.reference.source]} · {hit.text}</span></Button>)}
       </div>
     );
   };
@@ -625,8 +641,8 @@ const Sidebar: React.FC = () => {
                 <InputGroup className="rounded-md border-sidebar-border bg-background/60 text-sidebar-foreground shadow-none">
                   <InputGroupInput
                     id="meeting-search"
-                    aria-label="Search titles and transcripts"
-                    placeholder="Search titles and transcripts"
+                    aria-label="Search titles, transcripts, summaries, notes and bookmarks"
+                    placeholder="Search saved meetings"
                     value={searchQuery}
                     onChange={(e) => handleSearchChange(e.target.value)}
                     className="placeholder:text-muted-foreground"
@@ -679,6 +695,10 @@ const Sidebar: React.FC = () => {
               )}
               {searchError && <p role="alert" className="mb-2 px-1 text-xs text-destructive">{searchError}</p>}
               {searchResults?.limited && <p role="status" className="mb-2 px-1 text-xs text-muted-foreground">Limited results. Try more specific text.</p>}
+              {searchResults && visibleMeetings.length > 0 && <Button variant="outline" size="sm" className="mb-2" onClick={() => {
+                openMatchScope({ ids: visibleMeetings.map(meeting => meeting.id), project: { tags: [], mode: "any", untagged: false }, from: "", to: "" });
+                if (pathname !== "/meetings") router.push("/meetings");
+              }}>Ask about these results</Button>}
 
               <div className="flex-1 space-y-3 overflow-y-auto pr-1 custom-scrollbar">
                 {meetingGroups.map((group) => (

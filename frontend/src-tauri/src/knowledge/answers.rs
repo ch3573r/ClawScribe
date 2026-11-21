@@ -2,6 +2,7 @@
 use super::types::*;
 use super::{conversations, retrieval, store};
 use crate::library::calendar::{stored_title_policy, WITHHELD_TITLE};
+use crate::library::saved_text::{summary_overview, MAX_SAVED_TEXT_BYTES};
 use crate::summary::llm_client::{self, ConfiguredTextReply, ResolvedText, TextEnvironment};
 use sqlx::SqlitePool;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -628,17 +629,22 @@ async fn selection_prompt(
             continue;
         }
         let row: Option<(String, String, Option<String>, Option<String>, i64)> = sqlx::query_as(
-            "SELECT substr(m.title,1,128),substr(m.created_at,1,128),CASE WHEN json_valid(s.result) THEN substr(COALESCE(json_extract(s.result,'$.markdown'),json_extract(s.result,'$.summary'),''),1,?) END,m.calendar_link,length(m.title)>128 FROM meetings m LEFT JOIN summary_processes s ON s.meeting_id=m.id AND s.status='completed' WHERE m.id=? ORDER BY s.updated_at DESC LIMIT 1"
-        ).bind(summary_limit as i64).bind(meeting).fetch_optional(pool).await
+            "SELECT substr(m.title,1,128),substr(m.created_at,1,128),CASE WHEN octet_length(s.result)<=? THEN s.result END,m.calendar_link,length(m.title)>128 FROM meetings m LEFT JOIN summary_processes s ON s.meeting_id=m.id AND s.status='completed' WHERE m.id=?"
+        ).bind(MAX_SAVED_TEXT_BYTES as i64).bind(meeting).fetch_optional(pool).await
             .map_err(|_| "Saved meeting overview unavailable")?;
-        if let Some((title, date, text, link, clipped)) = row {
+        if let Some((title, date, raw, link, clipped)) = row {
+            let text = tokio::task::spawn_blocking(move || {
+                raw.and_then(|raw| summary_overview(&raw, summary_limit))
+            })
+            .await
+            .map_err(|_| "Saved meeting overview unavailable")?;
             // A title that came from an unreviewed invitation stays on this device.
             let title = stored_title_policy(link.as_deref())
                 .for_clipped(title, clipped != 0)
                 .unwrap_or_else(|| WITHHELD_TITLE.to_string());
             overviews.push(
                 serde_json::json!({"kind":"saved_summary_overview", "title":title,
-                "date":date, "text":text.filter(|text| !text.trim().is_empty()), "citable":false}),
+                "date":date, "text":text, "citable":false}),
             );
         }
     }
@@ -1444,6 +1450,15 @@ mod tests {
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO summary_processes(meeting_id,status,created_at,updated_at,result) VALUES ('second-long','completed',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'{\"markdown\":\"Saved budget overview.\"}')")
             .execute(&pool).await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO meeting_notes(meeting_id,notes_markdown,created_at,updated_at)
+            VALUES ('second-long','Private editor fixture',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+            INSERT INTO meeting_bookmarks(id,meeting_id,seconds,label)
+            VALUES ('private-marker','second-long',10,'Private bookmark fixture');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         request.search.query = "Launch".into();
         let mut configuration = resolved(&pool, dir.path()).await;
         configuration.budget.context_tokens = 8192;
@@ -1457,6 +1472,8 @@ mod tests {
             |resolved, _, prompt, _| async move {
                 let envelope: serde_json::Value = serde_json::from_str(&prompt).unwrap();
                 let overview = &envelope["overview_context"][0];
+                assert!(!prompt.contains("Private editor fixture"));
+                assert!(!prompt.contains("Private bookmark fixture"));
                 assert_eq!(overview["text"], "Saved budget overview.");
                 assert_eq!(overview["citable"], false);
                 assert!(overview.get("tag").is_none());

@@ -36,8 +36,16 @@ export function LiveBookmarkButton({ sessionId, disabled, className }: LiveBookm
   }}>{busy ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" /> : <BookmarkPlus size={16} />}</Button>;
 }
 
-export function MeetingBookmarks({ meetingId, currentTime, onSeek, addOpen = false, onAddOpenChange, onBookmarksChange }: { addOpen?: boolean; onAddOpenChange?: (open: boolean) => void; onBookmarksChange?: (bookmarks: MeetingBookmark[]) => void; meetingId: string; currentTime?: number; onSeek?: (time: number) => void }) {
+export function MeetingBookmarks({ meetingId, focusedBookmark, currentTime, onSeek, addOpen = false, onAddOpenChange, onBookmarksChange }: { focusedBookmark?: string | null; addOpen?: boolean; onAddOpenChange?: (open: boolean) => void; onBookmarksChange?: (bookmarks: MeetingBookmark[]) => void; meetingId: string; currentTime?: number; onSeek?: (time: number) => void }) {
   const [bookmarks, setBookmarks] = useState<MeetingBookmark[]>([]);
+  const [section, setSection] = useState('');
+  const hasFocusTarget = !!focusedBookmark && bookmarks.some(mark => mark.id === focusedBookmark);
+  useEffect(() => {
+    if (!hasFocusTarget || !focusedBookmark) return;
+    setSection('bookmarks');
+    const frame = requestAnimationFrame(() => document.getElementById(`bookmark-row-${focusedBookmark}`)?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [focusedBookmark, hasFocusTarget]);
   const [label, setLabel] = useState('');
   const [seconds, setSeconds] = useState('0');
   const [busy, setBusy] = useState(false);
@@ -116,9 +124,9 @@ export function MeetingBookmarks({ meetingId, currentTime, onSeek, addOpen = fal
   return <>
     <Dialog open={addOpen} onOpenChange={onAddOpenChange}><DialogContent><DialogHeader><DialogTitle>Add bookmark</DialogTitle><DialogDescription>Save a moment and an optional note to this meeting. Notes are private by default.</DialogDescription></DialogHeader>{addForm}</DialogContent></Dialog>
     {error && <p role="alert" className="mt-2 text-destructive">{error} <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-sm font-normal underline hover:bg-transparent hover:text-current" onClick={() => setRevision(r => r + 1)}>Retry</Button></p>}
-    {bookmarks.length > 0 && <Accordion type="single" collapsible className="border-b border-border px-3 py-2 text-sm"><AccordionItem value="bookmarks" className="group/details border-0">
+    {bookmarks.length > 0 && <Accordion type="single" collapsible value={section} onValueChange={setSection} className="border-b border-border px-3 py-2 text-sm"><AccordionItem value="bookmarks" className="group/details border-0">
     <AccordionTrigger className="cursor-pointer rounded-none py-0 font-medium hover:no-underline">Bookmarks ({bookmarks.length})</AccordionTrigger><AccordionContent forceMount className="p-0 group-data-[state=closed]/details:hidden">
-    <ul className="mt-2 max-h-48 space-y-2 overflow-y-auto">{bookmarks.map(mark => <li key={mark.id} className="flex flex-wrap items-center gap-1">
+    <ul className="mt-2 max-h-48 space-y-2 overflow-y-auto">{bookmarks.map(mark => <li key={mark.id} id={`bookmark-row-${mark.id}`} tabIndex={-1} className="flex flex-wrap items-center gap-1 focus-visible:ring-2 focus-visible:ring-ring">
       {editing === mark.id ? <>
         <Input aria-label="Bookmark label" maxLength={160} className="h-auto shadow-none text-sm md:text-sm min-w-0 flex-1 rounded border border-input bg-background p-1" value={editLabel} onChange={e => setEditLabel(e.target.value)} />
         <Button size="sm" disabled={busy || !editLabel.trim()} onClick={() => change('rename_meeting_bookmark', { id: mark.id, label: editLabel })}>Save</Button>

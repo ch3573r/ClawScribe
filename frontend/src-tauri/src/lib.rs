@@ -991,6 +991,8 @@ pub fn run() {
             api::api_get_meetings,
             api::api_search_transcripts,
             api::api_search_library,
+            knowledge::store::saved_search::search_saved_meetings,
+            knowledge::store::saved_search::resolve_saved_search_hit,
             api::api_get_model_config,
             api::api_save_model_config,
             api::api_get_api_key_status,

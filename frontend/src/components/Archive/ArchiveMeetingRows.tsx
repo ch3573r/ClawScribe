@@ -36,25 +36,9 @@ function actionLabel(review: ReturnType<typeof archiveReview>) {
   }
 }
 
-export function ArchiveMeetingRows({
-  meetings, projectTags, active, revision, librarySize, onOpen,
-}: {
-  meetings: readonly ArchiveMeeting[];
-  projectTags: readonly { meeting_id: string; tag: string }[];
-  active: boolean;
-  revision: number;
-  librarySize: number;
-  onOpen: (meeting: { id: string; title: string }) => void;
-}) {
+export function useArchiveMetadata(active: boolean, revision: number, librarySize: number) {
   const [metadata, setMetadata] = useState<Map<string, ArchiveRow> | null>(null);
   const [error, setError] = useState(false);
-  const { setDeleteTarget, projectTagsLoading, projectTagsError, refreshProjectTags } = useSidebar();
-  const [tagMeeting, setTagMeeting] = useState<ArchiveMeeting | null>(null);
-  const [selecting, setSelecting] = useState(false);
-  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [removal, setRemoval] = useState<ArchiveMeeting[] | null>(null);
-  const [showAttentionOnly, setShowAttentionOnly] = useState(false);
-  const removalOpener = useRef<HTMLElement | null>(null);
   const request = useRef(0);
   const refresh = useCallback(async () => {
     const latest = ++request.current;
@@ -90,13 +74,24 @@ export function ArchiveMeetingRows({
     return () => window.clearInterval(timer);
   }, [active, refresh, summaryRunning]);
 
-  const filteredIds = useMemo(
-    () => (showAttentionOnly
-      ? meetings.filter(meeting => { const row = metadata?.get(meeting.id); return row ? archiveReview(row).needsAttention : false; })
-      : meetings
-    ).map(meeting => meeting.id),
-    [meetings, metadata, showAttentionOnly],
-  );
+  return { metadata, error, refresh };
+}
+
+export function ArchiveMeetingRows({
+  meetings, projectTags, status: { metadata, error, refresh }, onOpen,
+}: {
+  meetings: readonly ArchiveMeeting[];
+  projectTags: readonly { meeting_id: string; tag: string }[];
+  status: ReturnType<typeof useArchiveMetadata>;
+  onOpen: (meeting: { id: string; title: string }) => void;
+}) {
+  const { setDeleteTarget, projectTagsLoading, projectTagsError, refreshProjectTags } = useSidebar();
+  const [tagMeeting, setTagMeeting] = useState<ArchiveMeeting | null>(null);
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [removal, setRemoval] = useState<ArchiveMeeting[] | null>(null);
+  const removalOpener = useRef<HTMLElement | null>(null);
+  const filteredIds = useMemo(() => meetings.map(meeting => meeting.id), [meetings]);
   const visibleSelected = visibleSelection(selected, filteredIds);
   useEffect(() => {
     setSelected(current => {
@@ -122,7 +117,7 @@ export function ArchiveMeetingRows({
     (row && archiveReview(row).needsAttention ? needsAttention : otherMeetings).push(meeting);
   }
 
-  const stack = showAttentionOnly ? needsAttention : [...needsAttention, ...otherMeetings];
+  const stack = [...needsAttention, ...otherMeetings];
   const bulkCandidates = stack.filter(meeting => visibleSelected.has(meeting.id));
   const handleRemoved = (ids: string[]) => {
     const removed = new Set(ids);
@@ -217,36 +212,20 @@ export function ArchiveMeetingRows({
               setRemoval(bulkCandidates);
             }}>Review selected audio</Button>
         </>}
-        {metadata !== null && (needsAttention.length > 0 || showAttentionOnly) && !selecting && (
-          <Button variant={showAttentionOnly ? "secondary" : "ghost"} size="sm"
-            aria-pressed={showAttentionOnly}
-            aria-label={`Needs attention (${needsAttention.length})`}
-            onClick={() => setShowAttentionOnly(prev => !prev)}>
-            {showAttentionOnly ? "All meetings" : `Needs attention (${needsAttention.length})`}
-          </Button>
-        )}
         <Button variant="ghost" size="sm" onClick={() => {
           setSelecting(!selecting);
           setSelected(new Set());
         }}>{selecting ? "Clear selection" : "Select meetings"}</Button>
       </div>
     </div>
-    {showAttentionOnly
-      ? (needsAttention.length > 0
-          ? <ul className="divide-y divide-border">{needsAttention.map(meeting => renderRow(meeting, true))}</ul>
-          : <p role="status" className="px-4 py-8 text-center text-sm text-muted-foreground sm:px-5">No meetings need attention.</p>
-        )
-      : <>
-          {needsAttention.length > 0 && <section aria-labelledby="archive-attention-heading" className="border-b border-border">
-            <h2 id="archive-attention-heading" className="border-b border-border bg-muted/50 px-4 py-2 text-sm font-semibold sm:px-5">Meetings that need attention</h2>
-            <ul className="divide-y divide-border">{needsAttention.map(meeting => renderRow(meeting, true))}</ul>
-          </section>}
-          {otherMeetings.length > 0 && <>
-            {needsAttention.length > 0 && <h2 className="border-b border-border bg-muted/50 px-4 py-2 text-sm font-semibold sm:px-5">Other meetings</h2>}
-            <ul className="divide-y divide-border">{otherMeetings.map(meeting => renderRow(meeting, false))}</ul>
-          </>}
-        </>
-    }
+    {needsAttention.length > 0 && <section aria-labelledby="archive-attention-heading" className="border-b border-border">
+      <h2 id="archive-attention-heading" className="border-b border-border bg-muted/50 px-4 py-2 text-sm font-semibold sm:px-5">Meetings that need attention</h2>
+      <ul className="divide-y divide-border">{needsAttention.map(meeting => renderRow(meeting, true))}</ul>
+    </section>}
+    {otherMeetings.length > 0 && <>
+      {needsAttention.length > 0 && <h2 className="border-b border-border bg-muted/50 px-4 py-2 text-sm font-semibold sm:px-5">Other meetings</h2>}
+      <ul className="divide-y divide-border">{otherMeetings.map(meeting => renderRow(meeting, false))}</ul>
+    </>}
     {removal && <ArchiveAudioRemoval meetings={removal} onClose={closeRemoval} onRemoved={handleRemoved} />}
     {tagMeeting && <ProjectTags key={tagMeeting.id} meetingId={tagMeeting.id} onClose={() => {
       setTagMeeting(null);

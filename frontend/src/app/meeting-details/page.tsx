@@ -225,6 +225,7 @@ function MeetingDetailsContent() {
     key={meetingDetails.id}
     meeting={meetingDetails}
     evidenceToken={evidenceToken}
+    savedSourceToken={searchParams.get('savedSource')}
     fromArchive={fromArchive}
     archiveAction={archiveAction}
     summaryData={meetingSummary}
