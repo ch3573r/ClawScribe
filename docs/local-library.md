@@ -76,17 +76,20 @@ already read are under the client's control.
 
 Open **Meetings → Archive** to search saved titles, current transcript
 passages, visible saved summaries, personal notes and timestamped bookmarks.
-Search ignores letter case, including German umlauts, and treats punctuation
-such as `%` and `_` literally. Projects, inclusive dates and **Needs attention**
+All unquoted terms must appear in the same title or text entry, in any order.
+Put an exact phrase in double quotes, for example `"offene Punkte" Budget`.
+Search ignores letter case, including German umlauts and capital sharp S, and
+treats punctuation such as `%` and `_` literally. Projects, inclusive dates and **Needs attention**
 apply to every source. Archive and Meeting memory date filters use the day shown
 in your local time zone. Older entries that store only a calendar date keep that
-day. The sidebar shows a preview for each matching source
-type in a meeting.
+day. Archive results are grouped by meeting. The sidebar shows one preview per
+matching source type in a meeting. Highlights mark the matches in each excerpt.
 
 Open a match to see its source. Transcript passages open at their verified
-position, including later pages. Summary and note matches show a verified
+position, including later pages. **Play passage** opens the transcript and
+plays from that position when saved audio is ready. Summary and note matches show a verified
 excerpt. Saved notes open with their surrounding text, and bookmark matches
-open the marker in the meeting. A changed or
+open the marker in the meeting, where you can play from its recording time. A changed or
 deleted source prompts a new search. **Back to archive** restores your search,
 filters and sort order for the current app session.
 
@@ -100,8 +103,8 @@ an indexable substring use a bounded scan. No download or answer provider is req
 
 **Ask about these results** opens a fresh Meeting memory conversation scoped
 to the displayed matching meetings, including when results are limited.
-The Archive also carries over project and date filters. Review the selected
-meetings, compose a question, and choose **Ask** to use the configured summary
+The Archive carries over project and date filters and fills an editable draft
+with the search text. Review the selected meetings and draft, then choose **Ask** to use the configured summary
 provider. Answers use the existing transcript evidence and eligible saved
 summary overviews. Personal notes and bookmarks stay local by default. Check
 **Review excerpt with a question** on individual results to bring up to eight
@@ -117,9 +120,22 @@ Reviewed requests send the displayed snippets as personal context alongside
 the usual meeting evidence. They omit prior conversation. Their saved questions
 and answers remain visible locally and are excluded from future provider
 history. The built-in model and providers with an identifiable HTTP endpoint
-support this review. Codex and Claude Code manage their own connections, so
-use them with personal excerpts deselected. The local assistant's `search_meetings` tool continues
+support this review. Codex and Claude Code manage their own connections and
+hide personal-excerpt choices. The local assistant's `search_meetings` tool continues
 to match only titles and current transcripts.
+
+## Transcript review
+
+The first transcript page can be read, searched and corrected while the full
+timeline loads. When the timeline arrives, Find and playback can follow the
+whole meeting. If audio is unavailable, the transcript still supports reading,
+copying and corrections. Choose **Check again** to retry an attached folder.
+
+Open **Replace…** from Find to use the current search text in the meeting-wide
+replacement dialog. **Whole words only** helps replace names that are also
+part of longer words. Review the examples and affected passage count before
+choosing **Replace all**. Text corrections and Undo update the existing list
+in place. A verified citation to an unchanged passage can still open it.
 
 ## Meeting memory
 

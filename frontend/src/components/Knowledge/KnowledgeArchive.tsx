@@ -19,8 +19,9 @@ import { EvidencePreview } from "./EvidencePreview";
 import { ReferenceDocuments } from "@/components/MeetingDetails/ReferenceDocuments";
 import { AttachReferenceButton } from "@/components/MeetingDetails/AttachReferenceButton";
 import type { ProjectFilter } from "@/lib/library";
-import type { MatchScope, SavedReference } from "@/lib/archive-search";
+import { supportsPersonalExcerpts, type MatchScope, type SavedReference } from "@/lib/archive-search";
 import { classifySummaryProvider } from "@/lib/privacy";
+import { archiveDateKey } from "@/lib/archive-review";
 import type { IndexStatus, MeetingFilter, SearchMode } from "@/types/knowledge";
 
 // Route navigation unmounts the archive; keep only the user's explicit source
@@ -42,6 +43,8 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
   const [all, setAll] = useState(initialMatches ? false : memorySources.all);
   const [selected, setSelected] = useState(initialMatches?.ids ?? memorySources.selected);
   const [notes, setNotes] = useState<SavedReference[]>(initialMatches?.notes ?? []);
+  const excerptsSupported = supportsPersonalExcerpts(modelConfig?.provider);
+  useEffect(() => { if (!excerptsSupported) setNotes([]); }, [excerptsSupported]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [meetingQuery, setMeetingQuery] = useState("");
   const [from, setFrom] = useState(initialMatches?.from ?? memorySources.from);
@@ -90,7 +93,7 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
   const invalidDates = !!from && !!to && from > to;
   const sourcesReady = (all || selected.length > 0) && !invalidDates;
   const attachmentMeetings = meetings.filter(meeting => {
-    const date = meeting.created_at?.slice(0, 10);
+    const date = archiveDateKey(meeting.created_at);
     return !invalidDates && (!from || (!!date && date >= from)) && (!to || (!!date && date <= to));
   });
   const attachmentMeetingId = !all && selected.length === 1 && attachmentMeetings.some(meeting => meeting.id === selected[0]) ? selected[0] : undefined;
@@ -173,7 +176,7 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
       {invalidDates && <p role="alert" className="text-sm text-destructive">The start date must be on or before the end date.</p>}
     </fieldset>
     <div className="min-h-0 flex-1"><KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model} secondary={secondary}
-      selectedNotes={notes} reviewActive={active} destinationRevision={JSON.stringify([modelConfig?.ollamaEndpoint, modelConfig?.customOpenAIEndpoint, modelConfig?.organization, modelConfig?.project])}
+      initialQuestion={initialMatches?.question} selectedNotes={excerptsSupported ? notes : undefined} reviewActive={active} destinationRevision={JSON.stringify([modelConfig?.ollamaEndpoint, modelConfig?.customOpenAIEndpoint, modelConfig?.organization, modelConfig?.project])}
       removeNote={ref => setNotes(current => current.filter(value => value.fingerprint !== ref.fingerprint))}
       clearNotes={() => setNotes([])}
       emptyState={!state.owner && !all && !selected.length ? <div className="flex flex-col items-center gap-2 text-center">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronRight, Ellipsis } from "lucide-react";
@@ -78,12 +78,14 @@ export function useArchiveMetadata(active: boolean, revision: number, librarySiz
 }
 
 export function ArchiveMeetingRows({
-  meetings, projectTags, status: { metadata, error, refresh }, onOpen,
+  meetings, projectTags, status: { metadata, error, refresh }, onOpen, renderTitle, renderExcerpts,
 }: {
   meetings: readonly ArchiveMeeting[];
   projectTags: readonly { meeting_id: string; tag: string }[];
   status: ReturnType<typeof useArchiveMetadata>;
   onOpen: (meeting: { id: string; title: string }) => void;
+  renderTitle?: (meeting: ArchiveMeeting) => ReactNode;
+  renderExcerpts?: (meeting: ArchiveMeeting) => ReactNode;
 }) {
   const { setDeleteTarget, projectTagsLoading, projectTagsError, refreshProjectTags } = useSidebar();
   const [tagMeeting, setTagMeeting] = useState<ArchiveMeeting | null>(null);
@@ -141,7 +143,8 @@ export function ArchiveMeetingRows({
     const open = () => onOpen({ id: meeting.id, title: meeting.title });
     const hrefClass = "min-w-0 truncate rounded-sm font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
-    return <li key={meeting.id} className="flex items-center gap-3 px-4 py-3 sm:px-5">
+    return <li key={meeting.id} className="px-4 py-3 sm:px-5">
+      <div className="flex items-center gap-3">
       {selecting && <Checkbox
         aria-label={`Select ${meeting.title}`}
         checked={visibleSelected.has(meeting.id)}
@@ -156,7 +159,7 @@ export function ArchiveMeetingRows({
       <div className="min-w-0 flex-1">
         <Tooltip>
           <TooltipTrigger asChild>
-            <Link href={href} onClick={open} className={`block w-fit max-w-full ${hrefClass}`}>{meeting.title}</Link>
+            <Link href={href} onClick={open} className={`block w-fit max-w-full ${hrefClass}`}>{renderTitle?.(meeting) ?? meeting.title}</Link>
           </TooltipTrigger>
           <TooltipContent className="max-w-sm break-words">{meeting.title}</TooltipContent>
         </Tooltip>
@@ -192,6 +195,8 @@ export function ArchiveMeetingRows({
           <DropdownMenuItem className="text-destructive" onSelect={() => setDeleteTarget(meeting)}>Delete meeting…</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      </div>
+      {renderExcerpts?.(meeting)}
     </li>;
   };
 

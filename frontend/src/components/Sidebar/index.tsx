@@ -12,6 +12,7 @@ import {
   Mic,
   Square,
   Pencil,
+  Play,
   NotebookPen,
   SearchIcon,
   X,
@@ -38,9 +39,11 @@ import {
 import { toast } from "sonner";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
+import { useConfig } from "@/contexts/ConfigContext";
 import { useResultNotes } from "@/hooks/useResultNotes";
 import { useLibrarySearch } from "@/hooks/useLibrarySearch";
-import { openMatchScope, savedPassageUrl, sourceLabel, type SavedHit } from "@/lib/archive-search";
+import { openMatchScope, savedPassageUrl, sourceLabel, supportsPersonalExcerpts, type SavedHit } from "@/lib/archive-search";
+import { SearchSnippet } from "@/components/Archive/SearchSnippet";
 import { transcriptPassageUrl } from "@/lib/knowledge-navigation";
 
 import {
@@ -78,6 +81,7 @@ interface SidebarItem {
 
 const Sidebar: React.FC = () => {
   const router = useRouter();
+  const { modelConfig } = useConfig();
   const pathname = usePathname();
   const {
     deleteTarget, setDeleteTarget,
@@ -128,7 +132,7 @@ const Sidebar: React.FC = () => {
   const searchQuery = showSidebarSearch ? sidebarQuery : "";
   const { results: searchResults, searching: isSearching, error: searchError } = useLibrarySearch(searchQuery, !isCollapsed && pathname !== "/settings", undefined, true, meetings);
   const passageMatches = useMemo(() => new Map(searchResults?.passages.map(hit => [hit.meeting_id, hit])), [searchResults]);
-  const titleMatches = useMemo(() => new Set(searchResults?.titles.map(hit => hit.id)), [searchResults]);
+  const titleMatches = useMemo(() => new Map(searchResults?.titles.map(hit => [hit.id, hit])), [searchResults]);
   const savedMatches = useMemo(() => {
     const grouped = new Map<string, SavedHit[]>();
     for (const hit of searchResults?.saved ?? []) {
@@ -137,7 +141,7 @@ const Sidebar: React.FC = () => {
     }
     return grouped;
   }, [searchResults]);
-  const noteSelection = useResultNotes(searchQuery);
+  const noteSelection = useResultNotes(searchQuery, supportsPersonalExcerpts(modelConfig?.provider));
   const [showAllMeetings, setShowAllMeetings] = useState(false);
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "";
 
@@ -479,7 +483,7 @@ const Sidebar: React.FC = () => {
             className="flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-md px-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <File className={`h-4 w-4 shrink-0 ${isActive ? "text-primary" : "text-muted-foreground"}`} aria-hidden="true" />
-            <span className="min-w-0 flex-1 truncate text-sm text-sidebar-foreground" title={item.title}>{titleMatches.has(item.id) && <span className="text-xs text-muted-foreground">Title · </span>}{item.title}</span>
+            <span className="min-w-0 flex-1 truncate text-sm text-sidebar-foreground" title={item.title}><SearchSnippet text={item.title} highlights={titleMatches.get(item.id)?.title === item.title ? titleMatches.get(item.id)?.highlights : undefined} /></span>
             <Meta className={`shrink-0 ${isMeetingItem ? "group-focus-within:invisible group-hover:invisible" : ""}`}>
               {shortMeetingDate(item.created_at)}
             </Meta>
@@ -509,22 +513,29 @@ const Sidebar: React.FC = () => {
           )}
         </div>
 
-        {matchingResult && (
-          <Button variant="ghost" className="mt-1 block h-auto w-full whitespace-normal p-2 text-left text-xs leading-5"
+        {matchingResult && <div className="mt-1 flex items-start gap-1">
+          <Button variant="ghost" className="block h-auto min-w-0 flex-1 whitespace-normal p-2 text-left text-xs leading-5"
             aria-label={`Open transcript match in ${item.title}`} onClick={() => {
               const url = transcriptPassageUrl(matchingResult.evidence);
               if (!url) return;
               setCurrentMeeting({ id: item.id, title: item.title });
               router.push(url);
             }}>
-            <span className="line-clamp-3 break-words">Transcript · {matchingResult.text}</span>
+            <span className="line-clamp-3 break-words">Transcript · <SearchSnippet {...matchingResult} /></span>
           </Button>
-        )}
+          {matchingResult.start_seconds != null && Number.isFinite(matchingResult.start_seconds) && matchingResult.start_seconds >= 0 &&
+            <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" aria-label={`Play transcript match in ${item.title}`} onClick={() => {
+              const url = transcriptPassageUrl(matchingResult.evidence, false, true);
+              if (!url) return;
+              setCurrentMeeting({ id: item.id, title: item.title });
+              router.push(url);
+            }}><Play /></Button></TooltipTrigger><TooltipContent>Play passage</TooltipContent></Tooltip>}
+        </div>}
         {savedMatches.get(item.id)?.map(hit => <div key={hit.reference.fingerprint}><Button variant="ghost" className="mt-1 block h-auto w-full whitespace-normal p-2 text-left text-xs leading-5"
           aria-label={`Open ${sourceLabel[hit.reference.source].toLowerCase()} match in ${item.title}`} onClick={() => {
             setCurrentMeeting({ id: item.id, title: item.title });
             router.push(savedPassageUrl(hit.reference));
-          }}><span className="line-clamp-3 break-words">{sourceLabel[hit.reference.source]} · {hit.text}</span></Button>{noteSelection.control(hit)}</div>)}
+          }}><span className="line-clamp-3 break-words">{sourceLabel[hit.reference.source]} · <SearchSnippet {...hit} /></span></Button>{noteSelection.control(hit)}</div>)}
       </div>
     );
   };
@@ -701,7 +712,7 @@ const Sidebar: React.FC = () => {
               {searchError && <p role="alert" className="mb-2 px-1 text-xs text-destructive">{searchError}</p>}
               {searchResults?.limited && <p role="status" className="mb-2 px-1 text-xs text-muted-foreground">Limited results. Try more specific text.</p>}
               {searchResults && visibleMeetings.length > 0 && <Button variant="outline" size="sm" className="mb-2" onClick={() => {
-                openMatchScope({ notes: noteSelection.references(visibleMeetings.flatMap(meeting => savedMatches.get(meeting.id) ?? [])), ids: visibleMeetings.map(meeting => meeting.id), project: { tags: [], mode: "any", untagged: false }, from: "", to: "" });
+                openMatchScope({ notes: noteSelection.references(visibleMeetings.flatMap(meeting => savedMatches.get(meeting.id) ?? [])), question: searchQuery.trim(), ids: visibleMeetings.map(meeting => meeting.id), project: { tags: [], mode: "any", untagged: false }, from: "", to: "" });
                 if (pathname !== "/meetings") router.push("/meetings");
               }}>Ask about these results</Button>}
 

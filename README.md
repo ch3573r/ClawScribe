@@ -177,15 +177,21 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 ## Meeting Notes And Exports
 
 Search saved meeting titles, current transcripts, summaries, personal notes
-and bookmarks from the sidebar or **Meetings → Archive**. Each match names
-its source. Open a transcript passage, saved summary, note or timestamped
-bookmark in its meeting. The Archive keeps the current search, project, date
-and attention filters when you return.
+and bookmarks from the sidebar or **Meetings → Archive**. Search for several
+terms in any order or put an exact phrase in quotes. Results are grouped by
+meeting and highlight matches in the saved text. Open a source in its meeting
+or play a timed transcript result. The Archive keeps the current search,
+project, date and attention filters when you return.
+
+Read and correct the transcript while the speaker timeline loads. The text
+stays available when the recording is missing. Use **Find and replace** to
+preview name corrections across the meeting, with a **Whole words only** option.
 
 **Ask about these results** opens Meeting memory with the displayed matching
-meetings selected. Review the sources and provider, then enter a question
-and choose **Ask**. To use a personal note or bookmark, check its matched
-excerpt first. **Review and ask** shows the exact excerpts, question, provider,
+meetings selected and the search text in an editable draft. Review the sources,
+provider and question before choosing **Ask**. With a provider that supports
+reviewed excerpts, check any personal note or bookmark you want to include.
+**Review and ask** shows the exact excerpts, question, provider,
 model and endpoint. **Confirm and send** includes those excerpts once.
 
 The meeting-memory preview in this source branch adds **Meetings → Meeting
