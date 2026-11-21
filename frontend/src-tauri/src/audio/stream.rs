@@ -406,10 +406,13 @@ impl AudioStreamManager {
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
         recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+        mut first_source_started: impl FnMut(),
     ) -> Result<()> {
+        let microphone_first = microphone_device.is_some();
         if let Some(device) = microphone_device {
             self.start_source(device, DeviceType::Microphone, recording_sender.clone())
                 .await?;
+            first_source_started();
         }
 
         if let Some(device) = system_device {
@@ -422,6 +425,8 @@ impl AudioStreamManager {
                 self.state.report_warning(
                     "Could not capture system audio from the selected output. Retry the connection or choose a different output for your next recording.",
                 );
+            } else if !microphone_first {
+                first_source_started();
             }
         }
 

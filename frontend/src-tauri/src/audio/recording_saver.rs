@@ -245,12 +245,18 @@ impl RecordingSaver {
     }
 
     /// Set device information in metadata
-    pub fn set_device_info(&mut self, mic_name: Option<String>, sys_name: Option<String>) {
+    pub(super) fn mark_capture_started(
+        &mut self,
+        started: chrono::DateTime<chrono::Utc>,
+        mic_name: Option<String>,
+        sys_name: Option<String>,
+    ) {
         if let Some(ref mut metadata) = self.metadata {
+            metadata.created_at = started.to_rfc3339();
             metadata.devices.microphone = mic_name;
             metadata.devices.system_audio = sys_name;
 
-            // Write updated metadata to disk if folder exists
+            // Recovery uses this timestamp even if a second device is slow to open.
             if let Some(folder) = &self.meeting_folder {
                 let metadata_clone = metadata.clone();
                 if let Err(_e) = write_metadata(folder, &metadata_clone) {
@@ -836,6 +842,25 @@ mod snapshot_tests {
         assert_eq!(snapshot["total_segments"], 2);
         assert_eq!(snapshot["segments"][0]["text"], "Before poison");
         assert_eq!(snapshot["segments"][1]["text"], "After poison");
+    }
+
+    #[tokio::test]
+    async fn first_source_activation_updates_the_start_for_stop_and_interrupted_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        saver.initialize_meeting_folder("Overnight", true).unwrap();
+        let started = "2025-08-05T00:00:03Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        saver.mark_capture_started(started, Some("Test input".into()), None);
+        let folder = saver.get_meeting_folder().unwrap();
+        let marker = crate::database::meeting_files::read_marker(folder).unwrap();
+        assert_eq!(saver.started_at(), marker["created_at"].as_str());
+        assert_eq!(
+            super::super::interrupted::recovered_provenance(folder, &marker, None).started_at,
+            Some(started)
+        );
     }
 
     #[tokio::test]

@@ -245,12 +245,6 @@ impl RecordingManager {
             )
         };
 
-        // Update recording metadata with device information
-        self.recording_saver.set_device_info(
-            microphone_device.as_ref().map(|d| d.name.clone()),
-            system_device.as_ref().map(|d| d.name.clone()),
-        );
-
         // Start the audio processing pipeline with FFmpeg adaptive mixer
         // Pipeline will: 1) Mix mic+system audio with adaptive buffering, 2) Send mixed to recording_sender,
         // 3) Apply VAD and send speech segments to transcription
@@ -272,8 +266,22 @@ impl RecordingManager {
 
         // Start audio streams - they send RAW unmixed chunks to pipeline for mixing
         // Pipeline handles mixing and distribution to both recording and transcription
+        // Save the start when the first device opens. Invitation checks and
+        // starting another device can each cross midnight.
+        let saver = &mut self.recording_saver;
         self.stream_manager
-            .start_streams(microphone_device.clone(), system_device.clone(), None)
+            .start_streams(
+                microphone_device.clone(),
+                system_device.clone(),
+                None,
+                || {
+                    saver.mark_capture_started(
+                        chrono::Utc::now(),
+                        microphone_device.as_ref().map(|d| d.name.clone()),
+                        system_device.as_ref().map(|d| d.name.clone()),
+                    );
+                },
+            )
             .await?;
 
         // Start device monitoring to detect disconnects
