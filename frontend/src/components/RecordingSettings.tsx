@@ -21,6 +21,7 @@ import { loadBehaviorSettings, refreshBehaviorSettings } from '@/lib/behaviorSet
 export interface RecordingPreferences {
   save_folder: string;
   auto_save: boolean;
+  auto_open_floating_controls: boolean;
   file_format: string;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
@@ -43,6 +44,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [preferences, setPreferences] = useState<RecordingPreferences>({
     save_folder: '',
     auto_save: true,
+    auto_open_floating_controls: true,
     file_format: 'mp4',
     preferred_mic_device: null,
     preferred_system_device: null
@@ -291,6 +293,19 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             </Button>
           </SettingsRow>
         )}
+
+        <SettingsRow
+          title="Open floating controls when recording starts"
+          htmlFor="auto-open-floating-controls"
+          description="Applies to the next recording. You can also open the controls from the recording bar or tray."
+        >
+          <Switch
+            id="auto-open-floating-controls"
+            checked={preferences.auto_open_floating_controls}
+            disabled={saving}
+            onCheckedChange={enabled => void savePreferences({ ...preferences, auto_open_floating_controls: enabled })}
+          />
+        </SettingsRow>
 
         <SettingsRow
           title="Recording start reminder"

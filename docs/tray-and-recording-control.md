@@ -28,9 +28,14 @@ doing in ClawScribe.
 
 ## Floating recording controls
 
-During a recording, choose **Open floating controls** on the recording bar
-or tray menu. The small window stays above other apps. It opens only when you
-ask, including for recordings started by call detection or a shortcut.
+The floating controls open when recording starts and stay above other apps
+without taking keyboard focus. This includes audio-only recordings and starts
+from call detection, the tray, a shortcut or the command line.
+
+To keep the controls closed at startup, turn off **Open floating controls when
+recording starts** in **Settings → Recording**. Changes apply to the next
+recording. With either setting, you can choose **Open floating controls** on
+the recording bar or tray.
 
 - The clock shows captured time and freezes during pauses. **Microphone** and
   **System audio** show levels from the running capture.
@@ -39,7 +44,8 @@ ask, including for recordings started by call detection or a shortcut.
 - **Stop** shows the current save stage. The window closes when saving finishes,
   or directs you to the main app if the recording needs review.
 - Close the window with its title-bar button or Alt+F4 to continue recording.
-  Reopen it from the tray, including during a save.
+  It stays closed for that recording until you reopen it. You can also reopen
+  it from the tray during a save.
 
 The window omits the meeting title and transcript. ClawScribe asks Windows to
 exclude the controls from capture. The result depends on the Windows version and
@@ -152,11 +158,13 @@ On the designated self-hosted machine with audio devices:
    first, and `powercfg /requests` no longer lists it.
 6. Start a recording and end the process from Task Manager. Restart ClawScribe:
    the recording is offered for recovery.
-7. Open the floating controls from Home. Check both meters, pause from the
+7. Start with automatic floating controls enabled. Check both meters, pause from the
    tray and verify the clock freezes. Use Tab and Enter to add a note and a
    bookmark. Close the controls with Alt+F4, reopen from the tray, then stop.
    Verify the save progress, playback and note times in the saved meeting.
-8. With another app focused, start a second recording from a shortcut. Check
-   that focus stays put and the controls stay closed. Open them explicitly,
-   stop from the tray and verify that the controls close after saving. Check
-   light and dark appearance and how the controls appear in a sharing preview.
+8. With another app focused, start a second recording from a shortcut. The
+   controls should open again while keystrokes still go to the other app.
+   Turn off automatic opening, stop from the tray and verify that the controls
+   close after saving. Restart ClawScribe, start another recording and confirm
+   that the controls stay closed until opened explicitly. Check light and dark
+   appearance and how the controls appear in a sharing preview.

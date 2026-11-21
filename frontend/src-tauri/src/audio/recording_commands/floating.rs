@@ -1,21 +1,22 @@
-//! One explicitly opened window per native recording. Its immutable webview
+//! One floating window per native recording. Its immutable webview
 //! label binds every request to the recording, including requests after reload.
 use super::{
-    active_bookmark_session, stop_recording_session, StopTarget, IS_RECORDING, RECORDING_MANAGER,
+    is_stopping, stop_recording_session, StopTarget, IS_RECORDING, RECORDING_MANAGER,
     SAVING_RECORDING,
 };
 use crate::audio::recording_levels::RecordingLevels;
 use serde::Serialize;
 use std::sync::{atomic::Ordering, Mutex, TryLockError};
 use tauri::{
-    ipc::Invoke, webview::NewWindowResponse, AppHandle, Manager, Runtime, WebviewUrl,
+    ipc::Invoke, webview::NewWindowResponse, AppHandle, Emitter, Manager, Runtime, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder,
 };
 
 const PREFIX: &str = "recording-controls-";
 const ROUTE: &str = "/recording-controls";
 const OPEN_FAILED: &str = "Could not open floating controls. Try again from the tray.";
-static OPEN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// Opening WebView2 can block. Only window workers hold this lock, never capture.
+static LAST_OPENED_SESSION: Mutex<Option<String>> = Mutex::new(None);
 static LAST_REVIEW: Mutex<Option<String>> = Mutex::new(None);
 static APPEARANCE: Mutex<Option<Appearance>> = Mutex::new(None);
 
@@ -66,13 +67,67 @@ pub(crate) fn restrict_commands<R: Runtime>(
     }
 }
 
-pub(crate) fn available_session() -> Option<String> {
-    let saving = SAVING_RECORDING
-        .lock()
-        .ok()?
-        .as_ref()
-        .and_then(|s| s.session_id.clone());
-    saving.or_else(active_bookmark_session)
+pub(crate) fn available_session<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    OpenReason::Manual.current_session(app)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenReason {
+    Automatic,
+    Manual,
+}
+
+impl OpenReason {
+    fn current_session<R: Runtime>(self, app: &AppHandle<R>) -> Option<String> {
+        let saving = SAVING_RECORDING.lock().ok()?;
+        if let Some(owner) = saving.as_ref() {
+            return if self == Self::Manual {
+                owner.session_id.clone()
+            } else {
+                None
+            };
+        }
+        if is_stopping() || !IS_RECORDING.load(Ordering::Acquire) {
+            return None;
+        }
+        // A reconnect can temporarily take the recording manager. The
+        // committed live identity survives it, and Stop clears that identity.
+        app.state::<crate::knowledge::KnowledgeState>()
+            .live
+            .current_session_id()
+    }
+
+    fn claim(
+        self,
+        id: &str,
+        current: Option<&str>,
+        last_opened: &mut Option<String>,
+    ) -> Result<bool, &'static str> {
+        if current != Some(id) {
+            return match self {
+                Self::Automatic => Ok(false),
+                Self::Manual => Err("This recording is no longer available."),
+            };
+        }
+        // A manual open can win the race with startup and be dismissed before
+        // the automatic work runs. Closing the window never resets this claim.
+        if self == Self::Automatic && last_opened.as_deref() == Some(id) {
+            return Ok(false);
+        }
+        *last_opened = Some(id.to_owned());
+        Ok(true)
+    }
+}
+
+pub(super) fn open_on_start<R: Runtime>(app: AppHandle<R>, session_id: String) {
+    tauri::async_runtime::spawn_blocking(move || {
+        if open(&app, &session_id, OpenReason::Automatic).is_err() {
+            log::warn!("Could not open floating controls automatically");
+            if OpenReason::Automatic.current_session(&app).as_deref() == Some(&session_id) {
+                let _ = app.emit("recording-start-feedback", OPEN_FAILED);
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -80,24 +135,32 @@ pub(crate) async fn open_floating_controls<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
 ) -> Result<(), String> {
-    let _opening = OPEN.lock().await;
-    if available_session().as_deref() != Some(&session_id) {
-        return Err("This recording is no longer available.".into());
+    tauri::async_runtime::spawn_blocking(move || open(&app, &session_id, OpenReason::Manual))
+        .await
+        .map_err(|_| OPEN_FAILED.to_string())?
+}
+
+fn open<R: Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    reason: OpenReason,
+) -> Result<(), String> {
+    let mut last_opened = LAST_OPENED_SESSION.lock().map_err(|_| OPEN_FAILED)?;
+    let manual = reason == OpenReason::Manual;
+    let current = reason.current_session(app);
+    if !reason.claim(session_id, current.as_deref(), &mut last_opened)? {
+        return Ok(());
     }
     let label = format!("{PREFIX}{session_id}");
     if let Some(existing) = app.get_webview_window(&label) {
-        existing
-            .unminimize()
-            .and_then(|_| existing.show())
-            .and_then(|_| existing.set_focus())
-            .map_err(|_| OPEN_FAILED)?;
-        return Ok(());
-    }
-    // Replace a previous session's recovery notice on explicit reopen.
-    for (other_label, window) in app.webview_windows() {
-        if session(&other_label).is_ok() {
-            window.destroy().map_err(|_| OPEN_FAILED)?;
+        if manual {
+            existing
+                .unminimize()
+                .and_then(|_| existing.show())
+                .and_then(|_| existing.set_focus())
+                .map_err(|_| OPEN_FAILED)?;
         }
+        return Ok(());
     }
     let origin = app
         .get_webview_window("main")
@@ -105,15 +168,16 @@ pub(crate) async fn open_floating_controls<R: Runtime>(
         .url()
         .map_err(|_| OPEN_FAILED)?;
     let builder =
-        WebviewWindowBuilder::new(&app, label, WebviewUrl::App("recording-controls".into()));
+        WebviewWindowBuilder::new(app, &label, WebviewUrl::App("recording-controls".into()));
     #[cfg(windows)]
-    let builder = builder.data_directory(
+    let builder = builder.visible(manual).data_directory(
         app.path()
             .app_local_data_dir()
             .map_err(|_| OPEN_FAILED)?
             .join("controls-webview"),
     );
-    builder
+    let window = builder
+        .focused(manual)
         .incognito(true)
         .title("Recording controls")
         .inner_size(340., 214.)
@@ -131,6 +195,23 @@ pub(crate) async fn open_floating_controls<R: Runtime>(
         .on_new_window(|_, _| NewWindowResponse::Deny)
         .build()
         .map_err(|_| OPEN_FAILED)?;
+    // The webview may take longer to initialize than a short recording. Keep
+    // a late window from replacing any other session's controls.
+    if reason.current_session(app).as_deref() != Some(session_id) {
+        window.destroy().map_err(|_| OPEN_FAILED)?;
+        return Ok(());
+    }
+    // On Windows the first show of a focused(false) window uses
+    // SW_SHOWNOACTIVATE. The webview also skips its initial focus request.
+    #[cfg(windows)]
+    if !manual {
+        window.show().map_err(|_| OPEN_FAILED)?;
+    }
+    for (other_label, previous) in app.webview_windows() {
+        if other_label != label && session(&other_label).is_ok() && previous.destroy().is_err() {
+            log::warn!("Could not close previous floating controls");
+        }
+    }
     Ok(())
 }
 
@@ -247,6 +328,37 @@ pub(crate) fn dismiss_floating_controls<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dismissed_panel_only_reopens_on_request_until_the_next_recording() {
+        use OpenReason::{Automatic, Manual};
+        let mut opened = None;
+        assert_eq!(Automatic.claim("a", Some("a"), &mut opened), Ok(true));
+        assert_eq!(Automatic.claim("a", Some("a"), &mut opened), Ok(false));
+        assert_eq!(Manual.claim("a", Some("a"), &mut opened), Ok(true));
+        assert_eq!(Automatic.claim("b", Some("b"), &mut opened), Ok(true));
+        // Delayed work for A cannot replace B or reset its dismissal.
+        assert_eq!(Automatic.claim("a", Some("b"), &mut opened), Ok(false));
+        assert!(Manual.claim("a", Some("b"), &mut opened).is_err());
+        assert_eq!(Automatic.claim("b", Some("b"), &mut opened), Ok(false));
+    }
+
+    #[test]
+    fn manual_open_before_delayed_automatic_open_keeps_ownership_of_focus_and_dismissal() {
+        let mut opened = None;
+        assert_eq!(
+            OpenReason::Manual.claim("a", Some("a"), &mut opened),
+            Ok(true)
+        );
+        assert_eq!(
+            OpenReason::Automatic.claim("a", Some("a"), &mut opened),
+            Ok(false)
+        );
+        assert_eq!(
+            OpenReason::Automatic.claim("b", None, &mut opened),
+            Ok(false)
+        );
+    }
 
     #[test]
     fn only_a_recorder_bound_window_can_use_the_four_panel_commands() {
