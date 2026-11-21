@@ -1687,7 +1687,7 @@ mod source_attribution_tests {
 
 #[cfg(test)]
 mod system_audio_warning_tests {
-    use super::{DeviceType, SystemAudioWarningTracker};
+    use super::{audible_system_audio, DeviceType, SystemAudioWarningTracker};
     use std::time::Duration;
 
     #[test]

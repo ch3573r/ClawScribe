@@ -1223,8 +1223,7 @@ pub(crate) mod tests {
             .contains("speaker detection"));
         assert!(undo(&pool, meeting)
             .await
-            .unwrap_err()
-            .contains("speaker detection"));
+            .is_err_and(|error| error.contains("speaker detection")));
         assert!(restore_previous(&pool, meeting, &[])
             .await
             .unwrap_err()
