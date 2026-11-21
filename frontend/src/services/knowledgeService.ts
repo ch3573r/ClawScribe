@@ -1,10 +1,20 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AskRequest, ConversationOwner, DocumentAttachment, DocumentBlock, EvidenceRef, HistoryMessage, IndexStatus, KnowledgeScope, LibraryConversation, LiveAskRequest, LiveReply, LiveSnapshot, MeetingFilter, ModelStatus, ResolvedEvidence, ScopedDocument, SearchRequest, SearchResponse } from '@/types/knowledge';
+import type { SavedReference } from '@/lib/archive-search';
+export interface NotePreview {
+  token: string;
+  question: string;
+  excerpts: { source: 'note' | 'bookmark'; text: string }[];
+  destination: { provider: string; model: string; endpoint: string | null; organization: string | null; project: string | null };
+}
 
 /** The single native boundary for meeting memory. No provider credentials enter the UI request. */
 export const knowledgeService = {
   search: (request:SearchRequest) => invoke<SearchResponse>('knowledge_search',{request}),
   ask: (request:AskRequest | LiveAskRequest) => invoke<LiveReply>('knowledge_ask',{request}),
+  previewNotes: (request: AskRequest, references: SavedReference[]) => invoke<NotePreview>('knowledge_preview_notes', { request, references }),
+  askWithNotes: (request: AskRequest, references: SavedReference[], token: string) => invoke<LiveReply>('knowledge_ask_with_notes', { request, references, token }),
+  discardNoteReview: (token: string) => invoke<void>('knowledge_discard_note_review', { token }),
   cancel: (requestId:string,sessionId?:string) => invoke<void>('knowledge_cancel_request',{requestId,...(sessionId ? {sessionId} : {})}),
   liveSnapshot: () => invoke<LiveSnapshot>('knowledge_live_snapshot'),
   liveSharing: () => invoke<boolean>('knowledge_live_sharing'),

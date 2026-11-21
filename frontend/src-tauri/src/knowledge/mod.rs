@@ -16,12 +16,14 @@ pub mod indexer;
 pub mod live;
 pub mod live_context;
 pub mod model;
+pub(crate) mod note_review;
 pub mod retrieval;
 pub mod scheduler;
 pub mod store;
 pub mod types;
 use std::sync::Arc;
 pub struct KnowledgeState {
+    note_reviews: note_review::Reviews,
     pub live: Arc<live::LiveState>,
     pub documents: documents::Imports,
     pub answers: Arc<answers::AnswerRegistry>,
@@ -35,6 +37,7 @@ impl Default for KnowledgeState {
     fn default() -> Self {
         let cancellation = Arc::new(scheduler::CancellationRegistry::default());
         Self {
+            note_reviews: Default::default(),
             live: Arc::new(live::LiveState::default()),
             documents: documents::Imports::default(),
             answers: Arc::new(answers::AnswerRegistry::default()),

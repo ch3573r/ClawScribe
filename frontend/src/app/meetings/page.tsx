@@ -27,6 +27,7 @@ import { KnowledgeArchive } from "@/components/Knowledge/KnowledgeArchive";
 import { bookmarkTime, matchesProjectFilter, type ProjectFilter } from "@/lib/library";
 import { libraryScope } from "@/lib/knowledge-state";
 import { transcriptPassageUrl } from "@/lib/knowledge-navigation";
+import { useResultNotes } from "@/hooks/useResultNotes";
 import { useLibrarySearch } from "@/hooks/useLibrarySearch";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -110,6 +111,7 @@ export default function MeetingsPage() {
   const invalidDates = !!from && !!to && from > to;
   const scope = hasScope ? libraryScope(attentionOnly ? [...attentionIds] : [], !attentionOnly, projectFilter, from, to) : undefined;
   const { results, searching, error: searchError } = useLibrarySearch(query, tab === "archive" && !invalidDates && (!attentionOnly || attentionIds.size > 0), scope, false, meetings);
+  const noteSelection = useResultNotes(JSON.stringify({ query, projectFilter, attentionOnly, from, to }));
   const titleIds = useMemo(() => new Set(results?.titles.map(hit => hit.id)), [results]);
 
   const sortedMeetings = useMemo(() => {
@@ -310,7 +312,7 @@ export default function MeetingsPage() {
               <Button variant="outline" size="sm" disabled={meetingsLoading} onClick={() => void refetchMeetings()}>{meetingsLoading ? "Retrying…" : "Retry"}</Button>
             </div>
           )}
-          {hasQuery && results && matchIds.length > 0 && <Button variant="outline" size="sm" className="mb-3" onClick={() => askAboutMatches({ ids: matchIds, project: projectFilter, from, to })}>Ask about these results</Button>}
+          {hasQuery && results && matchIds.length > 0 && <Button variant="outline" size="sm" className="mb-3" onClick={() => askAboutMatches({ ids: matchIds, project: projectFilter, from, to, notes: noteSelection.references(saved) })}>Ask about these results</Button>}
           {!invalidDates && !searching && !searchError && (!hasQuery || visibleMeetings.length > 0 || (!passages.length && !saved.length && !results?.limited)) && <PageSection className="min-w-0 rounded-lg border border-border bg-card shadow-sm" aria-label={hasQuery ? "Matching titles" : "Saved meetings"}>
             {hasQuery && visibleMeetings.length > 0 && <h2 className="border-b border-border px-6 py-3 text-sm font-semibold">Matching titles</h2>}
             {visibleMeetings.length > 0 ? (
@@ -380,6 +382,7 @@ export default function MeetingsPage() {
                   router.push(savedPassageUrl(hit.reference, true));
                 }}>Show {sourceLabel[hit.reference.source].toLowerCase()}</Button>
               </div><blockquote className="whitespace-pre-wrap break-words text-sm text-muted-foreground">{hit.text}</blockquote>
+              {noteSelection.control(hit)}
             </li>)}</ol>
           </PageSection>}
         </div>

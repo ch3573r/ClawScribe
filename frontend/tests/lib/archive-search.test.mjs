@@ -53,3 +53,31 @@ test('only a current source in the intended meeting can open after verification'
   assert.ok(markerChanges.every(id => id === null));
   hooks.unmount();
 });
+
+test('only individually checked, visible note revisions cross the handoff as locators', () => {
+  const hooks = createHookHarness();
+  const jsx = (type, props) => ({type, props});
+  const { useResultNotes } = loadTsModule('src/hooks/useResultNotes.tsx', {
+    react: hooks.react, 'react/jsx-runtime': {jsx,jsxs:jsx}, '@/components/ui/checkbox': {Checkbox:'checkbox'},
+  });
+  const {openMatchScope, receiveMatchScope} = loadTsModule('src/lib/archive-search.ts');
+  const hit = (source, id) => ({reference: {meeting_id:'matched', source, id, start:0,end:7,fingerprint:id},text:'Private fixture excerpt'});
+  const note = hit('note','n'), bookmark = hit('bookmark','b'), summary = hit('summary','s');
+  const render = (view='archive selection') => hooks.render(() => useResultNotes(view));
+  const check = (row, value) => render().control(row).props.children[0].props.onCheckedChange(value);
+  try {
+    assert.equal(render().control(summary),null);
+    assert.equal(render().references([note,bookmark]).length,0);
+    check(note,true); check(bookmark,true); check(note,false);
+    assert.equal(render().references([note]).length,0);
+    assert.equal(render().references([hit('bookmark','revised')]).length,0);
+    const refs = render().references([summary,bookmark,note]);
+    const scope = {ids:['matched'],project:{tags:[],mode:'any',untagged:false},from:'',to:'',
+      notes:[...refs.map(ref=>({...ref,text:bookmark.text})),{...note.reference,meeting_id:'outside'}]};
+    openMatchScope(scope);
+    let transferred; receiveMatchScope(value=>{transferred=value;})();
+    assert.deepEqual(JSON.parse(JSON.stringify(transferred.notes)),[bookmark.reference]);
+    assert.doesNotMatch(JSON.stringify(transferred),/Private fixture|outside/);
+    assert.equal(render('new query').references([bookmark]).length,0);
+  } finally { hooks.unmount(); }
+});

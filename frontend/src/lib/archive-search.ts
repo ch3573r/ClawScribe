@@ -31,18 +31,22 @@ export function savedPassage(token: string, meetingId: string) {
 }
 
 export interface MatchScope {
+  notes?: SavedReference[];
   ids: string[];
   project: ProjectFilter;
   from: string;
   to: string;
 }
-// Only meeting IDs and archive filters cross into Meeting memory.
+// Only meeting IDs, archive filters and explicitly checked locators cross into Meeting memory.
 // Keep the search phrase and excerpts out of draft questions and route URLs.
 let pendingScope: MatchScope | null = null;
 let onScope: (() => void) | undefined;
 export function openMatchScope(scope: MatchScope) {
   if (!scope.ids.length) return;
   pendingScope = { ids: [...new Set(scope.ids)], project: { ...scope.project, tags: [...scope.project.tags] }, from: scope.from, to: scope.to };
+  if (scope.notes?.length) pendingScope.notes = scope.notes
+    .filter(note => note.source !== 'summary' && scope.ids.includes(note.meeting_id)).slice(0, 8)
+    .map(({ meeting_id, source, id, start, end, fingerprint }) => ({ meeting_id, source, id, start, end, fingerprint }));
   onScope?.();
 }
 export function receiveMatchScope(receive: (scope: MatchScope) => void) {

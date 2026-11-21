@@ -55,7 +55,7 @@ pub struct DestinationReview {
     pub approved: bool,
 }
 
-fn canonical_endpoint(raw: &str) -> Result<Url, String> {
+pub(super) fn canonical_endpoint(raw: &str) -> Result<Url, String> {
     let endpoint = Url::parse(raw.trim()).map_err(|_| "Enter a valid summary endpoint URL.")?;
     if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host().is_none() {
         return Err("The summary endpoint must use HTTP or HTTPS.".into());

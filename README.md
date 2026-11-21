@@ -183,7 +183,9 @@ and attention filters when you return.
 
 **Ask about these results** opens Meeting memory with the displayed matching
 meetings selected. Review the sources and provider, then enter a question
-and choose **Ask**. Personal notes and bookmarks stay in local search.
+and choose **Ask**. To use a personal note or bookmark, check its matched
+excerpt first. **Review and ask** shows the exact excerpts, question, provider,
+model and endpoint. **Confirm and send** includes those excerpts once.
 
 The meeting-memory preview in this source branch adds **Meetings → Meeting
 memory** in a separate tab: use the searchable picker to select saved meetings

@@ -101,8 +101,22 @@ to the displayed matching meetings, including when results are limited.
 The Archive also carries over project and date filters. Review the selected
 meetings, compose a question, and choose **Ask** to use the configured summary
 provider. Answers use the existing transcript evidence and eligible saved
-summary overviews. Personal note text, bookmark labels and the search phrase
-stay out of the handoff. The local assistant's `search_meetings` tool continues
+summary overviews. Personal notes and bookmarks stay local by default. Check
+**Review excerpt with a question** on individual results to bring up to eight
+excerpt references into the composer. Opening the composer sends nothing.
+**Review and ask** resolves each excerpt locally and shows its exact text, the
+question, and the provider, model, endpoint and configured organization or
+project. Remove an excerpt or go back to edit the question before confirming.
+**Confirm and send** allows one attempt with that selection. Changes to the
+sources, question, scope or destination require a fresh review. A failed
+attempt also requires another review.
+
+Reviewed requests send the displayed snippets as personal context alongside
+the usual meeting evidence. They omit prior conversation. Their saved questions
+and answers remain visible locally and are excluded from future provider
+history. The built-in model and providers with an identifiable HTTP endpoint
+support this review. Codex and Claude Code manage their own connections, so
+use them with personal excerpts deselected. The local assistant's `search_meetings` tool continues
 to match only titles and current transcripts.
 
 ## Meeting memory

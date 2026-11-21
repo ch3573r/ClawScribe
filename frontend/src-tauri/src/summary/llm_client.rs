@@ -144,6 +144,7 @@ pub(super) fn fixed_summary_endpoint(provider: &LLMProvider) -> Option<&'static 
 
 #[derive(Clone, Copy)]
 pub(crate) struct SummaryDispatch<'a> {
+    pub single_attempt: bool,
     pub ollama_context_tokens: Option<usize>,
     pub endpoint: Option<&'a url::Url>,
     pub check: Option<&'a super::request_config::DispatchCheck>,
@@ -402,7 +403,12 @@ pub(crate) async fn generate_summary(
                 LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible | LLMProvider::OpenClaw
             ) {
                 checked_client = crate::openai::secret_destination::secret_client(
-                    Client::builder().timeout(REQUEST_TIMEOUT_DURATION),
+                    if dispatch.is_some_and(|route| route.single_attempt) {
+                        super::request_config::direct_client().http1_only()
+                    } else {
+                        Client::builder()
+                    }
+                    .timeout(REQUEST_TIMEOUT_DURATION),
                     api_url,
                     allow_unencrypted,
                 )
@@ -423,6 +429,7 @@ pub(crate) async fn generate_summary(
         cancellation_token,
         api_key,
         &[system_prompt, user_prompt],
+        dispatch.is_some_and(|route| route.single_attempt),
     )
     .await?;
     parse_response(provider, response)
@@ -741,30 +748,144 @@ pub(crate) async fn resolve_configured_text(
     }
 }
 
+/// A destination that the one-attempt transport can pin to the reviewed request.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct NoteDestination {
+    pub provider: &'static str,
+    pub model: String,
+    pub endpoint: Option<String>,
+    pub organization: Option<String>,
+    pub project: Option<String>,
+    allow_unencrypted: bool,
+}
+impl ResolvedText {
+    pub(crate) fn note_destination(&self) -> Result<NoteDestination, String> {
+        let (raw, allow_unencrypted, org, project) = match &self.execution {
+            TextExecution::Compatible(compatible) => compatible.destination(),
+            TextExecution::Generic { endpoint, ollama_endpoint, allow_unencrypted, .. } => {
+                let url = match self.provider {
+                    LLMProvider::BuiltInAI => String::new(),
+                    LLMProvider::Ollama => format!("{}/api/chat", ollama_endpoint.as_deref().unwrap_or("http://localhost:11434").trim_end_matches('/')),
+                    LLMProvider::OpenClaw => endpoint.clone().ok_or("Configure the OpenClaw endpoint")?,
+                    _ => fixed_summary_endpoint(&self.provider).ok_or("Cannot verify this provider endpoint")?.into(),
+                };
+                (url, *allow_unencrypted, None, None)
+            }
+            _ => return Err("This provider manages its own connection. Deselect personal excerpts or choose a provider with a verifiable endpoint.".into()),
+        };
+        let endpoint = if self.provider == LLMProvider::BuiltInAI {
+            None
+        } else {
+            Some(super::request_config::canonical_endpoint(&raw)?.to_string())
+        };
+        Ok(NoteDestination {
+            provider: canonical_provider(&self.provider),
+            model: self.model.clone(),
+            endpoint,
+            organization: org.map(str::to_owned),
+            project: project.map(str::to_owned),
+            allow_unencrypted,
+        })
+    }
+}
+
 pub(crate) async fn dispatch_resolved_text(
     resolved: ResolvedText,
     system: String,
     user: String,
     token: &CancellationToken,
 ) -> Result<ConfiguredTextReply, String> {
+    dispatch_text(resolved, system, user, token, None).await
+}
+
+pub(crate) async fn dispatch_reviewed_text(
+    resolved: ResolvedText,
+    system: String,
+    user: String,
+    token: &CancellationToken,
+    destination: &NoteDestination,
+    preflight: futures_util::future::BoxFuture<'static, Result<(), String>>,
+) -> Result<ConfiguredTextReply, String> {
+    if &resolved.note_destination()? != destination {
+        return Err("The destination changed. Review this question again.".into());
+    }
+    dispatch_text(
+        resolved,
+        system,
+        user,
+        token,
+        Some((destination.clone(), preflight)),
+    )
+    .await
+}
+
+async fn dispatch_text(
+    resolved: ResolvedText,
+    system: String,
+    user: String,
+    token: &CancellationToken,
+    reviewed: Option<(
+        NoteDestination,
+        futures_util::future::BoxFuture<'static, Result<(), String>>,
+    )>,
+) -> Result<ConfiguredTextReply, String> {
     let deadline = resolved.deadline;
-    supervise(token,deadline,Duration::from_secs(5),move |token|async move {
-        let text=match resolved.execution {
-            TextExecution::ClaudeCode(provider)=>provider.generate(&resolved.model,&system,&user,&token).await?,
-            TextExecution::Compatible(provider)=>{
-                tokio::select! {biased;_=token.cancelled()=>return Err("Answer cancelled".into()),result=provider.send_text_prompt_cancellable(&system,&user,&token)=>result?}
-            },
-            TextExecution::Codex(provider)=>provider.run_text_prompt_cancellable(&format!("{system}\n\n{user}"),&token).await?,
-            TextExecution::Generic{api_key,ollama_endpoint,endpoint,allow_unencrypted,app_data_dir}=>{
-                let client=Client::new();
-                let operation=generate_summary(&client,&resolved.provider,&resolved.model,&api_key,&system,&user,ollama_endpoint.as_deref(),endpoint.as_deref(),allow_unencrypted,None,None,None,Some(&app_data_dir),Some(&token),None);
-                if resolved.provider==LLMProvider::BuiltInAI {operation.await?} else {
-                    tokio::select! {biased;_=token.cancelled()=>return Err("Answer cancelled".into()),result=operation=>result?}
+    supervise(token, deadline, Duration::from_secs(5), move |token| async move {
+        let reviewed = match reviewed {
+            Some((destination, verify)) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err("Answer cancelled".into()),
+                    result = verify => result?,
                 }
-            },
+                Some(destination)
+            }
+            None => None,
         };
-        if token.is_cancelled() {return Err("Answer cancelled".into());}
-        Ok(ConfiguredTextReply{text,provider:canonical_provider(&resolved.provider).into(),model:resolved.model})
+        let text = match resolved.execution {
+            TextExecution::ClaudeCode(provider) => provider.generate(&resolved.model, &system, &user, &token).await?,
+            TextExecution::Compatible(provider) => {
+                let provider = if reviewed.is_some() { provider.into_reviewed()? } else { provider };
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err("Answer cancelled".into()),
+                    result = provider.send_text_prompt_cancellable(&system, &user, &token) => result?,
+                }
+            }
+            TextExecution::Codex(provider) => provider.run_text_prompt_cancellable(&format!("{system}\n\n{user}"), &token).await?,
+            TextExecution::Generic { api_key, ollama_endpoint, endpoint, allow_unencrypted, app_data_dir } => {
+                let client = if reviewed.is_some() {
+                    super::request_config::direct_client().http1_only().build()
+                        .map_err(|_| "Cannot initialize reviewed connection")?
+                } else {
+                    Client::new()
+                };
+                let url = reviewed.as_ref().and_then(|dest| dest.endpoint.as_deref())
+                    .map(super::request_config::canonical_endpoint).transpose()?;
+                let route = reviewed.as_ref().map(|_| SummaryDispatch {
+                    single_attempt: true,
+                    endpoint: url.as_ref(),
+                    ollama_context_tokens: Some(resolved.budget.context_tokens),
+                    check: None,
+                });
+                let operation = generate_summary(
+                    &client, &resolved.provider, &resolved.model, &api_key, &system, &user,
+                    ollama_endpoint.as_deref(), endpoint.as_deref(), allow_unencrypted,
+                    None, None, None, Some(&app_data_dir), Some(&token), route,
+                );
+                if resolved.provider == LLMProvider::BuiltInAI {
+                    operation.await?
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => return Err("Answer cancelled".into()),
+                        result = operation => result?,
+                    }
+                }
+            }
+        };
+        if token.is_cancelled() { return Err("Answer cancelled".into()); }
+        Ok(ConfiguredTextReply { text, provider: canonical_provider(&resolved.provider).into(), model: resolved.model })
     }).await
 }
 
@@ -940,6 +1061,80 @@ mod response_tests {
                 serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
             assert_eq!(body["model"], actual);
             assert!(body.get("response_format").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewed_transport_requires_the_same_route_and_makes_one_http_attempt() {
+        for status in [307, 503] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let redirected = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let pool = config_pool(&format!("http://{}/v1", listener.local_addr().unwrap())).await;
+            let dir = tempfile::tempdir().unwrap();
+            let token = CancellationToken::new();
+            let resolve = || {
+                resolve_configured_text(
+                    &pool,
+                    TextEnvironment::local(dir.path().into()),
+                    "custom-openai",
+                    "test-model",
+                    tokio::time::Instant::now(),
+                    &token,
+                )
+            };
+            let resolved = resolve().await.unwrap();
+            let destination = resolved.note_destination().unwrap();
+            let mut changed = destination.clone();
+            changed.model = "different-model".into();
+            assert!(dispatch_reviewed_text(
+                resolved,
+                "system".into(),
+                "synthetic excerpt".into(),
+                &token,
+                &changed,
+                Box::pin(async { Ok(()) })
+            )
+            .await
+            .is_err());
+            let resolved = resolve().await.unwrap();
+            assert!(dispatch_reviewed_text(
+                resolved,
+                "system".into(),
+                "synthetic excerpt".into(),
+                &token,
+                &destination,
+                Box::pin(async { Err("Source changed".into()) })
+            )
+            .await
+            .is_err());
+            let url = format!("http://{}/other", redirected.local_addr().unwrap());
+            let server = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_test_request(&mut socket).await;
+                assert!(request.contains("synthetic excerpt"));
+                socket.write_all(format!("HTTP/1.1 {status} Test\r\nLocation: {url}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
+            };
+            let resolved = resolve().await.unwrap();
+            let send = dispatch_reviewed_text(
+                resolved,
+                "system".into(),
+                "synthetic excerpt".into(),
+                &token,
+                &destination,
+                Box::pin(async { Ok(()) }),
+            );
+            let ((), result) =
+                tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(server, send) })
+                    .await
+                    .unwrap();
+            assert!(result.is_err());
+            for socket in [&listener, &redirected] {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(40), socket.accept())
+                        .await
+                        .is_err()
+                );
+            }
         }
     }
 
@@ -1160,6 +1355,7 @@ mod response_tests {
             std::sync::Arc::new(|| Err(crate::summary::automatic::REVIEW_REQUIRED.into()));
         for check in [None, Some(&revoked)] {
             let dispatch = SummaryDispatch {
+                single_attempt: false,
                 endpoint: None,
                 ollama_context_tokens: Some(128),
                 check,

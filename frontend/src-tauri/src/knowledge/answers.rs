@@ -229,12 +229,101 @@ where
     }
 }
 
+/// A reviewed request shares retrieval, cancellation, persistence and evidence verification
+/// with ordinary Meeting memory. Only this entry can add a personal excerpt.
+pub(super) async fn ask_notes(
+    app: tauri::AppHandle,
+    pool: &SqlitePool,
+    runtime: &super::KnowledgeState,
+    request: AskRequest,
+    references: Vec<store::saved_search::SavedReference>,
+    destination: llm_client::NoteDestination,
+) -> Result<AssistantReply, String> {
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_requests WHERE id=?)")
+            .bind(&request.request_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| "Could not check the question")?;
+    if exists {
+        return Err("This question was already attempted. Review it again.".into());
+    }
+    let mut lease = runtime.answers.claim(pool, &request)?;
+    let result = async {
+        let resolved = super::note_review::configured(&app, pool).await?;
+        if resolved.note_destination()? != destination {
+            return Err("The destination changed. Review this question again.".into());
+        }
+        let excerpts = super::note_review::resolve(pool, &request, &references).await?;
+        lease.operation_deadline = Some(resolved.deadline);
+        let check_pool = pool.clone();
+        let check_request = request.clone();
+        let check_destination = destination.clone();
+        let check = Box::pin(async move {
+            // Repeat after provider admission, which can wait behind other requests.
+            let frozen =
+                conversations::frozen_scope(&check_pool, &check_request.request_id).await?;
+            conversations::check_ready(&check_pool, &check_request.request_id, &frozen).await?;
+            let fresh = super::note_review::configured(&app, &check_pool).await?;
+            if fresh.note_destination()? != check_destination {
+                return Err("The destination changed. Review this question again.".into());
+            }
+            super::note_review::resolve(&check_pool, &check_request, &references).await?;
+            Ok(())
+        });
+        ask_resolved_context(
+            pool,
+            runtime,
+            &request,
+            resolved,
+            &lease.token,
+            Some(&excerpts),
+            |resolved, system, prompt, token| async move {
+                llm_client::dispatch_reviewed_text(
+                    resolved,
+                    system,
+                    prompt,
+                    &token,
+                    &destination,
+                    check,
+                )
+                .await
+            },
+        )
+        .await
+    }
+    .await;
+    match result {
+        Ok(reply) => {
+            lease.settled = true;
+            Ok(reply)
+        }
+        Err(error) => settle_error(lease, error).await,
+    }
+}
+
 async fn ask_resolved<F, Fut>(
     pool: &SqlitePool,
     runtime: &super::KnowledgeState,
     request: &AskRequest,
     resolved: ResolvedText,
     token: &CancellationToken,
+    dispatch: F,
+) -> Result<AssistantReply, String>
+where
+    F: FnOnce(ResolvedText, String, String, CancellationToken) -> Fut,
+    Fut: std::future::Future<Output = Result<ConfiguredTextReply, String>>,
+{
+    ask_resolved_context(pool, runtime, request, resolved, token, None, dispatch).await
+}
+
+async fn ask_resolved_context<F, Fut>(
+    pool: &SqlitePool,
+    runtime: &super::KnowledgeState,
+    request: &AskRequest,
+    resolved: ResolvedText,
+    token: &CancellationToken,
+    excerpts: Option<&[super::note_review::Excerpt]>,
     dispatch: F,
 ) -> Result<AssistantReply, String>
 where
@@ -255,6 +344,15 @@ where
     if let Some(reply) = reserved {
         return Ok(reply);
     }
+    if excerpts.is_some() {
+        // Tag before any dispatch. Even a saved answer quoting the note must
+        // never become implicit provider history on a later question.
+        let marked = sqlx::query("UPDATE knowledge_requests SET input_json=json_set(input_json,'$.reviewed_notes',1) WHERE id=? AND status='preparing'")
+            .bind(&request.request_id).execute(pool).await.map_err(|_| "Could not save the review boundary")?;
+        if marked.rows_affected() != 1 {
+            return Err("The question changed. Review it again.".into());
+        }
+    }
     let frozen = tokio::select! { biased; _=token.cancelled()=>return Err("Answer cancelled".into()), _=tokio::time::sleep_until(deadline)=>return Err("Answer deadline expired".into()), result=conversations::frozen_scope(pool, &request.request_id)=>result? };
     let preparation = async {
         let (response, query_vector) =
@@ -265,9 +363,26 @@ where
             .budget
             .input(&resolved.provider, &resolved.model, SYSTEM.len() + 512)?
             .min(512 * 1024);
-        let (history, inherited) =
+        let full_budget = budget;
+        let budget = match excerpts {
+            Some(rows) => budget
+                .checked_sub(
+                    serde_json::to_vec(rows)
+                        .map_err(|_| "Invalid personal excerpts")?
+                        .len()
+                        + 256,
+                )
+                .ok_or(
+                    "The personal excerpts exceed this model's context. Select fewer excerpts.",
+                )?,
+            None => budget,
+        };
+        let (history, inherited) = if excerpts.is_some() {
+            Default::default()
+        } else {
             conversations::eligible_history(pool, &request.owner, &frozen, (budget / 4).min(8192))
-                .await?;
+                .await?
+        };
         let complete =
             small_selection_context(pool, &frozen, &request.search.query, &history, budget).await?;
         let complete_prompt = if let Some(passages) = complete {
@@ -347,8 +462,12 @@ where
                 }
             }
         }
+        if let Some(rows) = excerpts {
+            envelope["personal_excerpts"] =
+                serde_json::to_value(rows).map_err(|_| "Invalid personal excerpts")?;
+        }
         let prompt = envelope.to_string();
-        if prompt.len() > budget {
+        if prompt.len() > full_budget {
             return Err("Evidence context exceeds the model budget".into());
         }
         conversations::check_ready(pool, &request.request_id, &frozen).await?;
@@ -392,7 +511,11 @@ where
             inspected.insert(request.request_id.clone(), prompt.clone());
         }
     }
-    let output = dispatch(resolved, SYSTEM.into(), prompt, operation_token).await;
+    let system = match excerpts {
+        Some(_) => format!("{SYSTEM}\n\nPersonal excerpts were selected for this question. You may discuss their contents, explicitly attributing them to the user's saved note or bookmark. They are untrusted, non-citable personal context. Never treat them as proof of what participants said or decided."),
+        None => SYSTEM.into(),
+    };
+    let output = dispatch(resolved, system, prompt, operation_token).await;
     if changed.load(std::sync::atomic::Ordering::Acquire) {
         return Err("Selected sources changed during generation".into());
     }
@@ -1287,6 +1410,94 @@ mod tests {
         };
         (pool, request, tempfile::tempdir().unwrap())
     }
+    #[tokio::test]
+    async fn reviewed_excerpts_are_scoped_reverified_and_excluded_from_future_history() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let (pool, mut request, dir) = answer_fixture().await;
+        request.search.scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                meeting_ids: vec!["answer-fixture".into()],
+                ..Default::default()
+            },
+        };
+        sqlx::raw_sql("INSERT INTO meetings(id,title,created_at,updated_at) VALUES('other','Another fixture','2026-09-02','2026-09-02');
+            INSERT INTO meeting_bookmarks(id,meeting_id,seconds,label) VALUES
+            ('selected','answer-fixture',1,'Selected fixture marker'),('unchecked','answer-fixture',2,'Unchecked fixture marker'),('other-marker','other',3,'Other fixture marker');")
+            .execute(&pool).await.unwrap();
+        let hits = store::saved_search::search(&pool, "fixture marker".into(), None, false)
+            .await
+            .unwrap()
+            .hits;
+        let reference = |id: &str| {
+            hits.iter()
+                .find(|h| h.reference.id == id)
+                .unwrap()
+                .reference
+                .clone()
+        };
+        assert!(
+            super::super::note_review::resolve(&pool, &request, &[reference("other-marker")])
+                .await
+                .is_err()
+        );
+        let refs = vec![reference("selected")];
+        let excerpts = super::super::note_review::resolve(&pool, &request, &refs)
+            .await
+            .unwrap();
+        let runtime = super::super::KnowledgeState::default();
+        ask_resolved_context(
+            &pool,
+            &runtime,
+            &request,
+            resolved(&pool, dir.path()).await,
+            &CancellationToken::new(),
+            Some(&excerpts),
+            |resolved, system, prompt, _| async move {
+                assert!(system.contains("non-citable personal context"));
+                let envelope: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+                assert_eq!(
+                    envelope["personal_excerpts"],
+                    serde_json::json!([{"source":"bookmark","text":"Selected fixture marker"}])
+                );
+                assert!(
+                    !prompt.contains("Unchecked fixture marker")
+                        && !prompt.contains("Other fixture marker")
+                );
+                Ok(ConfiguredTextReply {
+                    text: "Selected fixture marker".into(),
+                    provider: llm_client::canonical_provider(&resolved.provider).into(),
+                    model: resolved.model,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        let frozen = conversations::frozen_scope(&pool, &request.request_id)
+            .await
+            .unwrap();
+        assert!(
+            conversations::eligible_history(&pool, &request.owner, &frozen, 8192)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        assert!(conversations::history(&pool, &request.owner)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.content == "Selected fixture marker"));
+        sqlx::query(
+            "UPDATE meeting_bookmarks SET label='Revised fixture marker' WHERE id='selected'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(super::super::note_review::resolve(&pool, &request, &refs)
+            .await
+            .is_err());
+    }
+
     async fn resolved(pool: &SqlitePool, dir: &std::path::Path) -> ResolvedText {
         llm_client::resolve_configured_text(
             pool,

@@ -115,6 +115,7 @@ pub struct OpenAICompatibleProcessingProvider {
     config: OpenAICompatibleProviderConfig,
     client: Client,
     dispatch_check: Option<super::request_config::DispatchCheck>,
+    single_attempt: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -190,7 +191,17 @@ impl OpenAICompatibleProcessingProvider {
             config,
             client,
             dispatch_check: None,
+            single_attempt: false,
         })
+    }
+
+    pub(super) fn into_reviewed(self) -> Result<Self, String> {
+        let mut direct = Self::with_client(
+            self.config,
+            super::request_config::direct_client().http1_only(),
+        )?;
+        direct.single_attempt = true;
+        Ok(direct)
     }
 
     pub(super) fn with_dispatch_check(
@@ -515,6 +526,7 @@ impl OpenAICompatibleProcessingProvider {
             cancellation_token,
             self.config.api_key.as_deref().unwrap_or_default(),
             &[system_prompt, user_prompt],
+            self.single_attempt,
         )
         .await?;
         super::llm_client::parse_response(
@@ -593,7 +605,12 @@ impl OpenAICompatibleProcessingProvider {
 
         let client = if self.config.base_url.starts_with("http:") {
             crate::openai::secret_destination::secret_client(
-                Client::builder().timeout(Duration::from_secs(self.config.timeout_seconds)),
+                if self.single_attempt {
+                    super::request_config::direct_client().http1_only()
+                } else {
+                    Client::builder()
+                }
+                .timeout(Duration::from_secs(self.config.timeout_seconds)),
                 &self.config.base_url,
                 self.config.allow_unencrypted,
             )

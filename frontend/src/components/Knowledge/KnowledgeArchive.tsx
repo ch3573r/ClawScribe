@@ -19,7 +19,7 @@ import { EvidencePreview } from "./EvidencePreview";
 import { ReferenceDocuments } from "@/components/MeetingDetails/ReferenceDocuments";
 import { AttachReferenceButton } from "@/components/MeetingDetails/AttachReferenceButton";
 import type { ProjectFilter } from "@/lib/library";
-import type { MatchScope } from "@/lib/archive-search";
+import type { MatchScope, SavedReference } from "@/lib/archive-search";
 import { classifySummaryProvider } from "@/lib/privacy";
 import type { IndexStatus, MeetingFilter, SearchMode } from "@/types/knowledge";
 
@@ -41,6 +41,7 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
   const [indexError, setIndexError] = useState(false);
   const [all, setAll] = useState(initialMatches ? false : memorySources.all);
   const [selected, setSelected] = useState(initialMatches?.ids ?? memorySources.selected);
+  const [notes, setNotes] = useState<SavedReference[]>(initialMatches?.notes ?? []);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [meetingQuery, setMeetingQuery] = useState("");
   const [from, setFrom] = useState(initialMatches?.from ?? memorySources.from);
@@ -132,8 +133,8 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
       {(all || selected.length > 0) && <p className="text-sm text-muted-foreground">
         Asking uses {all ? "all meetings in this filter" : `${selected.length} selected meeting${selected.length === 1 ? "" : "s"}`}.
         {" "}{destination.kind === "none" ? "Choose a summary provider in Settings before asking." :
-          `Choosing Ask sends your question, transcript evidence and any available summary overviews${state.selectedDocumentIds?.length ? " and selected references" : ""} to ${destination.label}.`}
-        {" "}Personal notes and bookmarks stay on this device.
+          `${notes.length ? "Confirming the preview sends" : "Choosing Ask sends"} your question, transcript evidence and any available summary overviews${state.selectedDocumentIds?.length ? " and selected references" : ""} to ${destination.label}.`}
+        {" "}{notes.length ? `${notes.length} personal excerpt${notes.length === 1 ? "" : "s"} selected for review before sending.` : "Personal notes and bookmarks stay on this device."}
       </p>}
       <div className="flex flex-wrap items-center gap-3 text-sm [&_button]:text-sm">
         <label className="flex items-center gap-2 text-sm"><Switch checked={all} onCheckedChange={setAll} />Search all saved meetings</label>
@@ -172,6 +173,9 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
       {invalidDates && <p role="alert" className="text-sm text-destructive">The start date must be on or before the end date.</p>}
     </fieldset>
     <div className="min-h-0 flex-1"><KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model} secondary={secondary}
+      selectedNotes={notes} reviewActive={active} destinationRevision={JSON.stringify([modelConfig?.ollamaEndpoint, modelConfig?.customOpenAIEndpoint, modelConfig?.organization, modelConfig?.project])}
+      removeNote={ref => setNotes(current => current.filter(value => value.fingerprint !== ref.fingerprint))}
+      clearNotes={() => setNotes([])}
       emptyState={!state.owner && !all && !selected.length ? <div className="flex flex-col items-center gap-2 text-center">
         <h3 className="text-lg font-semibold">Choose meetings to ask about</h3>
         <p className="text-sm text-muted-foreground">Pick one or more meetings, or search all saved meetings</p>

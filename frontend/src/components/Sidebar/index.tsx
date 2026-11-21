@@ -37,6 +37,7 @@ import {
 import { toast } from "sonner";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
+import { useResultNotes } from "@/hooks/useResultNotes";
 import { useLibrarySearch } from "@/hooks/useLibrarySearch";
 import { openMatchScope, savedPassageUrl, sourceLabel, type SavedHit } from "@/lib/archive-search";
 import { transcriptPassageUrl } from "@/lib/knowledge-navigation";
@@ -135,6 +136,7 @@ const Sidebar: React.FC = () => {
     }
     return grouped;
   }, [searchResults]);
+  const noteSelection = useResultNotes(searchQuery);
   const [showAllMeetings, setShowAllMeetings] = useState(false);
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "";
 
@@ -517,11 +519,11 @@ const Sidebar: React.FC = () => {
             <span className="line-clamp-3 break-words">Transcript · {matchingResult.text}</span>
           </Button>
         )}
-        {savedMatches.get(item.id)?.map(hit => <Button key={hit.reference.source} variant="ghost" className="mt-1 block h-auto w-full whitespace-normal p-2 text-left text-xs leading-5"
+        {savedMatches.get(item.id)?.map(hit => <div key={hit.reference.fingerprint}><Button variant="ghost" className="mt-1 block h-auto w-full whitespace-normal p-2 text-left text-xs leading-5"
           aria-label={`Open ${sourceLabel[hit.reference.source].toLowerCase()} match in ${item.title}`} onClick={() => {
             setCurrentMeeting({ id: item.id, title: item.title });
             router.push(savedPassageUrl(hit.reference));
-          }}><span className="line-clamp-3 break-words">{sourceLabel[hit.reference.source]} · {hit.text}</span></Button>)}
+          }}><span className="line-clamp-3 break-words">{sourceLabel[hit.reference.source]} · {hit.text}</span></Button>{noteSelection.control(hit)}</div>)}
       </div>
     );
   };
@@ -698,7 +700,7 @@ const Sidebar: React.FC = () => {
               {searchError && <p role="alert" className="mb-2 px-1 text-xs text-destructive">{searchError}</p>}
               {searchResults?.limited && <p role="status" className="mb-2 px-1 text-xs text-muted-foreground">Limited results. Try more specific text.</p>}
               {searchResults && visibleMeetings.length > 0 && <Button variant="outline" size="sm" className="mb-2" onClick={() => {
-                openMatchScope({ ids: visibleMeetings.map(meeting => meeting.id), project: { tags: [], mode: "any", untagged: false }, from: "", to: "" });
+                openMatchScope({ notes: noteSelection.references(visibleMeetings.flatMap(meeting => savedMatches.get(meeting.id) ?? [])), ids: visibleMeetings.map(meeting => meeting.id), project: { tags: [], mode: "any", untagged: false }, from: "", to: "" });
                 if (pathname !== "/meetings") router.push("/meetings");
               }}>Ask about these results</Button>}
 
