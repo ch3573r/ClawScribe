@@ -25,6 +25,7 @@ import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperatio
 import { useConfig } from '@/contexts/ConfigContext';
 import { useSourceAttribution } from '@/hooks/useSourceAttribution';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import type { TranscriptTextPatch } from '@/lib/meetingTranscripts';
 import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
 import { stepPlaybackRate } from '@/lib/playback-controls';
 import type { MeetingBookmark } from '@/lib/library';
@@ -45,6 +46,7 @@ export default function PageContent({
   summaryJob,
   onMeetingUpdated,
   onRefetchTranscripts,
+  onPatchTranscriptText,
   onRevealTranscript,
   onUpdateTranscriptSpeaker,
   onApplySpeakerToMatching,
@@ -52,6 +54,7 @@ export default function PageContent({
   segments,
   timelineSegments,
   timelineComplete,
+  isLoadingTranscript,
   hasMore,
   isLoadingMore,
   totalCount,
@@ -68,12 +71,14 @@ export default function PageContent({
   onMeetingUpdated?: () => Promise<void>;
   onRevealTranscript?: (id: string, index: number) => Promise<void>;
   onRefetchTranscripts?: () => Promise<void>;
+  onPatchTranscriptText?: (patches: TranscriptTextPatch[]) => void;
   onUpdateTranscriptSpeaker?: (transcriptId: string, speaker: string | null) => Promise<void>;
   onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
   // Pagination props
   segments?: TranscriptSegmentData[];
   timelineSegments?: TranscriptSegmentData[];
   timelineComplete?: boolean;
+  isLoadingTranscript?: boolean;
   hasMore?: boolean;
   isLoadingMore?: boolean;
   totalCount?: number;
@@ -117,6 +122,7 @@ export default function PageContent({
   const evidenceFocusRequest = useRef(0);
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
+  const [audioCheck, setAudioCheck] = useState(0);
   const audioPlayer = useAudioPlayer(audioPath);
   const { seek, play, pause, isPlaying } = audioPlayer;
   // Review tools: follow-along, bookmarks on the timeline, and requests raised by keyboard shortcuts.
@@ -125,7 +131,7 @@ export default function PageContent({
   const [findOpenRequest, setFindOpenRequest] = useState(0);
   const [bookmarkRequest, setBookmarkRequest] = useState(0);
   const stopFollowing = useCallback(() => setFollowPlayback(false), []);
-  const isAudioReady = Boolean(audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
+  const isAudioReady = Boolean(audioStatus === 'found' && audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
   const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean) => {
     if (!onRevealTranscript || !current()) throw new Error('The transcript is not ready. Retry the citation.');
     await onRevealTranscript(id, index);
@@ -255,9 +261,9 @@ export default function PageContent({
     let cancelled = false;
     const folderPath = meeting.folder_path;
     setAudioStatus('loading');
+    setAudioPath(null);
 
     if (!folderPath) {
-      setAudioPath(null);
       setAudioStatus('missing');
       return;
     }
@@ -280,7 +286,7 @@ export default function PageContent({
     return () => {
       cancelled = true;
     };
-  }, [meeting.folder_path]);
+  }, [meeting.folder_path, audioCheck]);
 
   // Depend on the individual player functions (stable identities from
   // useAudioPlayer), not the whole player object, which changes identity on
@@ -290,8 +296,7 @@ export default function PageContent({
   }, [seek]);
 
   const playPassage = useCallback((seconds: number) => {
-    void seek(seconds);
-    void play();
+    void seek(seconds).then(() => play()).catch(() => toast.error('Could not play that part of the recording.'));
   }, [seek, play]);
 
   const handleTimelinePlayPause = useCallback(() => {
@@ -340,7 +345,7 @@ export default function PageContent({
         <Button variant="ghost" size="sm" asChild><Link href="/meetings"><ChevronLeft />Back to archive</Link></Button>
       </div>}
       <EvidenceRoute token={evidenceToken} meetingId={meeting.id} audioReady={isAudioReady} audioStatus={audioStatus} audioError={audioPlayer.error} onReveal={revealEvidence} onPlay={playEvidence} />
-      {savedSourceToken && <SavedSearchRoute key={savedSourceToken} token={savedSourceToken} meetingId={meeting.id} onBookmark={setFocusedBookmark} />}
+      {savedSourceToken && <SavedSearchRoute key={savedSourceToken} token={savedSourceToken} meetingId={meeting.id} onBookmark={setFocusedBookmark} onPlay={isAudioReady ? playPassage : undefined} />}
       <MeetingHeader meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
         onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}
         duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
@@ -397,10 +402,14 @@ export default function PageContent({
           meetingId={meeting.id}
           meetingFolderPath={hasRecordingFolder ? meeting.folder_path : null}
           audioStatus={audioStatus}
+          audioError={audioPlayer.error}
+          onRetryAudio={hasRecordingFolder ? () => setAudioCheck(check => check + 1) : undefined}
+          isLoadingTranscript={isLoadingTranscript}
           showSpeakerAttribution={showSpeakerAttribution}
           activeTime={isAudioReady ? audioPlayer.currentTime : undefined}
           onSeekToTime={isAudioReady ? playPassage : undefined}
           onRefetchTranscripts={onRefetchTranscripts}
+          onPatchTranscriptText={onPatchTranscriptText}
           onUpdateTranscriptSpeaker={onUpdateTranscriptSpeaker}
           onApplySpeakerToMatching={onApplySpeakerToMatching}
           onRevealSegment={onRevealTranscript}

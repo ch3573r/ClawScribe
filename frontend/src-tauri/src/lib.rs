@@ -1020,6 +1020,7 @@ pub fn run() {
             api::api_get_meeting,
             api::api_get_meeting_metadata,
             api::api_get_meeting_transcripts,
+            api::api_get_meeting_transcript_timeline,
             api::api_update_transcript_speaker,
             api::api_update_transcript_speakers_matching,
             api::api_save_meeting_title,

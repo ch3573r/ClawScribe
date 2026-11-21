@@ -749,6 +749,12 @@ therefore supersedes older work. Recording contention, disabled indexing,
 cancellation and superseded jobs do not consume the three real-failure attempts.
 The worker borrows the existing scheduler tokenizer inside bounded calls; it
 does not retain a second tokenizer or a handle across recording backoff.
+During a meeting rebuild, the last 64 distinct complete short passages (up to
+96 UTF-8 bytes each) can share a vector when the text bytes match exactly.
+Each occurrence has its own canonical chunk, fingerprint, position and rank.
+A vector alias points to an owned vector from the same source, revision,
+generation and embedding space. Existing per-row vectors remain readable.
+Rebuilding an index preserves the source revision and citation identities.
 
 Keyword evidence uses exact canonical UTF-8 windows of at most 2,048 bytes with
 at most 128 bytes of overlap. Semantic bodies use at most 320 model tokens and
@@ -822,7 +828,9 @@ answer branch; archive search does not accept Live scopes.
 mode. It returns actual mode, index status and canonical passages. Questions are
 limited to 1,024 UTF-8 bytes. Quoted lexical queries and a local cosine scan each
 retain at most 64 candidates; vector pages hold at most 512 rows and scoring
-runs on blocking workers. RRF uses constant 60 and returns at most 12 passages.
+runs on blocking workers. SQLite finds the eligible sources once, then pages
+each by its published revision, generation and chunk ID. Materialization still
+rechecks scope and canonical fingerprints. RRF uses constant 60 and returns at most 12 passages.
 When multiple current indexed sources are eligible, the semantic heap keeps
 at most three candidates per source. A sole eligible source retains all 64
 slots. This limits single-source crowding without merging or deleting stored
@@ -832,6 +840,12 @@ Lexical rank transfers to a published semantic chunk only when that chunk
 covers the complete match. Containment deduplication stays within one source
 revision and preserves distinct dated meetings. Missing models or recording
 contention return keyword results with a visible fallback reason.
+
+Run `node scripts/benchmark-meeting-retrieval.mjs` to compare SQLite query
+plans and vector reads before and after the change, with 240 synthetic meetings
+and 144,060 candidate rows. The benchmark also checks vector alias backfill and
+the number of embedding inputs a rebuild can avoid for repeated short rows.
+Real model inference and installed-app playback are checked separately.
 The saved semantic opt-in is distinct from runtime readiness. Settings show
 installation and verification separately. Index status distinguishes a pending
 or active check from a failed check. Once the worker discovers missing or

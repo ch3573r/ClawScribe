@@ -10,9 +10,9 @@ export function evidenceIntent(token:string,meetingId:string) {
 }
 export function finishEvidenceIntent(token:string) {if(intent?.token===token)intent=null;}
 
-export function transcriptPassageUrl(reference: EvidenceRef, fromArchive = false): string | null {
+export function transcriptPassageUrl(reference: EvidenceRef, fromArchive = false, play = false): string | null {
   if (reference.locator.kind !== "transcript") return null;
-  const params = new URLSearchParams({ id: reference.locator.meeting_id, evidence: createEvidenceIntent(reference, false) });
+  const params = new URLSearchParams({ id: reference.locator.meeting_id, evidence: createEvidenceIntent(reference, play) });
   if (fromArchive) params.set("from", "archive");
   return `/meeting-details?${params}`;
 }

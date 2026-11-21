@@ -5,11 +5,13 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
-export interface ReplaceOptions { query: string; replacement: string; matchCase: boolean }
+export interface ReplaceOptions { query: string; replacement: string; matchCase: boolean; wholeWords?: boolean }
 export interface ReplacePreview { token: string; matches: number; segments: number; examples: {before: string; after: string}[] }
 
-export function TextReplaceDialog({ open, onOpenChange, title, preview, apply }: {
+export function TextReplaceDialog({ open, onOpenChange, title, preview, apply, initialQuery, offerWholeWords }: {
   open: boolean; onOpenChange: (open: boolean) => void; title: string;
+  initialQuery?: string;
+  offerWholeWords?: boolean;
   preview: (options: ReplaceOptions) => Promise<ReplacePreview>;
   apply: (options: ReplaceOptions, token: string) => Promise<void>;
 }) {
@@ -19,7 +21,10 @@ export function TextReplaceDialog({ open, onOpenChange, title, preview, apply }:
   const [error, setError] = useState('');
   const version = useRef(0);
   const running = useRef(false);
-  useEffect(() => { version.current++; setResult(null); setError(''); setBusy(false); }, [open]);
+  useEffect(() => {
+    version.current++; setResult(null); setError(''); setBusy(false);
+    if (open && initialQuery?.trim()) setOptions(old => ({ ...old, query: initialQuery.trim() }));
+  }, [open, initialQuery]);
   const update = (value: Partial<ReplaceOptions>) => { version.current++; setOptions(old => ({ ...old, ...value })); setResult(null); setError(''); };
   const run = async (save: boolean) => {
     if (running.current) return;
@@ -39,6 +44,7 @@ export function TextReplaceDialog({ open, onOpenChange, title, preview, apply }:
         <label className="block space-y-1 text-sm">Find<Input autoFocus maxLength={1000} value={options.query} onChange={e => update({ query: e.target.value })} /></label>
         <label className="block space-y-1 text-sm">Replace with<Input maxLength={4000} value={options.replacement} onChange={e => update({ replacement: e.target.value })} /></label>
         <label className="flex items-center gap-2 text-sm"><Checkbox className="h-[13px] w-[13px]" checked={options.matchCase} onCheckedChange={checked => update({ matchCase: checked === true })} />Match case</label>
+        {offerWholeWords && <label className="flex items-center gap-2 text-sm"><Checkbox checked={options.wholeWords === true} onCheckedChange={checked => update({ wholeWords: checked === true })} />Whole words only</label>}
       </fieldset>
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       {result && <div className="space-y-3"><p role="status" className="text-sm font-medium">{result.matches} replacements in {result.segments} passages</p>

@@ -24,10 +24,45 @@ function createView() {
 
 const row = (id, text = id) => ({ id, text, audio_start_time: 1, audio_end_time: 2 });
 const page = (transcripts, has_more = false) => ({ transcripts, has_more, total_count: 300 });
+
+test('reading and paging can continue while the lean timeline is pending', async () => {
+  const view = createView();
+  view.render();
+  view.requests.find(request => request.command === 'api_get_meeting_metadata').resolve({ id: 'first' });
+  view.requests.find(request => request.args.limit === 100).resolve(page([row('first')], true));
+  await flush();
+  const current = view.render();
+  assert.equal(current.isLoading, false);
+  assert.equal(current.timelineComplete, false);
+  const next = current.loadMore();
+  assert.equal(view.requests.at(-1).args.offset, 1);
+  view.requests.at(-1).resolve(page([row('second')]));
+  await next;
+  assert.equal(view.render().loadedCount, 2);
+  assert.equal(view.requests.filter(request => request.command === 'api_get_meeting_transcript_timeline').length, 1);
+  view.unmount();
+});
+
+test('a correction updates loaded rows without resetting pagination or accepting stale text', async () => {
+  const view = createView();
+  view.render();
+  resolveInitial(view.requests, 'Before');
+  await flush();
+  const next = view.render().loadMore();
+  const oldPage = view.requests.at(-1);
+  view.render().patchTranscriptText([{ id: 'Before', text: 'After', original_text: 'Before' }, { id: 'next', text: 'Fixed' }]);
+  assert.equal(view.render().transcripts[0].text, 'After');
+  assert.equal(view.render().timelineSegments[0].text, 'After');
+  oldPage.resolve(page([row('next', 'Stale')]));
+  await next;
+  assert.equal(view.render().transcripts.find(row => row.id === 'next').text, 'Fixed');
+  assert.equal(view.requests.length, 4);
+  view.unmount();
+});
 function resolveInitial(requests, title = 'Meeting', text = title) {
   requests.find(request => request.command === 'api_get_meeting_metadata').resolve({ id: requests[0].args.meetingId, title });
   requests.find(request => request.command === 'api_get_meeting_transcripts').resolve(page([row(title, text)], true));
-  requests.find(request => request.args.limit === 1000).resolve(page([row(title, text)]));
+  requests.find(request => request.command === 'api_get_meeting_transcript_timeline').resolve([row(title, text)]);
 }
 
 test('late metadata and transcript pages cannot replace a newly opened meeting', async () => {
@@ -85,6 +120,19 @@ test('jumping to a source does not skip sequential pages and duplicate load requ
   view.unmount();
 });
 
+test('a cited late passage stays loaded if its page wins the first-page race', async () => {
+  const view = createView();
+  view.render();
+  const first = view.requests.slice();
+  const source = view.render().revealSource('late', 250);
+  view.requests.at(-1).resolve(page([row('late')]));
+  await source;
+  resolveInitial(first);
+  await flush();
+  assert.deepEqual(Array.from(view.render().transcripts, row => row.id), ['Meeting', 'late']);
+  view.unmount();
+});
+
 test('leaving and reopening the same meeting loads it again', async () => {
   const view = createView();
   view.render();
@@ -109,6 +157,7 @@ function resolveRows(requests, rows = longRows) {
   for (const request of requests.filter(request => request.command === 'api_get_meeting_transcripts')) {
     request.resolve({ transcripts: rows.slice(request.args.offset, request.args.offset + request.args.limit), total_count: rows.length, has_more: request.args.offset + request.args.limit < rows.length });
   }
+  requests.find(request => request.command === 'api_get_meeting_transcript_timeline').resolve(rows);
 }
 
 test('the first list page has 100 rows while the timeline spans all 250', async () => {
@@ -146,6 +195,22 @@ test('matching speaker edits optimistically update the list and every timeline r
   view.unmount();
 });
 
+test('a speaker edit during first-page review is preserved when the old timeline arrives', async () => {
+  const view = createView();
+  view.render();
+  const transcriptPage = view.requests.find(request => request.args.limit === 100);
+  const timeline = view.requests.find(request => request.command === 'api_get_meeting_transcript_timeline');
+  transcriptPage.resolve(page(longRows.slice(0, 100), true));
+  await flush();
+  const saving = view.render().applySpeakerToMatching('Me', 'Alex');
+  view.requests.at(-1).resolve({ updated: 250 });
+  await saving;
+  timeline.resolve(longRows);
+  await flush();
+  assert.equal(view.render().timelineSegments[249].speaker, 'Alex');
+  view.unmount();
+});
+
 test('a single speaker edit updates both views and failed edits refetch both', async () => {
   const view = createView();
   view.render();
@@ -168,11 +233,11 @@ test('a single speaker edit updates both views and failed edits refetch both', a
 test('a late timeline from an earlier refetch cannot replace the refreshed rows', async () => {
   const view = createView();
   view.render();
-  const oldTimeline = view.requests.find(request => request.args.limit === 1000);
+  const oldTimeline = view.requests.find(request => request.command === 'api_get_meeting_transcript_timeline');
   const refresh = view.render().refetch();
   resolveInitial(view.requests.slice(-3), 'Corrected');
   await refresh;
-  oldTimeline.resolve(page([row('stale')]));
+  oldTimeline.resolve([row('stale')]);
   await flush();
   assert.equal(view.render().timelineSegments[0].text, 'Corrected');
   view.unmount();
@@ -183,7 +248,7 @@ test('a failed full timeline read reports the failure while retaining the paged 
   view.render();
   view.requests.find(request => request.command === 'api_get_meeting_metadata').resolve({ id: 'first' });
   view.requests.find(request => request.args.limit === 100).resolve(page([row('loaded')]));
-  view.requests.find(request => request.args.limit === 1000).reject(new Error('Synthetic timeline failure'));
+  view.requests.find(request => request.command === 'api_get_meeting_transcript_timeline').reject(new Error('Synthetic timeline failure'));
   await flush();
   const current = view.render();
   assert.equal(current.transcripts.length, 1);

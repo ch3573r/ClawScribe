@@ -13,6 +13,8 @@ pub const RESULT_LIMIT: usize = 12;
 pub const RRF_CONSTANT: f64 = 60.;
 const SCOPE_CTE: &str = "WITH allowed AS (SELECT value FROM json_each(?)), selected_documents AS (SELECT value FROM json_each(?))";
 const SCOPED_SOURCE: &str = "(s.meeting_id IN(SELECT value FROM allowed) OR (s.kind='document' AND EXISTS(SELECT 1 FROM knowledge_documents d JOIN knowledge_document_attachments a ON a.document_id=d.id WHERE d.source_id=s.id AND d.id IN(SELECT value FROM selected_documents) AND a.meeting_id IN(SELECT value FROM allowed))))";
+const PUBLISHED_SOURCE: &str = "s.semantic_revision=s.revision AND s.semantic_space=? AND EXISTS (SELECT 1 FROM knowledge_chunks c JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE c.source_id=s.id AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space)";
+const SEMANTIC_SOURCE_PAGE: &str = "SELECT c.id,v.vector,s.id FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id LEFT JOIN knowledge_vector_aliases a ON a.chunk_id=c.id JOIN knowledge_vectors v ON v.chunk_id=COALESCE(a.vector_chunk_id,c.id) WHERE s.id=? AND s.semantic_space=? AND s.semantic_revision=s.revision AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space AND c.id>? ORDER BY c.id LIMIT ?";
 #[cfg(test)]
 tokio::task_local! { static MOVE_AFTER_FTS: std::cell::RefCell<Option<(String,String)>>; }
 #[cfg(test)]
@@ -492,56 +494,71 @@ async fn semantic_candidates(
 ) -> Result<Vec<Passage>, KnowledgeError> {
     let query = super::embedding::normalize(query.to_vec())?;
     // Empty or stale generations do not reduce another source's budget.
-    let eligible: i64 = sqlx::query_scalar(&format!("{SCOPE_CTE} SELECT COUNT(DISTINCT s.id) FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE {SCOPED_SOURCE} AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space"))
-        .bind(allowed).bind(documents).bind(space).fetch_one(pool).await?;
-    let per_source = if eligible >= 2 { 3 } else { CANDIDATES };
+    let sources: Vec<String> = sqlx::query_scalar(&format!(
+        "{SCOPE_CTE} SELECT s.id FROM knowledge_sources s WHERE {SCOPED_SOURCE} AND {PUBLISHED_SOURCE}"
+    ))
+        .bind(allowed).bind(documents).bind(space).fetch_all(pool).await?;
+    let per_source = if sources.len() >= 2 { 3 } else { CANDIDATES };
     let mut heap = BinaryHeap::<Scored>::new();
-    let mut after = String::new();
-    loop {
-        let page:Vec<(String,Vec<u8>,String)>=sqlx::query_as(&format!("{SCOPE_CTE} SELECT c.id,v.vector,s.id FROM knowledge_vectors v JOIN knowledge_chunks c ON c.id=v.chunk_id JOIN knowledge_sources s ON s.id=c.source_id WHERE {SCOPED_SOURCE} AND v.space=? AND s.semantic_space=? AND s.semantic_revision=s.revision AND c.revision=s.revision AND c.generation=s.generation AND c.id>? ORDER BY c.id LIMIT ?")).bind(allowed).bind(documents).bind(space).bind(space).bind(&after).bind(VECTOR_PAGE as i64).fetch_all(pool).await?;
-        if page.is_empty() {
-            break;
-        }
-        debug_assert!(page.len() <= 512);
-        after = page.last().unwrap().0.clone();
-        let query = query.clone();
-        heap = tokio::task::spawn_blocking(move || {
-            for (id, bytes, source_id) in page {
-                if bytes.len() != 384 * 4 {
-                    continue;
-                }
-                let mut score = 0.;
-                for (value, weight) in bytes.chunks_exact(4).zip(&query) {
-                    score += f32::from_le_bytes(value.try_into().unwrap()) as f64 * *weight as f64;
-                }
-                if !score.is_finite() {
-                    continue;
-                }
-                let hit = Scored {
-                    score,
-                    id,
-                    source_id,
-                };
-                if per_source < CANDIDATES {
-                    let same_source = || heap.iter().filter(|item| item.source_id == hit.source_id);
-                    if same_source().count() >= per_source {
-                        let weakest = same_source().max().unwrap();
-                        if hit >= *weakest {
-                            continue;
+    for source in sources {
+        let mut after = String::new();
+        loop {
+            let page: Vec<(String, Vec<u8>, String)> = sqlx::query_as(SEMANTIC_SOURCE_PAGE)
+                .bind(&source)
+                .bind(space)
+                .bind(&after)
+                .bind(VECTOR_PAGE as i64)
+                .fetch_all(pool)
+                .await?;
+            let Some((last, _, _)) = page.last() else {
+                break;
+            };
+            let final_page = page.len() < VECTOR_PAGE;
+            after.clone_from(last);
+            let query = query.clone();
+            heap = tokio::task::spawn_blocking(move || {
+                for (id, bytes, source_id) in page {
+                    if bytes.len() != 384 * 4 {
+                        continue;
+                    }
+                    let mut score = 0.;
+                    for (value, weight) in bytes.chunks_exact(4).zip(&query) {
+                        score +=
+                            f32::from_le_bytes(value.try_into().unwrap()) as f64 * *weight as f64;
+                    }
+                    if !score.is_finite() {
+                        continue;
+                    }
+                    let hit = Scored {
+                        score,
+                        id,
+                        source_id,
+                    };
+                    if per_source < CANDIDATES {
+                        let same_source =
+                            || heap.iter().filter(|item| item.source_id == hit.source_id);
+                        if same_source().count() >= per_source {
+                            let weakest = same_source().max().unwrap();
+                            if hit >= *weakest {
+                                continue;
+                            }
+                            let remove = weakest.id.clone();
+                            heap.retain(|item| item.id != remove);
                         }
-                        let remove = weakest.id.clone();
-                        heap.retain(|item| item.id != remove);
+                    }
+                    heap.push(hit);
+                    if heap.len() > CANDIDATES {
+                        heap.pop();
                     }
                 }
-                heap.push(hit);
-                if heap.len() > CANDIDATES {
-                    heap.pop();
-                }
+                heap
+            })
+            .await
+            .map_err(|_| KnowledgeError::ProviderFailure)?;
+            if final_page {
+                break;
             }
-            heap
-        })
-        .await
-        .map_err(|_| KnowledgeError::ProviderFailure)?;
+        }
     }
     let mut best = heap.into_vec();
     best.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
@@ -609,7 +626,7 @@ pub(super) async fn retrieve_with_vector(
         serde_json::to_string(&scope.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?;
     let documents =
         serde_json::to_string(&scope.document_ids).map_err(|_| KnowledgeError::InvalidInput)?;
-    let scoped_ready = request.mode == SearchMode::Hybrid && sqlx::query_scalar::<_, bool>(&format!("{SCOPE_CTE} SELECT EXISTS(SELECT 1 FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE {SCOPED_SOURCE} AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space)"))
+    let scoped_ready = request.mode == SearchMode::Hybrid && sqlx::query_scalar::<_, bool>(&format!("{SCOPE_CTE} SELECT EXISTS(SELECT 1 FROM knowledge_sources s WHERE {SCOPED_SOURCE} AND {PUBLISHED_SOURCE})"))
         .bind(allowed).bind(documents).bind(&space.id).fetch_one(pool).await?;
     let embedding = if scoped_ready {
         Some(

@@ -17,6 +17,51 @@ test('sidebar match scope survives navigation once and carries no search text or
   ]);
 });
 
+test('the Ask handoff keeps a local question draft and its selected meetings', () => {
+  const { openMatchScope, receiveMatchScope } = loadTsModule('src/lib/archive-search.ts');
+  const submitted = [];
+  openMatchScope({ ids: ['b'], project: { tags: [], mode: 'any', untagged: false }, from: '', to: '', question: 'Äpfel im März' });
+  receiveMatchScope(scope => submitted.push(scope))();
+  assert.equal(submitted[0].question, 'Äpfel im März');
+  assert.deepEqual([...submitted[0].ids], ['b']);
+});
+
+test('search highlights translate UTF-8 offsets without splitting umlauts or emoji', () => {
+  const { searchHighlightParts } = loadTsModule('src/lib/archive-search.ts');
+  const parts = searchHighlightParts('📘 Äpfel auf der Straße', [[5, 11], [20, 27]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(parts)), [
+    { text: '📘 ', match: false }, { text: 'Äpfel', match: true },
+    { text: ' auf der ', match: false }, { text: 'Straße', match: true },
+  ]);
+});
+
+test('a timed search result reveals its text before the player is ready and plays the verified offset', async () => {
+  const navigation = loadTsModule('src/lib/knowledge-navigation.ts');
+  const reference = { locator: { kind: 'transcript', meeting_id: 'fixture' }, chunk_id: 'late-match' };
+  const token = new URL(navigation.transcriptPassageUrl(reference, true, true), 'https://example.com').searchParams.get('evidence');
+  const hooks = createHookHarness();
+  const actions = [];
+  const jsx = (type, props) => ({ type, props });
+  const { EvidenceRoute } = loadTsModule('src/components/Knowledge/EvidenceRoute.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@/lib/knowledge-navigation': navigation, '@/components/ui/button': { Button: 'button' },
+    '@/services/knowledgeService': { knowledgeService: { resolve: async () => ({
+      status: 'current', passage: {},
+      navigation: { meeting_id: 'fixture', transcript_id: 'late', transcript_index: 221, start_seconds: 724 },
+    }) } },
+  });
+  const onReveal = async (id, index) => actions.push(['reveal', id, index]);
+  const onPlay = async seconds => actions.push(['play', seconds]);
+  const render = audioReady => hooks.render(() => EvidenceRoute({ token, meetingId: 'fixture', audioReady, audioStatus: 'found', audioError: null, onReveal, onPlay }));
+  render(false);
+  await flush();
+  assert.deepEqual(actions, [['reveal', 'late', 221]]);
+  render(true);
+  await flush();
+  assert.deepEqual(actions, [['reveal', 'late', 221], ['play', 724]]);
+  hooks.unmount();
+});
+
 test('only a current source in the intended meeting can open after verification', async () => {
   const navigation = loadTsModule('src/lib/archive-search.ts');
   const reference = { meeting_id: 'fixture', source: 'bookmark', id: 'marker', start: 0, end: 6, fingerprint: 'abc' };
@@ -80,4 +125,21 @@ test('only individually checked, visible note revisions cross the handoff as loc
     assert.doesNotMatch(JSON.stringify(transferred),/Private fixture|outside/);
     assert.equal(render('new query').references([bookmark]).length,0);
   } finally { hooks.unmount(); }
+});
+
+test('switching to an account-managed provider discards checked personal excerpts', () => {
+  const hooks = createHookHarness();
+  const jsx = (type, props) => ({ type, props });
+  const { useResultNotes } = loadTsModule('src/hooks/useResultNotes.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, '@/components/ui/checkbox': { Checkbox: 'checkbox' },
+  });
+  const { supportsPersonalExcerpts } = loadTsModule('src/lib/archive-search.ts');
+  const note = { reference: { meeting_id: 'fixture', source: 'note', fingerprint: 'current' }, text: 'Local excerpt' };
+  const render = provider => hooks.render(() => useResultNotes('search', supportsPersonalExcerpts(provider)));
+  render('builtin-ai').control(note).props.children[0].props.onCheckedChange(true);
+  assert.equal(render('builtin-ai').references([note]).length, 1);
+  assert.equal(render('codex').control(note), null);
+  assert.equal(render('claude-code').references([note]).length, 0);
+  assert.equal(render('builtin-ai').references([note]).length, 0);
+  hooks.unmount();
 });

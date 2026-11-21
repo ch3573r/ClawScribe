@@ -5,17 +5,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createLatestSearch } from "@/lib/latest-search";
 import type { EvidenceRef, KnowledgeScope } from "@/types/knowledge";
-import type { SavedHit } from "@/lib/archive-search";
+import type { SavedHit, SearchExcerpt } from "@/lib/archive-search";
 
 export const MAX_LIBRARY_QUERY = 256;
 
-interface TitleHit { id: string; title: string; date: string }
-export interface TranscriptHit {
+interface TitleHit { id: string; title: string; date: string; highlights?: SearchExcerpt['highlights'] }
+export interface TranscriptHit extends SearchExcerpt {
   meeting_id: string;
   transcript_id: string;
   title: string;
   date: string;
-  text: string;
   speaker: string | null;
   start_seconds: number | null;
   evidence: EvidenceRef;

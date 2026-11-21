@@ -83,14 +83,15 @@ function conversationLabel(question?: string | null, createdAt?: string) {
   const label = question.replace(/\s+/g, " ").trim().slice(0, 60);
   return `${label}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}`;
 }
-export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachments, suggestions, headerMenuExtra, emptyState, selectedNotes, removeNote, clearNotes, reviewActive = true, destinationRevision }: {
+export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachments, suggestions, headerMenuExtra, emptyState, initialQuestion, selectedNotes, removeNote, clearNotes, reviewActive = true, destinationRevision }: {
   state: KnowledgeSearchState; mode: SearchMode; provider?: string; model?: string; title?: string; secondary?: ReactNode; compact?: boolean; headerActions?: ReactNode;
   contextBar?: ReactNode; composerStart?: ReactNode; attachments?: ReactNode; suggestions?: readonly string[]; headerMenuExtra?: ReactNode;
   emptyState?: ReactNode;
+  initialQuestion?: string;
   selectedNotes?: SavedReference[]; removeNote?: (reference: SavedReference) => void; clearNotes?: () => void;
   reviewActive?: boolean; destinationRevision?: string;
 }) {
-  const [question, setQuestion] = useState("");
+  const [question, setQuestion] = useState(initialQuestion ?? "");
   const [menuOpen, setMenuOpen] = useState(false);
   const [clearTarget, setClearTarget] = useState<ConversationOwner | null>(null);
   useEffect(() => setClearTarget(null), [state.owner?.kind, state.owner?.id]);

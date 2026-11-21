@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useReducer, startTransition, useEffect, memo, useMemo } from "react";
+import { useRef, useReducer, startTransition, useEffect, memo, useMemo, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
@@ -230,8 +230,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     const [, rerender] = useReducer((x: number) => x + 1, 0);
 
     // Setup virtualizer for efficient rendering of large lists
+    const getItemKey = useCallback((index: number) => segments[index].id, [segments]);
     const virtualizer = useVirtualizer({
         count: segments.length,
+        getItemKey,
         getScrollElement: () => scrollRef.current,
         estimateSize: () => 60, // Estimated height per segment
         overscan: 10, // Render extra items above/below viewport
@@ -242,14 +244,15 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         },
     });
 
-    // Custom hook for auto-scrolling (supports both virtualized and non-virtualized)
+    const scrolledSource = useRef<number | undefined>(undefined);
     useEffect(() => {
-        if (!focusedSource) return;
+        if (!focusedSource || scrolledSource.current === focusedSource.request) return;
         const index = segments.findIndex(segment => segment.id === focusedSource.id);
         if (index < 0) return;
         const timer = setTimeout(() => {
             if (segments.length >= VIRTUALIZATION_THRESHOLD) virtualizer.scrollToIndex(index, { align: 'center' });
             else scrollRef.current?.querySelectorAll('[data-segment-id]')[index]?.scrollIntoView({ block: 'nearest' });
+            scrolledSource.current = focusedSource.request;
         }, 60);
         return () => clearTimeout(timer);
     }, [focusedSource, segments, virtualizer]);

@@ -4,14 +4,14 @@ import { Checkbox } from "@/components/ui/checkbox";
 import type { SavedHit } from "@/lib/archive-search";
 
 /** Only checked, still-visible source revisions are offered to the composer. */
-export function useResultNotes(view: string) {
+export function useResultNotes(view: string, enabled = true) {
   const [chosen, setChosen] = useState<{ view: string; keys: string[] }>({ view, keys: [] });
-  if (view !== chosen.view) setChosen({ view, keys: [] });
-  const keys = chosen.view === view ? chosen.keys : [];
+  if (view !== chosen.view || (!enabled && chosen.keys.length)) setChosen({ view, keys: [] });
+  const keys = enabled && chosen.view === view ? chosen.keys : [];
   return {
     references: (hits: SavedHit[]) => hits.filter(hit => hit.reference.source !== "summary" && keys.includes(hit.reference.fingerprint)).map(hit => hit.reference),
     control(hit: SavedHit) {
-      if (hit.reference.source === "summary") return null;
+      if (!enabled || hit.reference.source === "summary") return null;
       const key = hit.reference.fingerprint;
       return <label className="flex items-center gap-2 text-xs">
         <Checkbox checked={keys.includes(key)} disabled={keys.length >= 8 && !keys.includes(key)} onCheckedChange={checked =>

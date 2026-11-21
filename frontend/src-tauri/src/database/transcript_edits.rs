@@ -36,6 +36,36 @@ pub struct ReplaceExample {
 pub struct EditResult {
     changed: usize,
     file_warning: bool,
+    // None means the transcript was replaced and the row order may have changed.
+    patches: Option<Vec<TextPatch>>,
+}
+
+#[derive(Serialize)]
+struct TextPatch {
+    id: String,
+    text: String,
+    original_text: Option<String>,
+    word_timestamps: Option<Vec<crate::api::TranscriptWord>>,
+}
+
+impl Change {
+    fn into_patch(self, undo: bool) -> TextPatch {
+        if undo {
+            TextPatch {
+                id: self.id,
+                text: self.before,
+                original_text: self.original,
+                word_timestamps: crate::api::api::parse_word_timestamps(self.words.as_deref()),
+            }
+        } else {
+            TextPatch {
+                id: self.id,
+                text: self.after,
+                original_text: self.original.or(Some(self.before)),
+                word_timestamps: None,
+            }
+        }
+    }
 }
 
 fn error(_: impl std::fmt::Display) -> String {
@@ -47,13 +77,20 @@ fn replacement_plan(
     query: &str,
     replacement: &str,
     match_case: bool,
+    whole_words: bool,
 ) -> Result<(ReplacePreview, Vec<Change>), String> {
     if query.is_empty() || query.len() > 1000 || replacement.len() > 4000 {
         return Err(
             "Enter a search term up to 1,000 bytes and a replacement up to 4,000 bytes".into(),
         );
     }
-    let pattern = RegexBuilder::new(&regex::escape(query))
+    let literal = regex::escape(query);
+    let expression = if whole_words {
+        format!(r"\b{{start-half}}{literal}\b{{end-half}}")
+    } else {
+        literal
+    };
+    let pattern = RegexBuilder::new(&expression)
         .case_insensitive(!match_case)
         .build()
         .map_err(|_| "Invalid search term")?;
@@ -114,7 +151,7 @@ fn validate_text(text: &str) -> Result<(), String> {
 }
 
 async fn rows(pool: &SqlitePool, meeting: &str) -> Result<Vec<Transcript>, String> {
-    sqlx::query_as("SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY id")
+    sqlx::query_as("SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id")
         .bind(meeting)
         .fetch_all(pool)
         .await
@@ -169,7 +206,7 @@ async fn apply(pool: &SqlitePool, meeting: &str, changes: &[Change]) -> Result<(
     tx.commit().await.map_err(error)
 }
 
-async fn undo(pool: &SqlitePool, meeting: &str) -> Result<usize, String> {
+async fn undo(pool: &SqlitePool, meeting: &str) -> Result<Vec<Change>, String> {
     let mut tx = pool.begin().await.map_err(error)?;
     assert_editable(&mut tx, meeting).await?;
     let batch: Option<(String, String)> = sqlx::query_as("SELECT id, changes_json FROM transcript_edit_batches WHERE meeting_id = ? AND undone = 0 ORDER BY rowid DESC LIMIT 1")
@@ -200,7 +237,7 @@ async fn undo(pool: &SqlitePool, meeting: &str) -> Result<usize, String> {
         .await
         .map_err(error)?;
     tx.commit().await.map_err(error)?;
-    Ok(changes.len())
+    Ok(changes)
 }
 
 pub(crate) async fn restore_previous(
@@ -942,6 +979,7 @@ async fn complete<R: Runtime>(
     pool: &SqlitePool,
     meeting: &str,
     changed: usize,
+    patches: Option<Vec<TextPatch>>,
     job: tokio::sync::OwnedSemaphorePermit,
 ) -> EditResult {
     let roots = crate::audio::recording_preferences::recording_roots(app).await;
@@ -960,6 +998,7 @@ async fn complete<R: Runtime>(
     EditResult {
         changed,
         file_warning: synced.is_err(),
+        patches,
     }
 }
 
@@ -985,22 +1024,35 @@ pub async fn api_update_transcript_text<R: Runtime>(
     if row.transcript != expected_text {
         return Err("The transcript changed. Reload it before editing.".into());
     }
-    let changed = usize::from(row.transcript != text);
-    if changed > 0 {
-        apply(
-            pool,
-            &meeting_id,
-            &[Change {
-                id: row.id,
-                before: row.transcript,
-                after: text,
-                original: row.original_transcript,
-                words: row.word_timestamps_json,
-            }],
-        )
-        .await?;
-    }
-    Ok(complete(&app, pool, &meeting_id, changed, job).await)
+    let changes = if row.transcript == text {
+        Vec::new()
+    } else {
+        vec![Change {
+            id: row.id,
+            before: row.transcript,
+            after: text,
+            original: row.original_transcript,
+            words: row.word_timestamps_json,
+        }]
+    };
+    apply(pool, &meeting_id, &changes).await?;
+    Ok(complete_text_edit(&app, pool, &meeting_id, changes, false, job).await)
+}
+
+async fn complete_text_edit<R: Runtime>(
+    app: &AppHandle<R>,
+    pool: &SqlitePool,
+    meeting_id: &str,
+    changes: Vec<Change>,
+    undo: bool,
+    job: tokio::sync::OwnedSemaphorePermit,
+) -> EditResult {
+    let count = changes.len();
+    let patches = changes
+        .into_iter()
+        .map(|change| change.into_patch(undo))
+        .collect();
+    complete(app, pool, meeting_id, count, Some(patches), job).await
 }
 
 #[tauri::command]
@@ -1010,10 +1062,17 @@ pub async fn api_preview_transcript_replace(
     query: String,
     replacement: String,
     match_case: bool,
+    whole_words: Option<bool>,
 ) -> Result<ReplacePreview, String> {
     let transcripts = rows(state.db_manager.pool(), &meeting_id).await?;
     Ok(tauri::async_runtime::spawn_blocking(move || {
-        replacement_plan(transcripts, &query, &replacement, match_case)
+        replacement_plan(
+            transcripts,
+            &query,
+            &replacement,
+            match_case,
+            whole_words.unwrap_or(false),
+        )
     })
     .await
     .map_err(error)??
@@ -1028,13 +1087,20 @@ pub async fn api_replace_transcript_text<R: Runtime>(
     query: String,
     replacement: String,
     match_case: bool,
+    whole_words: Option<bool>,
     preview_token: String,
 ) -> Result<EditResult, String> {
     let job = crate::audio::inference::claim_job()?;
     let pool = state.db_manager.pool();
     let transcripts = rows(pool, &meeting_id).await?;
     let (preview, changes) = tauri::async_runtime::spawn_blocking(move || {
-        replacement_plan(transcripts, &query, &replacement, match_case)
+        replacement_plan(
+            transcripts,
+            &query,
+            &replacement,
+            match_case,
+            whole_words.unwrap_or(false),
+        )
     })
     .await
     .map_err(error)??;
@@ -1042,7 +1108,7 @@ pub async fn api_replace_transcript_text<R: Runtime>(
         return Err("The transcript changed. Preview the replacements again.".into());
     }
     apply(pool, &meeting_id, &changes).await?;
-    Ok(complete(&app, pool, &meeting_id, changes.len(), job).await)
+    Ok(complete_text_edit(&app, pool, &meeting_id, changes, false, job).await)
 }
 
 #[tauri::command]
@@ -1053,8 +1119,8 @@ pub async fn api_undo_transcript_edit<R: Runtime>(
 ) -> Result<EditResult, String> {
     let job = crate::audio::inference::claim_job()?;
     let pool = state.db_manager.pool();
-    let count = undo(pool, &meeting_id).await?;
-    Ok(complete(&app, pool, &meeting_id, count, job).await)
+    let changes = undo(pool, &meeting_id).await?;
+    Ok(complete_text_edit(&app, pool, &meeting_id, changes, true, job).await)
 }
 
 #[tauri::command]
@@ -1067,7 +1133,7 @@ pub async fn api_restore_previous_transcript<R: Runtime>(
     let pool = state.db_manager.pool();
     let roots = crate::audio::recording_preferences::recording_roots(&app).await;
     let count = restore_previous(pool, &meeting_id, &roots).await?;
-    Ok(complete(&app, pool, &meeting_id, count, job).await)
+    Ok(complete(&app, pool, &meeting_id, count, None, job).await)
 }
 
 #[tauri::command]
@@ -1114,6 +1180,26 @@ pub(crate) mod tests {
                 .bind(id).bind(content).bind(start).bind(start + 3.0).execute(&pool).await.unwrap();
         }
         pool
+    }
+
+    #[tokio::test]
+    async fn whole_word_preview_replaces_names_without_matching_a_larger_word() {
+        let pool = fixture().await;
+        sqlx::query("UPDATE transcripts SET transcript='MÜLLER in der Müllerstraße ruft Müller.' WHERE id='a'")
+            .execute(&pool).await.unwrap();
+        let (preview, _) = replacement_plan(
+            rows(&pool, "review-test").await.unwrap(),
+            "Müller",
+            "Möller",
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(preview.matches, 2);
+        assert_eq!(
+            preview.examples[0].after,
+            "Möller in der Müllerstraße ruft Möller."
+        );
     }
 
     #[tokio::test]
@@ -1202,6 +1288,7 @@ pub(crate) mod tests {
             "project",
             "$1",
             false,
+            false,
         )
         .unwrap();
         assert_eq!(preview.matches, 2);
@@ -1214,7 +1301,7 @@ pub(crate) mod tests {
         );
         assert!(changed.iter().all(|row| row.word_timestamps_json.is_none()));
         assert_eq!(changed[1].audio_start_time, Some(900.0));
-        let (_, second) = replacement_plan(changed, "$1", "review", true).unwrap();
+        let (_, second) = replacement_plan(changed, "$1", "review", true, false).unwrap();
         apply(&pool, "review-test", &second).await.unwrap();
         undo(&pool, "review-test").await.unwrap();
         assert_eq!(
@@ -1235,6 +1322,7 @@ pub(crate) mod tests {
             rows(&pool, "review-test").await.unwrap(),
             "project",
             "correction",
+            false,
             false,
         )
         .unwrap();
@@ -1335,6 +1423,7 @@ pub(crate) mod tests {
             "project",
             "review",
             false,
+            false,
         )
         .unwrap();
         sqlx::query("UPDATE transcripts SET transcript = 'A newer correction' WHERE id = 'b'")
@@ -1352,7 +1441,8 @@ pub(crate) mod tests {
             rows(&pool, "review-test").await.unwrap(),
             "Äpfel project",
             "",
-            true
+            true,
+            false,
         )
         .is_err());
     }
@@ -1371,6 +1461,7 @@ pub(crate) mod tests {
             rows(&pool, "review-test").await.unwrap(),
             "project",
             "review",
+            false,
             false,
         )
         .unwrap();

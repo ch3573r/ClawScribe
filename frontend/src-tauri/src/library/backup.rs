@@ -1855,6 +1855,7 @@ mod tests {
             "knowledge_title_literal",
             "knowledge_transcript_literal",
             "knowledge_vectors",
+            "knowledge_vector_aliases",
             "licensing",
             "openclaw_handoffs", // delivery history names the local profile's destination
             "pending_meeting_file_cleanup",
