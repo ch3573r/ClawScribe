@@ -171,6 +171,10 @@ save deadline allows two additional minutes for publication and fallback work.
 If raw encoding fails, existing legacy checkpoints are tried and originals are
 retained. New sessions rely on their raw spool for recovery.
 
+Older unsaved transcripts remain available in **Interrupted recordings**, including
+transcripts held only in the app's local recovery cache. A recording already
+saved to the library or currently being captured is excluded from cache recovery.
+
 Recovery accepts recordings without a transcript: recover the saved audio first,
 then use Transcribe in the saved meeting. If audio recovery fails and there is no
 transcript, the recovery entry and originals remain available for retry. Recovered

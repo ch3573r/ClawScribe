@@ -330,23 +330,18 @@ pub async fn api_get_meetings<R: Runtime>(
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Listing local meetings");
     let pool = state.db_manager.pool();
-    let meetings: Result<Vec<MeetingModel>, sqlx::Error> =
-        MeetingsRepository::get_meetings(pool).await;
-
-    match meetings {
-        Ok(meeting_models) => {
-            log_info!("Successfully got {} meetings", meeting_models.len());
-
-            let result: Vec<Meeting> = meeting_models
+    match MeetingsRepository::get_meetings(pool).await {
+        Ok(meetings) => {
+            log_info!("Successfully got {} meetings", meetings.len());
+            Ok(meetings
                 .into_iter()
-                .map(|m| Meeting {
-                    id: m.id,
-                    title: m.title,
-                    created_at: m.created_at.0.to_rfc3339(),
-                    updated_at: m.updated_at.0.to_rfc3339(),
+                .map(|meeting| Meeting {
+                    id: meeting.id,
+                    title: meeting.title,
+                    created_at: meeting.created_at,
+                    updated_at: meeting.updated_at,
                 })
-                .collect();
-            Ok(result)
+                .collect())
         }
         Err(e) => {
             log_error!("Error getting meetings");
@@ -1019,120 +1014,34 @@ pub async fn api_delete_meeting<R: Runtime>(
     auth_token: Option<String>,
     delete_files: bool,
 ) -> Result<serde_json::Value, String> {
-    let _job = claim_meeting_deletion_job(delete_files)?;
-    use tauri::Manager;
+    let _work = crate::updates::admit_work()?;
+    let recording_job = claim_meeting_deletion_job(delete_files)?.map(std::sync::Arc::new);
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Deleting local meeting");
 
     let pool = state.db_manager.pool();
-    let folder: Option<String> =
-        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
-            .bind(&meeting_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| "Could not read the meeting folder")?
-            .flatten();
-    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    let deleted = MeetingsRepository::delete_from_library(pool, &meeting_id, delete_files)
+        .await
+        .map_err(|_| "Could not delete the meeting from the library.")?
+        .ok_or("The meeting was not found or was already deleted.")?;
+    let _ = app.emit("library-meeting-deleted", &meeting_id);
 
-    match MeetingsRepository::delete_meeting_with_documents(pool, &meeting_id).await {
-        Ok((true, originals)) => {
-            let mut warnings = Vec::new();
-            match app.path().app_data_dir() {
-                Ok(data) => {
-                    let root = data.join("reference-documents");
-                    for name in originals {
-                        if let Err(warning) =
-                            crate::knowledge::documents::remove_original(&root, &name).await
-                        {
-                            warnings.push(warning);
-                        }
-                    }
-                    if let Some(warning) =
-                        crate::summary::codex_provider::remove_meeting_outputs(&data, &meeting_id)
-                            .await
-                    {
-                        warnings.push(warning);
-                    }
-                }
-                Err(_) => {
-                    if !originals.is_empty() {
-                        warnings.push("Could not locate reference document originals".into());
-                    }
-                    warnings.push("Could not locate generated meeting outputs".into());
-                }
-            }
-            if let Some(warning) =
-                crate::summary::codex_provider::remove_meeting_runs(&meeting_id).await
-            {
-                warnings.push(warning);
-            }
-            match crate::exports::commands::export_ledger_dir(&app, &meeting_id) {
-                Ok(ledger) => {
-                    if let Err(error) = tokio::fs::remove_dir_all(&ledger).await {
-                        if error.kind() != std::io::ErrorKind::NotFound {
-                            warnings
-                                .push(format!("Export history folder kept: {}", ledger.display()));
-                        }
-                    }
-                }
-                Err(_) => warnings.push("Could not locate the export history folder".into()),
-            }
-            if delete_files {
-                if let Some(folder) = folder {
-                    let other_folders = sqlx::query_scalar::<_, String>(
-                        "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL",
-                    )
-                    .fetch_all(pool)
-                    .await;
-                    let meeting_id_for_files = meeting_id.clone();
-                    match other_folders {
-                        Ok(others) => {
-                            let retained = format!(
-                                "Recording folder kept: {folder} (cleanup could not finish)"
-                            );
-                            let result = tokio::task::spawn_blocking(move || {
-                                crate::database::meeting_files::remove_recording_folder(
-                                    std::path::Path::new(&folder),
-                                    &meeting_id_for_files,
-                                    &roots,
-                                    &others
-                                        .into_iter()
-                                        .map(std::path::PathBuf::from)
-                                        .collect::<Vec<_>>(),
-                                )
-                            })
-                            .await;
-                            match result {
-                                Ok(Ok(())) => {}
-                                Ok(Err(warning)) => warnings.push(warning),
-                                Err(_) => warnings.push(retained),
-                            }
-                        }
-                        Err(_) => warnings.push(format!(
-                            "Recording folder kept: {folder} (could not check shared use)"
-                        )),
-                    }
-                }
-            }
-            log_info!("Successfully deleted meeting {}", meeting_id);
-            Ok(serde_json::json!({
-                "status": "success",
-                "message": "Meeting deleted successfully",
-                "warnings": warnings
-            }))
-        }
-        Ok((false, _)) => {
-            log_warn!("Meeting not found or already deleted");
-            Err(format!(
-                "Meeting not found or could not be deleted: {}",
-                meeting_id
-            ))
-        }
-        Err(e) => {
-            log_error!("Error deleting meeting");
-            Err(format!("Failed to delete meeting: {}", e))
-        }
+    let locations = crate::library::file_cleanup::CleanupLocations::for_app(&app).await;
+    let mut cleanup_pending = false;
+    for id in deleted.cleanup_ids {
+        let result =
+            crate::library::file_cleanup::attempt(pool, &locations, id, recording_job.clone())
+                .await;
+        cleanup_pending |= !matches!(result, Ok(None));
     }
+    if cleanup_pending {
+        log_warn!("Some deleted meeting files are pending cleanup");
+    }
+    Ok(serde_json::json!({
+        "status": "success",
+        "folder_path": deleted.folder,
+        "cleanup_pending": cleanup_pending
+    }))
 }
 
 fn claim_meeting_deletion_job(
@@ -1222,8 +1131,8 @@ pub async fn api_get_meeting_metadata<R: Runtime>(
             Ok(MeetingMetadata {
                 id: meeting.id,
                 title: meeting.title,
-                created_at: meeting.created_at.0.to_rfc3339(),
-                updated_at: meeting.updated_at.0.to_rfc3339(),
+                created_at: meeting.created_at,
+                updated_at: meeting.updated_at,
                 folder_path: meeting.folder_path,
             })
         }

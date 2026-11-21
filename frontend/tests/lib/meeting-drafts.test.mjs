@@ -95,3 +95,35 @@ test('a rejected quit flush reports failure with its attempt identity', async ()
   await flushSummaryEditsBeforeExit(13, async () => {});
   assert.deepEqual(calls[1], ['api_finish_summary_edit_exit', 13]);
 });
+
+test('deleting a meeting retires its draft without failing a quit flush or losing another meeting edit', async () => {
+  const saving = deferred();
+  const started = deferred();
+  const saves = [];
+  const pending = [];
+  const { meetingDraft, discardMeetingDraft, flushMeetingDrafts } = loadTsModule(fileURLToPath(new URL('../../src/lib/meetingDrafts.ts', import.meta.url)), {
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      if (command === 'api_get_summary') return { status: 'completed' };
+      if (command === 'api_set_summary_edits_pending') { pending.push(args.pending); return; }
+      saves.push([args.meetingId, command]);
+      if (args.meetingId === 'deleted') { started.resolve(); await saving.promise; }
+    } },
+    sonner: { toast: { error() { assert.fail('Deletion must not turn a late write into a save error'); } } },
+  });
+  const deleted = meetingDraft('deleted');
+  deleted.edit({ title: 'Pending title', summary: { markdown: 'Pending summary' } });
+  const writing = deleted.flush();
+  writing.catch(() => {});
+  await started.promise;
+  discardMeetingDraft('deleted');
+  deleted.edit({ title: 'Late editor update' });
+  meetingDraft('deleted').edit({ title: 'Late page mount' });
+  const other = meetingDraft('other');
+  other.edit({ title: 'Other edits' });
+  saving.reject(new Error('Meeting was deleted during the title save'));
+  await writing;
+  await flushMeetingDrafts();
+  assert.deepEqual(saves, [['deleted', 'api_save_meeting_title'], ['other', 'api_save_meeting_title']]);
+  assert.equal(deleted.dirty(), false);
+  assert.equal(pending.at(-1), false);
+});

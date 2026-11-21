@@ -3,6 +3,7 @@ pub(crate) mod archive;
 pub mod backup;
 pub mod calendar;
 pub mod context;
+pub(crate) mod file_cleanup;
 pub mod pending_recording_notes;
 pub(crate) mod recording_calendar;
 pub(crate) mod saved_text;

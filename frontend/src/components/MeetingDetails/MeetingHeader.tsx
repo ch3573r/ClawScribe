@@ -8,6 +8,7 @@ import { ProjectTags } from './ProjectTags';
 import { MeetingExportButtons } from './MeetingExportButtons';
 import { ReviewedActions } from './ReviewedActions';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { formatArchiveDate } from '@/lib/archive-review';
 
 export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFinishEditing, onChange, duration, segmentCount, disabled, getMarkdown, onOpenFolder, attendance }: {
   meeting: { id: string; created_at: string; folder_path?: string | null };
@@ -19,7 +20,6 @@ export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFin
   const [actionsOpen, setActionsOpen] = useState(false);
   const retainActionFocusRef = useRef(false);
   const overflowRef = useRef<HTMLButtonElement>(null);
-  const date = new Date(meeting.created_at);
   const seconds = Math.max(0, Math.floor(duration || 0));
   const length = seconds >= 3600
     ? `${Math.floor(seconds / 3600)}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
@@ -28,7 +28,7 @@ export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFin
     <div className="min-w-0 flex-1 space-y-1">
       <EditableTitle title={title} isEditing={isEditing} onStartEditing={onStartEditing} onFinishEditing={onFinishEditing} onChange={onChange} disabled={disabled} meetingTitle />
       <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-        <span className="shrink-0">{Number.isNaN(date.getTime()) ? 'Meeting' : date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+        <span className="shrink-0">{formatArchiveDate(meeting.created_at)}</span>
         {seconds > 0 && <><span aria-hidden>·</span><span className="font-mono">{length}</span></>}
         <span aria-hidden>·</span><span className="shrink-0">{segmentCount} segments</span>
         <span aria-hidden>·</span><ProjectTags key={meeting.id} meetingId={meeting.id} compact />

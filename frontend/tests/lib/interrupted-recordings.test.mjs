@@ -155,6 +155,23 @@ test('a saved or deleted native recording cannot reappear from the browser cache
   h.hooks.unmount();
 });
 
+test('old browser-only recovery stays visible while a live or just-written cache stays hidden', async () => {
+  const older = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const h = harness({
+    browserMeetings: [
+      browser('old-unsaved', undefined, { lastUpdated: older }),
+      browser('old-resolved', undefined, { lastUpdated: older }),
+      browser('live', 'C:\\Recordings\\current', { lastUpdated: old }),
+      browser('just-written', undefined, { lastUpdated: Date.now() }),
+    ],
+    scan: { recordings: [], activeCacheId: 'live', resolvedCacheIds: ['old-resolved'] },
+  });
+  const found = await h.render().checkForRecoverableTranscripts();
+  assert.deepEqual(json(found.map(entry => entry.meetingId)), ['old-unsaved']);
+  assert.ok(h.calls[0][1].cacheIds.includes('old-resolved'));
+  h.hooks.unmount();
+});
+
 test('recovering a clean Stop handoff does not mark its complete transcript as partial', async () => {
   const h = harness({ scan: { recordings: [disk('pending-folder', { reasons: ['library_handoff_pending'] })] } });
   await h.render().checkForRecoverableTranscripts();

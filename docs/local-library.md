@@ -78,7 +78,9 @@ Open **Meetings → Archive** to search saved titles, current transcript
 passages, visible saved summaries, personal notes and timestamped bookmarks.
 Search ignores letter case, including German umlauts, and treats punctuation
 such as `%` and `_` literally. Projects, inclusive dates and **Needs attention**
-apply to every source. The sidebar shows a preview for each matching source
+apply to every source. Archive and Meeting memory date filters use the day shown
+in your local time zone. Older entries that store only a calendar date keep that
+day. The sidebar shows a preview for each matching source
 type in a meeting.
 
 Open a match to see its source. Transcript passages open at their verified
@@ -397,12 +399,12 @@ remove its recording files.
 Deletion removes the meeting's database records, including transcript revisions,
 previous summaries, context, notes, chat, tags, and bookmarks. App-managed export
 history, Codex scratch runs, outputs under app data, and cached transcript recovery
-copies are also removed where possible; cleanup failures are reported separately.
+copies are also removed where possible. Unsaved title and summary edits for the
+deleted meeting are discarded.
 References used only by this meeting are deleted, including extracted text and
 original files, even when recording files are kept. References shared with another
 meeting remain available there. Answers that depended on a deleted reference are
-invalidated and their saved content is cleared. File cleanup failures appear in the
-deletion warnings. Startup also cleans abandoned references from earlier installs
+invalidated and their saved content is cleared. Startup also cleans abandoned references from earlier installs
 when recording and imports are idle; unknown reference files are kept for at least
 24 hours before cleanup. Portable backups include only attached references.
 
@@ -412,9 +414,17 @@ and generated documents. The folder must be inside the configured save location,
 a supported default recording location, or app-data `restored-recordings`; it must
 contain an app recording marker, have no links or junctions in its path, and not
 overlap another meeting's folder. Folders failing these checks or file deletion
-are kept and reported after the database deletion. Uncheck the option to keep
+are kept. Uncheck the option to keep
 the folder and its contents. While recording or transcription is running, only
 deletion with this option off is allowed.
+
+If file cleanup could not finish, open **Meetings → Archive → Storage**. Under
+**Pending file cleanup**, review the item and the reason it was kept. Close apps
+using the files or reconnect an unavailable recording location before retrying.
+ClawScribe checks the current ownership and recording location again before each
+retry. A recording-folder retry requires a marker that identifies that meeting.
+Choose **Keep files** to remove the entry from the cleanup list and retain the
+files. Pending entries are stored on this device and survive app restarts.
 
 Pre-migration database snapshots in app-data `backups` can contain deleted
 meetings. Each new snapshot keeps the newest two, and startup cleanup removes

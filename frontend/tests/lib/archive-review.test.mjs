@@ -25,6 +25,29 @@ test('review routes local recovery to transcription and preserves the remote rec
   assert.equal(archiveReview({ ...meeting, capture_incomplete: true }).action, 'review');
 });
 
+test('archive date keys follow the displayed local day for instants and legacy dates', () => {
+  const timeZone = process.env.TZ;
+  try {
+    for (const [zone, early, late] of [
+      ['Europe/Berlin', '2026-11-21', '2026-11-22'],
+      ['America/Los_Angeles', '2026-11-20', '2026-11-21'],
+    ]) {
+      process.env.TZ = zone;
+      const { archiveDateKey, formatArchiveDate } = loadTsModule('src/lib/archive-review.ts');
+      assert.equal(archiveDateKey('2026-11-21T00:30:00Z'), early);
+      assert.equal(archiveDateKey('2026-11-21T23:30:00+00:00'), late);
+      assert.equal(archiveDateKey('2026-11-21 23:30:00.125'), late);
+      assert.equal(archiveDateKey('2026-11-21'), '2026-11-21');
+      assert.equal(archiveDateKey('2026-02-30'), null);
+      assert.match(formatArchiveDate('2026-11-21'), /21/);
+      assert.equal(formatArchiveDate('2026-11-21 23:30:00'), formatArchiveDate('2026-11-21T23:30:00Z'));
+    }
+  } finally {
+    if (timeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = timeZone;
+  }
+});
+
 test('transcript-only meetings can generate a summary without entering the review queue', () => {
   const review = archiveReview({ ...meeting, has_folder: false });
   assert.equal(review.needsAttention, false);

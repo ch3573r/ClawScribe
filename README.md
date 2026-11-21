@@ -390,8 +390,9 @@ evidence; interrupted answers are never resubmitted automatically.
 
 Meeting deletion can also remove its recording folder, including audio,
 transcript copies, metadata, recovery originals, and generated documents. The
-option is on by default; folders outside supported storage locations, shared
-with another meeting, or failing ownership checks are kept and reported.
+option is on by default. Folders outside supported storage locations, shared
+with another meeting, or failing ownership checks are kept. Review retained
+files and retry cleanup in **Meetings → Archive → Storage**.
 Pre-migration database snapshots and separate backup archives can retain deleted
 meetings. See [local library tools](docs/local-library.md#deleting-meetings).
 

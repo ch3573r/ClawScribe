@@ -3,6 +3,7 @@ use super::store;
 #[cfg(test)]
 use super::store::{CanonicalRow, SourceJob};
 use super::types::*;
+use futures_util::TryStreamExt;
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::{BTreeMap, BinaryHeap};
 
@@ -23,17 +24,6 @@ pub struct FrozenScope {
     pub scope: KnowledgeScope,
     pub meeting_ids: Vec<String>,
     pub document_ids: Vec<String>,
-}
-fn valid_scope_date(value: &str) -> bool {
-    value.len() == 10
-        && value.bytes().enumerate().all(|(index, byte)| {
-            if index == 4 || index == 7 {
-                byte == b'-'
-            } else {
-                byte.is_ascii_digit()
-            }
-        })
-        && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
 }
 pub async fn freeze_scope(
     pool: &SqlitePool,
@@ -70,77 +60,78 @@ pub(super) async fn freeze_scope_rows(
     {
         return Err(KnowledgeError::InvalidInput);
     }
+    let parse_bound = |value: &str| {
+        crate::database::models::calendar_date(value).ok_or(KnowledgeError::InvalidInput)
+    };
+    let from = filter.from.as_deref().map(parse_bound).transpose()?;
+    let to = filter.to.as_deref().map(parse_bound).transpose()?;
     if filter.meeting_ids.iter().any(|id| id.trim().is_empty())
         || filter.tags.iter().any(|tag| tag.trim().is_empty())
-        || filter.from.as_ref().is_some_and(|v| !valid_scope_date(v))
-        || filter.to.as_ref().is_some_and(|v| !valid_scope_date(v))
-        || matches!((&filter.from,&filter.to),(Some(from),Some(to)) if from>to)
+        || matches!((from, to), (Some(from), Some(to)) if from > to)
     {
         return Err(KnowledgeError::InvalidInput);
     }
-    let mut ids = std::collections::BTreeMap::<String, (String, Vec<String>)>::new();
+    let mut ids = BTreeMap::<String, Vec<String>>::new();
     let selection = if filter.meeting_ids.is_empty() {
         None
     } else {
         Some(serde_json::to_string(&filter.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?)
     };
     let restriction = if selection.is_some() {
-        "AND m.id IN (SELECT value FROM json_each(?4))"
+        "WHERE m.id IN (SELECT value FROM json_each(?))"
     } else {
         ""
     };
     let statement = format!(
         "SELECT m.id,m.created_at,t.tag FROM meetings m LEFT JOIN meeting_tags t ON t.meeting_id=m.id
-         WHERE (?1 IS NULL OR substr(m.created_at,1,10)>=?1) AND (?2 IS NULL OR substr(m.created_at,1,10)<=?2)
-         {restriction} ORDER BY m.id LIMIT ?3"
+         {restriction} ORDER BY m.id"
     );
-    let mut query = sqlx::query(&statement)
-        // Leave saved-answer scope semantics intact for older date formats.
-        .bind(row_limit.and(filter.from.as_deref()))
-        .bind(row_limit.and(filter.to.as_deref()))
-        .bind(row_limit.map_or(-1, |limit| limit + 1));
+    let mut query = sqlx::query(&statement);
     if let Some(selection) = selection {
         query = query.bind(selection);
     }
-    let rows = query.fetch_all(&mut *connection).await?;
-    if row_limit.is_some_and(|limit| rows.len() > limit as usize) {
-        return Err(KnowledgeError::Busy);
-    }
-    for row in rows {
+    let mut rows = query.fetch(&mut *connection);
+    let mut matched = 0;
+    // Decode the same timestamps the sidebar receives. Apply the cap only to
+    // matching rows so other days cannot exhaust a narrow date search.
+    while let Some(row) = rows.try_next().await? {
+        if from.is_some() || to.is_some() {
+            let Some(date) = crate::database::models::local_meeting_date(&row, "created_at") else {
+                continue;
+            };
+            if from.is_some_and(|from| date < from) || to.is_some_and(|to| date > to) {
+                continue;
+            }
+        }
+        matched += 1;
+        if row_limit.is_some_and(|limit| matched > limit) {
+            return Err(KnowledgeError::Busy);
+        }
         let id: String = row.try_get("id")?;
-        let date: String = row.try_get("created_at")?;
-        let entry = ids.entry(id).or_insert((date, Vec::new()));
+        let entry = ids.entry(id).or_default();
         if let Some(tag) = row.try_get::<Option<String>, _>("tag")? {
-            entry.1.push(tag.to_lowercase());
+            entry.push(tag.to_lowercase());
         }
     }
     let meeting_ids = ids
         .into_iter()
-        .filter(|(_, (date, tags))| {
-            filter
-                .from
-                .as_ref()
-                .is_none_or(|from| date.get(..10).unwrap_or(date) >= from.as_str())
-                && filter
-                    .to
-                    .as_ref()
-                    .is_none_or(|to| date.get(..10).unwrap_or(date) <= to.as_str())
-                && if filter.untagged {
-                    tags.is_empty()
-                } else if filter.tags.is_empty() {
-                    true
-                } else {
-                    match filter.tag_mode {
-                        TagMatch::Any => filter
-                            .tags
-                            .iter()
-                            .any(|tag| tags.contains(&tag.to_lowercase())),
-                        TagMatch::All => filter
-                            .tags
-                            .iter()
-                            .all(|tag| tags.contains(&tag.to_lowercase())),
-                    }
+        .filter(|(_, tags)| {
+            if filter.untagged {
+                tags.is_empty()
+            } else if filter.tags.is_empty() {
+                true
+            } else {
+                match filter.tag_mode {
+                    TagMatch::Any => filter
+                        .tags
+                        .iter()
+                        .any(|tag| tags.contains(&tag.to_lowercase())),
+                    TagMatch::All => filter
+                        .tags
+                        .iter()
+                        .all(|tag| tags.contains(&tag.to_lowercase())),
                 }
+            }
         })
         .map(|(id, _)| id)
         .collect();
@@ -1043,6 +1034,81 @@ mod tests {
         assert_eq!(
             freeze_scope(&pool, &scope).await.unwrap().meeting_ids,
             vec!["two"]
+        );
+    }
+
+    #[tokio::test]
+    async fn date_scope_uses_the_local_day_for_both_midnights_and_legacy_timestamps() {
+        use chrono::{FixedOffset, Local, TimeZone, Utc};
+
+        let pool = fixture().await;
+        let day = "2026-11-21";
+        let early = Local.with_ymd_and_hms(2026, 11, 21, 0, 30, 0).unwrap();
+        let late = Local.with_ymd_and_hms(2026, 11, 21, 23, 30, 0).unwrap();
+        let west = FixedOffset::west_opt(12 * 3600).unwrap();
+        let east = FixedOffset::east_opt(14 * 3600).unwrap();
+        let different_prefix = |time: chrono::DateTime<Local>| {
+            [time.with_timezone(&west), time.with_timezone(&east)]
+                .into_iter()
+                .find(|stamp| stamp.date_naive() != time.date_naive())
+                .unwrap()
+                .to_rfc3339()
+        };
+        for (id, stamp) in [
+            ("early", different_prefix(early)),
+            ("late", different_prefix(late)),
+            ("legacy-day", day.to_string()),
+            (
+                "legacy-time",
+                late.with_timezone(&Utc).format("%F %T").to_string(),
+            ),
+            (
+                "outside",
+                Local
+                    .with_ymd_and_hms(2026, 11, 22, 0, 0, 0)
+                    .unwrap()
+                    .to_rfc3339(),
+            ),
+        ] {
+            sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES (?,'Synthetic meeting',?,?)")
+                .bind(id).bind(&stamp).bind(&stamp).execute(&pool).await.unwrap();
+        }
+        let scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                all_meetings: true,
+                from: Some(day.into()),
+                to: Some(day.into()),
+                ..Default::default()
+            },
+        };
+        let expected = vec!["early", "late", "legacy-day", "legacy-time"];
+        assert_eq!(
+            freeze_scope(&pool, &scope).await.unwrap().meeting_ids,
+            expected
+        );
+        assert_eq!(
+            freeze_scope_rows(&mut *pool.acquire().await.unwrap(), &scope, Some(4))
+                .await
+                .unwrap()
+                .meeting_ids,
+            expected
+        );
+        let rows = crate::database::repositories::meeting::MeetingsRepository::get_meetings(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == "legacy-day")
+                .unwrap()
+                .created_at,
+            day
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == "legacy-time")
+                .unwrap()
+                .created_at,
+            late.with_timezone(&Utc).to_rfc3339()
         );
     }
     #[tokio::test]

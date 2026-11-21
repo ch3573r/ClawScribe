@@ -1,4 +1,5 @@
 /** Date helpers for the sidebar: meeting groups, one-line dates and the "Next up" card. */
+import { parseArchiveDate } from './archive-review';
 
 export type MeetingGroupLabel = "Today" | "This week" | "Earlier";
 
@@ -14,9 +15,8 @@ function startOfWeek(date: Date): Date {
 
 /** Which group a meeting belongs to. A missing or invalid date counts as earlier. */
 export function meetingGroup(createdAt: string | undefined, now = new Date()): MeetingGroupLabel {
-  if (!createdAt) return "Earlier";
-  const date = new Date(createdAt);
-  if (!Number.isFinite(date.getTime())) return "Earlier";
+  const date = parseArchiveDate(createdAt);
+  if (!date) return "Earlier";
   if (sameDay(date, now)) return "Today";
   return date.getTime() >= startOfWeek(now).getTime() ? "This week" : "Earlier";
 }
@@ -31,10 +31,9 @@ export function groupMeetings<T extends { created_at?: string }>(items: T[], now
 
 /** A date short enough for a one-line row: "10:32", "Yesterday", "Nov 16" or "Nov 16, 2025". */
 export function shortMeetingDate(value: string | undefined, now = new Date()): string {
-  if (!value) return "Saved";
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return "Saved";
-  if (sameDay(date, now)) return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(date);
+  const date = parseArchiveDate(value);
+  if (!date) return "Saved";
+  if (sameDay(date, now)) return value?.length === 10 ? "Today" : new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(date);
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   if (sameDay(date, yesterday)) return "Yesterday";

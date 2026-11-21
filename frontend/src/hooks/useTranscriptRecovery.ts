@@ -42,30 +42,24 @@ export async function fetchRecoveryCandidates(
     return [] as MeetingMetadata[];
   });
 
-  // Filter out meetings older than 7 days and newer than 15 seconds
-  // The 15 seconds threshold prevents showing meetings from the current session(jus in case)
-  // where recording just stopped but hasn't been fully saved yet
-  const cutoffTime = Date.now() - (7 * 24 * 60 * 60 * 1000);
-  const secondsAgo = Date.now() - (2 * 1000);
-
-  const recentMeetings = meetings.filter(m => {
-    const isWithinRetention = m.lastUpdated > cutoffTime; // Not older than 7 days
-    const isOldEnough = m.lastUpdated < secondsAgo; // Older than 15 seconds
-    return isWithinRetention && isOldEnough;
-  });
+  // Give an in-progress save time to finish. Unresolved entries have no expiry.
+  const handoffCutoff = Date.now() - 2_000;
+  const eligibleMeetings = meetings.filter(meeting => meeting.lastUpdated < handoffCutoff);
 
   let scan = EMPTY_DISK_SCAN;
   let scanFailed = false;
   try {
     scan = readDiskScan(await invoke<unknown>('find_interrupted_recordings', {
-      cacheIds: recentMeetings.map(meeting => meeting.meetingId),
+      cacheIds: eligibleMeetings.map(meeting => meeting.meetingId),
     }));
   } catch (error) {
     console.warn('Could not look for interrupted recordings on disk:', error);
     scanFailed = true;
   }
   const resolvedCacheIds = new Set(scan.resolvedCacheIds);
-  const pendingMeetings = recentMeetings.filter(meeting => !resolvedCacheIds.has(meeting.meetingId));
+  const pendingMeetings = eligibleMeetings.filter(meeting =>
+    (!scan.recordingActive || !!scan.activeCacheId) &&
+    meeting.meetingId !== scan.activeCacheId && !resolvedCacheIds.has(meeting.meetingId));
 
   // Verify audio checkpoint availability for each pending meeting.
   const meetingsWithAudioStatus = await Promise.all(

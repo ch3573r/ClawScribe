@@ -18,10 +18,39 @@ export type ArchiveAction = 'review' | 'summary' | 'transcribe' | 'files';
 const archiveDate = new Intl.DateTimeFormat(undefined, {
   month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit',
 });
+const archiveDay = new Intl.DateTimeFormat(undefined, {
+  month: 'short', day: 'numeric', year: 'numeric',
+});
+const calendarDate = /^\d{4}-\d{2}-\d{2}$/;
+
+export function parseArchiveDate(value?: string): Date | null {
+  if (!value) return null;
+  const hasDayOnly = calendarDate.test(value);
+  const iso = value.replace(/^(\d{4}-\d{2}-\d{2}) /, '$1T');
+  // SQLite's legacy timestamps omit the zone and were recorded in UTC.
+  const date = new Date(hasDayOnly ? `${iso}T12:00:00`
+    : /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`);
+  if (!Number.isFinite(date.getTime())) return null;
+  if (hasDayOnly && localDateKey(date) !== value) return null;
+  return date;
+}
+
+function localDateKey(date: Date): string {
+  const year = String(date.getFullYear()).padStart(4, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function archiveDateKey(value?: string): string | null {
+  const date = parseArchiveDate(value);
+  return date ? localDateKey(date) : null;
+}
 
 export function formatArchiveDate(value?: string): string {
-  const date = value ? new Date(value) : null;
-  return date && Number.isFinite(date.getTime()) ? archiveDate.format(date) : 'Saved meeting';
+  const date = parseArchiveDate(value);
+  if (!date) return 'Saved meeting';
+  return (calendarDate.test(value ?? '') ? archiveDay : archiveDate).format(date);
 }
 
 export function archiveReview(row: ArchiveRow): {

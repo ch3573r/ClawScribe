@@ -314,7 +314,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     async fn scratch_cleanup_keeps_outputs_and_removes_deleted_meeting_runs() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("runs");
-        let scratch = root.join("review-test");
+        let scratch = meeting_run_dir(&root, "review-test");
         let output = temp.path().join("meeting");
         fs::create_dir_all(&scratch).unwrap();
         fs::create_dir_all(&output).unwrap();
@@ -326,9 +326,6 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         assert!(!scratch.exists());
         assert!(output.join("meeting-notes.md").exists());
         fs::create_dir_all(&scratch).unwrap();
-        remove_meeting_runs_at(&root, "review-test").await;
-        assert!(!scratch.exists());
-        fs::create_dir_all(&scratch).unwrap();
         let orphan = root.join("deleted-meeting");
         fs::create_dir_all(&orphan).unwrap();
         let pool = crate::database::transcript_edits::tests::fixture().await;
@@ -338,7 +335,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
 
     #[tokio::test]
-    async fn folderless_output_storage_preserves_audio_metadata_and_is_deleted() {
+    async fn folderless_output_storage_uses_a_separate_directory() {
         let temp = tempfile::tempdir().unwrap();
         let pool = crate::database::transcript_edits::tests::fixture().await;
         sqlx::query("UPDATE meetings SET folder_path = NULL WHERE id = 'review-test'")
@@ -359,16 +356,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
                 .await
                 .unwrap();
         assert!(folder.is_none());
-        crate::database::repositories::meeting::MeetingsRepository::delete_meeting(
-            &pool,
-            "review-test",
-        )
-        .await
-        .unwrap();
-        assert!(remove_meeting_outputs(temp.path(), "review-test")
-            .await
-            .is_none());
-        assert!(!output.exists());
+        assert!(output.join("meeting-notes.md").is_file());
     }
 
     #[test]
@@ -2293,27 +2281,8 @@ pub(crate) fn meeting_outputs_dir(app_data: &Path, meeting: &str) -> PathBuf {
         .join(sanitize_path_segment(meeting))
 }
 
-pub(crate) async fn remove_meeting_outputs(app_data: &Path, meeting: &str) -> Option<String> {
-    match tokio::fs::remove_dir_all(meeting_outputs_dir(app_data, meeting)).await {
-        Ok(()) => None,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => Some("Generated meeting outputs could not be removed".into()),
-    }
-}
-
-pub(crate) async fn remove_meeting_runs(meeting: &str) -> Option<String> {
-    remove_meeting_runs_at(&default_codex_runs_root(), meeting).await
-}
-
-async fn remove_meeting_runs_at(root: &Path, meeting: &str) -> Option<String> {
-    let path = root.join(sanitize_path_segment(meeting));
-    if let Err(error) = tokio::fs::remove_dir_all(&path).await {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("Could not remove Codex scratch folder; startup cleanup will retry");
-            return Some(format!("Codex run folder kept: {}", path.display()));
-        }
-    }
-    None
+pub(crate) fn meeting_run_dir(root: &Path, meeting: &str) -> PathBuf {
+    root.join(sanitize_path_segment(meeting))
 }
 
 pub(crate) async fn cleanup_orphaned_runs(pool: &sqlx::SqlitePool) {
@@ -2321,14 +2290,18 @@ pub(crate) async fn cleanup_orphaned_runs(pool: &sqlx::SqlitePool) {
 }
 
 async fn cleanup_orphaned_runs_at(pool: &sqlx::SqlitePool, root: &Path) {
-    let Ok(ids) = sqlx::query_scalar::<_, String>("SELECT id FROM meetings")
+    let Ok(ids) = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM meetings UNION SELECT meeting_id FROM pending_meeting_file_cleanup WHERE kind='codex'",
+    )
         .fetch_all(pool)
         .await
     else {
         return;
     };
-    let live: std::collections::HashSet<_> =
-        ids.iter().map(|id| sanitize_path_segment(id)).collect();
+    let live: std::collections::HashSet<_> = ids
+        .iter()
+        .map(|id| crate::library::file_cleanup::directory_key(&meeting_run_dir(root, id)))
+        .collect();
     let Ok(mut entries) = tokio::fs::read_dir(root).await else {
         return;
     };
@@ -2337,14 +2310,14 @@ async fn cleanup_orphaned_runs_at(pool: &sqlx::SqlitePool, root: &Path) {
             .file_type()
             .await
             .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
-            && !live.contains(&entry.file_name().to_string_lossy().to_string())
+            && !live.contains(&crate::library::file_cleanup::directory_key(&entry.path()))
         {
             let _ = tokio::fs::remove_dir_all(entry.path()).await;
         }
     }
 }
 
-fn default_codex_runs_root() -> PathBuf {
+pub(crate) fn default_codex_runs_root() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| std::env::temp_dir())
         .join("ClawScribe")

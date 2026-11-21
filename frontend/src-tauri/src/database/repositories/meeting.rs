@@ -6,22 +6,68 @@ use tracing::{error, info};
 
 pub struct MeetingsRepository;
 
+pub(crate) struct DeletedMeetingFiles {
+    pub folder: Option<String>,
+    pub cleanup_ids: Vec<i64>,
+}
+
 impl MeetingsRepository {
     pub async fn get_meetings(pool: &SqlitePool) -> Result<Vec<MeetingModel>, sqlx::Error> {
-        let meetings =
-            sqlx::query_as::<_, MeetingModel>("SELECT * FROM meetings ORDER BY created_at DESC")
-                .fetch_all(pool)
-                .await?;
-        Ok(meetings)
+        sqlx::query_as("SELECT id,title,created_at,updated_at,folder_path FROM meetings ORDER BY created_at DESC")
+            .fetch_all(pool)
+            .await
     }
 
+    #[cfg(test)]
     pub async fn delete_meeting(pool: &SqlitePool, meeting_id: &str) -> Result<bool, SqlxError> {
         Self::delete_meeting_with_documents(pool, meeting_id)
             .await
             .map(|(deleted, _)| deleted)
     }
 
+    /// Persist the requested cleanup before committing the deletion, including
+    /// the original storage names that will no longer be reachable from SQLite.
+    pub(crate) async fn delete_from_library(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        delete_files: bool,
+    ) -> Result<Option<DeletedMeetingFiles>, SqlxError> {
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some((title, folder)) = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT title, folder_path FROM meetings WHERE id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let (deleted, originals) = delete_meeting_with_transaction(&mut tx, meeting_id).await?;
+        if !deleted {
+            return Ok(None);
+        }
+        // The cache may survive a failed IndexedDB removal even when this
+        // meeting did not save a native recording folder.
+        sqlx::query("INSERT OR IGNORE INTO recording_library_deletions(meeting_id) VALUES (?)")
+            .bind(meeting_id)
+            .execute(&mut *tx)
+            .await?;
+        let recording = folder
+            .as_deref()
+            .filter(|path| delete_files && !path.trim().is_empty());
+        let cleanup_ids = crate::library::file_cleanup::enqueue(
+            &mut tx, meeting_id, &title, recording, &originals,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Some(DeletedMeetingFiles {
+            folder,
+            cleanup_ids,
+        }))
+    }
+
     /// Return original storage names only after the database deletion commits.
+    #[cfg(test)]
     pub async fn delete_meeting_with_documents(
         pool: &SqlitePool,
         meeting_id: &str,
@@ -112,8 +158,8 @@ impl MeetingsRepository {
             Ok(Some(MeetingDetails {
                 id: meeting.id,
                 title: meeting.title,
-                created_at: meeting.created_at.0.to_rfc3339(),
-                updated_at: meeting.updated_at.0.to_rfc3339(),
+                created_at: meeting.created_at,
+                updated_at: meeting.updated_at,
                 transcripts: meeting_transcripts,
             }))
         } else {

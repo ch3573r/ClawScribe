@@ -2,7 +2,16 @@
 use std::path::{Path, PathBuf};
 
 pub(crate) fn is_link(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
 /// Resolves a folder a caller named (for example a webview) to its canonical
@@ -246,46 +255,115 @@ pub(crate) fn remove_recording_folder(
     roots: &[PathBuf],
     other_folders: &[PathBuf],
 ) -> Result<(), String> {
-    let retained = |reason: &str| format!("Recording folder kept: {} ({reason})", folder.display());
+    remove_library_recording_folder(folder, meeting_id, roots, other_folders, false)
+        .map_err(|reason| format!("Recording folder kept: {} ({reason})", folder.display()))
+}
+
+pub(crate) fn remove_library_recording_folder(
+    folder: &Path,
+    meeting_id: &str,
+    roots: &[PathBuf],
+    other_folders: &[PathBuf],
+    exact_marker: bool,
+) -> Result<(), &'static str> {
     if !crate::trusted_roots::text_allowed(&folder.to_string_lossy(), roots) {
-        return Err(retained("not a recording location"));
+        return Err("not a recording location");
+    }
+    // Check from the root down so even inspecting the target cannot traverse
+    // a linked ancestor into a different local or network location.
+    let ancestors: Vec<_> = folder.ancestors().skip(1).collect();
+    for ancestor in ancestors.into_iter().rev() {
+        if std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| is_link(&metadata)) {
+            return Err("the path contains a link or junction");
+        }
     }
     let metadata = match std::fs::symlink_metadata(folder) {
         Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(retained("could not inspect the folder")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return if roots.iter().any(|root| {
+                crate::local_path::lexically_inside(&folder.to_string_lossy(), root)
+                    && root.is_dir()
+            }) {
+                Ok(())
+            } else {
+                Err("the recording location is unavailable")
+            };
+        }
+        Err(_) => return Err("could not inspect the folder"),
     };
     if !metadata.is_dir() || is_link(&metadata) {
-        return Err(retained("not a regular recording directory"));
+        return Err("not a regular recording directory");
     }
     let canonical = folder
         .canonicalize()
-        .map_err(|_| retained("could not resolve the folder"))?;
+        .map_err(|_| "could not resolve the folder")?;
     if !roots
         .iter()
         .filter_map(|root| root.canonicalize().ok())
         .any(|root| canonical != root && canonical.starts_with(root))
     {
-        return Err(retained("outside the configured recording locations"));
+        return Err("outside the configured recording locations");
     }
-    // Reject linked ancestors as well as a junction at the folder itself.
-    for ancestor in folder.ancestors() {
-        if std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| is_link(&metadata)) {
-            return Err(retained("the path contains a link or junction"));
+    let marker_error = "no ClawScribe recording marker for this meeting";
+    if exact_marker {
+        let marker = read_marker(folder).ok_or(marker_error)?;
+        let ids = [marker.get("meeting_id"), marker.get("recording_id")];
+        let mut present = ids.into_iter().flatten().filter(|value| !value.is_null());
+        if present.next().and_then(serde_json::Value::as_str) != Some(meeting_id)
+            || present.any(|id| id.as_str() != Some(meeting_id))
+        {
+            return Err(marker_error);
+        }
+    } else if !has_app_marker(folder, Some(meeting_id)) {
+        return Err(marker_error);
+    }
+    let compare = |a: &Path, b: &Path| {
+        let a = folder_key(a);
+        let b = folder_key(b);
+        a == b
+            || a.strip_prefix(&b).is_some_and(|rest| rest.starts_with('/'))
+            || b.strip_prefix(&a).is_some_and(|rest| rest.starts_with('/'))
+    };
+    if other_folders.iter().any(|other| {
+        !other.as_os_str().is_empty()
+            && (compare(other, folder)
+                || (crate::trusted_roots::text_allowed(&other.to_string_lossy(), roots)
+                    && other
+                        .canonicalize()
+                        .is_ok_and(|other| compare(&other, &canonical))))
+    }) {
+        return Err("another meeting uses this folder");
+    }
+    remove_recording_folder_contents(folder).map_err(|_| "file deletion failed")
+}
+
+fn remove_recording_folder_contents(folder: &Path) -> std::io::Result<()> {
+    // Keep the ownership marker while removing children, so a file held open
+    // during this attempt can be retried after its handle closes.
+    for entry in std::fs::read_dir(folder)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "metadata.json" || (cfg!(windows) && name.eq_ignore_ascii_case("metadata.json"))
+        {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileTypeExt;
+            if kind.is_symlink_dir() {
+                std::fs::remove_dir(entry.path())?;
+                continue;
+            }
+        }
+        if kind.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
         }
     }
-    if !has_app_marker(folder, Some(meeting_id)) {
-        return Err(retained("no ClawScribe recording marker for this meeting"));
-    }
-    if other_folders.iter().any(|other| {
-        other == folder
-            || other.canonicalize().is_ok_and(|other| {
-                other == canonical || other.starts_with(&canonical) || canonical.starts_with(other)
-            })
-    }) {
-        return Err(retained("another meeting uses this folder"));
-    }
-    std::fs::remove_dir_all(folder).map_err(|_| retained("file deletion failed"))
+    std::fs::remove_file(folder.join("metadata.json"))?;
+    std::fs::remove_dir(folder)
 }
 
 #[cfg(test)]

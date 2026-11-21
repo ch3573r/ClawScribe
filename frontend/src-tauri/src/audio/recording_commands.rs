@@ -1915,20 +1915,29 @@ pub async fn is_recording() -> bool {
 /// recording is running but its manager is out for a reconnection or a stop, so
 /// callers err on the side of leaving every folder alone.
 pub(crate) fn active_recording_folder() -> super::interrupted::ActiveFolder {
+    active_recording_recovery().0
+}
+
+pub(crate) fn active_recording_recovery() -> (super::interrupted::ActiveFolder, Option<String>) {
     use super::interrupted::ActiveFolder;
     if IS_STARTING.load(Ordering::Acquire) {
-        return ActiveFolder::Unknown;
+        return (ActiveFolder::Unknown, None);
     }
     if !capture_active() {
-        return ActiveFolder::None;
+        return (ActiveFolder::None, None);
     }
-    match RECORDING_MANAGER.try_lock() {
-        Ok(guard) => guard
-            .as_ref()
-            .and_then(|manager| manager.get_meeting_folder())
+    let Ok(manager) = RECORDING_MANAGER.try_lock() else {
+        return (ActiveFolder::Unknown, None);
+    };
+    let Some(manager) = manager.as_ref() else {
+        return (ActiveFolder::Unknown, None);
+    };
+    (
+        manager
+            .get_meeting_folder()
             .map_or(ActiveFolder::Unknown, ActiveFolder::Folder),
-        Err(_) => ActiveFolder::Unknown,
-    }
+        manager.recording_id().map(str::to_owned),
+    )
 }
 
 /// Get recording statistics

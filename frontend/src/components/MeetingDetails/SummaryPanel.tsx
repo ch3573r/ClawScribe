@@ -401,7 +401,7 @@ export function SummaryPanel({
         <div className="flex min-w-0 flex-nowrap items-center gap-2">
           <h2 className="shrink-0 text-sm font-semibold">Summary</h2>
           <div className="min-w-0 flex-1">
-            {aiSummary && <span className="block truncate text-xs text-muted-foreground" role="status" title={saveState === 'error' ? 'Save failed — edits retained' : undefined}>
+            {aiSummary && saveState !== 'discarded' && <span className="block truncate text-xs text-muted-foreground" role="status" title={saveState === 'error' ? 'Save failed — edits retained' : undefined}>
               {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Save failed — edits retained' : 'Unsaved changes'}
             </span>}
           </div>

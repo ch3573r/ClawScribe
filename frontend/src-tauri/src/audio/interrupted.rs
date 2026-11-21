@@ -137,8 +137,10 @@ pub struct InterruptedScan {
     pub recordings: Vec<InterruptedRecording>,
     /// The scan stopped at a bound; there may be more.
     pub truncated: bool,
-    /// A recording is running and its folder could not be told, so nothing was listed.
+    /// A recording is running without a known folder or cache identity.
     pub recording_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_cache_id: Option<String>,
     /// Requested browser cache IDs that are already saved or were deleted.
     pub resolved_cache_ids: Vec<String>,
 }
@@ -649,11 +651,11 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
         cache_ids
             .unwrap_or_default()
             .into_iter()
-            .take(Limits::default().max_examined)
             .filter(|id| registered_ids.contains(id) || deleted.contains(id))
             .collect()
     };
-    let active = super::recording_commands::active_recording_folder();
+    let (active, active_cache_id) = super::recording_commands::active_recording_recovery();
+    let active_cache_unknown = active != ActiveFolder::None && active_cache_id.is_none();
     let kept = kept_folders(&app);
     tokio::task::spawn_blocking(move || {
         // The whole scan stays inside its time limit: the registered-folder
@@ -674,6 +676,8 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
             active,
             limits,
         });
+        result.recording_active |= active_cache_unknown;
+        result.active_cache_id = active_cache_id;
         result.resolved_cache_ids = resolved_cache_ids;
         result
     })

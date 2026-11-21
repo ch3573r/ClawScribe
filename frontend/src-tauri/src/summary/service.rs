@@ -467,6 +467,12 @@ impl SummaryService {
             .is_ok_and(|jobs| jobs.values().any(|job| job.builtin))
     }
 
+    pub(crate) fn is_running_for(meeting_id: &str) -> bool {
+        CANCELLATION_REGISTRY
+            .lock()
+            .map_or(true, |jobs| jobs.contains_key(meeting_id))
+    }
+
     /// Cancels the summary generation for a meeting
     pub fn cancel_summary(meeting_id: &str) -> bool {
         if let Ok(registry) = CANCELLATION_REGISTRY.lock() {
