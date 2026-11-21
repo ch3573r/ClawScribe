@@ -469,8 +469,13 @@ If file cleanup could not finish, open **Meetings → Archive → Storage**. Und
 using the files or reconnect an unavailable recording location before retrying.
 ClawScribe verifies ownership before moving files to a temporary location beside
 the original, then removes the moved files. If removal stops partway through,
-the cleanup list shows the temporary location for the next retry. A new meeting
-using the original path can keep using it. A recording-folder retry before the
+the cleanup list shows the temporary location for the next retry. An unavailable
+drive, share, or parent folder keeps staged cleanup pending until the location can
+be verified again. ClawScribe can clear an empty staging folder when the original
+is verified absent, or retry the move when the recording marker confirms the
+original still belongs to the deleted meeting. Review other unfinished staging
+locations before removing files manually. A new meeting using the original path
+can keep using it. A recording-folder retry before the
 files have moved requires a marker that identifies that meeting. If an older
 folder has no marker or its marker has no meeting ID, use **Keep files** and review
 the folder before removing it manually. **Keep files** clears the item from the
@@ -479,12 +484,19 @@ are stored on this device and survive app restarts.
 
 On Windows, a OneDrive Cloud Files placeholder can be part of a configured
 recording location. Opening or recovering its contents may require OneDrive to
-download them. ClawScribe refuses paths redirected through links or junctions.
-If the interrupted-recording check fails, choose **Retry scan** in the recovery
-dialog or under **Settings → General**. ClawScribe keeps cached drafts while the
-library is unavailable and uses saved recording identity and deletion history to
-check them on retry. Old cache entries without enough evidence to identify their
-recording folder can still hold a recoverable transcript.
+download them. When you pick a recording location through a link or junction,
+ClawScribe saves its verified target and checks the new recording folder before
+capture. For an older setting that still points through a link, choose the actual
+folder again in **Settings → Recording**. This also makes earlier interrupted
+recordings in that target available to the disk scan. Folder deletion continues
+to require an unlinked path and verified ownership.
+
+If a recovery scan cannot verify a draft's folder or read its recording marker,
+the draft and audio folder are kept. Reconnect the location or let OneDrive
+finish downloading, then choose **Retry scan** in the recovery dialog or under
+**Settings → General**. A draft with a folder is offered as transcript-only
+recovery when the folder is verified missing or belongs to a different recording.
+ClawScribe uses recording identity and library deletion history during the check.
 
 Pre-migration database snapshots in app-data `backups` can contain deleted
 meetings. Each new snapshot keeps the newest two, and startup cleanup removes

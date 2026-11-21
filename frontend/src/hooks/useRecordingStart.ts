@@ -14,7 +14,8 @@ import { readRecordingCalendar, resolveRecordingCalendar } from '@/services/reco
 import { toast } from 'sonner';
 import { readPinnedSummaryLanguageDefault } from '@/lib/summary-language-preferences';
 import {
-  isDiskSpaceRefusal, LIVE_MODEL_FAILURE_MESSAGE, liveModelStartFailure, startErrorText, transcriptionSettingsPath,
+  describeRecordingsFolderRefusal, isDiskSpaceRefusal, LIVE_MODEL_FAILURE_MESSAGE,
+  liveModelStartFailure, startErrorText, transcriptionSettingsPath,
 } from '@/lib/start-error';
 import { openStorageDialog } from '@/lib/storage-dialog-controller';
 
@@ -33,11 +34,17 @@ export function reportStartFailure(error: unknown): void {
     toast.info('Recording is busy. During a save, choose Start after saving to record again.');
     return;
   }
+  const folderRefusal = describeRecordingsFolderRefusal(error);
   if (isDiskSpaceRefusal(error)) {
     toast.error('Not enough disk space', {
       description: message,
       duration: 15000,
       action: { label: 'Review storage', onClick: openStorageDialog },
+    });
+  } else if (folderRefusal) {
+    toast.error(folderRefusal.title, {
+      description: folderRefusal.message,
+      action: { label: 'Recording settings', onClick: () => window.location.assign('/settings?tab=recording') },
     });
   } else if (modelFailure) {
     toast.error('Live transcription unavailable', {

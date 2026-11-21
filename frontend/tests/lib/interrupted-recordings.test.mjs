@@ -214,6 +214,33 @@ test('a folder reused by another recording is never attached to a detached brows
   h.hooks.unmount();
 });
 
+test('an unverified folder keeps its browser draft and retries without offering text-only recovery', async () => {
+  const folder = 'C:\\Rec\\offline';
+  const draft = browser('offline', folder, { lastUpdated: old });
+  let available = false;
+  const h = harness({
+    browserMeetings: [draft, browser('text-only', undefined, { lastUpdated: old })],
+    scan: () => ({
+      recordings: [disk(folder)],
+      unverifiedCacheIds: available ? [] : ['offline'],
+    }),
+  });
+  const first = await h.render().checkForRecoverableTranscripts();
+  assert.deepEqual(json(first.map(entry => entry.meetingId)), ['text-only']);
+  assert.equal(h.render().scanFailed, true);
+  assert.ok(!h.names().includes('has_audio_checkpoints'));
+  await assert.rejects(h.render().recoverMeeting('offline'), /check for interrupted recordings/i);
+  assert.equal(h.saves.length, 0);
+  assert.ok(!h.names().includes('markSaved') && !h.names().includes('deleteBrowser'));
+
+  available = true;
+  const retried = await h.render().checkForRecoverableTranscripts();
+  assert.equal(h.render().scanFailed, false);
+  assert.equal(retried.find(entry => entry.meetingId === 'offline').recordingFolder, folder);
+  assert.equal(h.calls.filter(([name]) => name === 'find_interrupted_recordings')[1][1].cacheEntries[0].folder, folder);
+  h.hooks.unmount();
+});
+
 test('old browser-only recovery stays visible while a live or just-written cache stays hidden', async () => {
   const older = Date.now() - 30 * 24 * 60 * 60 * 1000;
   const h = harness({

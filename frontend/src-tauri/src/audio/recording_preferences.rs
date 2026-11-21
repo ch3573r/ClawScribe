@@ -597,11 +597,9 @@ pub(crate) fn is_system_top_level(path: &std::path::Path) -> bool {
     }
 }
 
-/// The recordings folder a caller asked for, if it may be one: an existing
-/// local directory that is not a drive root, UNC or device path, the profile or
-/// application-data root, or part of the system. UNC, device and
-/// extended-length text is refused before any filesystem call. Returns the
-/// resolved folder; the error never contains the path.
+/// Validate a folder obtained from the core picker, including a network share.
+/// Persist its resolved path so recording and recovery use the same directory
+/// without following the original alias again.
 pub(crate) fn validate_save_folder(
     requested: &std::path::Path,
     protected: &ProtectedFolders,
@@ -617,11 +615,10 @@ pub(crate) fn validate_save_folder(
     let canonical = requested
         .canonicalize()
         .map_err(|_| SAVE_FOLDER_REFUSED.to_string())?;
-    if !canonical.is_dir() {
-        return Err(SAVE_FOLDER_REFUSED.into());
-    }
     let resolved = crate::database::meeting_files::plain_path(&canonical);
-    if crate::trusted_roots::root_problem(&resolved, protected, true).is_some() {
+    if crate::database::meeting_files::directory_chain(&resolved).is_err()
+        || crate::trusted_roots::root_problem(&resolved, protected, true).is_some()
+    {
         return Err(SAVE_FOLDER_REFUSED.into());
     }
     Ok(resolved)
@@ -699,20 +696,31 @@ pub async fn set_recording_preferences<R: Runtime>(
         let protected = protected_folders(tauri::Manager::path(&app).app_data_dir().ok());
         let checked = granted.clone();
         let trusted_app = app.clone();
-        let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            validate_save_folder(&checked, &protected)?;
+        let result = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
+            let resolved = validate_save_folder(&checked, &protected)?;
+            if !same_path(&checked, &resolved) {
+                return Err(
+                    "The selected folder changed. Choose it again in Settings → Recording.".into(),
+                );
+            }
             let backing = trust_backing(&trusted_app)
                 .ok_or_else(|| "Could not save the folder".to_string())?;
-            crate::trusted_roots::trust_folder(backing.as_ref(), &checked, &protected)
+            crate::trusted_roots::trust_folder(backing.as_ref(), &resolved, &protected)?;
+            Ok(resolved)
         })
         .await
         .map_err(|_| "Could not check the recordings folder".to_string())
         .and_then(|result| result);
-        if let Err(message) = result {
-            crate::file_grants::give_back(crate::file_grants::Purpose::RecordingsFolder, &taken);
-            return Err(message);
-        }
-        preferences.save_folder = granted;
+        preferences.save_folder = match result {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                crate::file_grants::give_back(
+                    crate::file_grants::Purpose::RecordingsFolder,
+                    &taken,
+                );
+                return Err(message);
+            }
+        };
     }
     preferences.folder_notice = None;
     save_recording_preferences(&app, &preferences)
@@ -827,21 +835,18 @@ pub async fn select_recording_folder<R: Runtime>(
             .map_err(|e| format!("Folder dialog task failed: {}", e))?;
 
     if let Some(path) = folder_path {
-        let folder_path = path.to_string();
-        let folder = PathBuf::from(&folder_path);
-        ensure_recordings_directory(&folder)
-            .map_err(|e| format!("Failed to create selected recordings folder: {}", e))?;
+        let folder = PathBuf::from(path.to_string());
         let protected = protected_folders(tauri::Manager::path(&app).app_data_dir().ok());
-        let checked = folder.clone();
-        tokio::task::spawn_blocking(move || validate_save_folder(&checked, &protected))
-            .await
-            .map_err(|_| "Could not check the recordings folder".to_string())??;
+        let resolved =
+            tokio::task::spawn_blocking(move || validate_save_folder(&folder, &protected))
+                .await
+                .map_err(|_| "Could not check the recordings folder".to_string())??;
         // The choice is remembered by the core; `set_recording_preferences`
         // accepts a changed folder only if it is this one.
-        crate::file_grants::grant(crate::file_grants::Purpose::RecordingsFolder, &folder)?;
+        crate::file_grants::grant(crate::file_grants::Purpose::RecordingsFolder, &resolved)?;
 
         info!("User selected a recordings folder");
-        Ok(Some(folder_path))
+        Ok(Some(resolved.to_string_lossy().into_owned()))
     } else {
         info!("User cancelled recordings folder selection");
         Ok(None)
