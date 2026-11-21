@@ -299,6 +299,9 @@ export function MeetingExportButtons({
   }, [historyOpen, reviewItem, meetingId, candidateReload]);
 
   const selectedCandidate = candidates?.items.find(item => item.id === remoteId);
+  const linkedFileUses = reviewItem?.destination === "OneDrive Word document"
+    ? "unfinished PDF conversion and Word sharing"
+    : reviewItem?.destination === "OneDrive PDF" ? "PDF sharing" : null;
 
   async function reconcileExport() {
     if (!reviewItem || pending.current || !reviewOutcome || (reviewOutcome === "exists" && !remoteId.trim())) return;
@@ -733,6 +736,9 @@ export function MeetingExportButtons({
           {history?.length === 0 && <p className="text-sm text-muted-foreground">No remote exports recorded for this meeting.</p>}
           {reviewItem && <form className="space-y-3" onSubmit={event => { event.preventDefault(); void reconcileExport(); }}>
             <p className="text-sm">Check {reviewItem.destination} for {reviewItem.displayName ? `“${reviewItem.displayName}”` : "the exported item"}, then record what you found.</p>
+            {reviewItem.destination === "Confluence" && !reviewItem.displayName && (
+              <p className="text-sm text-muted-foreground">This export has no saved page title. Link the page if you find it. If the page is missing, review a browser draft before publishing manually.</p>
+            )}
             <Label htmlFor="export-review-outcome">What did you find?</Label>
             <Select value={reviewOutcome} onValueChange={setReviewOutcome} disabled={savingReview}>
               <SelectTrigger id="export-review-outcome"><SelectValue placeholder="Choose an outcome" /></SelectTrigger>
@@ -761,6 +767,9 @@ export function MeetingExportButtons({
                     {item.title}{item.createdAt && ` · ${new Date(item.createdAt).toLocaleString()}`}
                   </SelectItem>)}</SelectContent>
                 </Select>
+                {selectedCandidate && linkedFileUses && (
+                  <p className="break-words text-sm text-muted-foreground">A repeat export of this draft will use “{selectedCandidate.title}” for {linkedFileUses}, if requested.</p>
+                )}
                 {selectedCandidate?.webUrl && <Button type="button" variant="outline" size="sm" onClick={() => void openExternal(selectedCandidate.webUrl!)}>Open selected item</Button>}
               </>}
               {candidates?.truncated && <p className="text-sm text-muted-foreground">Showing part of the destination. Check the service directly if your item is missing here.</p>}
