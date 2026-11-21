@@ -721,101 +721,20 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         super::disk_space::ensure_space_to_record(&save_folder).await?;
     }
 
-    // ============================================================================
-    // MICROPHONE DEVICE RESOLUTION: Preference → Default → Error
-    // ============================================================================
-    let microphone_device = match preferred_mic_name {
-        Some(pref_name) => {
-            info!("🎤 Attempting to use preferred microphone: '{}'", pref_name);
-            match parse_audio_device(&pref_name) {
-                Ok(device) => {
-                    info!("✅ Using preferred microphone: '{}'", device.name);
-                    Some(Arc::new(device))
-                }
-                Err(_e) => {
-                    warn!("Preferred microphone unavailable");
-                    warn!("   Falling back to system default microphone...");
-                    match default_input_device() {
-                        Ok(device) => {
-                            info!("✅ Using default microphone: '{}'", device.name);
-                            Some(Arc::new(device))
-                        }
-                        Err(default_err) => {
-                            error!(
-                                "❌ No microphone available (preferred and default both failed)"
-                            );
-                            return Err(format!(
-                                "No microphone device available. Preferred device '{}' not found, and default microphone unavailable: {}",
-                                pref_name, default_err
-                            ));
-                        }
-                    }
-                }
-            }
+    let microphone_device = Some(Arc::new(match preferred_mic_name {
+        Some(name) => {
+            parse_audio_device(&name).map_err(|_| "Select a valid microphone in Settings.")?
         }
-        None => {
-            info!("🎤 No microphone preference set, using system default");
-            match default_input_device() {
-                Ok(device) => {
-                    info!("✅ Using default microphone: '{}'", device.name);
-                    Some(Arc::new(device))
-                }
-                Err(e) => {
-                    error!("❌ No default microphone available");
-                    return Err(format!("No microphone device available: {}", e));
-                }
-            }
-        }
-    };
-
-    // ============================================================================
-    // SYSTEM AUDIO DEVICE RESOLUTION: Preference → Default → None (optional)
-    // ============================================================================
+        None => default_input_device().map_err(|_| "No default microphone is available.")?,
+    }));
     let system_device = match preferred_system_name {
-        Some(pref_name) => {
-            info!(
-                "🔊 Attempting to use preferred system audio: '{}'",
-                pref_name
-            );
-            match parse_audio_device(&pref_name) {
-                Ok(device) => {
-                    info!("✅ Using preferred system audio: '{}'", device.name);
-                    Some(Arc::new(device))
-                }
-                Err(_e) => {
-                    warn!("Preferred system audio unavailable");
-                    warn!("   Falling back to system default...");
-                    match default_output_device() {
-                        Ok(device) => {
-                            info!("✅ Using default system audio: '{}'", device.name);
-                            Some(Arc::new(device))
-                        }
-                        Err(_default_err) => {
-                            warn!(
-                                "⚠️ No system audio available (preferred and default both failed)"
-                            );
-                            warn!("   Recording will continue with microphone only");
-                            None // System audio is optional
-                        }
-                    }
-                }
-            }
-        }
-        None => {
-            info!("🔊 No system audio preference set, using system default");
-            match default_output_device() {
-                Ok(device) => {
-                    info!("✅ Using default system audio: '{}'", device.name);
-                    Some(Arc::new(device))
-                }
-                Err(_e) => {
-                    warn!("⚠️ No default system audio available");
-                    warn!("   Recording will continue with microphone only");
-                    None // System audio is optional
-                }
-            }
-        }
-    };
+        Some(name) => Some(
+            parse_audio_device(&name)
+                .map_err(|_| "Select a valid system audio device in Settings.")?,
+        ),
+        None => default_output_device().ok(),
+    }
+    .map(Arc::new);
 
     // Always ensure a meeting name is set so incremental saver initializes
     let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {

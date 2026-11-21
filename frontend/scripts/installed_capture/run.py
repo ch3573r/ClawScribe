@@ -325,6 +325,8 @@ def main():
     require_app_closed()
     print("Checking release identity and the provisioned profile.", file=sys.stderr)
     report = release_identity(args)
+    require(tuple(map(int, args.version.split("-")[0].split("."))) >= (0, 64, 1),
+            "Use a candidate with exact Windows audio endpoint selection (0.64.1 or later).")
     payload = installer_payload(args.seven_zip, args.installer)
     config = json_file(args.config)
     root = safe_path(Path(config["recordings_root"]))

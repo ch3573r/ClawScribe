@@ -19,12 +19,11 @@ the runner service and GitHub Actions.
 3. Provision an isolated virtual microphone with its own render endpoint for
    injecting sound. Provide a second, independent virtual render endpoint for
    system loopback. Check the driver and signal routing for all three in
-   Windows Sound settings. Keep physical devices, remote audio, monitoring,
-   call/media apps and notification sounds out of this session. The app can
-   fall back to a default device. The harness requires that these three
-   endpoints constitute the entire active WASAPI inventory. Keep this topology
-   fixed until the app has exited. The harness does not change Windows audio
-   settings or install drivers.
+   Windows Sound settings. Keep live speech, call and media apps, sound
+   monitoring and notifications off the selected routes. From 0.64.1 the
+   app opens each explicitly selected Windows device by its exact name.
+   Other devices can remain connected. A missing or ambiguous selection
+   fails the check. The harness leaves Windows audio settings in place.
 4. Have 64-bit Python 3.11 or later, NumPy, SoundCard 0.4.6, Git, Windows
    PowerShell with UI Automation and 7-Zip available. SoundCard exposes the
    WASAPI endpoint IDs and the render endpoints' loopback inputs.

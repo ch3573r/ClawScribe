@@ -18,6 +18,10 @@ Verify both sources in a short saved recording before relying on a long session.
 Call detection is optional. With the correct output device selected, manual
 recordings can capture audio from any meeting app.
 
+On Windows, recording uses the exact name of each selected device. If a device
+disappears, ClawScribe reports the missing source. If two devices have the
+same name, rename one in Windows Sound settings before recording.
+
 The Settings microphone test is independent of recording capture. On Windows,
 an unavailable preferred microphone falls back to the current default, with the
 actual tested device and fallback shown beside its levels. Saved preferences

@@ -256,7 +256,9 @@ class SignalTests(unittest.TestCase):
         mic, feed, system, extra = [SimpleNamespace(id=n, name=n) for n in ("mic", "feed", "system", "extra")]
         config = dict(isolated_virtual_routes=True, microphone="mic", microphone_feed="feed", system_output="system")
         self.assertEqual((mic, feed, system), signals.resolve_routes(config, [mic], [feed, system]))
-        for inputs, outputs in [([mic, extra], [feed, system]), ([mic], [feed]), ([mic], [feed, system, extra])]:
+        self.assertEqual((mic, feed, system), signals.resolve_routes(config, [extra, mic], [extra, feed, system]))
+        duplicate = SimpleNamespace(id="second", name="mic")
+        for inputs, outputs in [([duplicate, mic], [feed, system]), ([mic], [feed]), ([extra], [feed, system])]:
             with self.assertRaises(signals.Refused):
                 signals.resolve_routes(config, inputs, outputs)
         with self.assertRaises(signals.Refused):

@@ -41,10 +41,11 @@ def resolve_routes(config, microphones, speakers):
     inputs = {d.id: d for d in microphones}
     outputs = {d.id: d for d in speakers}
     mic, feed, system = (config[k] for k in ("microphone", "microphone_feed", "system_output"))
-    require(len({mic, feed, system}) == 3 and set(inputs) == {mic} and set(outputs) == {feed, system},
-            "Active WASAPI endpoints differ from the three provisioned virtual endpoints.")
-    require(outputs[system].name not in outputs[feed].name and outputs[feed].name not in outputs[system].name,
-            "The two render names are ambiguous to the application's device matcher.")
+    require(len({mic, feed, system}) == 3 and mic in inputs and feed in outputs and system in outputs,
+            "One of the provisioned virtual endpoints is missing or shares an ID.")
+    for selected, devices in ((inputs[mic], microphones), (outputs[system], speakers), (outputs[feed], speakers)):
+        require(sum(d.name == selected.name for d in devices) == 1,
+                "A selected endpoint name is ambiguous in Windows Sound settings.")
     return inputs[mic], outputs[feed], outputs[system]
 
 

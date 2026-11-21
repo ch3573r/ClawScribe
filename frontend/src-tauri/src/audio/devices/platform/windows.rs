@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
-use log::{debug, info, warn};
+use log::{debug, warn};
 
 use crate::audio::devices::configuration::{AudioDevice, DeviceType};
 
@@ -102,177 +102,83 @@ pub fn get_windows_device(
     let wasapi_host = cpal::host_from_id(cpal::HostId::Wasapi)
         .map_err(|e| anyhow!("Failed to create WASAPI host: {}", e))?;
 
-    // Extract the base device name without the (input) or (output) suffix
-    let base_name = if audio_device.name.ends_with(" (input)") {
-        audio_device.name.trim_end_matches(" (input)")
-    } else if audio_device.name.ends_with(" (output)") {
-        audio_device.name.trim_end_matches(" (output)")
-    } else {
-        &audio_device.name
-    };
-
-    info!("Looking for Windows device with base name: {}", base_name);
-
-    match audio_device.device_type {
+    // The device type suffix is removed at the IPC boundary. A default choice
+    // made by the caller also arrives here as a concrete endpoint name.
+    let device = match audio_device.device_type {
         DeviceType::Input => {
-            for device in wasapi_host.input_devices()? {
-                if let Ok(name) = device.name() {
-                    info!("Checking input device: {}", name);
-                    // Check if the device name contains our base name
-                    if name == base_name || name.contains(base_name) {
-                        // info!("Found matching input device: {}", name);
-
-                        // Try to get default input config with better error logging
-                        match device.default_input_config() {
-                            Ok(default_config) => {
-                                // info!("Using default input config: {:?}", default_config);
-                                return Ok((device, default_config));
-                            }
-                            Err(e) => {
-                                warn!("Failed to get default input config: {}. Trying supported configs...", e);
-
-                                // Try to find a supported configuration
-                                if let Ok(supported_configs) = device.supported_input_configs() {
-                                    let configs: Vec<_> = supported_configs.collect();
-                                    if configs.is_empty() {
-                                        warn!("No supported input configurations found for device: {}", name);
-                                    } else {
-                                        // info!("Found {} supported input configurations", configs.len());
-
-                                        // First try to find F32 format with 2 channels (stereo)
-                                        for config in &configs {
-                                            if config.sample_format() == cpal::SampleFormat::F32
-                                                && config.channels() == 2
-                                            {
-                                                let config = config.with_max_sample_rate();
-                                                // info!("Using stereo F32 input config: {:?}", config);
-                                                return Ok((device, config));
-                                            }
-                                        }
-
-                                        // Then try any F32 format
-                                        for config in &configs {
-                                            if config.sample_format() == cpal::SampleFormat::F32 {
-                                                let config = config.with_max_sample_rate();
-                                                // info!("Using F32 input config: {:?}", config);
-                                                return Ok((device, config));
-                                            }
-                                        }
-
-                                        // Finally, use the first available config
-                                        let config = configs[0].with_max_sample_rate();
-                                        info!("Using fallback input config: {:?}", config);
-                                        return Ok((device, config));
-                                    }
-                                } else {
-                                    warn!("Could not enumerate supported configurations for device: {}", name);
-                                }
-
-                                return Err(anyhow!(
-                                    "No compatible input configuration found for device: {}",
-                                    name
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-
-            // If we didn't find a matching device, try the default input device as fallback
-            info!("No matching input device found, trying default input device");
-            if let Some(default_device) = wasapi_host.default_input_device() {
-                if let Ok(_name) = default_device.name() {
-                    // info!("Using default input device: {}", _name);
-                    if let Ok(config) = default_device.default_input_config() {
-                        return Ok((default_device, config));
-                    } else if let Ok(supported_configs) = default_device.supported_input_configs() {
-                        if let Some(config) = supported_configs.into_iter().next() {
-                            return Ok((default_device, config.with_max_sample_rate()));
-                        }
-                    }
-                }
-            }
+            named_endpoint(wasapi_host.input_devices()?, &audio_device.name, |d| {
+                d.name().ok()
+            })?
         }
         DeviceType::Output => {
-            for device in wasapi_host.output_devices()? {
-                if let Ok(name) = device.name() {
-                    info!("Checking output device: {}", name);
-                    // Check if the device name contains our base name
-                    if name == base_name || name.contains(base_name) {
-                        // info!("Found matching output device: {}", name);
-
-                        // For output devices, we want to use them in loopback mode
-                        if let Ok(supported_configs) = device.supported_output_configs() {
-                            let configs: Vec<_> = supported_configs.collect();
-                            if configs.is_empty() {
-                                warn!(
-                                    "No supported output configurations found for device: {}",
-                                    name
-                                );
-                            } else {
-                                // info!("Found {} supported output configurations", configs.len());
-
-                                // Try to find a config that supports f32 format with 2 channels (stereo)
-                                for config in &configs {
-                                    if config.sample_format() == cpal::SampleFormat::F32
-                                        && config.channels() == 2
-                                    {
-                                        let config = config.with_max_sample_rate();
-                                        info!("Using stereo F32 output config: {:?}", config);
-                                        return Ok((device, config));
-                                    }
-                                }
-
-                                // Then try any F32 format
-                                for config in &configs {
-                                    if config.sample_format() == cpal::SampleFormat::F32 {
-                                        let config = config.with_max_sample_rate();
-                                        // info!("Using F32 output config: {:?}", config);
-                                        return Ok((device, config));
-                                    }
-                                }
-
-                                // Finally, use the first available config
-                                let config = configs[0].with_max_sample_rate();
-                                // info!("Using fallback output config: {:?}", config);
-                                return Ok((device, config));
-                            }
-                        } else {
-                            warn!(
-                                "Could not enumerate supported configurations for device: {}",
-                                name
-                            );
-                        }
-
-                        // If we couldn't get supported configs, try default
-                        if let Ok(default_config) = device.default_output_config() {
-                            // info!("Using default output config: {:?}", default_config);
-                            return Ok((device, default_config));
-                        }
-                    }
-                }
-            }
-
-            // If we didn't find a matching device, try the default output device as fallback
-            info!("No matching output device found, trying default output device");
-            if let Some(default_device) = wasapi_host.default_output_device() {
-                if let Ok(name) = default_device.name() {
-                    info!("Using default output device: {}", name);
-                    if let Ok(config) = default_device.default_output_config() {
-                        return Ok((default_device, config));
-                    } else if let Ok(supported_configs) = default_device.supported_output_configs()
-                    {
-                        if let Some(config) = supported_configs.into_iter().next() {
-                            return Ok((default_device, config.with_max_sample_rate()));
-                        }
-                    }
-                }
-            }
+            named_endpoint(wasapi_host.output_devices()?, &audio_device.name, |d| {
+                d.name().ok()
+            })?
         }
+    };
+    let config = match audio_device.device_type {
+        DeviceType::Input => device
+            .default_input_config()
+            .ok()
+            .or_else(|| preferred_config(device.supported_input_configs().ok()?)),
+        DeviceType::Output => device
+            .supported_output_configs()
+            .ok()
+            .and_then(preferred_config)
+            .or_else(|| device.default_output_config().ok()),
     }
+    .ok_or_else(|| anyhow!("The selected audio device has no supported format."))?;
+    Ok((device, config))
+}
 
-    Err(anyhow!(
-        "Device not found or no compatible configuration available: {}",
-        audio_device.name
-    ))
+fn named_endpoint<T>(
+    endpoints: impl Iterator<Item = T>,
+    name: &str,
+    endpoint_name: impl Fn(&T) -> Option<String>,
+) -> Result<T> {
+    let mut matching = endpoints.filter(|device| endpoint_name(device).as_deref() == Some(name));
+    let selected = matching
+        .next()
+        .ok_or_else(|| anyhow!("The selected audio device is no longer available."))?;
+    if matching.next().is_some() {
+        return Err(anyhow!("More than one audio device has the selected name. Give the devices distinct names in Windows Sound settings."));
+    }
+    Ok(selected)
+}
+
+fn preferred_config(
+    configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+) -> Option<cpal::SupportedStreamConfig> {
+    configs
+        .min_by_key(|config| match (config.sample_format(), config.channels()) {
+            (cpal::SampleFormat::F32, 2) => 0,
+            (cpal::SampleFormat::F32, _) => 1,
+            _ => 2,
+        })
+        .map(|config| config.with_max_sample_rate())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::named_endpoint;
+
+    #[test]
+    fn a_named_source_cannot_switch_to_another_endpoint() {
+        let names = [
+            "Virtual microphone 2",
+            "Default input",
+            "Virtual microphone",
+        ];
+        let find =
+            |name: &str| named_endpoint(names.into_iter(), name, |value| Some((*value).to_owned()));
+        assert_eq!(find("Virtual microphone").unwrap(), "Virtual microphone");
+        assert!(find("Virtual").is_err());
+        assert!(find("Disconnected microphone").is_err());
+        assert!(
+            named_endpoint(["Output", "Output"].into_iter(), "Output", |value| Some(
+                (*value).to_owned()
+            ))
+            .is_err()
+        );
+    }
 }
