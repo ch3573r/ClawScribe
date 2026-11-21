@@ -41,7 +41,9 @@ def run_cmd(command, timeout, *, output=False):
 
 def audio_step(config, action, number=1):
     command = [sys.executable, "-B", HERE / "signals.py", action, "--config", config, "--round", str(number)]
-    result = subprocess.run(command, capture_output=True, timeout=30)
+    if action == "probe":
+        command.extend(["--ffmpeg", installation()[0].with_name("ffmpeg.exe")])
+    result = subprocess.run(command, capture_output=True, timeout=40)
     if result.returncode:
         # Only show fixed failure categories, not raw audio backend diagnostics.
         raise Refused(f"Virtual route {action} failed for recording {number}. Check endpoint isolation and calibration.")

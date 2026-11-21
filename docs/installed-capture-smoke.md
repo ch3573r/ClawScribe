@@ -24,10 +24,11 @@ the runner service and GitHub Actions.
    app opens each explicitly selected Windows device by its exact name.
    Other devices can remain connected. A missing or ambiguous selection
    fails the check. The harness leaves Windows audio settings in place.
-4. Have 64-bit Python 3.11 or later, NumPy, SoundCard 0.4.6, Git, Windows
-   PowerShell with UI Automation and 7-Zip available. SoundCard exposes the
-   WASAPI endpoint IDs and the render endpoints' loopback inputs.
-   [SoundCard documentation](https://soundcard.readthedocs.io/en/latest/)
+4. Have 64-bit Python 3.11 or later, NumPy, PyAudioWPatch 0.2.12.8, Git, Windows
+   PowerShell with UI Automation and 7-Zip available. Windows supplies the
+   endpoint IDs. PyAudioWPatch plays the test signals and measures system loopback.
+   The installed FFmpeg measures the selected virtual microphone independently.
+   [PyAudioWPatch documentation](https://github.com/s0d3s/PyAudioWPatch)
 
 From the repository root, enumerate device names and IDs locally. This command
 opens no streams. Keep its output on the test desktop.
@@ -134,4 +135,4 @@ node scripts/verify-public-repo-safety.mjs
 These checks use generated PCM/AAC, the repository's SQLite migrations and
 temporary directories. They exercise release identity, Stop deadlines, shifted
 pitch, missing or stale sources, cross-feed, cleanup ownership and preference
-restoration. They can run without SoundCard, an installed app or audio devices.
+restoration. They can run without PyAudioWPatch, an installed app or audio devices.

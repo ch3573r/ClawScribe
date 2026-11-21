@@ -252,6 +252,21 @@ class SignalTests(unittest.TestCase):
         with self.assertRaisesRegex(signals.Refused, "other virtual endpoint"):
             signals.measured_marker(mic, mic, signals.RATE)
 
+    def test_inventory_pairs_windows_ids_only_with_unique_wasapi_devices(self):
+        host = Mock()
+        host.get_host_api_info_by_type.return_value = {"index": 3}
+        def device(label, index):
+            return dict(name=label, index=index, hostApi=3, isLoopbackDevice=False,
+                        maxInputChannels=1, maxOutputChannels=0)
+        host.get_device_info_generator.return_value = [
+            device("Virtual input", 2), device("Repeated", 3), device("Repeated", 4),
+            dict(device("Virtual input", 5), hostApi=1)]
+        names = {"{0.0.1.test}.one": "Virtual input", "{0.0.1.test}.two": "Repeated"}
+        with patch.object(signals, "windows_endpoint_names", return_value=names):
+            inputs, outputs, _ = signals.wasapi_routes(host, SimpleNamespace(paWASAPI=13))
+        self.assertEqual([(d.id, d.info["index"]) for d in inputs], [("{0.0.1.test}.one", 2)])
+        self.assertEqual(outputs, [])
+
     def test_refuse_unconfigured_endpoint_and_shared_render_route(self):
         mic, feed, system, extra = [SimpleNamespace(id=n, name=n) for n in ("mic", "feed", "system", "extra")]
         config = dict(isolated_virtual_routes=True, microphone="mic", microphone_feed="feed", system_output="system")
