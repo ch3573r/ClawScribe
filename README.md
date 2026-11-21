@@ -7,9 +7,9 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-**0.65.0** adds **Join and record** for upcoming Teams meetings, floating
+**0.65.1** adds **Join and record** for upcoming Teams meetings, floating
 recording controls, and one search across titles, transcripts, summaries and
-personal notes. See the [release notes](docs/releases/0.65.0.md) and
+personal notes. See the [release notes](docs/releases/0.65.1.md) and
 [download the latest stable Windows release](https://github.com/ch3573r/ClawScribe/releases/latest).
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
