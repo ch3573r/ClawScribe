@@ -15,6 +15,31 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn editing_notes_requires_a_summary_row() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        let before: String = sqlx::query_scalar("SELECT updated_at FROM meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let saved = SummaryProcessesRepository::update_meeting_summary(
+            &pool,
+            meeting,
+            &serde_json::json!({"markdown": "Unsaved notes"}),
+        )
+        .await
+        .unwrap();
+        assert!(!saved);
+        let after: String = sqlx::query_scalar("SELECT updated_at FROM meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
     async fn editing_notes_preserves_their_generation_revision_and_email_without_reusing_cached_text(
     ) {
         let pool = crate::database::transcript_edits::tests::fixture().await;
@@ -506,10 +531,6 @@ impl SummaryProcessesRepository {
             .is_some();
 
         if !meeting_exists {
-            log_info!(
-                "Attempted to save summary for a non-existent meeting_id: {}",
-                meeting_id
-            );
             transaction.rollback().await?;
             return Ok(false);
         }
@@ -564,12 +585,18 @@ impl SummaryProcessesRepository {
         }
         let now = Utc::now();
 
-        sqlx::query("UPDATE summary_processes SET result = ?, updated_at = ? WHERE meeting_id = ?")
-            .bind(&result_json.unwrap())
-            .bind(now)
-            .bind(meeting_id)
-            .execute(&mut *transaction)
-            .await?;
+        let saved = sqlx::query(
+            "UPDATE summary_processes SET result = ?, updated_at = ? WHERE meeting_id = ?",
+        )
+        .bind(&result_json.unwrap())
+        .bind(now)
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+        if saved.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
 
         sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
             .bind(now)
@@ -579,10 +606,6 @@ impl SummaryProcessesRepository {
 
         transaction.commit().await?;
 
-        log_info!(
-            "Successfully updated summary and timestamp for meeting_id: {}",
-            meeting_id
-        );
         Ok(true)
     }
 

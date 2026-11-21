@@ -2,6 +2,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { flushMeetingDrafts } from '@/lib/meetingDrafts';
 
 export type UpdateChannel = 'stable' | 'preview';
 export interface UpdateInfo {
@@ -180,6 +181,7 @@ export class UpdateService {
       throw new Error('The selected update changed. Check for updates again.');
     }
     const candidate = this.candidate;
+    let staged = false;
     this.publish({ isInstalling: true, error: null });
     try {
       const assertRecordingIdle = async () => {
@@ -201,12 +203,19 @@ export class UpdateService {
         onProgress({ downloaded, total, percentage: total > 0 ? Math.min(100, Math.round(downloaded / total * 100)) : 0, phase: 'downloading' });
       };
       await invoke('download_app_update', { rid: candidate.rid, onEvent: events });
+      staged = true;
       await assertRecordingIdle();
+      try {
+        await flushMeetingDrafts();
+      } catch {
+        throw new Error('Could not save meeting edits. Your edits are still available. Save them before trying the update again.');
+      }
       onProgress({ downloaded, total, percentage: 100, phase: 'installing' });
       await invoke('install_app_update', { rid: candidate.rid });
       await relaunch();
     } catch (error) {
       // Cleanup must never replace the error the user needs to see.
+      if (staged) await invoke('discard_app_update', { rid: candidate.rid }).catch(() => {});
       await this.closeCandidate().catch(() => {});
       this.lastSuccess = 0;
       this.publish({ updateInfo: null, error: updateErrorMessage(error) });

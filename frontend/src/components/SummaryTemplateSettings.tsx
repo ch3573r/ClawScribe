@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { confirm } from '@tauri-apps/plugin-dialog';
 import { Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -75,6 +76,27 @@ export function SummaryTemplateSettings() {
     } finally { if (mounted.current) setBusy(false); }
   };
   const closeEditor = () => { loadVersion.current += 1; setDraft(null); setEditingId(''); setDirty(false); setError(''); };
+  const savedTemplate = templates.availableTemplates.find(template => template.id === editingId);
+  const remove = async () => {
+    if (!savedTemplate?.personal || busy || dirty) return;
+    setBusy(true); setError('');
+    const reset = savedTemplate.bundled;
+    try {
+      const confirmed = await confirm(
+        reset ? 'Remove your changes and use the original template?' : 'Delete this personal template? Meetings that used it for future summaries will use the default template.',
+        { title: reset ? 'Reset template' : 'Delete template', kind: 'warning' },
+      );
+      if (!confirmed || !mounted.current) return;
+      await invoke('api_remove_template', { templateId: savedTemplate.id });
+      if (!mounted.current) return;
+      closeEditor();
+      toast.success(reset ? 'Template reset' : 'Template deleted');
+    } catch {
+      if (mounted.current) setError(reset ? 'Could not reset the template. Try again.' : 'Could not delete the template. Try again.');
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
 
   const defaultSelect = <>
     <SaveMark status={defaultStatus} />
@@ -127,7 +149,13 @@ export function SummaryTemplateSettings() {
       <Button variant="outline" disabled={draft.sections.length >= 30} onClick={() => update({ ...draft, sections: [...draft.sections, { title: '', instruction: '', format: 'list' }] })}><Plus className="mr-2 h-4 w-4" />Add section</Button>
       <p className="text-xs text-muted-foreground">Changes to a built-in template are saved as your personal override. Existing meeting notes stay as they are.</p>
       <div className="flex flex-wrap gap-2"><Button disabled={!dirty || !draft.name.trim() || !draft.description.trim() || draft.sections.some(s => !s.title.trim() || !s.instruction.trim())} onClick={() => void save()}>{busy ? 'Saving…' : 'Save template'}</Button>
-        <Button variant="outline" disabled={busy} onClick={closeEditor}>Discard changes</Button></div>
+        {dirty && <Button variant="outline" disabled={busy} onClick={closeEditor}>Discard changes</Button>}
+        {savedTemplate?.personal && !dirty && (
+          <Button variant="ghost" disabled={busy} onClick={() => void remove()}>
+            {savedTemplate.bundled ? 'Reset template' : 'Delete template'}
+          </Button>
+        )}
+      </div>
           </fieldset>}
         </div>
       </DialogContent>

@@ -81,9 +81,10 @@ is not brought to the front. See
   Live transcription and the local notes model can be set up independently.
   If a speech model fails after capture opens, a session with audio saving
   enabled continues in audio-only mode.
-- **Check recording readiness:** Home shows the microphone, system output, and
-  on-device live engine. **Recheck devices** refreshes the list after a change.
-  Any hosted file-transcription preference is shown separately.
+- **Check recording readiness:** Choose the microphone and system output under
+  **Signal path** on Home. These choices also apply in Recording settings and
+  when starting from the tray. **Recheck devices** refreshes the list after a change.
+  Home shows the on-device live engine and any hosted file-transcription preference separately.
 - Recording continues after temporary queue pressure or spool-write failures,
   with incomplete audio reported visibly. Playback streams saved recordings.
   Stop saves available audio even if transcript backup writes fail, and capture
@@ -292,8 +293,9 @@ settings after upgrading to refresh models. Availability depends on the signed-i
 your saved model selection is preserved. OpenAI's API model fallback list also
 includes GPT-6.1 Sol.
 
-In **Settings → Summary**, create or edit templates and choose a persistent
-default. Each meeting can use a different template when generating notes.
+In **Settings → Summary**, create, edit or delete personal templates, reset
+customized built-in templates, and choose a default. Each meeting can use a
+different template when generating notes.
 Summary find-and-replace preserves formatting and source links; review the
 changes, which save automatically. Use the editor's undo command to revert changes.
 
@@ -402,12 +404,15 @@ meetings. See [local library tools](docs/local-library.md#deleting-meetings).
 
 ClawScribe checks **stable releases** by default. Enable **Include prereleases**
 under **Settings > General > Updates** or **About** to receive preview builds
-as well. The choice persists across restarts and applies to manual and startup
-checks. You still choose when to install; checking at launch is a separate option.
+as well. The choice persists across restarts and applies to all checks. Turn on
+**Check for updates automatically** to check at startup and periodically while
+ClawScribe stays open in the tray. You choose when to install.
 
 Preview builds may contain unfinished features. Turning previews off waits for a
 newer stable version and never downgrades your installation. Update downloads
 retain Tauri signature verification and remain subject to Windows security policy.
+ClawScribe saves pending meeting title and summary edits before installation and
+keeps the app open if a save fails.
 
 ## What changed in the 0.64.0 preview
 

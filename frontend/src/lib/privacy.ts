@@ -27,7 +27,7 @@ export interface PrivacyInput {
   confluenceRest: boolean;
   calendars: Loadable<{ files: number; subscriptions: number }>;
   assistant: Loadable<boolean>;
-  /** "Check for updates at startup" on the General page. */
+  /** "Check for updates automatically" on the General page. */
   updateCheck: boolean;
   semanticSearch: Loadable<boolean>;
   /**
@@ -329,7 +329,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
   const updateRow = row({
     id: "update", title: "Update check", tab: "general", tabLabel: "General",
     destination: "GitHub", detail: "Asks for the latest version, no meeting data",
-    ...(input.updateCheck ? { when: "At startup", tone: "warning" as const } : { when: "Only when you check", tone: "active" as const }),
+    ...(input.updateCheck ? { when: "At startup and periodically", tone: "warning" as const } : { when: "Only when you check", tone: "active" as const }),
   });
 
   const rows = [

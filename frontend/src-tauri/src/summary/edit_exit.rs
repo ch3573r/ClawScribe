@@ -6,6 +6,19 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 #[derive(Default)]
 pub struct SummaryEditsState(Mutex<ExitState>);
 
+impl SummaryEditsState {
+    pub(crate) fn ensure_saved_for_update(&self) -> Result<(), String> {
+        let state = self.0.lock().unwrap();
+        if state.pending || state.attempt.is_some() {
+            return Err(
+                "Save your meeting edits and close any quit prompt before installing the update."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct ExitState {
     pending: bool,
@@ -173,6 +186,20 @@ mod tests {
             panic!("Expected save wait")
         };
         (state, id)
+    }
+
+    #[test]
+    fn native_update_requires_saved_drafts_and_no_pending_quit() {
+        let edits = SummaryEditsState::default();
+        assert!(edits.ensure_saved_for_update().is_ok());
+        let now = Instant::now();
+        let (state, id) = waiting(now);
+        *edits.0.lock().unwrap() = state;
+        assert!(edits.ensure_saved_for_update().is_err());
+        edits.0.lock().unwrap().pending = false;
+        assert!(edits.ensure_saved_for_update().is_err());
+        assert_eq!(edits.0.lock().unwrap().finish(id), Some(7));
+        assert!(edits.ensure_saved_for_update().is_ok());
     }
 
     #[test]

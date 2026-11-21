@@ -114,7 +114,7 @@ test('exports, calendars, assistant access and the update check follow their set
   assert.equal(rowOf(derive({ calendars: ready({ files: 1, subscriptions: 0 }) }), 'calendars').when, 'Never leaves');
   assert.equal(rowOf(derive({}), 'calendars').tone, 'off');
   assert.equal(rowOf(derive({ assistant: ready(true) }), 'assistant').destination, 'Local apps on this PC');
-  assert.equal(rowOf(derive({ updateCheck: true }), 'update').when, 'At startup');
+  assert.equal(rowOf(derive({ updateCheck: true }), 'update').when, 'At startup and periodically');
   assert.equal(rowOf(derive({ updateCheck: true }), 'update').tone, 'warning');
   assert.equal(rowOf(derive({ updateCheck: false }), 'update').when, 'Only when you check');
   assert.equal(rowOf(derive({ confluenceRest: true }), 'exports').destination, 'Confluence');

@@ -155,9 +155,9 @@ export function PreferenceSettings() {
     <SettingsStack>
       <SettingsCard title="Updates">
         <SettingsRow
-          title="Check for updates at startup"
+          title="Check for updates automatically"
           htmlFor="preferences-auto-update"
-          description="Looks for a new ClawScribe release each time the app starts"
+          description="Checks at startup and while ClawScribe is running in the tray"
         >
           <Switch id="preferences-auto-update" checked={autoUpdateChecksEnabled} onCheckedChange={handleAutoUpdateCheckChange} />
         </SettingsRow>

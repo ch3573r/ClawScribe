@@ -10,7 +10,7 @@ function deferred() {
 }
 
 function fixture(channel = 'stable') {
-  const calls = { checks: 0, downloads: [], installs: [], closed: [], relaunches: 0, native: [] };
+  const calls = { checks: 0, downloads: [], installs: [], discarded: [], closed: [], relaunches: 0, native: [] };
   const control = { channel, check: null, saveError: null, download: null, recording: false, backgroundJob: false, installError: null, closeError: null };
   const result = (rid = 1, selected = control.channel) => ({
     channel: selected,
@@ -24,8 +24,7 @@ function fixture(channel = 'stable') {
     async download() { throw new Error('The page must not download through the plugin'); }
     async install() { throw new Error('The page must not install through the plugin'); }
   }
-  const { UpdateService } = loadTsModule('src/services/updateService.ts', {
-    '@tauri-apps/api/core': { Channel: class { onmessage = () => {}; }, invoke: async (command, args) => {
+  const core = { Channel: class { onmessage = () => {}; }, invoke: async (command, args) => {
       calls.native.push(command);
       if (command === 'get_update_channel') return control.channel;
       if (command === 'set_update_channel') {
@@ -34,6 +33,16 @@ function fixture(channel = 'stable') {
         return;
       }
       if (command === 'is_recording') return control.recording;
+      if (command === 'api_set_summary_edits_pending') {
+        if (control.draftAcknowledgementError) throw control.draftAcknowledgementError;
+        control.draftsPending = args.pending;
+        return;
+      }
+      if (command === 'api_get_summary') return { status: 'completed' };
+      if (command === 'api_save_meeting_title' || command === 'api_save_meeting_summary') {
+        if (control.draftSaveError) throw control.draftSaveError;
+        return;
+      }
       if (command === 'download_app_update') {
         if (control.backgroundJob) throw new Error('Finish the active job before installing.');
         calls.downloads.push(args.rid);
@@ -48,17 +57,24 @@ function fixture(channel = 'stable') {
         calls.installs.push(args.rid);
         return;
       }
+      if (command === 'discard_app_update') { calls.discarded.push(args.rid); return; }
       if (command === 'check_app_update') {
         ++calls.checks;
         return control.check ? control.check() : result();
       }
       throw new Error(`Unexpected command: ${command}`);
-    } },
+    } };
+  const drafts = loadTsModule('src/lib/meetingDrafts.ts', {
+    '@tauri-apps/api/core': core, sonner: { toast: { error() {} } },
+  });
+  const { UpdateService } = loadTsModule('src/services/updateService.ts', {
+    '@tauri-apps/api/core': core,
+    '@/lib/meetingDrafts': drafts,
     '@tauri-apps/api/app': { getVersion: async () => '0.5.36' },
     '@tauri-apps/plugin-updater': { Update: FakeUpdate },
     '@tauri-apps/plugin-process': { relaunch: async () => { ++calls.relaunches; } },
   });
-  return { service: new UpdateService(), control, calls, result };
+  return { service: new UpdateService(), control, calls, result, drafts };
 }
 
 test('loads persisted channel and actual installed version before checking', async () => {
@@ -252,4 +268,51 @@ test('page state changing after the download still blocks the installer hand-off
   f.control.download = () => { allowed = false; };
   await assert.rejects(f.service.downloadAndInstall(info, () => {}, () => allowed), /Finish recording/);
   assert.deepEqual(f.calls.installs, []);
+});
+
+test('installer hand-off saves a dirty title and notes, including edits created during download', async () => {
+  const f = fixture();
+  const draft = f.drafts.meetingDraft('draft-during-download');
+  draft.edit({ title: 'Edited title' });
+  f.control.download = () => { draft.edit({ summary: { markdown: 'Edited notes' } }); };
+  const info = await f.service.checkForUpdates();
+  await f.service.downloadAndInstall(info, () => {}, () => true);
+  assert.deepEqual(f.calls.native.filter(command => command.startsWith('api_save_meeting_') || /^(download|install)_app_update$/.test(command)), [
+    'download_app_update', 'api_save_meeting_title', 'api_save_meeting_summary', 'install_app_update',
+  ]);
+  assert.equal(f.control.draftsPending, false);
+  assert.equal(draft.dirty(), false);
+});
+
+test('failed draft save during hand-off leaves edits pending and prevents the installer and restart', async () => {
+  const f = fixture();
+  const draft = f.drafts.meetingDraft('failed-update-save');
+  f.control.draftSaveError = new Error('Synthetic write failure');
+  f.control.download = () => { draft.edit({ summary: { markdown: 'Unsaved notes' } }); };
+  const info = await f.service.checkForUpdates();
+  await assert.rejects(f.service.downloadAndInstall(info, () => {}, () => true), /save.*meeting edits/i);
+  assert.equal(draft.state, 'error');
+  assert.equal(draft.edits.summary.markdown, 'Unsaved notes');
+  assert.equal(f.control.draftsPending, true);
+  assert.deepEqual(f.calls.discarded, [1]);
+  assert.deepEqual(f.calls.installs, []);
+  assert.equal(f.calls.relaunches, 0);
+  f.control.draftSaveError = null;
+  await f.drafts.flushMeetingDrafts();
+  assert.equal(draft.dirty(), false);
+});
+
+test('an unavailable native draft acknowledgement blocks installation even after disk writes succeed', async () => {
+  const f = fixture();
+  const info = await f.service.checkForUpdates();
+  const draft = f.drafts.meetingDraft('draft-acknowledgement');
+  f.control.download = () => {
+    draft.edit({ title: 'Pending title' });
+    f.control.draftAcknowledgementError = new Error('Synthetic IPC error');
+  };
+  await assert.rejects(f.service.downloadAndInstall(info, () => {}, () => true), /save.*meeting edits/i);
+  assert.equal(draft.dirty(), false);
+  assert.deepEqual(f.calls.installs, []);
+  assert.deepEqual(f.calls.discarded, [1]);
+  assert.equal(f.calls.relaunches, 0);
 });

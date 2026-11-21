@@ -388,9 +388,14 @@ so refreshing the surrounding array cannot leave an utterance partly hidden.
 
 User template edits are validated and atomically stored as personal JSON files
 in the existing template directory. Overrides take precedence over bundled
-versions. The default template uses `summary_preferences.json`; a missing saved
-default falls back to `standard_meeting`. Shared template events refresh Settings
-and meeting selectors. Structured providers return a template-shaped
+versions. Deleting a personal template removes it from selection. Resetting a
+customized built-in template restores the bundled version. ClawScribe records
+removals in its own storage when the template came from a legacy Meetily profile.
+The bundled `psychiatric_session.json` resource retains the shipped template ID
+`psychatric_session`. The default template uses `summary_preferences.json` and
+falls back to `standard_meeting` when the saved template is unavailable. A series
+with a missing template uses the current default. Shared template events refresh
+Settings and meeting selectors. Structured providers return a template-shaped
 `notes_markdown` alongside their existing export fields; old stored outputs use
 the standard renderer. Manual summary saves retain source identities and
 invalidate the English generation cache. Summary replacement edits inline text,

@@ -115,8 +115,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
 
     setIsSaving(true);
     try {
-      console.log('💾 Saving BlockNote content...');
-
       // Generate markdown from current blocks; preserve BlockNote JSON even if markdown conversion fails.
       const markdownResult = await blocksToMarkdownSafely(editor, currentBlocks, {
         source: 'BlockNoteSummaryView.handleSave',
@@ -133,9 +131,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       await onSave(saveData);
 
       setIsDirty(false);
-      console.log('✅ Save successful');
-    } catch (err) {
-      console.error('❌ Save failed:', err);
+    } catch {
       throw new Error("Could not save the summary. Your edits are still in the editor.");
     } finally {
       saveInFlight.current = false;
@@ -163,23 +159,17 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     },
     getMarkdown: async () => {
       try {
-        console.log('🔍 getMarkdown called, format:', format);
-        console.log('🔍 currentBlocks length:', currentBlocks.length);
-
         // For markdown format - use the main editor
         if (format === 'markdown' && editor) {
-          console.log('📝 Using markdown editor, blocks:', editor.document.length);
           const markdownResult = await blocksToMarkdownSafely(editor, editor.document, {
             source: 'BlockNoteSummaryView.getMarkdown.markdown',
             fallbackMarkdown: data?.markdown,
           });
-          console.log('📝 Generated markdown length:', markdownResult.markdown?.length || 0);
           return markdownResult.markdown || '';
         }
 
         // For blocknote format - use currentBlocks state
         if (format === 'blocknote') {
-          console.log('📝 BlockNote format, currentBlocks:', currentBlocks.length);
           const blocks = currentBlocks.length > 0
             ? currentBlocks
             : data?.summary_json || [];
@@ -189,21 +179,18 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
               source: 'BlockNoteSummaryView.getMarkdown.blocknote',
               fallbackMarkdown: data?.markdown,
             });
-            console.log('📝 Generated markdown from blocks, length:', markdownResult.markdown?.length || 0);
             return markdownResult.markdown || '';
           }
           // Fallback: if we have the original data with markdown
           if (data?.markdown) {
-            console.log('📝 Using fallback markdown from data');
             return data.markdown;
           }
         }
 
         // For legacy format - return empty (handled by parent)
-        console.warn('⚠️ Cannot generate markdown for legacy format, returning empty');
         return '';
-      } catch (err) {
-        console.error('❌ Failed to generate markdown:', err);
+      } catch {
+        console.warn('Could not read Markdown from the summary editor.');
         return '';
       }
     },
@@ -214,7 +201,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
 
   // Render legacy format
   if (format === 'legacy') {
-    console.log('🎨 Rendering LEGACY format');
     return (
       <AISummary
         summary={hasEditorData ? null : summaryData}
@@ -227,7 +213,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
 
   // Render BlockNote format (has summary_json)
   if (format === 'blocknote') {
-    console.log('🎨 Rendering BLOCKNOTE format (direct)');
     return (
       <div className="flex flex-col w-full">
         <div className="w-full">
@@ -236,10 +221,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
             initialContent={data?.summary_json}
             summaryPresentation
             onEditorReady={onEditorReady}
-            onChange={(blocks) => {
-              console.log('📝 Editor blocks changed:', blocks.length);
-              handleEditorChange(blocks);
-            }}
+            onChange={handleEditorChange}
             editable={!isSaving}
           />
         </div>
@@ -249,7 +231,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
 
   // Render Markdown format (parse and display in BlockNote)
   if (format === 'markdown') {
-    console.log('🎨 Rendering MARKDOWN format (parsed to BlockNote)');
     return (
       <div className="flex flex-col w-full">
         <div className="w-full">

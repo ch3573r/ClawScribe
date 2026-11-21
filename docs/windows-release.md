@@ -485,10 +485,12 @@ missing. Do not publish an empty signature to work around that failure.
 
 Stable releases are the default. The app checks the latest non-draft,
 non-prerelease release's `latest.json`. Users can enable **Include prereleases**
-in Settings > Preferences > Updates or About. This choice persists locally in
-the Tauri-owned `updater.json` store and applies to startup checks, manual checks,
-and the tray. Checking at launch is a separate preference; opting into previews
-does not turn on automatic checks or install anything automatically.
+in Settings > General > Updates or About. The Tauri-owned `updater.json` store
+persists the channel for both manual and automatic checks. When automatic
+checks are enabled, the main webview checks shortly after launch and retries
+hourly while the app is running, including while hidden in the tray. Successful
+checks are cached for 24 hours and concurrent requests share one check per
+channel. Installation requires a user action.
 
 The preview channel considers the stable update and the newest eligible Windows
 x64 release in GitHub's 100 most recent release entries. It compares numeric
@@ -509,8 +511,11 @@ held in memory, never handed to the page) and keeps the verified bytes until the
 install step, so a page reload cannot change what is installed. An update can
 install once recording, transcription, speaker detection, indexing, summaries,
 saved answers and Microsoft 365 or Confluence exports finish. Work can start
-during the download. If it does, the install step stops without losing that work;
-try the update again after it finishes. The exclusion is held by the native
+during the download. ClawScribe flushes pending meeting title and summary edits
+after the download and waits for the core to acknowledge them. A failed save or
+newly active job stops installation. The native hand-off checks for pending
+drafts again while holding the same exclusion as meeting writes.
+The exclusion is held by the native
 application for the whole installer hand-off and released if the installer
 fails, so it cannot be stranded by a reload. Device security policy still applies
 to the installer; selecting a channel does not bypass Windows security blocks.

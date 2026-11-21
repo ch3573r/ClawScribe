@@ -3,6 +3,7 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { loadTsModule } from './load-ts-module.mjs';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
 function settings(overrides={}) {
   const snapshot={ready:true,channel:'stable',isChecking:false,isInstalling:false,isSavingChannel:false,updateInfo:null,error:null,setChannel:async()=>{},checkForUpdates:async()=>{},...overrides};
@@ -74,4 +75,56 @@ test('the check button and status sit in the card footer, with no time invented'
   const at = new Date(2026, 10, 19, 10, 42);
   assert.match(checkedLabel(at, new Date(2026, 10, 19, 12, 0)), /^Checked today /);
   assert.doesNotMatch(checkedLabel(at, new Date(2026, 10, 20, 12, 0)), /today/);
+});
+
+test('automatic checks keep running in the tray, change channel and stop when disabled', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const window = new EventTarget();
+  const previousWindow = globalThis.window;
+  globalThis.window = window;
+  t.after(() => { globalThis.window = previousWindow; });
+  const hook = createHookHarness();
+  t.after(() => hook.unmount());
+  let enabled = true;
+  let nextCheck;
+  const calls = [], notifications = [];
+  const snapshot = { ready: true, channel: 'stable' };
+  const updateService = {
+    initialize: async () => {},
+    checkForUpdates: async force => {
+      calls.push([snapshot.channel, force]);
+      return nextCheck?.promise;
+    },
+    getSnapshot: () => snapshot,
+  };
+  const { UpdateCheckProvider } = loadTsModule('src/components/UpdateCheckProvider.tsx', {
+    react: { ...hook.react, useSyncExternalStore: () => snapshot },
+    'react/jsx-runtime': { jsx: () => null, jsxs: () => null },
+    '@/services/updateService': { updateService },
+    '@/lib/updatePreferences': { AUTO_UPDATE_CHECK_CHANGED_EVENT: 'auto-update', getAutoUpdateCheckEnabled: () => enabled },
+    './UpdateDialog': { UpdateDialog: () => null },
+    './UpdateNotification': { showUpdateNotification: info => notifications.push(info) },
+    sonner: { toast: { dismiss() {} } },
+  });
+  const render = () => hook.render(() => UpdateCheckProvider({ children: null }));
+  render(); render();
+  t.mock.timers.tick(2000);
+  assert.deepEqual(calls, [['stable', false]]);
+  t.mock.timers.tick(60 * 60 * 1000);
+  assert.deepEqual(calls, [['stable', false], ['stable', false]]);
+  snapshot.channel = 'preview';
+  render();
+  nextCheck = deferred();
+  t.mock.timers.tick(2000);
+  assert.deepEqual(calls.at(-1), ['preview', false]);
+  enabled = false;
+  window.dispatchEvent(new Event('auto-update'));
+  render();
+  nextCheck.resolve({ available: true, version: '0.5.61' });
+  await flush();
+  t.mock.timers.tick(48 * 60 * 60 * 1000);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(notifications, []);
+  window.dispatchEvent(new Event('check-updates-from-tray'));
+  assert.deepEqual(calls.at(-1), ['preview', true]);
 });

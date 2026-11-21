@@ -4,7 +4,9 @@ import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { MEETING_SERIES_TEMPLATE_CHANGED } from '@/lib/meetingCalendarStore';
 
-export interface TemplateInfo { id: string; name: string; description: string }
+export interface TemplateInfo {
+  id: string; name: string; description: string; personal: boolean; bundled: boolean;
+}
 
 export function useTemplates(meetingId?: string) {
   const [availableTemplates, setAvailableTemplates] = useState<TemplateInfo[]>([]);

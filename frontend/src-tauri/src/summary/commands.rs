@@ -83,10 +83,7 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     mut summary: serde_json::Value,
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_save_meeting_summary (native) called for meeting_id: {}",
-        meeting_id
-    );
+    let _install_guard = crate::updates::admit_work()?;
     let pool = state.db_manager.pool();
 
     super::processor::validate_saved_summary(&summary)?;
@@ -100,21 +97,14 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     match SummaryProcessesRepository::update_meeting_summary(pool, &meeting_id, &summary).await {
         Ok(true) => {
             let _ = app.emit(super::automatic::CHANGED_EVENT, &meeting_id);
-            log_info!("Summary saved successfully for meeting_id: {}", meeting_id);
             Ok(serde_json::json!({
                 "message": "Meeting summary saved successfully"
             }))
         }
-        Ok(false) => {
-            log_warn!(
-                "Meeting not found or invalid JSON for meeting_id: {}",
-                meeting_id
-            );
-            Err("Meeting not found or can't convert the json".into())
-        }
-        Err(e) => {
-            log_error!("Failed to save meeting summary for {}: {}", meeting_id, e);
-            Err(e.to_string())
+        Ok(false) => Err("Meeting or saved summary was not found".into()),
+        Err(_) => {
+            log_error!("Could not persist the meeting summary");
+            Err("Could not save the meeting summary".into())
         }
     }
 }
@@ -263,10 +253,6 @@ pub async fn api_get_summary<R: Runtime>(
     meeting_id: String,
     _auth_token: Option<String>,
 ) -> Result<SummaryResponse, String> {
-    log_info!(
-        "api_get_summary (native) called for meeting_id: {}",
-        meeting_id
-    );
     let pool = state.db_manager.pool();
 
     match SummaryProcessesRepository::get_summary_status_data(pool, &meeting_id).await {
@@ -289,8 +275,8 @@ pub async fn api_get_summary<R: Runtime>(
                             None
                         }
                     },
-                    Err(e) => {
-                        log_error!("Failed to parse summary result JSON: {}", e);
+                    Err(_) => {
+                        log_error!("Could not parse the saved summary JSON");
                         None
                     }
                 }
@@ -301,21 +287,14 @@ pub async fn api_get_summary<R: Runtime>(
             // Fetch meeting title from database
             let meeting_name =
                 match MeetingsRepository::get_meeting_metadata(pool, &meeting_id).await {
-                    Ok(Some(meeting_details)) => {
-                        log_info!("Fetched meeting metadata for {}", meeting_id);
-                        Some(meeting_details.title)
-                    }
-                    Ok(None) => {
-                        log_warn!("Meeting not found for meeting_id: {}", meeting_id);
-                        None
-                    }
-                    Err(e) => {
-                        log_error!("Failed to fetch meeting title: {}", e);
+                    Ok(details) => details.map(|meeting| meeting.title),
+                    Err(_) => {
+                        log_error!("Could not load the meeting title for its summary");
                         None
                     }
                 };
 
-            let response = SummaryResponse {
+            Ok(SummaryResponse {
                 transcript_changed: data
                     .as_ref()
                     .and_then(|result| result.get("transcript_content_revision")?.as_i64())
@@ -324,26 +303,16 @@ pub async fn api_get_summary<R: Runtime>(
                 progress: SummaryService::progress(&meeting_id),
                 partial_notes,
                 has_previous_result: process.previous_result.is_some(),
-                status: status.clone(),
+                status,
                 meeting_name,
-                meeting_id: meeting_id.clone(),
+                meeting_id,
                 start: process.start_time.map(|t| t.to_rfc3339()),
                 end: process.end_time.map(|t| t.to_rfc3339()),
                 data,
                 error,
-            };
-
-            log_info!(
-                "Summary status for {}: {}, has_data: {}",
-                meeting_id,
-                status,
-                response.data.is_some()
-            );
-            Ok(response)
+            })
         }
         Ok(None) => {
-            log_info!("No summary process found for meeting_id: {}", meeting_id);
-
             // Still fetch meeting title for idle state
             let meeting_name =
                 match MeetingsRepository::get_meeting_metadata(pool, &meeting_id).await {
@@ -365,9 +334,9 @@ pub async fn api_get_summary<R: Runtime>(
                 error: None,
             })
         }
-        Err(e) => {
-            log_error!("Error retrieving summary for {}: {}", meeting_id, e);
-            Err(format!("Failed to retrieve summary: {}", e))
+        Err(_) => {
+            log_error!("Could not load the meeting summary from the library");
+            Err("Could not load the meeting summary".into())
         }
     }
 }
