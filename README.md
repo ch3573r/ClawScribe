@@ -388,6 +388,7 @@ continue when recording folders are missing and report affected meetings,
 excluded recovery files, and unavailable audio. Archives exclude credentials and
 models and are not encrypted.
 Daily backups are optional and keep three recent copies in a chosen local folder.
+Recordings take priority over scheduled backups, which retry when the library is idle.
 If the database fails to open, a separate recovery library can import one of
 these archives while preserving the original files.
 Saved knowledge conversations, attached reference originals and extracted blocks,

@@ -315,9 +315,8 @@ the summary provider for that run. The switch applies to the whole meeting.
 ## Backup and restore
 
 Open **Meetings → Backup and restore** to save or restore a ZIP archive. Finish
-active recording, import, retranscription, and Microsoft export work first. The
-app prevents these operations from overlapping an archive operation. Keep the
-app open until it completes.
+active recording, import, retranscription, and Microsoft export work before
+starting a manual backup or restore. Keep the app open until it completes.
 
 Backups contain saved meetings, transcripts and correction history, notes,
 summaries, per-meeting summary context, linked calendar events and attendance,
@@ -411,14 +410,21 @@ In **Backup and restore**, choose a local folder to enable daily backups. The
 first backup runs when the app is open and the library is idle. Later backups
 run at least 24 hours after the last successful one. ClawScribe checks once a
 minute and defers while recording, transcription, an export, or an archive
-operation is active. The dialog shows the current destination, last successful
-backup, incomplete audio count, and any recent error.
+operation is active. Starting a recording interrupts a scheduled backup that
+is still reading the library. ClawScribe discards the partial ZIP and retries
+when the library is idle. A completed ZIP can finish saving during recording.
+If ClawScribe can measure free space, it budgets the ZIP and temporary
+transcript records to leave room for recording. The dialog shows
+the current destination, last successful backup, incomplete audio count, and
+any recent error.
 
 ClawScribe creates a dedicated folder in the location you choose. After a new
 backup is saved, retention keeps the three newest tracked archives. It removes
 an older ZIP only when its file identity still matches the saved copy. Manual
 copies, unrelated or replaced files, and archives in earlier destinations
 remain on disk. Turning off daily backups leaves your archives available.
+After an interruption such as a crash, ClawScribe cleans up the recorded
+partial ZIP when its identity still matches.
 
 ### If the library fails to open
 

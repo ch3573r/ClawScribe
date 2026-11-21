@@ -5,14 +5,27 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use super::{failure, meeting_failure, text_field, Manifest, MAX_MANIFEST};
+use super::{
+    backup_checkpoint, failure, meeting_failure, text_field, Manifest, ScheduledBackup,
+    MAX_MANIFEST,
+};
 
 pub(super) const UNREADABLE_HISTORY: &str =
     "Microsoft export history could not be read. Check file access or recover the history from a known-good copy before retrying.";
 
+#[cfg(test)]
 pub(super) fn capture(manifest: &mut Manifest, app_data: &Path) -> Result<(), String> {
+    capture_for_backup(manifest, app_data, None)
+}
+
+pub(super) fn capture_for_backup(
+    manifest: &mut Manifest,
+    app_data: &Path,
+    scheduled: Option<&ScheduledBackup>,
+) -> Result<(), String> {
     let mut budget = MAX_MANIFEST;
     for (index, row) in manifest.tables["meetings"].iter().enumerate() {
+        backup_checkpoint(scheduled)?;
         let id = text_field(row, "id")?;
         if let Some(mut ledger) = ExportLedger::read(&meeting_dir(app_data, id))
             .map_err(|_| meeting_failure(row, UNREADABLE_HISTORY))?

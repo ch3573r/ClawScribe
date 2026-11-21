@@ -69,6 +69,8 @@ pub(super) fn file_identity(file: &File) -> io::Result<(u32, u32, u32, u64)> {
     ))
 }
 
+pub(super) use file_identity as staging_identity;
+
 pub(super) fn remove_audio(_path: &Path, file: &File) -> io::Result<()> {
     let disposition = FILE_DISPOSITION_INFO {
         DeleteFile: BOOLEAN(1),
