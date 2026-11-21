@@ -425,6 +425,7 @@ continue when recording folders are missing and report affected meetings,
 excluded recovery files, unavailable audio, and skipped custom template items.
 Archives exclude credentials and models and are not encrypted.
 Daily backups are optional and keep three recent copies in a chosen local folder.
+Recordings take priority over scheduled backups, which retry when the library is idle.
 If the database fails to open, a separate recovery library can import one of
 these archives while preserving the original files. From recovery, select
 **Return to original library**, then quit and reopen ClawScribe to try it again.

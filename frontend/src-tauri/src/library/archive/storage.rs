@@ -76,8 +76,20 @@ pub(crate) fn pin_backup_folder(path: &Path) -> io::Result<Vec<File>> {
     platform::pin_directories(path)
 }
 
+#[cfg(test)]
 pub(crate) fn backup_identity(path: &Path) -> io::Result<serde_json::Value> {
     let file = platform::open_audio(path, false)?;
+    owned_backup_identity(&file)
+}
+
+pub(crate) fn published_backup_identity(
+    path: &Path,
+    stage_identity: &serde_json::Value,
+) -> io::Result<serde_json::Value> {
+    let file = platform::open_audio(path, false)?;
+    if &staging_identity(&file)? != stage_identity {
+        return Err(io::Error::other("The scheduled backup file was replaced"));
+    }
     owned_backup_identity(&file)
 }
 
@@ -95,13 +107,39 @@ fn owned_backup_identity(file: &File) -> io::Result<serde_json::Value> {
 }
 
 pub(crate) fn remove_owned_backup(path: &Path, expected: &serde_json::Value) -> io::Result<()> {
+    remove_matching_backup(path, expected, owned_backup_identity)
+}
+
+pub(crate) fn mark_backup_stage(file: &File) -> io::Result<serde_json::Value> {
+    #[cfg(unix)]
+    platform::mark_staging(file)?;
+    staging_identity(file)
+}
+
+fn staging_identity(file: &File) -> io::Result<serde_json::Value> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || linked(&metadata) {
+        return Err(io::Error::other("Expected a regular backup stage"));
+    }
+    serde_json::to_value(platform::staging_identity(file)?).map_err(io::Error::other)
+}
+
+pub(crate) fn remove_backup_stage(path: &Path, expected: &serde_json::Value) -> io::Result<()> {
+    remove_matching_backup(path, expected, staging_identity)
+}
+
+fn remove_matching_backup(
+    path: &Path,
+    expected: &serde_json::Value,
+    identity: impl FnOnce(&File) -> io::Result<serde_json::Value>,
+) -> io::Result<()> {
     let _pins = pin_backup_folder(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
     let file = match platform::open_audio(path, true) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    if &owned_backup_identity(&file)? != expected {
+    if &identity(&file)? != expected {
         return Err(io::Error::other("The scheduled backup file was replaced"));
     }
     platform::remove_audio(path, &file)

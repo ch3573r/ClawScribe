@@ -69,6 +69,10 @@ pub(crate) async fn wait_for_job(
     .await
 }
 
+pub(crate) fn job_slot_idle() -> bool {
+    JOBS.available_permits() > 0 && NATIVE.available_permits() > 0
+}
+
 /// A caller already holding the exclusive job may need to restore a model
 /// after cancelling a native load/decode. The native permit outlives its waiter.
 pub(crate) async fn wait_for_native_idle() {
@@ -85,6 +89,7 @@ pub(crate) enum BatchJob {
     Import,
     SpeakerDetection,
     PcTest,
+    ScheduledBackup,
 }
 
 impl BatchJob {
@@ -95,6 +100,7 @@ impl BatchJob {
             Self::Import => "import",
             Self::SpeakerDetection => "speaker-detection",
             Self::PcTest => "pc-test",
+            Self::ScheduledBackup => "scheduled-backup",
         }
     }
 
@@ -111,6 +117,9 @@ impl BatchJob {
             }
             Self::PcTest => {
                 "The PC test is still stopping. Try starting the recording again in a moment."
+            }
+            Self::ScheduledBackup => {
+                "The scheduled backup is still stopping. Try starting the recording again in a moment."
             }
         }
     }
@@ -173,6 +182,7 @@ impl Drop for BatchPermit {
 /// call) cannot be interrupted, so this covers the call in flight plus the
 /// job's own cleanup (engine unload, previous-model restore).
 const BATCH_PREEMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+const BACKUP_PREEMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 const LOCAL_SUMMARY_PREEMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 enum Poll {
@@ -332,12 +342,23 @@ async fn claim_job_for_recording_with(
     Ok(permit)
 }
 
+#[cfg(test)]
+pub(crate) async fn claim_recording_for_test(
+    on_preempt: impl Fn() + Sync,
+) -> Result<OwnedSemaphorePermit, String> {
+    claim_job_for_recording_with("test recording", BATCH_PREEMPT_WAIT, &|_| on_preempt()).await
+}
+
 fn emit_batch_preempted<R: tauri::Runtime>(app: &tauri::AppHandle<R>, job: BatchJob) {
     use tauri::Emitter;
     log::info!(
         "Stopping {} because a recording is starting",
         job.event_name()
     );
+    // The scheduler retries automatically and reports its own status.
+    if job == BatchJob::ScheduledBackup {
+        return;
+    }
     let _ = app.emit(
         "batch-job-preempted",
         serde_json::json!({ "job": job.event_name(), "reason": "recording" }),
@@ -378,7 +399,12 @@ async fn claim_with_preemption(
             crate::summary::SummaryService::cancel_local_summaries(reason);
         }
         let mut stopping = first.job;
-        let deadline = tokio::time::Instant::now() + batch_wait;
+        let wait = if first.job == BatchJob::ScheduledBackup {
+            batch_wait.min(BACKUP_PREEMPT_WAIT)
+        } else {
+            batch_wait
+        };
+        let deadline = tokio::time::Instant::now() + wait;
         loop {
             // Re-issued each round: a job that has claimed the slot but not
             // yet reset its own cancel state would otherwise swallow it.
@@ -607,6 +633,7 @@ mod tests {
             BatchJob::Import,
             BatchJob::SpeakerDetection,
             BatchJob::PcTest,
+            BatchJob::ScheduledBackup,
         ] {
             let batch = FakeBatchJob::start(job);
             let flag = batch.cancelled.clone();

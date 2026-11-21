@@ -1,16 +1,23 @@
 //! App-local daily backups. Only successfully published files recorded by this
 //! profile are eligible for retention.
 use super::{
-    archive::storage::{backup_identity, pin_backup_folder, remove_owned_backup},
+    archive::storage::{
+        mark_backup_stage, pin_backup_folder, published_backup_identity, remove_backup_stage,
+        remove_owned_backup,
+    },
     backup,
 };
+use crate::audio::{disk_space, inference};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager};
@@ -25,6 +32,7 @@ const KEEP: usize = 3;
 const MAX_TRACKED: usize = 64;
 const MAX_SETTINGS: u64 = 64 * 1024;
 const SETTINGS_ERROR: &str = "Could not read or save scheduled backup settings.";
+const STAGING_ERROR: &str = "Could not verify or remove the unfinished scheduled backup.";
 static JOB: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -40,6 +48,8 @@ struct Schedule {
     #[serde(default)]
     skipped_template_items: usize,
     files: Vec<OwnedArchive>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staging: Option<OwnedArchive>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -71,6 +81,7 @@ impl Schedule {
             incomplete_meetings: 0,
             skipped_template_items: 0,
             files: Vec::new(),
+            staging: None,
         }
     }
 
@@ -107,6 +118,44 @@ impl Schedule {
         });
         success
     }
+
+    fn clean_staging(&mut self) -> Result<(), String> {
+        if let Some(stage) = &self.staging {
+            remove_backup_stage(
+                &self.folder().join(staging_filename(stage.id)),
+                &stage.identity,
+            )
+            .map_err(|_| STAGING_ERROR)?;
+            self.staging = None;
+        }
+        Ok(())
+    }
+
+    fn reserve_staging(
+        &mut self,
+        settings: &Path,
+        id: Uuid,
+        now: i64,
+    ) -> Result<tempfile::NamedTempFile, String> {
+        let mut output = tempfile::Builder::new()
+            .prefix(&staging_filename(id))
+            .rand_bytes(0)
+            .tempfile_in(self.folder())
+            .map_err(|_| "Could not create the scheduled backup file.")?;
+        let identity = mark_backup_stage(output.as_file())
+            .map_err(|_| "Could not verify the scheduled backup staging file.")?;
+        output
+            .as_file()
+            .sync_all()
+            .map_err(|_| "Could not reserve the scheduled backup staging file.")?;
+        // Write the ownership record before any archive bytes. Only this exact
+        // file can be cleaned after interruption, and failed reservations back off.
+        self.staging = Some(OwnedArchive { id, identity });
+        self.last_failure = Some(now);
+        save(settings, self)?;
+        output.disable_cleanup(true);
+        Ok(output)
+    }
 }
 
 fn elapsed(now: i64, then: i64, interval: i64) -> bool {
@@ -115,6 +164,10 @@ fn elapsed(now: i64, then: i64, interval: i64) -> bool {
 
 fn filename(id: Uuid) -> String {
     format!("ClawScribe-backup-{id}.zip")
+}
+
+fn staging_filename(id: Uuid) -> String {
+    format!(".ClawScribe-backup-{id}.partial")
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -223,8 +276,9 @@ pub(crate) async fn choose_scheduled_backup_folder(app: AppHandle) -> Result<(),
         let _pins = pin_backup_folder(&parent)
             .map_err(|_| "The backup folder is unavailable or linked.")?;
         let mut schedule = Schedule::new(parent);
-        if let Ok(Some(previous)) = read(&settings) {
+        if let Ok(Some(mut previous)) = read(&settings) {
             schedule.enabled = previous.enabled;
+            let _ = previous.clean_staging();
         }
         let folder = schedule.folder();
         fs::create_dir(&folder).map_err(|_| "Could not create the scheduled backups folder.")?;
@@ -288,24 +342,31 @@ async fn run_if_due(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     };
     let now = chrono::Utc::now().timestamp();
-    if !schedule.due(now) {
-        return Ok(());
-    }
-    let Ok(permits) = backup::claim_archive() else {
-        return Ok(());
-    };
-    // Reserve the attempt before writing an archive. If the destination is
-    // writable but the local index cannot be saved, avoid producing a new
-    // untracked archive every minute.
-    schedule.last_failure = Some(now);
-    let reservation = schedule.clone();
-    let index_path = settings.clone();
-    tokio::task::spawn_blocking(move || save(&index_path, &reservation))
+    if schedule.staging.is_some()
+        && (schedule.last_error.as_deref() != Some(STAGING_ERROR)
+            || schedule
+                .last_failure
+                .is_none_or(|then| elapsed(now, then, RETRY)))
+    {
+        let index_path = settings.clone();
+        schedule = tokio::task::spawn_blocking(move || {
+            if let Err(error) = schedule.clean_staging() {
+                schedule.last_failure = Some(now);
+                schedule.last_error = Some(error);
+            }
+            save(&index_path, &schedule)?;
+            Ok::<_, String>(schedule)
+        })
         .await
         .map_err(|_| SETTINGS_ERROR)??;
+        let _ = app.emit(CHANGED, ());
+    }
+    if !schedule.due(now) || schedule.staging.is_some() || !inference::job_slot_idle() {
+        return Ok(());
+    }
     RUNNING.store(true, Ordering::Release);
     let _ = app.emit(CHANGED, ());
-    let result = run_backup(app, &settings, &mut schedule, permits).await;
+    let result = run_backup(app, &settings, &mut schedule, now).await;
     if let Err(error) = result {
         schedule.last_failure = Some(chrono::Utc::now().timestamp());
         schedule.last_error = Some(error);
@@ -323,7 +384,7 @@ async fn run_backup(
     app: &AppHandle,
     settings: &Path,
     schedule: &mut Schedule,
-    permits: backup::ArchivePermits,
+    now: i64,
 ) -> Result<(), String> {
     if schedule.files.len() >= MAX_TRACKED {
         return Err(
@@ -334,15 +395,41 @@ async fn run_backup(
     let folder = schedule.folder();
     let id = Uuid::new_v4();
     let destination = folder.join(filename(id));
-    let pins = tokio::task::spawn_blocking(move || pin_backup_folder(&folder))
-        .await
-        .map_err(|_| "Could not check the backup folder.")?
-        .map_err(|_| "The backup folder is unavailable or linked.")?;
-    let report =
-        backup::backup_with_permits(app.clone(), destination.clone(), true, permits).await?;
+    let app_data = settings.parent().ok_or(SETTINGS_ERROR)?.to_owned();
+    let index_path = settings.to_owned();
+    let mut reservation = schedule.clone();
+    let (pins, stage, output, control) = tokio::task::spawn_blocking(move || {
+        let pins = pin_backup_folder(&folder)
+            .map_err(|_| "The backup folder is unavailable or linked.")?;
+        let control = backup::ScheduledBackup::new(
+            disk_space::free_space_volume(&app_data),
+            disk_space::free_space_volume(&folder),
+        );
+        let output = reservation.reserve_staging(&index_path, id, now)?;
+        Ok::<_, String>((pins, reservation.staging, output, Arc::new(control)))
+    })
+    .await
+    .map_err(|_| "Could not prepare the scheduled backup.")??;
+    schedule.staging = stage.clone();
+    let result =
+        backup::try_scheduled_backup(app.clone(), destination.clone(), output, control).await;
+    let mut cleanup = schedule.clone();
+    let (cleanup, pins) = tokio::task::spawn_blocking(move || {
+        cleanup.clean_staging()?;
+        Ok::<_, String>((cleanup.staging, pins))
+    })
+    .await
+    .map_err(|_| "Could not clear the unfinished scheduled backup.")??;
+    schedule.staging = cleanup;
+    let Some(report) = result? else {
+        // Keep the previous success and error state. A recording is expected
+        // activity, so the next idle scheduler tick can try again.
+        return Ok(());
+    };
+    let stage = stage.ok_or("Could not verify the saved backup.")?;
     let identity = tokio::task::spawn_blocking(move || {
         let _pins = pins;
-        backup_identity(&destination)
+        published_backup_identity(&destination, &stage.identity)
     })
     .await
     .map_err(|_| "Could not verify the saved backup.")?
@@ -374,6 +461,7 @@ async fn run_backup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library::archive::storage::backup_identity;
 
     #[test]
     fn retention_only_removes_identified_old_files() {
@@ -413,5 +501,59 @@ mod tests {
         assert!(schedule.due(87400));
         schedule.enabled = false;
         assert!(!schedule.due(87400));
+    }
+
+    #[test]
+    fn restart_cleanup_only_removes_the_recorded_staging_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut schedule = Schedule::new(temp.path().to_owned());
+        fs::create_dir(schedule.folder()).unwrap();
+        let id = Uuid::new_v4();
+        let stage = schedule.folder().join(staging_filename(id));
+        let index = temp.path().join(STORE);
+        let unrelated = schedule.folder().join(staging_filename(Uuid::new_v4()));
+        let prior = schedule.folder().join(filename(Uuid::new_v4()));
+        fs::write(&unrelated, "unrelated partial").unwrap();
+        fs::write(&prior, "previous archive").unwrap();
+
+        let mut partial = schedule.reserve_staging(&index, id, 100).unwrap();
+        assert_eq!(partial.path(), stage);
+        partial
+            .write_all(b"backup data written after reservation")
+            .unwrap();
+        drop(partial);
+
+        let mut restarted = read(&index).unwrap().unwrap();
+        restarted.clean_staging().unwrap();
+        assert!(restarted.staging.is_none());
+        assert!(!stage.exists());
+        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "unrelated partial");
+        assert_eq!(fs::read_to_string(prior).unwrap(), "previous archive");
+
+        // A user can replace a file in the chosen folder while the app is down.
+        fs::write(&stage, "replacement").unwrap();
+        assert!(read(&index).unwrap().unwrap().clean_staging().is_err());
+        assert_eq!(fs::read_to_string(stage).unwrap(), "replacement");
+    }
+
+    #[test]
+    fn published_stage_can_be_tracked_by_retention() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut schedule = Schedule::new(temp.path().to_owned());
+        fs::create_dir(schedule.folder()).unwrap();
+        let id = Uuid::new_v4();
+        let mut stage = schedule
+            .reserve_staging(&temp.path().join(STORE), id, 100)
+            .unwrap();
+        stage.write_all(b"completed archive").unwrap();
+        let destination = schedule.folder().join(filename(id));
+        drop(stage.persist_noclobber(&destination).unwrap());
+
+        let identity =
+            published_backup_identity(&destination, &schedule.staging.as_ref().unwrap().identity)
+                .unwrap();
+        assert_eq!(identity, backup_identity(&destination).unwrap());
+        schedule.clean_staging().unwrap();
+        assert_eq!(fs::read(destination).unwrap(), b"completed archive");
     }
 }
