@@ -243,6 +243,21 @@ async fn resolve_meeting_folder(
     Ok(MeetingFolderResolution::Folder(PathBuf::from(folder_path)))
 }
 
+fn summary_job_status(
+    meeting_id: &str,
+    status: String,
+    error: Option<String>,
+) -> (String, Option<String>) {
+    let status = status.to_lowercase();
+    if status == "cancelled" && error.as_deref() == Some(super::automatic::PAUSED_FOR_INFERENCE) {
+        if SummaryService::has_paused_automatic_job(meeting_id) {
+            return ("deferred".into(), error);
+        }
+        return (status, Some(super::automatic::PAUSE_ENDED.into()));
+    }
+    (status, error)
+}
+
 /// Gets summary status and data (Native SQLx implementation)
 ///
 /// Returns summary status (pending/processing/completed/failed) and parsed result data
@@ -257,14 +272,8 @@ pub async fn api_get_summary<R: Runtime>(
 
     match SummaryProcessesRepository::get_summary_status_data(pool, &meeting_id).await {
         Ok(Some((process, partial_notes))) => {
-            let mut status = process.status.to_lowercase();
-            let mut error = process.error;
-            if status == "cancelled"
-                && error.as_deref() == Some(super::automatic::PAUSED_FOR_INFERENCE)
-                && SummaryService::is_running_for(&meeting_id)
-            {
-                status = "deferred".into();
-            }
+            let (mut status, mut error) =
+                summary_job_status(&meeting_id, process.status, process.error);
 
             // Parse result data if it exists (regardless of status)
             // This allows displaying restored summaries after cancellation or failure
@@ -351,6 +360,37 @@ pub(super) struct MeetingSummaryContext {
     pub(super) prompt: String,
     pub(super) template: String,
     pub(super) series_language: Option<String>,
+}
+
+#[cfg(test)]
+mod pause_status_tests {
+    use super::*;
+    use crate::summary::automatic::{PAUSED_FOR_INFERENCE, PAUSE_ENDED};
+
+    #[tokio::test]
+    async fn paused_notes_require_a_live_local_automatic_job_to_show_as_deferred() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let meeting = "pause-status-test";
+        let status = || {
+            summary_job_status(
+                meeting,
+                "cancelled".into(),
+                Some(PAUSED_FOR_INFERENCE.into()),
+            )
+        };
+        // A restored or orphaned pause has no worker and offers manual retry.
+        let terminal = ("cancelled".into(), Some(PAUSE_ENDED.into()));
+        assert_eq!(status(), terminal);
+        let manual = SummaryService::register_job(meeting, "builtin-ai").unwrap();
+        assert_eq!(status(), terminal);
+        drop(manual);
+        let _automatic = SummaryService::try_register_job(meeting, "builtin-ai", true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status().0, "deferred");
+        assert!(SummaryService::cancel_summary(meeting));
+        assert_eq!(status(), terminal);
+    }
 }
 
 pub(super) async fn meeting_summary_context<R: Runtime>(

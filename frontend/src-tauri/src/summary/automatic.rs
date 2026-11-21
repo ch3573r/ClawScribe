@@ -26,11 +26,14 @@ pub(super) const DESTINATION_CHANGED: &str =
     "The summary destination changed. Review it and try again.";
 pub(crate) const PAUSED_FOR_INFERENCE: &str =
     "Automatic notes are paused while recording or transcription uses local inference.";
+pub(super) const PAUSE_ENDED: &str = "Automatic notes stopped. Generate a summary to try again.";
 pub(crate) const CHANGED_EVENT: &str = "summary-job-changed";
 pub(crate) static ROUTE_CHANGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static PREFERENCE_EPOCH: AtomicU64 = AtomicU64::new(0);
 static ROUTE_EPOCH: AtomicU64 = AtomicU64::new(0);
 static PREFERENCE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static APPROVAL_CHANGED: std::sync::LazyLock<tokio::sync::watch::Sender<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(()).0);
 
 #[derive(Default, Serialize, Deserialize)]
 struct Preference {
@@ -100,6 +103,7 @@ pub(crate) fn invalidate_external_review<R: Runtime>(app: &AppHandle<R>) -> Resu
         Ok(())
     })?;
     ROUTE_EPOCH.fetch_add(1, Ordering::SeqCst);
+    APPROVAL_CHANGED.send_replace(());
     let _ = app.emit("summary-destination-changed", ());
     Ok(())
 }
@@ -179,8 +183,54 @@ pub async fn set_automatic_summary_preference<R: Runtime>(
         if !enabled {
             PREFERENCE_EPOCH.fetch_add(1, Ordering::SeqCst);
         }
+        APPROVAL_CHANGED.send_replace(());
         Ok(())
     })
+}
+
+/// Called while the route lock holds the selected Built-in AI model in place.
+/// Setup can enable local automatic notes without granting an outbound approval.
+pub(crate) fn finish_builtin_onboarding<R: Runtime>(
+    app: &AppHandle<R>,
+    enabled: Option<bool>,
+    finish: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let Some(enabled) = enabled else {
+        return finish();
+    };
+    with_preference(app, |store| {
+        finish_local_setup(store, enabled, finish)?;
+        if !enabled {
+            PREFERENCE_EPOCH.fetch_add(1, Ordering::SeqCst);
+        }
+        APPROVAL_CHANGED.send_replace(());
+        Ok(())
+    })
+}
+
+fn finish_local_setup(
+    store: &dyn Backing,
+    enabled: bool,
+    finish: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let previous = store.read(AUTO_SUMMARY);
+    Preference {
+        enabled,
+        external_fingerprint: None,
+    }
+    .persist(store)?;
+    if let Err(error) = finish() {
+        // Restore the live value even if the disk refuses to save the rollback.
+        match previous {
+            Some(value) => store.write(AUTO_SUMMARY, value),
+            None => store.remove(AUTO_SUMMARY),
+        }
+        if store.commit().is_err() {
+            log::warn!("Could not restore the automatic notes preference after setup failed");
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn dispatch_check<R: Runtime>(app: AppHandle<R>, review: DestinationReview) -> DispatchCheck {
@@ -212,14 +262,7 @@ pub(crate) async fn prepare_import<R: Runtime>(
     let _guard = ROUTE_CHANGE_LOCK.lock().await;
     let request = AutomaticRequest::resolve(app, pool).await?;
     let review = request.review();
-    // Older import clients only offered explicit Built-in AI notes. A missing
-    // review token must never authorize another provider on their behalf.
-    let legacy_builtin = !use_automatic_preference
-        && fingerprint.is_none()
-        && request.provider == super::llm_client::LLMProvider::BuiltInAI;
-    if !legacy_builtin && fingerprint != Some(review.fingerprint.as_str()) {
-        return Err(DESTINATION_CHANGED.into());
-    }
+    validate_import_approval(&review, fingerprint, use_automatic_preference)?;
     let check: DispatchCheck = if use_automatic_preference {
         dispatch_check(app.clone(), review)
     } else {
@@ -233,10 +276,22 @@ pub(crate) async fn prepare_import<R: Runtime>(
         })
     };
     check()?;
-    Ok(AuthorizedRequest {
-        request,
-        check: Some(check),
-    })
+    Ok(AuthorizedRequest { request, check })
+}
+
+fn validate_import_approval(
+    review: &DestinationReview,
+    fingerprint: Option<&str>,
+    use_automatic_preference: bool,
+) -> Result<(), String> {
+    // Older import clients only offered explicit Built-in AI notes.
+    if fingerprint == Some(review.fingerprint.as_str())
+        || (!use_automatic_preference && fingerprint.is_none() && review.provider == "builtin-ai")
+    {
+        Ok(())
+    } else {
+        Err("The import's summary approval expired or the destination changed. Generate a summary from the saved meeting.".into())
+    }
 }
 
 #[tauri::command]
@@ -343,9 +398,14 @@ pub(crate) async fn start_import<R: Runtime>(
     app: AppHandle<R>,
     pool: SqlitePool,
     meeting_id: String,
-    request: AuthorizedRequest,
+    request: Result<AuthorizedRequest, String>,
 ) -> Result<(), String> {
-    launch(app, pool, meeting_id, Start::Import(request)).await?;
+    match request {
+        Ok(request) => {
+            launch(app, pool, meeting_id, Start::Import(request)).await?;
+        }
+        Err(reason) => record_outcome(&app, &pool, &meeting_id, "import", &reason).await?,
+    }
     Ok(())
 }
 
@@ -364,10 +424,7 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
     if check().is_err() {
         return;
     }
-    let request = AuthorizedRequest {
-        request,
-        check: Some(check),
-    };
+    let request = AuthorizedRequest { request, check };
     drop(route_guard);
 
     let profile = publication::stored_profile(&app).ok().flatten();
@@ -460,8 +517,8 @@ async fn launch<R: Runtime>(
     }
 
     let _route = ROUTE_CHANGE_LOCK.lock().await;
-    let (request, check) = if let Some(authorized) = prepared {
-        (authorized.request, authorized.check)
+    let authorized = if let Some(authorized) = prepared {
+        authorized
     } else {
         let request = match AutomaticRequest::resolve(&app, &pool).await {
             Ok(request) => request,
@@ -471,14 +528,13 @@ async fn launch<R: Runtime>(
             }
         };
         let check = dispatch_check(app.clone(), request.review());
-        (request, Some(check))
+        AuthorizedRequest { request, check }
     };
-    if let Some(check) = &check {
-        if let Err(reason) = check() {
-            record_outcome(&app, &pool, &meeting, origin, &reason).await?;
-            return Ok(Launch::Handled);
-        }
+    if let Err(reason) = (authorized.check)() {
+        record_outcome(&app, &pool, &meeting, origin, &reason).await?;
+        return Ok(Launch::Handled);
     }
+    let request = &authorized.request;
     let fingerprint = request.review().fingerprint;
     let provider = super::llm_client::canonical_provider(&request.provider);
     let local = request.provider == super::llm_client::LLMProvider::BuiltInAI;
@@ -500,7 +556,6 @@ async fn launch<R: Runtime>(
     drop(_route);
 
     Ok(Launch::Started(tauri::async_runtime::spawn(async move {
-        let authorized = AuthorizedRequest { request, check };
         loop {
             let prepared = super::llm_client::with_cancellation(
                 Some(job.token()),
@@ -528,7 +583,12 @@ async fn launch<R: Runtime>(
                         .await;
                 }
             }
-            if !local || !resume_after_preemption(&app, &pool, &meeting, &mut job).await {
+            if !local
+                || !resume_after_preemption(&pool, &meeting, &mut job, &authorized.check, || {
+                    let _ = app.emit(CHANGED_EVENT, &meeting);
+                })
+                .await
+            {
                 break;
             }
         }
@@ -543,11 +603,12 @@ async fn launch<R: Runtime>(
     })))
 }
 
-async fn resume_after_preemption<R: Runtime>(
-    app: &AppHandle<R>,
+async fn resume_after_preemption(
     pool: &SqlitePool,
     meeting: &str,
     job: &mut super::service::SummaryJob,
+    check: &DispatchCheck,
+    on_pause: impl FnOnce(),
 ) -> bool {
     let Ok(Some(paused)) = SummaryProcessesRepository::get_summary_data(pool, meeting).await else {
         return false;
@@ -555,21 +616,31 @@ async fn resume_after_preemption<R: Runtime>(
     if paused.status != "cancelled" || paused.error.as_deref() != Some(PAUSED_FOR_INFERENCE) {
         return false;
     }
+    let mut approval_changes = APPROVAL_CHANGED.subscribe();
+    on_pause();
     loop {
-        if !job.renew_after_preemption() {
-            super::service::finish_provider_error(pool, meeting, job.token(), PAUSED_FOR_INFERENCE)
-                .await;
+        if job.token().is_cancelled() && !job.renew_after_preemption() {
+            super::service::finish_provider_error(pool, meeting, job.token(), PAUSE_ENDED).await;
             return false;
         }
-        let _ = app.emit(CHANGED_EVENT, meeting);
-        // Each native request takes its own permit and rechecks consent at dispatch.
-        if crate::audio::inference::wait_for_job(job.token())
-            .await
-            .map(drop)
-            .is_ok()
-        {
-            break;
+        if let Err(reason) = check() {
+            super::service::finish_provider_error(pool, meeting, job.token(), &reason).await;
+            return false;
         }
+        // Each model request takes its own permit and rechecks consent at dispatch.
+        tokio::select! {
+            biased;
+            _ = approval_changes.changed() => continue,
+            available = crate::audio::inference::wait_for_job(job.token()) => {
+                if available.is_ok() {
+                    break;
+                }
+            }
+        }
+    }
+    if let Err(reason) = check() {
+        super::service::finish_provider_error(pool, meeting, job.token(), &reason).await;
+        return false;
     }
     let Ok(Some(fingerprint)) = sqlx::query_scalar::<_, Option<String>>(
         "SELECT automatic_request_fingerprint FROM summary_processes WHERE meeting_id = ?",
@@ -700,6 +771,156 @@ async fn notify_ready<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool, meeting
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn revoked_approval_ends_a_pause_while_transcription_still_holds_the_slot() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        let _foreground = crate::audio::inference::claim_job().unwrap();
+        let mut job = SummaryService::try_register_job(meeting, "builtin-ai", true)
+            .unwrap()
+            .unwrap();
+        SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved",
+        )
+        .await
+        .unwrap();
+        SummaryService::cancel_local_summaries("test interruption");
+        super::super::service::finish_provider_error(&pool, meeting, job.token(), "interrupted")
+            .await;
+
+        let approved = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let check: DispatchCheck = {
+            let approved = approved.clone();
+            Arc::new(move || {
+                if approved.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(DISABLED.into())
+                }
+            })
+        };
+        let paused = tokio::sync::Notify::new();
+        let revoke = async {
+            paused.notified().await;
+            approved.store(false, Ordering::SeqCst);
+            APPROVAL_CHANGED.send_replace(());
+        };
+        let (resumed, _) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                resume_after_preemption(&pool, meeting, &mut job, &check, || paused.notify_one()),
+                revoke
+            )
+        })
+        .await
+        .unwrap();
+        assert!(!resumed);
+        let row = SummaryProcessesRepository::get_summary_data(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.error.as_deref(), Some(DISABLED));
+    }
+
+    #[test]
+    fn failed_setup_restores_the_previous_local_preference() {
+        use crate::behavior_settings::test_memory::Memory;
+        for previous in [None, Some(serde_json::json!({"enabled": false}))] {
+            let memory = Memory::default();
+            if let Some(value) = &previous {
+                behavior_settings::persist(&memory, AUTO_SUMMARY, value.clone()).unwrap();
+            }
+            assert!(
+                finish_local_setup(&memory, true, || Err("Setup could not be saved".into()))
+                    .is_err()
+            );
+            assert_eq!(memory.read(AUTO_SUMMARY), previous);
+            assert_eq!(memory.persisted(AUTO_SUMMARY), previous);
+            finish_local_setup(&memory, true, || Ok(())).unwrap();
+            let preference = Preference::read(&memory);
+            assert!(preference.enabled);
+            assert!(preference.external_fingerprint.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn previous_approvals_only_match_routes_that_still_keep_notes_local() {
+        use crate::behavior_settings::test_memory::Memory;
+        use sha2::{Digest, Sha256};
+
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        for (meeting, endpoint, external) in [
+            ("review-test", "https://models.example.com", true),
+            ("local-notes", "http://localhost:11434", false),
+        ] {
+            sqlx::query("INSERT OR IGNORE INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Synthetic', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+                .bind(meeting).execute(&pool).await.unwrap();
+            let request = AutomaticRequest {
+                provider: super::super::llm_client::LLMProvider::Ollama,
+                model: "fixture-model".into(),
+                execution: super::super::request_config::Execution::Ollama {
+                    base: url::Url::parse(endpoint).unwrap(),
+                    client: super::super::request_config::direct_client()
+                        .build()
+                        .unwrap(),
+                },
+            };
+            let identity = serde_json::json!([
+                "automatic-summary-v2",
+                "ollama",
+                "fixture-model",
+                endpoint,
+                "direct-ollama",
+                null,
+                null
+            ]);
+            let old = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&identity).unwrap())
+            );
+            let memory = Memory::with(&[(
+                AUTO_SUMMARY,
+                serde_json::json!({
+                    "enabled": true, "external_fingerprint": old
+                }),
+            )]);
+            let review = request.review();
+            assert_eq!(Preference::read(&memory).allows(&review), !external);
+            assert_eq!(
+                validate_import_approval(&review, Some(&old), false).is_ok(),
+                !external
+            );
+            assert_eq!(
+                validate_import_approval(&review, Some(&old), true).is_ok(),
+                !external
+            );
+            assert!(validate_import_approval(&review, Some(&review.fingerprint), false).is_ok());
+            assert!(SummaryProcessesRepository::create_automatic_process(
+                &pool, meeting, "import", &old
+            )
+            .await
+            .unwrap());
+            SummaryProcessesRepository::fail_interrupted_processes(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                SummaryProcessesRepository::automatic_resume_candidates(
+                    &pool,
+                    &review.fingerprint,
+                    None
+                )
+                .await
+                .unwrap()
+                .contains(&(meeting.to_owned(), old)),
+                !external
+            );
+        }
+    }
 
     #[tokio::test]
     async fn gap_allows_usable_text_but_incomplete_publication_and_damaged_text_wait() {

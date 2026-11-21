@@ -164,8 +164,19 @@ pub(crate) fn defaults() -> BehaviorSettings {
 
 /// Writes one value and saves; on a failed save the previous value is put back.
 pub(crate) fn persist(backing: &dyn Backing, key: &str, value: Value) -> Result<(), String> {
+    replace(backing, key, Some(value)).map(drop)
+}
+
+pub(crate) fn replace(
+    backing: &dyn Backing,
+    key: &str,
+    value: Option<Value>,
+) -> Result<Option<Value>, String> {
     let previous = backing.read(key);
-    backing.write(key, value);
+    match value {
+        Some(value) => backing.write(key, value),
+        None => backing.remove(key),
+    }
     if let Err(error) = backing.commit() {
         match previous {
             Some(previous) => backing.write(key, previous),
@@ -173,7 +184,7 @@ pub(crate) fn persist(backing: &dyn Backing, key: &str, value: Value) -> Result<
         }
         return Err(error);
     }
-    Ok(())
+    Ok(previous)
 }
 
 pub(crate) fn persist_bool(backing: &dyn Backing, key: &str, enabled: bool) -> Result<(), String> {

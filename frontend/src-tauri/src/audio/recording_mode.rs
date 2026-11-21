@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_store::StoreExt;
 
+pub(crate) static CHANGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordingMode {
@@ -50,28 +52,30 @@ pub async fn set_recording_mode<R: Runtime>(
     app: AppHandle<R>,
     mode: RecordingMode,
 ) -> Result<(), String> {
+    let _change = CHANGE_LOCK.lock().await;
     let worker_app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let store = worker_app
-            .store("recording_mode.json")
-            .map_err(|_| "Could not load recording mode")?;
-        let previous = store.get("mode");
-        store.set("mode", serde_json::json!(mode));
-        if store.save().is_err() {
-            match previous {
-                Some(value) => store.set("mode", value),
-                None => {
-                    store.delete("mode");
-                }
-            }
-            return Err("Could not save recording mode".into());
-        }
-        Ok(())
+    tauri::async_runtime::spawn_blocking(move || {
+        replace(&worker_app, Some(serde_json::json!(mode)))
     })
     .await
     .map_err(|_| "Could not save recording mode")??;
-    let _ = app.emit("recording-mode-changed", mode);
+    notify_changed(&app, mode);
     Ok(())
+}
+
+pub(crate) fn replace<R: Runtime>(
+    app: &AppHandle<R>,
+    mode: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    let store = app
+        .store("recording_mode.json")
+        .map_err(|_| "Could not load recording mode")?;
+    crate::behavior_settings::replace(store.as_ref(), "mode", mode)
+        .map_err(|_| "Could not save recording mode".into())
+}
+
+pub(crate) fn notify_changed<R: Runtime>(app: &AppHandle<R>, mode: RecordingMode) {
+    let _ = app.emit("recording-mode-changed", mode);
 }
 
 #[cfg(test)]

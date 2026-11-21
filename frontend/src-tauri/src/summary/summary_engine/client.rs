@@ -144,17 +144,12 @@ pub(crate) async fn generate_with_builtin(
             return Err(anyhow!("Generation cancelled before starting"));
         }
     }
-    let _job = match (dispatch_check, cancellation_token) {
-        (Some(check), Some(token)) => {
-            check().map_err(anyhow::Error::msg)?;
-            let permit = crate::audio::inference::wait_for_job(token)
-                .await
-                .map_err(anyhow::Error::msg)?;
-            check().map_err(anyhow::Error::msg)?;
-            permit
-        }
-        _ => crate::audio::inference::claim_job().map_err(anyhow::Error::msg)?,
-    };
+    if let Some(check) = dispatch_check {
+        check().map_err(anyhow::Error::msg)?;
+    }
+    let _job = crate::audio::inference::claim_local_summary(dispatch_check.and(cancellation_token))
+        .await
+        .map_err(anyhow::Error::msg)?;
 
     log::info!("Built-in AI generation request");
     log::info!("Model: {}", model_name);
@@ -209,6 +204,9 @@ pub(crate) async fn generate_with_builtin(
 
     log::info!("Sending generation request to sidecar");
 
+    if let Some(check) = dispatch_check {
+        check().map_err(anyhow::Error::msg)?;
+    }
     let response_json = manager
         .send_request_cancellable(request_json, timeout, Some(model_path), cancellation_token)
         .await?;
@@ -234,6 +232,30 @@ pub(crate) async fn generate_with_builtin(
             }
         }
         Response::Error { message } => Err(anyhow!("Sidecar error: {}", message)),
+    }
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn revoked_authorization_is_checked_without_a_cancellation_token() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let check: crate::summary::request_config::DispatchCheck =
+            Arc::new(|| Err("Notes approval was revoked".into()));
+        let error = generate_with_builtin(
+            &PathBuf::new(),
+            "fixture-model",
+            "",
+            "",
+            None,
+            None,
+            Some(&check),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "Notes approval was revoked");
     }
 }
 
