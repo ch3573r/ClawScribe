@@ -79,10 +79,18 @@ impl BatchJob {
 
     fn still_stopping_message(self) -> &'static str {
         match self {
-            Self::Retranscription => "Retranscription is still stopping. Try starting the recording again in a moment.",
-            Self::Import => "The audio import is still stopping. Try starting the recording again in a moment.",
-            Self::SpeakerDetection => "Speaker detection is still stopping. Try starting the recording again in a moment.",
-            Self::PcTest => "The PC test is still stopping. Try starting the recording again in a moment.",
+            Self::Retranscription => {
+                "Retranscription is still stopping. Try starting the recording again in a moment."
+            }
+            Self::Import => {
+                "The audio import is still stopping. Try starting the recording again in a moment."
+            }
+            Self::SpeakerDetection => {
+                "Speaker detection is still stopping. Try starting the recording again in a moment."
+            }
+            Self::PcTest => {
+                "The PC test is still stopping. Try starting the recording again in a moment."
+            }
         }
     }
 }
@@ -226,9 +234,15 @@ fn running_batch_job() -> Option<(BatchJob, CancelBatchJob)> {
 pub(crate) async fn claim_job_preempting_local_summary(
     reason: &'static str,
 ) -> Result<OwnedSemaphorePermit, String> {
-    claim_with_preemption(reason, None, None, LOCAL_SUMMARY_PREEMPT_WAIT, BATCH_PREEMPT_WAIT)
-        .await
-        .map(|(permit, _)| permit)
+    claim_with_preemption(
+        reason,
+        None,
+        None,
+        LOCAL_SUMMARY_PREEMPT_WAIT,
+        BATCH_PREEMPT_WAIT,
+    )
+    .await
+    .map(|(permit, _)| permit)
 }
 
 /// A batch job takes the slot, pre-empting only a local summary, and
@@ -272,8 +286,10 @@ pub(crate) async fn claim_job_for_recording<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     reason: &'static str,
 ) -> Result<OwnedSemaphorePermit, String> {
-    claim_job_for_recording_with(reason, BATCH_PREEMPT_WAIT, &|job| emit_batch_preempted(app, job))
-        .await
+    claim_job_for_recording_with(reason, BATCH_PREEMPT_WAIT, &|job| {
+        emit_batch_preempted(app, job)
+    })
+    .await
 }
 
 async fn claim_job_for_recording_with(
@@ -294,7 +310,10 @@ async fn claim_job_for_recording_with(
 
 fn emit_batch_preempted<R: tauri::Runtime>(app: &tauri::AppHandle<R>, job: BatchJob) {
     use tauri::Emitter;
-    log::info!("Stopping {} because a recording is starting", job.event_name());
+    log::info!(
+        "Stopping {} because a recording is starting",
+        job.event_name()
+    );
     let _ = app.emit(
         "batch-job-preempted",
         serde_json::json!({ "job": job.event_name(), "reason": "recording" }),
@@ -365,7 +384,10 @@ async fn claim_with_preemption(
                 } => {}
             }
             if tokio::time::Instant::now() >= deadline {
-                log::warn!("{} did not release the job slot in time", stopping.event_name());
+                log::warn!(
+                    "{} did not release the job slot in time",
+                    stopping.event_name()
+                );
                 return Err(stopping.still_stopping_message().to_string());
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -566,10 +588,13 @@ mod tests {
             let flag = batch.cancelled.clone();
             let released = batch.release_when_cancelled();
             let (seen, record) = preempted_jobs();
-            let recording =
-                claim_job_for_recording_with("recording", std::time::Duration::from_secs(5), &record)
-                    .await
-                    .expect("recording must pre-empt a batch job");
+            let recording = claim_job_for_recording_with(
+                "recording",
+                std::time::Duration::from_secs(5),
+                &record,
+            )
+            .await
+            .expect("recording must pre-empt a batch job");
             assert!(flag.load(Ordering::Acquire), "{job:?} was not cancelled");
             assert_eq!(*seen.lock().unwrap(), vec![job], "reported once");
             assert!(released.await.unwrap().load(Ordering::Relaxed) >= 1);
@@ -577,7 +602,11 @@ mod tests {
                 running_batch_job().is_none(),
                 "the pre-empted job's registration is gone"
             );
-            assert_eq!(claim_job().unwrap_err(), BUSY, "the recording holds the slot");
+            assert_eq!(
+                claim_job().unwrap_err(),
+                BUSY,
+                "the recording holds the slot"
+            );
             drop(recording);
             assert!(claim_job().is_ok());
         }
@@ -649,7 +678,10 @@ mod tests {
         );
         assert!(claim_batch_job_without_preemption(BatchJob::PcTest, other_cancel).is_err());
         assert!(!running.cancelled.load(Ordering::Acquire));
-        assert_eq!(running_batch_job().map(|(job, _)| job), Some(BatchJob::Retranscription));
+        assert_eq!(
+            running_batch_job().map(|(job, _)| job),
+            Some(BatchJob::Retranscription)
+        );
     }
 
     #[tokio::test]
@@ -660,7 +692,10 @@ mod tests {
         let started = std::time::Instant::now();
         let result = claim_job_for_recording_with("recording", SHORT_WAIT, &record).await;
         let message = result.err().expect("the slot never became free");
-        assert!(message.contains("Speaker detection is still stopping"), "{message}");
+        assert!(
+            message.contains("Speaker detection is still stopping"),
+            "{message}"
+        );
         assert!(started.elapsed() >= SHORT_WAIT);
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
         assert_eq!(*seen.lock().unwrap(), vec![BatchJob::SpeakerDetection]);
@@ -737,11 +772,17 @@ mod tests {
         let _test_lock = GLOBAL_JOB_TEST_LOCK.lock().await;
         let first = FakeBatchJob::start(BatchJob::Import);
         let first_id = first.permit.as_ref().unwrap().id;
-        assert_eq!(running_batch_job().map(|(job, _)| job), Some(BatchJob::Import));
+        assert_eq!(
+            running_batch_job().map(|(job, _)| job),
+            Some(BatchJob::Import)
+        );
         drop(first);
         assert!(running_batch_job().is_none());
         let second = FakeBatchJob::start(BatchJob::PcTest);
         assert_ne!(second.permit.as_ref().unwrap().id, first_id);
-        assert_eq!(running_batch_job().map(|(job, _)| job), Some(BatchJob::PcTest));
+        assert_eq!(
+            running_batch_job().map(|(job, _)| job),
+            Some(BatchJob::PcTest)
+        );
     }
 }

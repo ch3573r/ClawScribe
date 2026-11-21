@@ -319,9 +319,12 @@ impl OpenAICompatibleProcessingProvider {
                         cancellation_token,
                     )
                     .await
-                    .and_then(|text| super::processor::require_summary_markdown(&text, "Meeting excerpt"))
-            })
-            .await?;
+                    .and_then(|text| {
+                        super::processor::require_summary_markdown(&text, "Meeting excerpt")
+                    })
+            },
+        )
+        .await?;
         let user_prompt = build_user_prompt(
             &request.meeting_id,
             &request.meeting_title,

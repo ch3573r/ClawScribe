@@ -27,22 +27,21 @@ pub(crate) use perf_debug;
 pub mod anthropic;
 pub mod api;
 pub mod audio;
+pub mod behavior_settings;
 pub mod cli_control;
 pub mod config;
-pub mod behavior_settings;
 pub(crate) mod credentials;
-pub(crate) mod file_grants;
-pub(crate) mod trusted_roots;
-pub(crate) mod local_path;
 pub mod database;
 pub mod diagnostics;
 pub mod exit_guard;
 pub mod exports;
 mod external_url;
+pub(crate) mod file_grants;
 pub mod groq;
 mod ical_sources;
 pub mod knowledge;
 pub mod library;
+pub(crate) mod local_path;
 pub mod mcp;
 pub(crate) mod model_download;
 pub mod nemotron_engine;
@@ -61,6 +60,7 @@ pub mod state;
 pub mod summary;
 pub mod teams_detection;
 pub mod tray;
+pub(crate) mod trusted_roots;
 pub mod updates;
 pub mod utils;
 pub mod whisper_engine;
@@ -276,8 +276,9 @@ fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, 
         .canonicalize()
         .map_err(|_| "Failed to resolve the meeting folder".to_string())?;
     // A mapped network drive resolves to a UNC path: fine inside a trusted root.
-    Ok((local_path::is_local_canonical(&resolved) || trusted_roots::canonical_inside(&resolved, &roots))
-        .then_some(resolved))
+    Ok((local_path::is_local_canonical(&resolved)
+        || trusted_roots::canonical_inside(&resolved, &roots))
+    .then_some(resolved))
 }
 
 fn canonical_folder_is_registered<'a>(
@@ -535,9 +536,11 @@ pub(crate) async fn apply_language(app: &AppHandle, language: &str) -> Result<()
     }
     let stored = app.clone();
     let stored_language = language.clone();
-    tauri::async_runtime::spawn_blocking(move || behavior_settings::save_language(&stored, &stored_language))
-        .await
-        .map_err(|_| "Could not save the language".to_string())??;
+    tauri::async_runtime::spawn_blocking(move || {
+        behavior_settings::save_language(&stored, &stored_language)
+    })
+    .await
+    .map_err(|_| "Could not save the language".to_string())??;
     log_info!("Setting language preference to: {}", language);
     set_language_runtime(&language);
     audio::transcription::worker::reset_live_source_languages(&app);

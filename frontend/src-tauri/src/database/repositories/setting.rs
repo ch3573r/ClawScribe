@@ -1,6 +1,5 @@
 use crate::credentials::{
-    forget_in, new_secret_problem, platform_store, Store,
-    KEY_REQUIRED_FOR_NEW_ADDRESS,
+    forget_in, new_secret_problem, platform_store, Store, KEY_REQUIRED_FOR_NEW_ADDRESS,
 };
 use crate::database::models::{Setting, TranscriptSetting};
 use crate::openai::secret_destination::keeps_destination;
@@ -124,8 +123,15 @@ impl SettingsRepository {
             r#"INSERT INTO settings (id, provider, model, whisperModel, "{api_key_column}")
                VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', ?)"#
         );
-        replace_protected_setting(store, pool, "settings", api_key_column, &insert, api_key.trim())
-            .await
+        replace_protected_setting(
+            store,
+            pool,
+            "settings",
+            api_key_column,
+            &insert,
+            api_key.trim(),
+        )
+        .await
     }
 
     /// What the webview may know about a summary provider's stored key.
@@ -307,7 +313,12 @@ impl SettingsRepository {
                 base_url,
                 Some(DEFAULT_CLOUD_WHISPER_BASE_URL),
             ),
-            "mai-transcribe" => ("maiTranscribeApiKey", "maiTranscribeEndpoint", endpoint, None),
+            "mai-transcribe" => (
+                "maiTranscribeApiKey",
+                "maiTranscribeEndpoint",
+                endpoint,
+                None,
+            ),
             _ => return Ok(()),
         };
         if key_supplied {
@@ -326,7 +337,9 @@ impl SettingsRepository {
         }
         let saved = address.filter(|value| !value.trim().is_empty());
         let saved = saved.as_deref().or(default);
-        let requested = requested.filter(|value| !value.trim().is_empty()).or(default);
+        let requested = requested
+            .filter(|value| !value.trim().is_empty())
+            .or(default);
         match (saved, requested) {
             (Some(saved), Some(requested)) if !keeps_destination(saved, requested) => {
                 Err(sqlx::Error::Protocol(KEY_REQUIRED_FOR_NEW_ADDRESS.into()))
@@ -588,9 +601,8 @@ impl SettingsRepository {
                             }
                             protected
                         };
-                        config.api_key = Some(
-                            open_in(store, "summary/custom-openai", &protected).await?,
-                        );
+                        config.api_key =
+                            Some(open_in(store, "summary/custom-openai", &protected).await?);
                     }
                     config.destination_problem =
                         crate::openai::secret_destination::validate_secret_destination(
@@ -705,14 +717,12 @@ impl SettingsRepository {
     async fn stored_custom_openai_json(
         pool: &SqlitePool,
     ) -> std::result::Result<Option<String>, sqlx::Error> {
-        Ok(
-            sqlx::query_scalar::<_, Option<String>>(
-                "SELECT customOpenAIConfig FROM settings WHERE id = '1'",
-            )
-            .fetch_optional(pool)
-            .await?
-            .flatten(),
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT customOpenAIConfig FROM settings WHERE id = '1'",
         )
+        .fetch_optional(pool)
+        .await?
+        .flatten())
     }
 
     /// What the webview may know about the custom provider's stored key.
@@ -883,7 +893,10 @@ async fn compare_and_set_column(
     if exists > 0 {
         return Ok(false);
     }
-    sqlx::query(insert_sql).bind(new_reference).execute(pool).await?;
+    sqlx::query(insert_sql)
+        .bind(new_reference)
+        .execute(pool)
+        .await?;
     Ok(true)
 }
 
@@ -900,18 +913,24 @@ async fn replace_protected_setting(
     let scope = format!("{table}/{column}");
     let old = read_stored_reference(pool, table, column).await?;
     let old_for_update = old.clone();
-    crate::credentials::commit_replacement(store, &scope, new_key, old, |new_reference| async move {
-        compare_and_set_column(
-            pool,
-            table,
-            column,
-            insert_sql,
-            &new_reference,
-            old_for_update.as_deref(),
-        )
-        .await
-        .map_err(|e| e.to_string())
-    })
+    crate::credentials::commit_replacement(
+        store,
+        &scope,
+        new_key,
+        old,
+        |new_reference| async move {
+            compare_and_set_column(
+                pool,
+                table,
+                column,
+                insert_sql,
+                &new_reference,
+                old_for_update.as_deref(),
+            )
+            .await
+            .map_err(|e| e.to_string())
+        },
+    )
     .await
     .map(|_| ())
     .map_err(sqlx::Error::Protocol)
@@ -961,9 +980,11 @@ async fn clear_protected_setting(
     column: &str,
 ) -> Result<(), sqlx::Error> {
     let old = read_stored_reference(pool, table, column).await?;
-    sqlx::query(&format!("UPDATE {table} SET {column} = NULL WHERE id = '1'"))
-        .execute(pool)
-        .await?;
+    sqlx::query(&format!(
+        "UPDATE {table} SET {column} = NULL WHERE id = '1'"
+    ))
+    .execute(pool)
+    .await?;
     if let Some(old) = old {
         forget_in(store, &format!("{table}/{column}"), old).await;
     }
@@ -1036,7 +1057,8 @@ pub(crate) async fn migrate_provider_credentials(pool: &SqlitePool) {
         for column in columns {
             if read_protected_setting(&platform_store(), pool, table, column)
                 .await
-                .is_err() {
+                .is_err()
+            {
                 log::warn!(
                     "A provider credential needs protected-store access before it can be used"
                 );
@@ -1118,21 +1140,37 @@ mod secret_tests {
     async fn a_summary_key_is_stored_as_a_reference_and_replaced_without_leaving_entries() {
         let pool = pool().await;
         let (memory, store) = fixture();
-        SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_ONE).await.unwrap();
+        SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_ONE)
+            .await
+            .unwrap();
         let reference = column(&pool, "settings", "openaiApiKey").await.unwrap();
         assert!(crate::credentials::is_protected(&reference));
         assert!(!reference.contains(KEY_ONE));
         assert_eq!(memory.entries(), 1);
-        SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_TWO).await.unwrap();
-        assert_eq!(memory.entries(), 1, "the old entry is removed after the update");
+        SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_TWO)
+            .await
+            .unwrap();
         assert_eq!(
-            SettingsRepository::get_api_key_with(&store, &pool, "openai").await.unwrap().as_deref(),
+            memory.entries(),
+            1,
+            "the old entry is removed after the update"
+        );
+        assert_eq!(
+            SettingsRepository::get_api_key_with(&store, &pool, "openai")
+                .await
+                .unwrap()
+                .as_deref(),
             Some(KEY_TWO)
         );
         // An empty key keeps the stored one.
-        SettingsRepository::save_api_key_with(&store, &pool, "openai", "  ").await.unwrap();
+        SettingsRepository::save_api_key_with(&store, &pool, "openai", "  ")
+            .await
+            .unwrap();
         assert_eq!(
-            SettingsRepository::get_api_key_with(&store, &pool, "openai").await.unwrap().as_deref(),
+            SettingsRepository::get_api_key_with(&store, &pool, "openai")
+                .await
+                .unwrap()
+                .as_deref(),
             Some(KEY_TWO)
         );
     }
@@ -1141,29 +1179,36 @@ mod secret_tests {
     async fn a_new_key_shorter_than_eight_characters_is_refused_and_changes_nothing() {
         let pool = pool().await;
         let (memory, store) = fixture();
-        SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_ONE).await.unwrap();
+        SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_ONE)
+            .await
+            .unwrap();
         let before = column(&pool, "settings", "openaiApiKey").await;
         for short in [SHORT, "1234567", "   abcdefg   "] {
             let error = SettingsRepository::save_api_key_with(&store, &pool, "openai", short)
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("too short"));
-            let error = SettingsRepository::save_transcript_api_key_with(&store, &pool, "groq", short)
-                .await
-                .unwrap_err();
+            let error =
+                SettingsRepository::save_transcript_api_key_with(&store, &pool, "groq", short)
+                    .await
+                    .unwrap_err();
             assert!(error.to_string().contains("too short"));
         }
         assert_eq!(column(&pool, "settings", "openaiApiKey").await, before);
         assert_eq!(memory.entries(), 1);
         // Exactly eight characters is accepted.
-        SettingsRepository::save_api_key_with(&store, &pool, "groq", "12345678").await.unwrap();
+        SettingsRepository::save_api_key_with(&store, &pool, "groq", "12345678")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn a_failing_update_keeps_the_old_key_and_removes_the_new_entry() {
         let pool = pool().await;
         let (memory, store) = fixture();
-        SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_ONE).await.unwrap();
+        SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_ONE)
+            .await
+            .unwrap();
         let before = column(&pool, "settings", "openaiApiKey").await;
         fail_updates(&pool, "settings").await;
         let error = SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_TWO)
@@ -1174,7 +1219,10 @@ mod secret_tests {
         assert_eq!(memory.entries(), 1, "the new entry was removed again");
         assert!(!memory.contains_value(KEY_TWO));
         assert_eq!(
-            SettingsRepository::get_api_key_with(&store, &pool, "openai").await.unwrap().as_deref(),
+            SettingsRepository::get_api_key_with(&store, &pool, "openai")
+                .await
+                .unwrap()
+                .as_deref(),
             Some(KEY_ONE)
         );
     }
@@ -1183,9 +1231,13 @@ mod secret_tests {
     async fn a_lost_race_keeps_the_column_and_removes_the_new_entry() {
         let pool = pool().await;
         let (memory, store) = fixture();
-        SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_ONE).await.unwrap();
+        SettingsRepository::save_api_key_with(&store, &pool, "openai", KEY_ONE)
+            .await
+            .unwrap();
         // The save read a reference that another save has since replaced.
-        let stale = memory.seal("settings/openaiApiKey", "fake-key-stale-22222222").unwrap();
+        let stale = memory
+            .seal("settings/openaiApiKey", "fake-key-stale-22222222")
+            .unwrap();
         let current = column(&pool, "settings", "openaiApiKey").await.unwrap();
         let replaced = crate::credentials::commit_replacement(
             &store,
@@ -1195,18 +1247,34 @@ mod secret_tests {
             |new_reference| {
                 let pool = pool.clone();
                 async move {
-                    compare_and_set_column(&pool, "settings", "openaiApiKey", "SELECT 1", &new_reference, Some(&stale))
-                        .await
-                        .map_err(|e| e.to_string())
+                    compare_and_set_column(
+                        &pool,
+                        "settings",
+                        "openaiApiKey",
+                        "SELECT 1",
+                        &new_reference,
+                        Some(&stale),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
                 }
             },
         )
         .await;
         assert!(replaced.is_err());
-        assert_eq!(column(&pool, "settings", "openaiApiKey").await.unwrap(), current);
-        assert!(!memory.contains_value(KEY_TWO), "the new entry was removed again");
         assert_eq!(
-            SettingsRepository::get_api_key_with(&store, &pool, "openai").await.unwrap().as_deref(),
+            column(&pool, "settings", "openaiApiKey").await.unwrap(),
+            current
+        );
+        assert!(
+            !memory.contains_value(KEY_TWO),
+            "the new entry was removed again"
+        );
+        assert_eq!(
+            SettingsRepository::get_api_key_with(&store, &pool, "openai")
+                .await
+                .unwrap()
+                .as_deref(),
             Some(KEY_ONE)
         );
     }
@@ -1215,11 +1283,18 @@ mod secret_tests {
     async fn clearing_a_summary_key_removes_the_column_value_and_the_entry() {
         let pool = pool().await;
         let (memory, store) = fixture();
-        SettingsRepository::save_api_key_with(&store, &pool, "groq", KEY_ONE).await.unwrap();
-        SettingsRepository::delete_api_key_with(&store, &pool, "groq").await.unwrap();
+        SettingsRepository::save_api_key_with(&store, &pool, "groq", KEY_ONE)
+            .await
+            .unwrap();
+        SettingsRepository::delete_api_key_with(&store, &pool, "groq")
+            .await
+            .unwrap();
         assert_eq!(column(&pool, "settings", "groqApiKey").await, None);
         assert_eq!(memory.entries(), 0);
-        assert!(SettingsRepository::get_api_key_with(&store, &pool, "groq").await.unwrap().is_none());
+        assert!(SettingsRepository::get_api_key_with(&store, &pool, "groq")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1227,9 +1302,13 @@ mod secret_tests {
         let pool = pool().await;
         let (memory, store) = fixture();
         let a = "https://gateway.example.com/v1";
-        SettingsRepository::save_custom_openai_config_with(&store, &pool, &custom(a, Some(KEY_ONE)))
-            .await
-            .unwrap();
+        SettingsRepository::save_custom_openai_config_with(
+            &store,
+            &pool,
+            &custom(a, Some(KEY_ONE)),
+        )
+        .await
+        .unwrap();
         let before = column(&pool, "settings", "customOpenAIConfig").await;
 
         // Endpoint B without a new key is refused; key and endpoint stay.
@@ -1241,9 +1320,15 @@ mod secret_tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("Enter the key again"));
-        assert_eq!(column(&pool, "settings", "customOpenAIConfig").await, before);
+        assert_eq!(
+            column(&pool, "settings", "customOpenAIConfig").await,
+            before
+        );
         assert_eq!(memory.entries(), 1);
-        let kept = SettingsRepository::get_custom_openai_config_with(&store, &pool).await.unwrap().unwrap();
+        let kept = SettingsRepository::get_custom_openai_config_with(&store, &pool)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(kept.endpoint, a);
         assert_eq!(kept.api_key.as_deref(), Some(KEY_ONE));
 
@@ -1255,14 +1340,24 @@ mod secret_tests {
         )
         .await
         .unwrap();
-        let kept = SettingsRepository::get_custom_openai_config_with(&store, &pool).await.unwrap().unwrap();
+        let kept = SettingsRepository::get_custom_openai_config_with(&store, &pool)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(kept.api_key.as_deref(), Some(KEY_ONE));
 
         // A different scheme or port is a different destination.
-        for other in ["http://gateway.example.com/v1", "https://gateway.example.com:8443/v1"] {
-            assert!(SettingsRepository::save_custom_openai_config_with(&store, &pool, &custom(other, None))
-                .await
-                .is_err());
+        for other in [
+            "http://gateway.example.com/v1",
+            "https://gateway.example.com:8443/v1",
+        ] {
+            assert!(SettingsRepository::save_custom_openai_config_with(
+                &store,
+                &pool,
+                &custom(other, None)
+            )
+            .await
+            .is_err());
         }
 
         // Endpoint B with a newly entered key is accepted and the old entry goes.
@@ -1273,7 +1368,10 @@ mod secret_tests {
         )
         .await
         .unwrap();
-        let now = SettingsRepository::get_custom_openai_config_with(&store, &pool).await.unwrap().unwrap();
+        let now = SettingsRepository::get_custom_openai_config_with(&store, &pool)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(now.endpoint, "https://other.example.com/v1");
         assert_eq!(now.api_key.as_deref(), Some(KEY_TWO));
         assert_eq!(memory.entries(), 1);
@@ -1284,13 +1382,24 @@ mod secret_tests {
     async fn without_a_stored_key_the_custom_address_can_change_freely() {
         let pool = pool().await;
         let (_memory, store) = fixture();
-        SettingsRepository::save_custom_openai_config_with(&store, &pool, &custom("https://a.example.com/v1", None))
+        SettingsRepository::save_custom_openai_config_with(
+            &store,
+            &pool,
+            &custom("https://a.example.com/v1", None),
+        )
+        .await
+        .unwrap();
+        SettingsRepository::save_custom_openai_config_with(
+            &store,
+            &pool,
+            &custom("https://b.example.com/v1", None),
+        )
+        .await
+        .unwrap();
+        let now = SettingsRepository::get_custom_openai_config_with(&store, &pool)
             .await
+            .unwrap()
             .unwrap();
-        SettingsRepository::save_custom_openai_config_with(&store, &pool, &custom("https://b.example.com/v1", None))
-            .await
-            .unwrap();
-        let now = SettingsRepository::get_custom_openai_config_with(&store, &pool).await.unwrap().unwrap();
         assert_eq!(now.endpoint, "https://b.example.com/v1");
         assert!(now.api_key.is_none());
     }
@@ -1308,7 +1417,9 @@ mod secret_tests {
         .unwrap_err();
         assert!(error.to_string().contains("too short"));
         assert_eq!(memory.entries(), 0);
-        assert!(column(&pool, "settings", "customOpenAIConfig").await.is_none());
+        assert!(column(&pool, "settings", "customOpenAIConfig")
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -1316,15 +1427,26 @@ mod secret_tests {
         let pool = pool().await;
         let (memory, store) = fixture();
         let a = "https://gateway.example.com/v1";
-        SettingsRepository::save_custom_openai_config_with(&store, &pool, &custom(a, Some(KEY_ONE)))
-            .await
-            .unwrap();
+        SettingsRepository::save_custom_openai_config_with(
+            &store,
+            &pool,
+            &custom(a, Some(KEY_ONE)),
+        )
+        .await
+        .unwrap();
         let before = column(&pool, "settings", "customOpenAIConfig").await;
         fail_updates(&pool, "settings").await;
-        assert!(SettingsRepository::save_custom_openai_config_with(&store, &pool, &custom(a, Some(KEY_TWO)))
-            .await
-            .is_err());
-        assert_eq!(column(&pool, "settings", "customOpenAIConfig").await, before);
+        assert!(SettingsRepository::save_custom_openai_config_with(
+            &store,
+            &pool,
+            &custom(a, Some(KEY_TWO))
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            column(&pool, "settings", "customOpenAIConfig").await,
+            before
+        );
         assert_eq!(memory.entries(), 1);
         assert!(!memory.contains_value(KEY_TWO));
     }
@@ -1334,12 +1456,21 @@ mod secret_tests {
         let pool = pool().await;
         let (memory, store) = fixture();
         let a = "https://gateway.example.com/v1";
-        SettingsRepository::save_custom_openai_config_with(&store, &pool, &custom(a, Some(KEY_ONE)))
+        SettingsRepository::save_custom_openai_config_with(
+            &store,
+            &pool,
+            &custom(a, Some(KEY_ONE)),
+        )
+        .await
+        .unwrap();
+        SettingsRepository::clear_custom_openai_api_key_with(&store, &pool)
             .await
             .unwrap();
-        SettingsRepository::clear_custom_openai_api_key_with(&store, &pool).await.unwrap();
         assert_eq!(memory.entries(), 0);
-        let now = SettingsRepository::get_custom_openai_config_with(&store, &pool).await.unwrap().unwrap();
+        let now = SettingsRepository::get_custom_openai_config_with(&store, &pool)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(now.endpoint, a);
         assert_eq!(now.model, "model-a");
         assert!(now.api_key.is_none());
@@ -1350,9 +1481,17 @@ mod secret_tests {
         let pool = pool().await;
         let (_memory, store) = fixture();
         let a = Some("https://api.example.com/v1");
-        SettingsRepository::save_transcript_provider_config(&pool, "cloud-whisper", a, None, None, false, false)
-            .await
-            .unwrap();
+        SettingsRepository::save_transcript_provider_config(
+            &pool,
+            "cloud-whisper",
+            a,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
         SettingsRepository::save_transcript_api_key_with(&store, &pool, "cloud-whisper", KEY_ONE)
             .await
             .unwrap();
@@ -1370,7 +1509,10 @@ mod secret_tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("Enter the key again"));
-        assert_eq!(column(&pool, "transcript_settings", "cloudWhisperBaseUrl").await, before);
+        assert_eq!(
+            column(&pool, "transcript_settings", "cloudWhisperBaseUrl").await,
+            before
+        );
 
         // Other case and a trailing slash are the same address.
         SettingsRepository::save_transcript_provider_config(
@@ -1398,7 +1540,9 @@ mod secret_tests {
         .await
         .unwrap();
         assert_eq!(
-            column(&pool, "transcript_settings", "cloudWhisperBaseUrl").await.as_deref(),
+            column(&pool, "transcript_settings", "cloudWhisperBaseUrl")
+                .await
+                .as_deref(),
             Some("https://other.example.com/v1")
         );
     }
@@ -1408,9 +1552,17 @@ mod secret_tests {
         let pool = pool().await;
         let (_memory, store) = fixture();
         let a = Some("https://mai.example.com/transcribe");
-        SettingsRepository::save_transcript_provider_config(&pool, "mai-transcribe", None, a, Some("west"), false, false)
-            .await
-            .unwrap();
+        SettingsRepository::save_transcript_provider_config(
+            &pool,
+            "mai-transcribe",
+            None,
+            a,
+            Some("west"),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
         SettingsRepository::save_transcript_api_key_with(&store, &pool, "mai-transcribe", KEY_ONE)
             .await
             .unwrap();
@@ -1427,7 +1579,9 @@ mod secret_tests {
         .unwrap_err();
         assert!(error.to_string().contains("Enter the key again"));
         assert_eq!(
-            column(&pool, "transcript_settings", "maiTranscribeEndpoint").await.as_deref(),
+            column(&pool, "transcript_settings", "maiTranscribeEndpoint")
+                .await
+                .as_deref(),
             a
         );
     }
@@ -1441,15 +1595,30 @@ mod secret_tests {
             .unwrap();
         let address = Some("https://mai.example.com/transcribe");
         let error = SettingsRepository::save_transcript_provider_config(
-            &pool, "mai-transcribe", None, address, Some("west"), false, false,
+            &pool,
+            "mai-transcribe",
+            None,
+            address,
+            Some("west"),
+            false,
+            false,
         )
         .await
         .unwrap_err();
         assert!(error.to_string().contains("Enter the key again"));
-        assert_eq!(column(&pool, "transcript_settings", "maiTranscribeEndpoint").await, None);
+        assert_eq!(
+            column(&pool, "transcript_settings", "maiTranscribeEndpoint").await,
+            None
+        );
         // With the key entered again for the new address it is accepted.
         SettingsRepository::save_transcript_provider_config(
-            &pool, "mai-transcribe", None, address, Some("west"), false, true,
+            &pool,
+            "mai-transcribe",
+            None,
+            address,
+            Some("west"),
+            false,
+            true,
         )
         .await
         .unwrap();
@@ -1459,14 +1628,21 @@ mod secret_tests {
     async fn a_failing_transcript_update_keeps_the_old_key() {
         let pool = pool().await;
         let (memory, store) = fixture();
-        SettingsRepository::save_transcript_api_key_with(&store, &pool, "groq", KEY_ONE).await.unwrap();
-        fail_updates(&pool, "transcript_settings").await;
-        assert!(SettingsRepository::save_transcript_api_key_with(&store, &pool, "groq", KEY_TWO)
+        SettingsRepository::save_transcript_api_key_with(&store, &pool, "groq", KEY_ONE)
             .await
-            .is_err());
+            .unwrap();
+        fail_updates(&pool, "transcript_settings").await;
+        assert!(
+            SettingsRepository::save_transcript_api_key_with(&store, &pool, "groq", KEY_TWO)
+                .await
+                .is_err()
+        );
         assert_eq!(memory.entries(), 1);
         assert_eq!(
-            SettingsRepository::get_transcript_api_key_with(&store, &pool, "groq").await.unwrap().as_deref(),
+            SettingsRepository::get_transcript_api_key_with(&store, &pool, "groq")
+                .await
+                .unwrap()
+                .as_deref(),
             Some(KEY_ONE)
         );
     }

@@ -901,13 +901,22 @@ mod catalog_url_tests {
                 "decoder_joint-model.fp16.onnx",
             ),
         ] {
-            assert_eq!(parakeet_file_url(name, encoder), format!("{ULTRA}/{encoder}"));
-            assert_eq!(parakeet_file_url(name, decoder), format!("{ULTRA}/{decoder}"));
+            assert_eq!(
+                parakeet_file_url(name, encoder),
+                format!("{ULTRA}/{encoder}")
+            );
+            assert_eq!(
+                parakeet_file_url(name, decoder),
+                format!("{ULTRA}/{decoder}")
+            );
             assert_eq!(
                 parakeet_file_url(name, "nemo128.onnx"),
                 format!("{V3}/nemo128.onnx")
             );
-            assert_eq!(parakeet_file_url(name, "vocab.txt"), format!("{V3}/vocab.txt"));
+            assert_eq!(
+                parakeet_file_url(name, "vocab.txt"),
+                format!("{V3}/vocab.txt")
+            );
             for file in [encoder, decoder, "nemo128.onnx", "vocab.txt"] {
                 crate::model_download::pinned_file(&parakeet_file_url(name, file))
                     .unwrap_or_else(|_| panic!("{name}/{file} has no integrity pin"));
@@ -917,9 +926,8 @@ mod catalog_url_tests {
 
     #[test]
     fn ultra_pins_match_published_sizes_and_hashes() {
-        let pin = |file: &str| {
-            crate::model_download::pinned_file(&format!("{ULTRA}/{file}")).unwrap()
-        };
+        let pin =
+            |file: &str| crate::model_download::pinned_file(&format!("{ULTRA}/{file}")).unwrap();
         let encoder = pin("encoder-model.int8.onnx");
         assert_eq!(encoder.size, 652_183_214);
         assert_eq!(
@@ -940,8 +948,10 @@ mod catalog_url_tests {
             parakeet_file_url("parakeet-tdt-0.6b-v3-int8", "vocab.txt"),
             format!("{V3}/vocab.txt")
         );
-        assert!(parakeet_file_url("parakeet-tdt-0.6b-v2-int8", "nemo128.onnx")
-            .contains("parakeet-tdt-0.6b-v2-onnx"));
+        assert!(
+            parakeet_file_url("parakeet-tdt-0.6b-v2-int8", "nemo128.onnx")
+                .contains("parakeet-tdt-0.6b-v2-onnx")
+        );
         assert!(
             parakeet_file_url("parakeet-tdt-0.6b-v3-smoothquant-int8", "vocab.txt")
                 .contains("smoothquant")

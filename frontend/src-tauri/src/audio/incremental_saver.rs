@@ -484,7 +484,12 @@ async fn authorized_recording_folder<R: tauri::Runtime>(
             .unwrap_or_default();
         }
     }
-    authorize_recording_folder(Path::new(meeting_folder), &roots, &registered, allow_registered)
+    authorize_recording_folder(
+        Path::new(meeting_folder),
+        &roots,
+        &registered,
+        allow_registered,
+    )
 }
 
 /// Recover audio from checkpoint files
@@ -1169,7 +1174,9 @@ mod folder_authorization_tests {
         let registered = vec![l.saved_elsewhere.to_string_lossy().to_string()];
         assert!(authorize_recording_folder(&l.saved_elsewhere, &roots, &registered, true).is_ok());
         // Recovery and probing do not accept it.
-        assert!(authorize_recording_folder(&l.saved_elsewhere, &roots, &registered, false).is_err());
+        assert!(
+            authorize_recording_folder(&l.saved_elsewhere, &roots, &registered, false).is_err()
+        );
     }
 
     #[test]

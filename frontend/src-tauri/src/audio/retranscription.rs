@@ -230,9 +230,10 @@ async fn run_retranscription<R: Runtime>(
         .pool()
         .clone();
     let roots = crate::audio::recording_preferences::recording_roots(&app).await;
-    let folder_path = crate::database::meeting_files::registered_meeting_folder(&pool, &meeting_id, &roots)
-        .await
-        .map_err(|message| anyhow!(message))?;
+    let folder_path =
+        crate::database::meeting_files::registered_meeting_folder(&pool, &meeting_id, &roots)
+            .await
+            .map_err(|message| anyhow!(message))?;
     let (audio_path, capture_gaps) =
         crate::audio::incremental_saver::find_or_recover_audio_file_with_status(&folder_path)
             .await?;
@@ -1671,13 +1672,25 @@ mod tests {
         assert!(!cancel_retranscription_if_possible(), "no job is running");
         {
             let _phase = PhaseGuard::open();
-            assert!(cancel_retranscription_if_possible(), "before the save a cancel takes effect");
-            assert!(cancel_retranscription_if_possible(), "repeats stay accepted");
+            assert!(
+                cancel_retranscription_if_possible(),
+                "before the save a cancel takes effect"
+            );
+            assert!(
+                cancel_retranscription_if_possible(),
+                "repeats stay accepted"
+            );
             set_retranscription_phase(Phase::Saving);
-            assert!(!cancel_retranscription_if_possible(), "a save in progress cannot be cancelled");
+            assert!(
+                !cancel_retranscription_if_possible(),
+                "a save in progress cannot be cancelled"
+            );
         }
         // Dropping the guard (declared after the job registration) ends the
         // window before the registration is cleared.
-        assert!(!cancel_retranscription_if_possible(), "the finished job refuses a cancel");
+        assert!(
+            !cancel_retranscription_if_possible(),
+            "the finished job refuses a cancel"
+        );
     }
 }

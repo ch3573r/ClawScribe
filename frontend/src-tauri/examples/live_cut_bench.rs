@@ -48,7 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut samples = read_wav_16k_mono_pcm(&wav)?;
     // Synthetic clips contain exact digital silence, which a microphone never
     // produces. LIVE_CUT_BENCH_NOISE adds a noise floor of that amplitude.
-    if let Some(level) = env::var("LIVE_CUT_BENCH_NOISE").ok().and_then(|v| v.parse::<f32>().ok()) {
+    if let Some(level) = env::var("LIVE_CUT_BENCH_NOISE")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
         let mut seed = 0x2545_F491u32;
         for sample in &mut samples {
             seed ^= seed << 13;
@@ -205,21 +208,39 @@ fn probe_empty(
     let silence = |ms: usize| vec![0.0f32; ms * 16];
     let mut variants: Vec<(String, Vec<f32>)> = Vec::new();
     for ms in [100usize, 300, 1000] {
-        variants.push((format!("lead {ms} ms silence"), [silence(ms), samples.to_vec()].concat()));
-        variants.push((format!("trail {ms} ms silence"), [samples.to_vec(), silence(ms)].concat()));
+        variants.push((
+            format!("lead {ms} ms silence"),
+            [silence(ms), samples.to_vec()].concat(),
+        ));
+        variants.push((
+            format!("trail {ms} ms silence"),
+            [samples.to_vec(), silence(ms)].concat(),
+        ));
     }
-    for ms in [10usize, 50, 200].into_iter().filter(|ms| samples.len() > ms * 32) {
+    for ms in [10usize, 50, 200]
+        .into_iter()
+        .filter(|ms| samples.len() > ms * 32)
+    {
         variants.push((format!("drop first {ms} ms"), samples[ms * 16..].to_vec()));
-        variants.push((format!("drop last {ms} ms"), samples[..samples.len() - ms * 16].to_vec()));
+        variants.push((
+            format!("drop last {ms} ms"),
+            samples[..samples.len() - ms * 16].to_vec(),
+        ));
     }
     for gain in [0.5f32, 0.1] {
-        variants.push((format!("gain {gain}"), samples.iter().map(|s| s * gain).collect()));
+        variants.push((
+            format!("gain {gain}"),
+            samples.iter().map(|s| s * gain).collect(),
+        ));
     }
     variants.push(("same again".to_string(), samples.to_vec()));
     for (name, audio) in variants {
         let text = model.transcribe_samples(audio)?.text;
         let shown: String = text.trim().chars().take(60).collect();
-        println!("    {name:<22} -> {} chars: {shown}", text.trim().chars().count());
+        println!(
+            "    {name:<22} -> {} chars: {shown}",
+            text.trim().chars().count()
+        );
     }
     Ok(())
 }

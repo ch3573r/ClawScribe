@@ -2069,8 +2069,13 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     // The folder is the one the core saved for this meeting; the path the
     // webview sends is not trusted. Custom model files from the webview are not
     // used either: the models are the ones the app downloads.
-    let _ = (&meeting_folder_path, &segmentation_model_path, &embedding_model_path);
-    let (segmentation_model_path, embedding_model_path): (Option<String>, Option<String>) = (None, None);
+    let _ = (
+        &meeting_folder_path,
+        &segmentation_model_path,
+        &embedding_model_path,
+    );
+    let (segmentation_model_path, embedding_model_path): (Option<String>, Option<String>) =
+        (None, None);
     let folder_path = {
         let pool = app
             .try_state::<AppState>()

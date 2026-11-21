@@ -56,7 +56,8 @@ impl<R: Runtime> Backing for tauri_plugin_store::Store<R> {
         self.delete(key);
     }
     fn commit(&self) -> Result<(), String> {
-        self.save().map_err(|_| "Could not save the setting".to_string())
+        self.save()
+            .map_err(|_| "Could not save the setting".to_string())
     }
 }
 
@@ -106,11 +107,15 @@ pub(crate) fn valid_language(language: &str) -> bool {
         return true;
     }
     let mut parts = language.split(['-', '_']);
-    let Some(first) = parts.next() else { return false };
+    let Some(first) = parts.next() else {
+        return false;
+    };
     (2..=8).contains(&first.len())
         && first.chars().all(|c| c.is_ascii_alphabetic())
         && parts.clone().count() <= 2
-        && parts.all(|part| (1..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_alphanumeric()))
+        && parts.all(|part| {
+            (1..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_alphanumeric())
+        })
 }
 
 impl Stored {
@@ -127,7 +132,10 @@ impl Stored {
                 .and_then(|value| value.as_str().map(str::to_string))
                 .filter(|language| valid_language(language)),
             show_recording_notification: boolean(SHOW_RECORDING_NOTIFICATION),
-            legacy_migrated: backing.read(LEGACY_MIGRATED).and_then(|value| value.as_bool()) == Some(true),
+            legacy_migrated: backing
+                .read(LEGACY_MIGRATED)
+                .and_then(|value| value.as_bool())
+                == Some(true),
         }
     }
 
@@ -139,7 +147,10 @@ impl Stored {
             parakeet_worker: self.parakeet_worker.unwrap_or(false),
             cloud_transcription: self.cloud_transcription == Some(true),
             source_attribution: self.source_attribution.unwrap_or(false),
-            language: self.language.clone().unwrap_or_else(|| DEFAULT_LANGUAGE.to_string()),
+            language: self
+                .language
+                .clone()
+                .unwrap_or_else(|| DEFAULT_LANGUAGE.to_string()),
             show_recording_notification: self.show_recording_notification.unwrap_or(true),
             legacy_migrated: self.legacy_migrated,
         }
@@ -207,7 +218,11 @@ pub(crate) fn plan_migration(stored: &Stored, legacy: &LegacyBehaviorSettings) -
         plan.push(Change::SourceAttribution(value));
     }
     if stored.language.is_none() {
-        if let Some(language) = legacy.language.as_deref().filter(|language| valid_language(language)) {
+        if let Some(language) = legacy
+            .language
+            .as_deref()
+            .filter(|language| valid_language(language))
+        {
             plan.push(Change::Language(language.to_string()));
         }
     }
@@ -232,8 +247,11 @@ pub(crate) fn apply(settings: &BehaviorSettings) {
     crate::set_language_runtime(&settings.language);
 }
 
-fn open<R: Runtime>(app: &AppHandle<R>) -> Result<std::sync::Arc<tauri_plugin_store::Store<R>>, String> {
-    app.store(STORE_FILE).map_err(|_| "Could not open the settings".to_string())
+fn open<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<std::sync::Arc<tauri_plugin_store::Store<R>>, String> {
+    app.store(STORE_FILE)
+        .map_err(|_| "Could not open the settings".to_string())
 }
 
 /// Load and apply during start-up. A store that cannot be read gives the
@@ -255,7 +273,10 @@ pub fn load_and_apply<R: Runtime>(app: &AppHandle<R>) {
 /// here once, when the core has none.
 fn import_old_notification_preference<R: Runtime>(app: &AppHandle<R>) {
     let Ok(store) = open(app) else { return };
-    if Stored::read(store.as_ref()).show_recording_notification.is_some() {
+    if Stored::read(store.as_ref())
+        .show_recording_notification
+        .is_some()
+    {
         return;
     }
     let old = app
@@ -268,20 +289,36 @@ fn import_old_notification_preference<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-pub(crate) fn save_bool<R: Runtime>(app: &AppHandle<R>, key: &'static str, enabled: bool) -> Result<(), String> {
+pub(crate) fn save_bool<R: Runtime>(
+    app: &AppHandle<R>,
+    key: &'static str,
+    enabled: bool,
+) -> Result<(), String> {
     persist_bool(open(app)?.as_ref(), key, enabled)
 }
 
-pub(crate) fn save_parakeet_directml<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<(), String> {
+pub(crate) fn save_parakeet_directml<R: Runtime>(
+    app: &AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
     save_bool(app, PARAKEET_DIRECTML, enabled)
 }
-pub(crate) fn save_parakeet_worker<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<(), String> {
+pub(crate) fn save_parakeet_worker<R: Runtime>(
+    app: &AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
     save_bool(app, PARAKEET_WORKER, enabled)
 }
-pub(crate) fn save_cloud_transcription<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<(), String> {
+pub(crate) fn save_cloud_transcription<R: Runtime>(
+    app: &AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
     save_bool(app, CLOUD_TRANSCRIPTION, enabled)
 }
-pub(crate) fn save_source_attribution<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<(), String> {
+pub(crate) fn save_source_attribution<R: Runtime>(
+    app: &AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
     save_bool(app, SOURCE_ATTRIBUTION, enabled)
 }
 pub(crate) fn save_language<R: Runtime>(app: &AppHandle<R>, language: &str) -> Result<(), String> {
@@ -289,7 +326,9 @@ pub(crate) fn save_language<R: Runtime>(app: &AppHandle<R>, language: &str) -> R
 }
 
 #[tauri::command]
-pub async fn get_behavior_settings<R: Runtime>(app: AppHandle<R>) -> Result<BehaviorSettings, String> {
+pub async fn get_behavior_settings<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<BehaviorSettings, String> {
     tauri::async_runtime::spawn_blocking(move || Ok(Stored::read(open(&app)?.as_ref()).effective()))
         .await
         .map_err(|_| "Could not read the settings".to_string())?
@@ -308,15 +347,25 @@ pub async fn migrate_legacy_behavior_settings(
 ) -> Result<BehaviorSettings, String> {
     let _change = CHANGE_LOCK.lock().await;
     let reader = app.clone();
-    let stored = tauri::async_runtime::spawn_blocking(move || Ok::<_, String>(Stored::read(open(&reader)?.as_ref())))
-        .await
-        .map_err(|_| "Could not migrate the settings".to_string())??;
+    let stored = tauri::async_runtime::spawn_blocking(move || {
+        Ok::<_, String>(Stored::read(open(&reader)?.as_ref()))
+    })
+    .await
+    .map_err(|_| "Could not migrate the settings".to_string())??;
     for change in plan_migration(&stored, &legacy) {
         match change {
-            Change::ParakeetDirectml(value) => crate::parakeet_engine::commands::apply_parakeet_directml(&app, value).await?,
-            Change::ParakeetWorker(value) => crate::parakeet_engine::commands::apply_parakeet_worker(&app, value).await?,
-            Change::CloudTranscription(value) => crate::audio::recording_commands::apply_cloud_transcription(&app, value).await?,
-            Change::SourceAttribution(value) => crate::audio::recording_commands::apply_source_attribution(&app, value).await?,
+            Change::ParakeetDirectml(value) => {
+                crate::parakeet_engine::commands::apply_parakeet_directml(&app, value).await?
+            }
+            Change::ParakeetWorker(value) => {
+                crate::parakeet_engine::commands::apply_parakeet_worker(&app, value).await?
+            }
+            Change::CloudTranscription(value) => {
+                crate::audio::recording_commands::apply_cloud_transcription(&app, value).await?
+            }
+            Change::SourceAttribution(value) => {
+                crate::audio::recording_commands::apply_source_attribution(&app, value).await?
+            }
             Change::Language(language) => crate::apply_language(&app, &language).await?,
         }
     }
@@ -332,18 +381,22 @@ pub async fn migrate_legacy_behavior_settings(
 
 /// Whether the "recording started" notice is shown.
 #[tauri::command]
-pub async fn set_recording_notification_preference<R: Runtime>(app: AppHandle<R>, enabled: bool) -> Result<(), String> {
+pub async fn set_recording_notification_preference<R: Runtime>(
+    app: AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
     let _change = CHANGE_LOCK.lock().await;
-    tauri::async_runtime::spawn_blocking(move || persist_bool(open(&app)?.as_ref(), SHOW_RECORDING_NOTIFICATION, enabled))
-        .await
-        .map_err(|_| "Could not save the setting".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        persist_bool(open(&app)?.as_ref(), SHOW_RECORDING_NOTIFICATION, enabled)
+    })
+    .await
+    .map_err(|_| "Could not save the setting".to_string())?
 }
 
 #[cfg(test)]
 pub(crate) mod test_memory {
     use super::*;
     use std::{cell::RefCell, collections::HashMap};
-
 
     #[derive(Default)]
     pub(crate) struct Memory {
@@ -355,8 +408,14 @@ pub(crate) mod test_memory {
         pub(crate) fn with(entries: &[(&str, Value)]) -> Self {
             let memory = Self::default();
             for (key, value) in entries {
-                memory.values.borrow_mut().insert(key.to_string(), value.clone());
-                memory.saved.borrow_mut().insert(key.to_string(), value.clone());
+                memory
+                    .values
+                    .borrow_mut()
+                    .insert(key.to_string(), value.clone());
+                memory
+                    .saved
+                    .borrow_mut()
+                    .insert(key.to_string(), value.clone());
             }
             memory
         }
@@ -386,8 +445,8 @@ pub(crate) mod test_memory {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_memory::Memory;
+    use super::*;
 
     #[test]
     fn an_empty_store_gives_the_defaults_with_everything_off() {
@@ -401,12 +460,31 @@ mod tests {
 
     #[test]
     fn the_cloud_opt_in_is_on_only_for_a_stored_boolean_true() {
-        for unreadable in [json!("true"), json!(1), json!("yes"), json!(null), json!({}), json!([true]), json!("on")] {
+        for unreadable in [
+            json!("true"),
+            json!(1),
+            json!("yes"),
+            json!(null),
+            json!({}),
+            json!([true]),
+            json!("on"),
+        ] {
             let memory = Memory::with(&[(CLOUD_TRANSCRIPTION, unreadable.clone())]);
-            assert!(!Stored::read(&memory).effective().cloud_transcription, "{unreadable}");
+            assert!(
+                !Stored::read(&memory).effective().cloud_transcription,
+                "{unreadable}"
+            );
         }
-        assert!(!Stored::read(&Memory::with(&[(CLOUD_TRANSCRIPTION, json!(false))])).effective().cloud_transcription);
-        assert!(Stored::read(&Memory::with(&[(CLOUD_TRANSCRIPTION, json!(true))])).effective().cloud_transcription);
+        assert!(
+            !Stored::read(&Memory::with(&[(CLOUD_TRANSCRIPTION, json!(false))]))
+                .effective()
+                .cloud_transcription
+        );
+        assert!(
+            Stored::read(&Memory::with(&[(CLOUD_TRANSCRIPTION, json!(true))]))
+                .effective()
+                .cloud_transcription
+        );
     }
 
     #[test]
@@ -431,7 +509,19 @@ mod tests {
         for ok in ["auto", "en", "de", "zh-CN", "pt_BR", "yue", "sr-Latn-RS"] {
             assert!(valid_language(ok), "{ok}");
         }
-        for bad in ["", "e", "englishlanguage", "en-", "-en", "en us", "en;rm", "12", "../x", "a-b-c-d", "auto-translate-now"] {
+        for bad in [
+            "",
+            "e",
+            "englishlanguage",
+            "en-",
+            "-en",
+            "en us",
+            "en;rm",
+            "12",
+            "../x",
+            "a-b-c-d",
+            "auto-translate-now",
+        ] {
             assert!(!valid_language(bad), "{bad}");
         }
     }
@@ -443,16 +533,28 @@ mod tests {
         assert_eq!(memory.persisted(CLOUD_TRANSCRIPTION), Some(json!(true)));
         *memory.fail_saves.borrow_mut() = true;
         assert!(persist_bool(&memory, CLOUD_TRANSCRIPTION, false).is_err());
-        assert_eq!(memory.read(CLOUD_TRANSCRIPTION), Some(json!(true)), "the stored value is back");
+        assert_eq!(
+            memory.read(CLOUD_TRANSCRIPTION),
+            Some(json!(true)),
+            "the stored value is back"
+        );
         assert!(persist_bool(&memory, PARAKEET_WORKER, true).is_err());
-        assert_eq!(memory.read(PARAKEET_WORKER), None, "a value that did not exist is removed again");
+        assert_eq!(
+            memory.read(PARAKEET_WORKER),
+            None,
+            "a value that did not exist is removed again"
+        );
         assert!(persist_language(&memory, "bad language").is_err());
         assert_eq!(memory.read(LANGUAGE), None);
     }
 
     #[test]
     fn migration_plans_the_webview_value_only_where_the_core_has_none() {
-        let stored = Stored { parakeet_worker: Some(false), language: Some("de".into()), ..Stored::default() };
+        let stored = Stored {
+            parakeet_worker: Some(false),
+            language: Some("de".into()),
+            ..Stored::default()
+        };
         let legacy = LegacyBehaviorSettings {
             parakeet_directml: Some(true),
             parakeet_worker: Some(true),
@@ -473,10 +575,22 @@ mod tests {
 
     #[test]
     fn migration_is_planned_once_and_unusable_values_are_ignored() {
-        let migrated = Stored { legacy_migrated: true, ..Stored::default() };
-        let legacy = LegacyBehaviorSettings { cloud_transcription: Some(true), ..Default::default() };
-        assert!(plan_migration(&migrated, &legacy).is_empty(), "after the hand-over nothing is taken");
-        let odd = LegacyBehaviorSettings { language: Some("???".into()), ..Default::default() };
+        let migrated = Stored {
+            legacy_migrated: true,
+            ..Stored::default()
+        };
+        let legacy = LegacyBehaviorSettings {
+            cloud_transcription: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            plan_migration(&migrated, &legacy).is_empty(),
+            "after the hand-over nothing is taken"
+        );
+        let odd = LegacyBehaviorSettings {
+            language: Some("???".into()),
+            ..Default::default()
+        };
         assert!(plan_migration(&Stored::default(), &odd).is_empty());
         assert!(plan_migration(&Stored::default(), &LegacyBehaviorSettings::default()).is_empty());
     }
@@ -502,38 +616,72 @@ mod tests {
             .filter_map(|line| line.split("code: '").nth(1))
             .filter_map(|rest| rest.split('\'').next())
             .collect();
-        assert!(codes.len() >= 30, "the language list was read: {}", codes.len());
+        assert!(
+            codes.len() >= 30,
+            "the language list was read: {}",
+            codes.len()
+        );
         assert!(codes.contains(&"auto") && codes.contains(&"auto-translate"));
         for code in &codes {
             assert!(valid_language(code), "{code}");
             let memory = Memory::default();
             persist_language(&memory, code).unwrap();
-            assert_eq!(Stored::read(&memory).language.as_deref(), Some(*code), "{code} survives a save and a read");
+            assert_eq!(
+                Stored::read(&memory).language.as_deref(),
+                Some(*code),
+                "{code} survives a save and a read"
+            );
         }
-        for bad in ["auto-translate-now", "auto_translate", "translate", "auto-", "auto translate"] {
+        for bad in [
+            "auto-translate-now",
+            "auto_translate",
+            "translate",
+            "auto-",
+            "auto translate",
+        ] {
             assert!(!valid_language(bad), "{bad}");
         }
     }
 
     #[test]
     fn the_notification_preference_defaults_to_shown_and_keeps_a_stored_no() {
-        assert!(Stored::read(&Memory::default()).effective().show_recording_notification);
+        assert!(
+            Stored::read(&Memory::default())
+                .effective()
+                .show_recording_notification
+        );
         let memory = Memory::default();
         persist_bool(&memory, SHOW_RECORDING_NOTIFICATION, false).unwrap();
-        assert!(!Stored::read(&memory).effective().show_recording_notification);
+        assert!(
+            !Stored::read(&memory)
+                .effective()
+                .show_recording_notification
+        );
         let odd = Memory::with(&[(SHOW_RECORDING_NOTIFICATION, json!("no"))]);
-        assert!(Stored::read(&odd).effective().show_recording_notification, "an unreadable value is the default");
+        assert!(
+            Stored::read(&odd).effective().show_recording_notification,
+            "an unreadable value is the default"
+        );
     }
 
     #[test]
     fn the_legacy_payload_reads_camel_case_and_tolerates_missing_fields() {
         let legacy: LegacyBehaviorSettings =
-            serde_json::from_value(json!({"parakeetDirectml": true, "cloudTranscription": false})).unwrap();
+            serde_json::from_value(json!({"parakeetDirectml": true, "cloudTranscription": false}))
+                .unwrap();
         assert_eq!(legacy.parakeet_directml, Some(true));
         assert_eq!(legacy.cloud_transcription, Some(false));
         assert_eq!(legacy.language, None);
         let settings = serde_json::to_value(defaults()).unwrap();
-        for key in ["parakeetDirectml", "parakeetWorker", "cloudTranscription", "sourceAttribution", "language", "showRecordingNotification", "legacyMigrated"] {
+        for key in [
+            "parakeetDirectml",
+            "parakeetWorker",
+            "cloudTranscription",
+            "sourceAttribution",
+            "language",
+            "showRecordingNotification",
+            "legacyMigrated",
+        ] {
             assert!(settings.get(key).is_some(), "{key}");
         }
     }

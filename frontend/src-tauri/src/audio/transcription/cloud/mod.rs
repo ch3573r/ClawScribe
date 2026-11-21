@@ -1507,7 +1507,6 @@ mod tests {
         assert_eq!(i16::from_le_bytes([wav[50], wav[51]]), i16::MAX);
         assert_eq!(i16::from_le_bytes([wav[52], wav[53]]), -i16::MAX);
     }
-
 }
 
 #[cfg(test)]

@@ -1416,7 +1416,10 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
             info!("Audio file selected");
             // The user chose it in a dialog the core opened: the import accepts
             // this file once, and no other path.
-            crate::file_grants::grant(crate::file_grants::Purpose::AudioImport, Path::new(&path_str))?;
+            crate::file_grants::grant(
+                crate::file_grants::Purpose::AudioImport,
+                Path::new(&path_str),
+            )?;
 
             match validate_audio_file(Path::new(&path_str)) {
                 Ok(info) => Ok(Some(info)),
@@ -1894,14 +1897,24 @@ mod tests {
 
     #[test]
     fn test_validate_audio_file_nonexistent() {
-        let missing = std::env::temp_dir().join("clawscribe-missing-folder").join("file.mp4");
+        let missing = std::env::temp_dir()
+            .join("clawscribe-missing-folder")
+            .join("file.mp4");
         let result = validate_audio_file(&missing);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
         // A network or relative path is refused before the filesystem is asked.
         // Only a granted path is accepted by the commands.
-        assert!(crate::file_grants::peek(crate::file_grants::Purpose::AudioImport, "//host/share/never-granted.mp4").is_err());
-        assert!(crate::file_grants::take(crate::file_grants::Purpose::AudioImport, "relative/file.mp4").is_err());
+        assert!(crate::file_grants::peek(
+            crate::file_grants::Purpose::AudioImport,
+            "//host/share/never-granted.mp4"
+        )
+        .is_err());
+        assert!(crate::file_grants::take(
+            crate::file_grants::Purpose::AudioImport,
+            "relative/file.mp4"
+        )
+        .is_err());
     }
 
     #[test]
@@ -2239,14 +2252,23 @@ mod phase_tests {
         assert!(!cancel_import_if_possible(), "no job is running");
         {
             let _phase = PhaseGuard::open();
-            assert!(cancel_import_if_possible(), "before the save a cancel takes effect");
+            assert!(
+                cancel_import_if_possible(),
+                "before the save a cancel takes effect"
+            );
             assert!(cancel_import_if_possible(), "repeats stay accepted");
             set_import_phase(Phase::Saving);
-            assert!(!cancel_import_if_possible(), "a save in progress cannot be cancelled");
+            assert!(
+                !cancel_import_if_possible(),
+                "a save in progress cannot be cancelled"
+            );
         }
         // Dropping the guard (declared after the job registration) ends the
         // window before the registration is cleared.
-        assert!(!cancel_import_if_possible(), "the finished job refuses a cancel");
+        assert!(
+            !cancel_import_if_possible(),
+            "the finished job refuses a cancel"
+        );
     }
 
     // ── duration_from_params via TimeBase::calc_time ───────────────────────

@@ -38,7 +38,6 @@ pub(crate) fn resolve_recording_folder(
     }
 }
 
-
 const REFUSED: &str = "This folder is not one of your recordings.";
 const MAX_MARKER_BYTES: u64 = 1024 * 1024;
 const MAX_CORE_FOLDERS: usize = 64;
@@ -61,7 +60,9 @@ fn folder_key(path: &Path) -> String {
 static CORE_FOLDERS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
 pub(crate) fn register_core_folder(folder: &Path) {
-    let mut folders = CORE_FOLDERS.lock().unwrap_or_else(|error| error.into_inner());
+    let mut folders = CORE_FOLDERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let key = folder_key(folder);
     folders.retain(|(known, _)| *known != key);
     folders.push((key, folder.to_string_lossy().into_owned()));
@@ -412,7 +413,9 @@ mod tests {
         assert!(result.status.success());
         let roots = [base.path().to_path_buf()];
         assert!(remove_recording_folder(&junction, "meeting-1", &roots, &[]).is_err());
-        assert!(remove_recording_folder(&junction.join("meeting"), "meeting-1", &roots, &[]).is_err());
+        assert!(
+            remove_recording_folder(&junction.join("meeting"), "meeting-1", &roots, &[]).is_err()
+        );
         assert!(folder.join("metadata.json").exists());
         std::fs::remove_dir(&junction).unwrap();
     }
@@ -474,7 +477,8 @@ mod tests {
                 }
                 _ => std::fs::create_dir(folder.join("metadata.json")).unwrap(),
             }
-            let error = remove_recording_folder(&folder, "meeting-1", &[root.clone()], &[]).unwrap_err();
+            let error =
+                remove_recording_folder(&folder, "meeting-1", &[root.clone()], &[]).unwrap_err();
             assert!(error.contains("marker"), "{name}: {error}");
             assert!(folder.join("audio.wav").exists(), "{name} was kept");
         }
@@ -493,13 +497,21 @@ mod tests {
 
     #[test]
     fn unc_device_and_extended_length_text_is_refused_before_any_filesystem_call() {
-        for refused in [r"\\server\share\x", r"\\?\C:\x", r"\\.\pipe\x", "//host/share/x", r"  \\server\x"] {
+        for refused in [
+            r"\\server\share\x",
+            r"\\?\C:\x",
+            r"\\.\pipe\x",
+            "//host/share/x",
+            r"  \\server\x",
+        ] {
             assert!(!crate::local_path::is_local_path_text(refused), "{refused}");
             assert!(authorize_folder_to_open(refused, &[PathBuf::from("C:/")]).is_err());
             assert!(authorize_new_meeting_folder(refused, &[PathBuf::from("C:/")]).is_err());
-            assert!(remove_recording_folder(Path::new(refused), "meeting-1", &[], &[])
-                .unwrap_err()
-                .contains("not a recording location"));
+            assert!(
+                remove_recording_folder(Path::new(refused), "meeting-1", &[], &[])
+                    .unwrap_err()
+                    .contains("not a recording location")
+            );
         }
         #[cfg(not(windows))]
         assert!(crate::local_path::is_local_path_text("/home/x"));
@@ -527,10 +539,18 @@ mod tests {
             root.to_string_lossy().into_owned(),
             root.join("missing").to_string_lossy().into_owned(),
             root.join("file.txt").to_string_lossy().into_owned(),
-            folder.join("..").join("..").join("outside").to_string_lossy().into_owned(),
+            folder
+                .join("..")
+                .join("..")
+                .join("outside")
+                .to_string_lossy()
+                .into_owned(),
             String::new(),
         ] {
-            assert_eq!(authorize_folder_to_open(&refused, &roots).unwrap_err(), REFUSED);
+            assert_eq!(
+                authorize_folder_to_open(&refused, &roots).unwrap_err(),
+                REFUSED
+            );
         }
         assert!(authorize_folder_to_open(&folder.to_string_lossy(), &[]).is_err());
     }
@@ -553,7 +573,10 @@ mod tests {
             .unwrap();
         assert!(result.status.success());
         // A link is never opened, even when it points inside the root.
-        assert_eq!(authorize_folder_to_open(&junction.to_string_lossy(), &[root]).unwrap_err(), REFUSED);
+        assert_eq!(
+            authorize_folder_to_open(&junction.to_string_lossy(), &[root]).unwrap_err(),
+            REFUSED
+        );
         std::fs::remove_dir(&junction).unwrap();
     }
 
@@ -595,7 +618,10 @@ mod tests {
             root.join("missing").to_string_lossy().into_owned(),
             String::new(),
         ] {
-            assert_eq!(authorize_new_meeting_folder(&refused, &roots).unwrap_err(), REFUSED);
+            assert_eq!(
+                authorize_new_meeting_folder(&refused, &roots).unwrap_err(),
+                REFUSED
+            );
         }
         assert!(authorize_new_meeting_folder(&recovered.to_string_lossy(), &[]).is_err());
     }
@@ -615,7 +641,10 @@ mod tests {
             ("saved", folder.to_string_lossy().into_owned()),
             ("network", r"\\h\s\meeting".to_string()),
             ("relative", "meeting".to_string()),
-            ("gone", base.path().join("gone").to_string_lossy().into_owned()),
+            (
+                "gone",
+                base.path().join("gone").to_string_lossy().into_owned(),
+            ),
         ] {
             sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 't', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
                 .bind(id)
@@ -629,11 +658,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            registered_meeting_folder(&pool, "saved", &[]).await.unwrap(),
+            registered_meeting_folder(&pool, "saved", &[])
+                .await
+                .unwrap(),
             plain_path(&folder.canonicalize().unwrap())
         );
-        for refused in ["network", "relative", "gone", "no-folder", "unknown-meeting"] {
-            assert!(registered_meeting_folder(&pool, refused, &[]).await.is_err(), "{refused}");
+        for refused in [
+            "network",
+            "relative",
+            "gone",
+            "no-folder",
+            "unknown-meeting",
+        ] {
+            assert!(
+                registered_meeting_folder(&pool, refused, &[])
+                    .await
+                    .is_err(),
+                "{refused}"
+            );
         }
     }
 
@@ -656,7 +698,10 @@ mod tests {
         write_marker(&meeting, None);
         let text = meeting.to_string_lossy().into_owned();
         let roots = [root.clone()];
-        assert!(!crate::local_path::is_local_path_text(&text), "the test root reads as network");
+        assert!(
+            !crate::local_path::is_local_path_text(&text),
+            "the test root reads as network"
+        );
 
         // Save and recover: a marked folder in the root is accepted (the saved text is the folder's own).
         let saved = authorize_new_meeting_folder(&text, &roots).unwrap();
@@ -677,7 +722,8 @@ mod tests {
     }
 
     #[test]
-    fn network_text_outside_the_trusted_root_or_without_any_root_is_refused_before_the_disk_is_asked() {
+    fn network_text_outside_the_trusted_root_or_without_any_root_is_refused_before_the_disk_is_asked(
+    ) {
         let base = tempfile::tempdir().unwrap();
         let (share, root) = pretend_share(base.path());
         let other = share.join("other").join("meeting");
@@ -710,8 +756,18 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let (share, root) = pretend_share(base.path());
         for (id, path) in [
-            ("inside", root.join("meeting").to_string_lossy().into_owned()),
-            ("outside", share.join("other").join("meeting").to_string_lossy().into_owned()),
+            (
+                "inside",
+                root.join("meeting").to_string_lossy().into_owned(),
+            ),
+            (
+                "outside",
+                share
+                    .join("other")
+                    .join("meeting")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         ] {
             sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 't', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
                 .bind(id)
@@ -721,9 +777,15 @@ mod tests {
                 .unwrap();
         }
         let roots = [root.clone()];
-        assert!(registered_meeting_folder(&pool, "inside", &roots).await.is_ok());
-        assert!(registered_meeting_folder(&pool, "outside", &roots).await.is_err());
-        assert!(registered_meeting_folder(&pool, "inside", &[]).await.is_err());
+        assert!(registered_meeting_folder(&pool, "inside", &roots)
+            .await
+            .is_ok());
+        assert!(registered_meeting_folder(&pool, "outside", &roots)
+            .await
+            .is_err());
+        assert!(registered_meeting_folder(&pool, "inside", &[])
+            .await
+            .is_err());
     }
 
     #[test]
@@ -733,9 +795,17 @@ mod tests {
         let meeting = root.join("meeting");
         crate::trusted_roots::set_snapshot(vec![root.clone()]);
         let found = crate::canonicalize_existing_dir(&meeting).unwrap();
-        assert!(found.is_some(), "a folder in a trusted network root is found");
+        assert!(
+            found.is_some(),
+            "a folder in a trusted network root is found"
+        );
         crate::trusted_roots::set_snapshot(vec![]);
-        assert!(crate::canonicalize_existing_dir(&meeting).unwrap().is_none(), "without the root it is not looked at");
+        assert!(
+            crate::canonicalize_existing_dir(&meeting)
+                .unwrap()
+                .is_none(),
+            "without the root it is not looked at"
+        );
     }
 
     #[test]
@@ -746,7 +816,10 @@ mod tests {
         assert!(has_app_marker(base.path(), Some("meeting-1")));
         assert!(!has_app_marker(base.path(), Some("meeting-2")));
         assert!(stamp_meeting_id(base.path(), "meeting-2").is_err());
-        assert!(has_app_marker(base.path(), Some("meeting-1")), "an existing id is kept");
+        assert!(
+            has_app_marker(base.path(), Some("meeting-1")),
+            "an existing id is kept"
+        );
         assert!(stamp_meeting_id(&base.path().join("missing"), "meeting-1").is_err());
     }
 }

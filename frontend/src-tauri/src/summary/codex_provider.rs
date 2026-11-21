@@ -1696,12 +1696,24 @@ pub async fn codex_save_config<R: Runtime>(
     let mut full = load_processing_config(&app).unwrap_or_default();
     let mut config = config;
     let mut taken = None;
-    if let Some(value) = config.codex_home_path.clone().filter(|value| !value.trim().is_empty()) {
+    if let Some(value) = config
+        .codex_home_path
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    {
         let validated = validate_codex_home(&value)?;
-        let unchanged = full.processing.codex.codex_home_path.as_deref().is_some_and(|saved| {
-            codex_path_key(&expand_windows_style_appdata(&saved.to_string())) == codex_path_key(&validated)
-        });
-        if !unchanged && codex_path_key(&validated) != codex_path_key(&default_isolated_codex_home()) {
+        let unchanged = full
+            .processing
+            .codex
+            .codex_home_path
+            .as_deref()
+            .is_some_and(|saved| {
+                codex_path_key(&expand_windows_style_appdata(&saved.to_string()))
+                    == codex_path_key(&validated)
+            });
+        if !unchanged
+            && codex_path_key(&validated) != codex_path_key(&default_isolated_codex_home())
+        {
             // A different folder is accepted only if the user chose it in the
             // core's folder picker (`pick_codex_home_folder`) in this session.
             let grant = crate::file_grants::take(crate::file_grants::Purpose::CodexHome, &value)?;
@@ -2009,7 +2021,11 @@ fn codex_path_key(path: &Path) -> String {
     #[cfg(windows)]
     let text = text.to_ascii_lowercase();
     let trimmed = text.trim_end_matches('/');
-    if trimmed.is_empty() || trimmed.ends_with(':') { text } else { trimmed.to_string() }
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        text
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// The path with links resolved as far as it exists (the rest is kept as given).
@@ -2017,7 +2033,10 @@ fn codex_resolved_key(path: &Path) -> String {
     let mut existing = path.to_path_buf();
     let mut rest: Vec<std::ffi::OsString> = Vec::new();
     while !existing.exists() {
-        match (existing.file_name().map(ToOwned::to_owned), existing.parent().map(Path::to_path_buf)) {
+        match (
+            existing.file_name().map(ToOwned::to_owned),
+            existing.parent().map(Path::to_path_buf),
+        ) {
             (Some(name), Some(parent)) => {
                 rest.push(name);
                 existing = parent;
@@ -2025,7 +2044,8 @@ fn codex_resolved_key(path: &Path) -> String {
             _ => break,
         }
     }
-    let mut resolved = crate::database::meeting_files::plain_path(&existing.canonicalize().unwrap_or(existing));
+    let mut resolved =
+        crate::database::meeting_files::plain_path(&existing.canonicalize().unwrap_or(existing));
     for name in rest.into_iter().rev() {
         resolved.push(name);
     }
@@ -2058,7 +2078,10 @@ fn validate_codex_home(value: &str) -> Result<PathBuf, String> {
         }
     }
     let protected = crate::audio::recording_preferences::protected_folders(None);
-    let is_protected = protected.exact.iter().any(|folder| codex_resolved_key(folder) == resolved_key)
+    let is_protected = protected
+        .exact
+        .iter()
+        .any(|folder| codex_resolved_key(folder) == resolved_key)
         || protected.trees.iter().any(|folder| {
             let key = codex_resolved_key(folder);
             resolved_key == key || resolved_key.starts_with(&format!("{key}/"))
@@ -2087,7 +2110,9 @@ enum HomeState {
 }
 
 fn codex_home_state(home: &Path) -> HomeState {
-    let Ok(metadata) = fs::symlink_metadata(home) else { return HomeState::New };
+    let Ok(metadata) = fs::symlink_metadata(home) else {
+        return HomeState::New;
+    };
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return HomeState::Foreign;
     }
@@ -2131,8 +2156,11 @@ fn claim_codex_home(home: &Path) -> Result<(), String> {
         _ => {}
     }
     fs::create_dir_all(home).map_err(|_| "Failed to create isolated Codex profile".to_string())?;
-    fs::write(home.join(CODEX_HOME_MARKER), "This folder is ClawScribe's own Codex profile.\n")
-        .map_err(|_| "Failed to mark the isolated Codex profile".to_string())
+    fs::write(
+        home.join(CODEX_HOME_MARKER),
+        "This folder is ClawScribe's own Codex profile.\n",
+    )
+    .map_err(|_| "Failed to mark the isolated Codex profile".to_string())
 }
 
 /// A custom Codex profile folder of an earlier version holds files and has no
@@ -2143,8 +2171,11 @@ fn mark_custom_home(home: &Path) -> Result<bool, String> {
     validate_codex_home(&home.to_string_lossy())?;
     match codex_home_state(home) {
         HomeState::Foreign | HomeState::Empty => {
-            fs::write(home.join(CODEX_HOME_MARKER), "This folder is ClawScribe's own Codex profile.\n")
-                .map_err(|_| "Failed to mark the Codex profile".to_string())?;
+            fs::write(
+                home.join(CODEX_HOME_MARKER),
+                "This folder is ClawScribe's own Codex profile.\n",
+            )
+            .map_err(|_| "Failed to mark the Codex profile".to_string())?;
             Ok(true)
         }
         HomeState::Marked | HomeState::New => Ok(false),
@@ -2156,7 +2187,9 @@ fn mark_custom_home(home: &Path) -> Result<bool, String> {
 /// chosen again. Recorded in the core-owned trust state.
 pub(crate) fn mark_custom_home_once<R: Runtime>(app: &AppHandle<R>) {
     use tauri_plugin_store::StoreExt;
-    let Ok(store) = app.store(crate::trusted_roots::STORE_FILE) else { return };
+    let Ok(store) = app.store(crate::trusted_roots::STORE_FILE) else {
+        return;
+    };
     if crate::trusted_roots::read(store.as_ref()).codex_done {
         return;
     }
@@ -2165,7 +2198,9 @@ pub(crate) fn mark_custom_home_once<R: Runtime>(app: &AppHandle<R>) {
         .and_then(|full| full.processing.codex.codex_home_path)
         .filter(|value| !value.trim().is_empty())
         .map(|value| expand_windows_style_appdata(&value));
-    if let Some(home) = configured.filter(|home| codex_path_key(home) != codex_path_key(&default_isolated_codex_home())) {
+    if let Some(home) = configured
+        .filter(|home| codex_path_key(home) != codex_path_key(&default_isolated_codex_home()))
+    {
         if let Err(message) = mark_custom_home(&home) {
             log::warn!("The custom Codex profile folder was not marked: {message}");
         }
@@ -2176,14 +2211,21 @@ pub(crate) fn mark_custom_home_once<R: Runtime>(app: &AppHandle<R>) {
 /// Opens the folder dialog for ClawScribe's Codex profile. Returns the chosen
 /// folder, which `codex_save_config` then accepts once.
 #[tauri::command]
-pub async fn pick_codex_home_folder<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+pub async fn pick_codex_home_folder<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let chosen = tokio::task::spawn_blocking(move || {
-        app.dialog().file().blocking_pick_folder().and_then(|path| path.into_path().ok())
+        app.dialog()
+            .file()
+            .blocking_pick_folder()
+            .and_then(|path| path.into_path().ok())
     })
     .await
     .map_err(|_| "The folder dialog failed".to_string())?;
-    let Some(folder) = chosen else { return Ok(None) };
+    let Some(folder) = chosen else {
+        return Ok(None);
+    };
     codex_home_usable(&folder)?;
     crate::file_grants::grant(crate::file_grants::Purpose::CodexHome, &folder)?;
     Ok(Some(folder.to_string_lossy().into_owned()))
@@ -2363,7 +2405,9 @@ fn prepare_isolated_codex_home(home: &Path, model: &str) -> Result<(), String> {
 fn remove_legacy_auth_after_keyring_signin(home: &Path, authenticated: bool) {
     // Only in a profile that is ClawScribe's: nothing is deleted from a folder
     // without the marker.
-    if authenticated && fs::symlink_metadata(home.join(CODEX_HOME_MARKER)).is_ok_and(|m| m.is_file()) {
+    if authenticated
+        && fs::symlink_metadata(home.join(CODEX_HOME_MARKER)).is_ok_and(|m| m.is_file())
+    {
         if let Err(error) = fs::remove_file(home.join("auth.json")) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 log::warn!("Could not remove obsolete Codex credential file");
@@ -4364,10 +4408,21 @@ mod codex_home_tests {
     #[test]
     fn network_device_relative_and_drive_relative_paths_are_refused() {
         for refused in [
-            r"\\h\s\codex", r"\/h/s/codex", r"/\h\s\codex", r"\??\UNC\h\s\codex",
-            r"\\?\C:\codex", "codex", r"C:codex", "", "../codex",
+            r"\\h\s\codex",
+            r"\/h/s/codex",
+            r"/\h\s\codex",
+            r"\??\UNC\h\s\codex",
+            r"\\?\C:\codex",
+            "codex",
+            r"C:codex",
+            "",
+            "../codex",
         ] {
-            assert_eq!(validate_codex_home(refused).unwrap_err(), CODEX_HOME_REFUSED, "{refused:?}");
+            assert_eq!(
+                validate_codex_home(refused).unwrap_err(),
+                CODEX_HOME_REFUSED,
+                "{refused:?}"
+            );
         }
     }
 
@@ -4376,18 +4431,28 @@ mod codex_home_tests {
         if let Some(home) = dirs::home_dir() {
             let own = home.join(".codex");
             for refused in [own.clone(), own.join("sub"), home.clone()] {
-                assert!(validate_codex_home(&refused.to_string_lossy()).is_err(), "{}", refused.display());
+                assert!(
+                    validate_codex_home(&refused.to_string_lossy()).is_err(),
+                    "{}",
+                    refused.display()
+                );
             }
         }
         #[cfg(windows)]
         if let Some(root) = std::env::var_os("SystemRoot") {
-            assert!(validate_codex_home(&PathBuf::from(&root).join("codex").to_string_lossy()).is_err());
+            assert!(
+                validate_codex_home(&PathBuf::from(&root).join("codex").to_string_lossy()).is_err()
+            );
         }
         // A saved value that does not pass is not used: the default folder is.
         let mut config = CodexProviderConfig::default();
-        config.codex_home_path = dirs::home_dir().map(|home| home.join(".codex").to_string_lossy().into_owned());
+        config.codex_home_path =
+            dirs::home_dir().map(|home| home.join(".codex").to_string_lossy().into_owned());
         if config.codex_home_path.is_some() {
-            assert_eq!(config.effective_codex_home(), Some(default_isolated_codex_home()));
+            assert_eq!(
+                config.effective_codex_home(),
+                Some(default_isolated_codex_home())
+            );
         }
     }
 }
@@ -4426,7 +4491,10 @@ mod codex_home_marker_tests {
         assert!(prepare_isolated_codex_home(&foreign, "model").is_err());
         // Signing in must not delete a credential file from a folder that is not ClawScribe's.
         remove_legacy_auth_after_keyring_signin(&foreign, true);
-        assert_eq!(fs::read_to_string(foreign.join("config.toml")).unwrap(), "approval_policy = \"never\"\n");
+        assert_eq!(
+            fs::read_to_string(foreign.join("config.toml")).unwrap(),
+            "approval_policy = \"never\"\n"
+        );
         assert!(foreign.join("auth.json").exists());
         assert!(!foreign.join(CODEX_HOME_MARKER).exists());
     }
@@ -4441,9 +4509,15 @@ mod codex_home_marker_tests {
         assert_eq!(codex_home_state(&home), HomeState::Foreign);
         assert!(mark_custom_home(&home).unwrap());
         assert_eq!(codex_home_state(&home), HomeState::Marked);
-        assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), "model = \"x\"\n");
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            "model = \"x\"\n"
+        );
         assert!(home.join("auth.json").exists());
-        assert!(prepare_isolated_codex_home(&home, "model").is_ok(), "Codex summaries work again");
+        assert!(
+            prepare_isolated_codex_home(&home, "model").is_ok(),
+            "Codex summaries work again"
+        );
         assert!(!mark_custom_home(&home).unwrap(), "already marked");
         // A folder that does not exist yet is left for first use; one that fails the rules is refused.
         assert!(!mark_custom_home(&base.path().join("not-yet")).unwrap());

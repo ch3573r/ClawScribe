@@ -1379,11 +1379,7 @@ async fn import_manifest_impl(
                 // from the same interrupted recording.
                 query.push(" ON CONFLICT (meeting_id) DO NOTHING");
             }
-            query
-                .build()
-                .execute(&mut *tx)
-                .await
-                .map_err(failure)?;
+            query.build().execute(&mut *tx).await.map_err(failure)?;
         }
     }
     // Replaying transcripts fires the revision triggers. Reinstate the saved

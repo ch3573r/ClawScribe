@@ -472,8 +472,14 @@ mod tests {
             "Lunch at Denny's was fine.",
         ] {
             let corrected = apply_custom_words(text, &words, DEFAULT_THRESHOLD);
-            assert!(!corrected.contains("s's") && !corrected.contains("s’s"), "{corrected}");
-            assert!(!corrected.contains("’s's") && !corrected.contains("'s’s"), "{corrected}");
+            assert!(
+                !corrected.contains("s's") && !corrected.contains("s’s"),
+                "{corrected}"
+            );
+            assert!(
+                !corrected.contains("’s's") && !corrected.contains("'s’s"),
+                "{corrected}"
+            );
         }
         assert_eq!(
             apply_custom_words("at mcdonald's today", &words, DEFAULT_THRESHOLD),

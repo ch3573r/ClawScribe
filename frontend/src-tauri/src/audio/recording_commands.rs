@@ -352,7 +352,12 @@ async fn acquire_stop_owner(
 /// do, so report "not stopped by this call") or may have given up (the
 /// recording is still running, so this Stop takes over). A recording that
 /// started in between is never touched.
-fn stop_should_continue(waited: bool, recording_now: bool, epoch_at_request: u64, epoch_now: u64) -> bool {
+fn stop_should_continue(
+    waited: bool,
+    recording_now: bool,
+    epoch_at_request: u64,
+    epoch_now: u64,
+) -> bool {
     !waited || (recording_now && epoch_at_request == epoch_now)
 }
 static LIVE_TRANSCRIPTION: AtomicBool = AtomicBool::new(true);
@@ -568,7 +573,9 @@ pub struct TranscriptionStatus {
 /// waiting for its startup error dialog to be closed.
 pub(crate) fn start_allowed() -> Result<(), String> {
     if crate::database::setup::startup_failed() {
-        return Err("ClawScribe cannot record because its meeting database could not be opened.".into());
+        return Err(
+            "ClawScribe cannot record because its meeting database could not be opened.".into(),
+        );
     }
     Ok(())
 }
@@ -2456,9 +2463,12 @@ mod reconnect_tests {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let _restore = install_manager();
         let (release, wait) = mpsc::channel::<()>();
-        let first = tokio::spawn(with_recording_manager_out(Duration::from_secs(5), move |_| {
-            wait.recv().unwrap();
-        }));
+        let first = tokio::spawn(with_recording_manager_out(
+            Duration::from_secs(5),
+            move |_| {
+                wait.recv().unwrap();
+            },
+        ));
         until(|| RECORDING_MANAGER.lock().unwrap().is_none()).await;
         let second = with_recording_manager_out(Duration::from_secs(5), |_| ()).await;
         assert_eq!(
@@ -2499,9 +2509,12 @@ mod reconnect_tests {
         {
             let guard = RECORDING_MANAGER.lock().unwrap();
             let sink = warnings.clone();
-            guard.as_ref().unwrap().set_warning_callback(move |message| {
-                sink.lock().unwrap().push(message.to_string());
-            });
+            guard
+                .as_ref()
+                .unwrap()
+                .set_warning_callback(move |message| {
+                    sink.lock().unwrap().push(message.to_string());
+                });
             assert!(!guard.as_ref().unwrap().get_state().capture_incomplete());
         }
         let panicked = with_recording_manager_out(Duration::from_secs(5), |_| {
@@ -2555,9 +2568,12 @@ mod reconnect_tests {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let _restore = install_manager();
         let (release, wait) = mpsc::channel::<()>();
-        let reconnect = tokio::spawn(with_recording_manager_out(Duration::from_secs(5), move |_| {
-            wait.recv().unwrap();
-        }));
+        let reconnect = tokio::spawn(with_recording_manager_out(
+            Duration::from_secs(5),
+            move |_| {
+                wait.recv().unwrap();
+            },
+        ));
         until(|| RECORDING_MANAGER.lock().unwrap().is_none()).await;
         let waiter = tokio::spawn(async {
             let _guard = wait_for_reconnect(Duration::from_secs(5)).await.unwrap();
@@ -2569,7 +2585,10 @@ mod reconnect_tests {
         assert!(!waiter.is_finished(), "the waiter is held back");
         release.send(()).unwrap();
         reconnect.await.unwrap().unwrap();
-        assert!(waiter.await.unwrap(), "the manager was restored before the waiter ran");
+        assert!(
+            waiter.await.unwrap(),
+            "the manager was restored before the waiter ran"
+        );
     }
 
     #[tokio::test]
@@ -2577,20 +2596,30 @@ mod reconnect_tests {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let _restore = install_manager();
         let (release, wait) = mpsc::channel::<()>();
-        let reconnect = tokio::spawn(with_recording_manager_out(Duration::from_secs(5), move |manager| {
-            // A paused recording stays paused while the manager is out.
-            let _ = manager;
-            wait.recv().unwrap();
-        }));
+        let reconnect = tokio::spawn(with_recording_manager_out(
+            Duration::from_secs(5),
+            move |manager| {
+                // A paused recording stays paused while the manager is out.
+                let _ = manager;
+                wait.recv().unwrap();
+            },
+        ));
         until(|| RECORDING_MANAGER.lock().unwrap().is_none()).await;
         let state = tokio::spawn(get_recording_state());
         tokio::time::sleep(Duration::from_millis(40)).await;
-        assert!(!state.is_finished(), "the state read waits instead of reporting an absent manager");
+        assert!(
+            !state.is_finished(),
+            "the state read waits instead of reporting an absent manager"
+        );
         release.send(()).unwrap();
         reconnect.await.unwrap().unwrap();
         let state = state.await.unwrap();
         // With the manager back its real values are reported.
-        assert!(state["recording_generation"].is_null() || state["recording_generation"].is_number() || state["recording_generation"].is_string());
+        assert!(
+            state["recording_generation"].is_null()
+                || state["recording_generation"].is_number()
+                || state["recording_generation"].is_string()
+        );
         assert!(state.get("is_paused").is_some());
     }
 }

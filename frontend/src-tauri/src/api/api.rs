@@ -406,7 +406,11 @@ pub async fn api_get_model_config<R: Runtime>(
     _auth_token: Option<String>,
 ) -> Result<Option<ModelConfig>, String> {
     log_info!("api_get_model_config called (native)");
-    model_config_view(&crate::credentials::platform_store(), state.db_manager.pool()).await
+    model_config_view(
+        &crate::credentials::platform_store(),
+        state.db_manager.pool(),
+    )
+    .await
 }
 
 /// The summary model settings as the webview sees them: a key status, never a key.
@@ -775,7 +779,11 @@ pub async fn api_test_transcript_provider<R: Runtime>(
 /// Whether a provider test may use plain HTTP. A request from the webview can
 /// switch it off, but never on over a saved "no"; without a request the saved
 /// setting applies, and only to the saved destination.
-fn test_http_opt_in(requested: Option<bool>, saved: Option<bool>, destination_is_saved: bool) -> bool {
+fn test_http_opt_in(
+    requested: Option<bool>,
+    saved: Option<bool>,
+    destination_is_saved: bool,
+) -> bool {
     match (requested, saved) {
         (Some(true), Some(false)) => false,
         (Some(requested), _) => requested,
@@ -1497,7 +1505,9 @@ pub async fn api_save_transcript<R: Runtime>(
             // retry of the same save finds its meeting). Any other folder, one
             // from an earlier run being recovered, must not already belong to a
             // meeting: that one is repaired, not saved a second time.
-            let created_here = crate::database::meeting_files::core_folder_text(std::path::Path::new(&requested)).is_some();
+            let created_here =
+                crate::database::meeting_files::core_folder_text(std::path::Path::new(&requested))
+                    .is_some();
             let asked = requested.clone();
             let (authorised, recording_id, stamped_id, transcribes, marker) =
                 tokio::task::spawn_blocking(move || {
@@ -1910,7 +1920,11 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<CustomOpenAIConfigView>, String> {
     log_info!("api_get_custom_openai_config called");
-    custom_openai_config_view(&crate::credentials::platform_store(), state.db_manager.pool()).await
+    custom_openai_config_view(
+        &crate::credentials::platform_store(),
+        state.db_manager.pool(),
+    )
+    .await
 }
 
 /// The custom provider settings as the webview sees them: a key status, never a key.
@@ -1973,8 +1987,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
         allow_unencrypted.unwrap_or(false),
     )?;
 
-    let api_key =
-        custom_openai_test_key(state.db_manager.pool(), api_key, &endpoint).await?;
+    let api_key = custom_openai_test_key(state.db_manager.pool(), api_key, &endpoint).await?;
     let config = CustomOpenAIConfig {
         destination_problem: None,
         allow_unencrypted: allow_unencrypted.unwrap_or(false),
@@ -2020,8 +2033,7 @@ pub async fn api_test_custom_openai_processing<R: Runtime>(
     organization: Option<String>,
     project: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let api_key =
-        custom_openai_test_key(state.db_manager.pool(), api_key, &endpoint).await?;
+    let api_key = custom_openai_test_key(state.db_manager.pool(), api_key, &endpoint).await?;
     let config = CustomOpenAIConfig {
         destination_problem: None,
         allow_unencrypted: allow_unencrypted.unwrap_or(false),
@@ -2098,7 +2110,10 @@ mod secret_tests {
         let json = serde_json::to_value(&config).unwrap();
         assert!(!json.to_string().contains(FAKE_KEY));
         assert!(json.get("apiKey").is_none());
-        assert_eq!(json["apiKeyStatus"], serde_json::json!({"stored": true, "hint": "7777"}));
+        assert_eq!(
+            json["apiKeyStatus"],
+            serde_json::json!({"stored": true, "hint": "7777"})
+        );
         assert!(!format!("{config:?}").contains(FAKE_KEY));
     }
 
@@ -2124,7 +2139,10 @@ mod secret_tests {
         let json = serde_json::to_value(&view).unwrap();
         assert!(!json.to_string().contains(FAKE_KEY));
         assert!(json.get("apiKey").is_none());
-        assert_eq!(json["apiKeyStatus"], serde_json::json!({"stored": true, "hint": "7777"}));
+        assert_eq!(
+            json["apiKeyStatus"],
+            serde_json::json!({"stored": true, "hint": "7777"})
+        );
         // The names the settings screen reads are unchanged.
         assert_eq!(json["endpoint"], "https://gateway.example.com/v1");
         assert_eq!(json["model"], "model-a");
@@ -2150,7 +2168,10 @@ mod secret_tests {
     /// webview receives, no part of the key longer than the hint does.
     fn windows(key: &str, len: usize) -> Vec<String> {
         let chars: Vec<char> = key.chars().collect();
-        chars.windows(len).map(|window| window.iter().collect()).collect()
+        chars
+            .windows(len)
+            .map(|window| window.iter().collect())
+            .collect()
     }
 
     fn assert_no_part_of_the_key(output: &str, key: &str, what: &str) {
@@ -2180,44 +2201,90 @@ mod secret_tests {
             key
         };
         let summary = ["openai", "claude", "ollama", "groq", "openrouter"];
-        let transcript = ["localWhisper", "deepgram", "elevenLabs", "groq", "openai", "cloud-whisper", "mai-transcribe"];
+        let transcript = [
+            "localWhisper",
+            "deepgram",
+            "elevenLabs",
+            "groq",
+            "openai",
+            "cloud-whisper",
+            "mai-transcribe",
+        ];
         for provider in summary {
             let key = next_key(&mut keys);
-            SettingsRepository::save_api_key_with(&store, &pool, provider, &key).await.unwrap();
+            SettingsRepository::save_api_key_with(&store, &pool, provider, &key)
+                .await
+                .unwrap();
         }
         for provider in transcript {
             let key = next_key(&mut keys);
-            SettingsRepository::save_transcript_api_key_with(&store, &pool, provider, &key).await.unwrap();
+            SettingsRepository::save_transcript_api_key_with(&store, &pool, provider, &key)
+                .await
+                .unwrap();
         }
         let custom_key = next_key(&mut keys);
         SettingsRepository::save_custom_openai_config_with(
             &store,
             &pool,
-            &CustomOpenAIConfig { api_key: Some(custom_key), ..custom_config() },
+            &CustomOpenAIConfig {
+                api_key: Some(custom_key),
+                ..custom_config()
+            },
         )
         .await
         .unwrap();
-        assert_eq!(memory.entries(), keys.len(), "every key is in the credential store");
+        assert_eq!(
+            memory.entries(),
+            keys.len(),
+            "every key is in the credential store"
+        );
 
         let mut outputs: Vec<(String, String)> = Vec::new();
         for provider in summary {
-            SettingsRepository::save_model_config(&pool, provider, "model-a", "large-v3", None).await.unwrap();
+            SettingsRepository::save_model_config(&pool, provider, "model-a", "large-v3", None)
+                .await
+                .unwrap();
             let view = model_config_view(&store, &pool).await.unwrap().unwrap();
-            outputs.push((format!("model config for {provider}"), serde_json::to_string(&view).unwrap()));
-            let status = SettingsRepository::api_key_status_with(&store, &pool, provider).await.unwrap();
+            outputs.push((
+                format!("model config for {provider}"),
+                serde_json::to_string(&view).unwrap(),
+            ));
+            let status = SettingsRepository::api_key_status_with(&store, &pool, provider)
+                .await
+                .unwrap();
             assert!(status.stored, "{provider} reports a stored key");
-            outputs.push((format!("summary status for {provider}"), serde_json::to_string(&status).unwrap()));
+            outputs.push((
+                format!("summary status for {provider}"),
+                serde_json::to_string(&status).unwrap(),
+            ));
         }
         for provider in transcript {
-            SettingsRepository::save_transcript_config(&pool, provider, "model-a").await.unwrap();
+            SettingsRepository::save_transcript_config(&pool, provider, "model-a")
+                .await
+                .unwrap();
             let view = transcript_config_view(&pool).await.unwrap().unwrap();
-            outputs.push((format!("transcript config for {provider}"), serde_json::to_string(&view).unwrap()));
-            let status = SettingsRepository::transcript_api_key_status_with(&store, &pool, provider).await.unwrap();
+            outputs.push((
+                format!("transcript config for {provider}"),
+                serde_json::to_string(&view).unwrap(),
+            ));
+            let status =
+                SettingsRepository::transcript_api_key_status_with(&store, &pool, provider)
+                    .await
+                    .unwrap();
             assert!(status.stored, "{provider} reports a stored key");
-            outputs.push((format!("transcript status for {provider}"), serde_json::to_string(&status).unwrap()));
+            outputs.push((
+                format!("transcript status for {provider}"),
+                serde_json::to_string(&status).unwrap(),
+            ));
         }
-        let custom_view = custom_openai_config_view(&store, &pool).await.unwrap().unwrap();
-        outputs.push(("custom provider config".into(), serde_json::to_string(&custom_view).unwrap()));
+        let custom_view = custom_openai_config_view(&store, &pool)
+            .await
+            .unwrap()
+            .unwrap();
+        outputs.push((
+            "custom provider config".into(),
+            serde_json::to_string(&custom_view).unwrap(),
+        ));
         // Debug output counts as output too.
         outputs.push(("custom provider debug".into(), format!("{custom_view:?}")));
 
@@ -2249,15 +2316,31 @@ mod secret_tests {
             (None, Some(false), true, false),
             (None, None, true, false),
         ] {
-            assert_eq!(test_http_opt_in(requested, saved, same), expected, "{requested:?} {saved:?} {same}");
+            assert_eq!(
+                test_http_opt_in(requested, saved, same),
+                expected,
+                "{requested:?} {saved:?} {same}"
+            );
         }
     }
 
     #[test]
     fn a_stored_key_is_only_offered_for_its_own_endpoint() {
-        assert!(crate::openai::secret_destination::same_destination("https://gateway.example.com/v1", "https://gateway.example.com/v1/"));
-        assert!(crate::openai::secret_destination::same_destination(" HTTPS://Gateway.Example.com/v1 ", "https://gateway.example.com/v1"));
-        assert!(!crate::openai::secret_destination::same_destination("https://gateway.example.com/v1", "https://other.example.com/v1"));
-        assert!(!crate::openai::secret_destination::same_destination("https://gateway.example.com/v1", "https://gateway.example.com/v2"));
+        assert!(crate::openai::secret_destination::same_destination(
+            "https://gateway.example.com/v1",
+            "https://gateway.example.com/v1/"
+        ));
+        assert!(crate::openai::secret_destination::same_destination(
+            " HTTPS://Gateway.Example.com/v1 ",
+            "https://gateway.example.com/v1"
+        ));
+        assert!(!crate::openai::secret_destination::same_destination(
+            "https://gateway.example.com/v1",
+            "https://other.example.com/v1"
+        ));
+        assert!(!crate::openai::secret_destination::same_destination(
+            "https://gateway.example.com/v1",
+            "https://gateway.example.com/v2"
+        ));
     }
 }

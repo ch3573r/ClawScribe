@@ -43,14 +43,25 @@ fn strings(backing: &dyn Backing, key: &str) -> Vec<String> {
     backing
         .read(key)
         .and_then(|value| value.as_array().cloned())
-        .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 pub(crate) fn read(backing: &dyn Backing) -> Trust {
     Trust {
-        trusted: strings(backing, TRUSTED).into_iter().map(PathBuf::from).collect(),
-        takeover_done: backing.read(TAKEOVER_DONE).and_then(|value| value.as_bool()) == Some(true),
+        trusted: strings(backing, TRUSTED)
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        takeover_done: backing
+            .read(TAKEOVER_DONE)
+            .and_then(|value| value.as_bool())
+            == Some(true),
         kept: strings(backing, KEPT),
         registered_done: flag(backing, REGISTERED_DONE),
         codex_done: flag(backing, CODEX_DONE),
@@ -67,7 +78,11 @@ fn write(backing: &dyn Backing, trust: &Trust) -> Result<(), String> {
     let previous: Vec<_> = keys.iter().map(|key| backing.read(key)).collect();
     backing.write(
         TRUSTED,
-        serde_json::json!(trust.trusted.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>()),
+        serde_json::json!(trust
+            .trusted
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()),
     );
     backing.write(TAKEOVER_DONE, serde_json::json!(trust.takeover_done));
     backing.write(KEPT, serde_json::json!(trust.kept));
@@ -91,7 +106,11 @@ fn write(backing: &dyn Backing, trust: &Trust) -> Result<(), String> {
 /// profile or application-data folder (the rules a new recordings folder must
 /// pass). `resolve` follows links on disk; without it the judgement is by the
 /// text alone, which never touches a network host (used at start-up).
-pub(crate) fn root_problem(folder: &Path, protected: &ProtectedFolders, resolve: bool) -> Option<&'static str> {
+pub(crate) fn root_problem(
+    folder: &Path,
+    protected: &ProtectedFolders,
+    resolve: bool,
+) -> Option<&'static str> {
     let key = |path: &Path| crate::local_path::comparable_text(&path.to_string_lossy());
     let resolved = |path: &Path| -> PathBuf {
         if !resolve {
@@ -100,7 +119,10 @@ pub(crate) fn root_problem(folder: &Path, protected: &ProtectedFolders, resolve:
         let mut existing = path.to_path_buf();
         let mut rest = Vec::new();
         while !existing.exists() {
-            match (existing.file_name().map(ToOwned::to_owned), existing.parent().map(Path::to_path_buf)) {
+            match (
+                existing.file_name().map(ToOwned::to_owned),
+                existing.parent().map(Path::to_path_buf),
+            ) {
                 (Some(name), Some(parent)) => {
                     rest.push(name);
                     existing = parent;
@@ -119,7 +141,11 @@ pub(crate) fn root_problem(folder: &Path, protected: &ProtectedFolders, resolve:
     };
     let folder = resolved(folder);
     let text = folder.to_string_lossy();
-    if text.is_empty() || text.contains('\0') || folder.is_relative() || key(&folder).split('/').any(|part| part == "..") {
+    if text.is_empty()
+        || text.contains('\0')
+        || folder.is_relative()
+        || key(&folder).split('/').any(|part| part == "..")
+    {
         return Some("is not an absolute path");
     }
     // A drive root or a share root has no parent.
@@ -130,7 +156,10 @@ pub(crate) fn root_problem(folder: &Path, protected: &ProtectedFolders, resolve:
         let (a, b) = (key(&folder), key(&resolved(root)));
         a == b || a.starts_with(&format!("{}/", b.trim_end_matches('/')))
     };
-    let exact = protected.exact.iter().any(|root| key(&folder) == key(&resolved(root)));
+    let exact = protected
+        .exact
+        .iter()
+        .any(|root| key(&folder) == key(&resolved(root)));
     if exact || protected.trees.iter().any(inside) {
         return Some("is a system, profile or application-data folder");
     }
@@ -138,13 +167,19 @@ pub(crate) fn root_problem(folder: &Path, protected: &ProtectedFolders, resolve:
 }
 
 /// Makes a folder the user chose in the core's folder picker a root.
-pub(crate) fn trust_folder(backing: &dyn Backing, folder: &Path, protected: &ProtectedFolders) -> Result<(), String> {
+pub(crate) fn trust_folder(
+    backing: &dyn Backing,
+    folder: &Path,
+    protected: &ProtectedFolders,
+) -> Result<(), String> {
     if let Some(reason) = root_problem(folder, protected, true) {
         return Err(format!("This folder {reason} and cannot hold recordings."));
     }
     let mut trust = read(backing);
     let wanted = crate::local_path::comparable_text(&folder.to_string_lossy());
-    trust.trusted.retain(|known| crate::local_path::comparable_text(&known.to_string_lossy()) != wanted);
+    trust
+        .trusted
+        .retain(|known| crate::local_path::comparable_text(&known.to_string_lossy()) != wanted);
     trust.trusted.insert(0, folder.to_path_buf());
     trust.trusted.truncate(MAX_TRUSTED);
     write(backing, &trust)
@@ -173,10 +208,16 @@ pub(crate) fn take_over_once(
     if trust.takeover_done {
         return Ok(outcome);
     }
-    for folder in configured.into_iter().chain(previous.iter().map(PathBuf::as_path)) {
+    for folder in configured
+        .into_iter()
+        .chain(previous.iter().map(PathBuf::as_path))
+    {
         let wanted = crate::local_path::comparable_text(&folder.to_string_lossy());
         if folder.as_os_str().is_empty()
-            || trust.trusted.iter().any(|known| crate::local_path::comparable_text(&known.to_string_lossy()) == wanted)
+            || trust
+                .trusted
+                .iter()
+                .any(|known| crate::local_path::comparable_text(&known.to_string_lossy()) == wanted)
         {
             continue;
         }
@@ -203,7 +244,9 @@ pub(crate) fn take_over_registered_parents(
     saved_folders: Option<&[String]>,
     protected: &ProtectedFolders,
 ) -> Result<(usize, usize), String> {
-    let Some(saved_folders) = saved_folders else { return Ok((0, 0)) };
+    let Some(saved_folders) = saved_folders else {
+        return Ok((0, 0));
+    };
     let mut trust = read(backing);
     if trust.registered_done {
         return Ok((0, 0));
@@ -211,7 +254,10 @@ pub(crate) fn take_over_registered_parents(
     let (mut added, mut skipped) = (0usize, 0usize);
     let mut seen: Vec<String> = Vec::new();
     for saved in saved_folders {
-        let Some(parent) = Path::new(saved).parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+        let Some(parent) = Path::new(saved)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        else {
             skipped += 1;
             continue;
         };
@@ -227,7 +273,10 @@ pub(crate) fn take_over_registered_parents(
         if covered {
             continue;
         }
-        if added >= MAX_REGISTERED_PARENTS || root_problem(parent, protected, false).is_some() || trust.trusted.len() >= MAX_TRUSTED {
+        if added >= MAX_REGISTERED_PARENTS
+            || root_problem(parent, protected, false).is_some()
+            || trust.trusted.len() >= MAX_TRUSTED
+        {
             skipped += 1;
             continue;
         }
@@ -261,7 +310,9 @@ pub(crate) fn is_trusted_or_default(trust: &Trust, folder: &Path, defaults: &[Pa
 pub(crate) fn set_kept(backing: &dyn Backing, folder: &Path, keep: bool) -> Result<(), String> {
     let mut trust = read(backing);
     let wanted = crate::local_path::comparable_text(&folder.to_string_lossy());
-    trust.kept.retain(|known| crate::local_path::comparable_text(known) != wanted);
+    trust
+        .kept
+        .retain(|known| crate::local_path::comparable_text(known) != wanted);
     if keep {
         trust.kept.insert(0, folder.to_string_lossy().into_owned());
         trust.kept.truncate(MAX_KEPT);
@@ -272,7 +323,10 @@ pub(crate) fn set_kept(backing: &dyn Backing, folder: &Path, keep: bool) -> Resu
 #[cfg(test)]
 fn is_kept(trust: &Trust, folder: &Path) -> bool {
     let wanted = crate::local_path::comparable_text(&folder.to_string_lossy());
-    trust.kept.iter().any(|known| crate::local_path::comparable_text(known) == wanted)
+    trust
+        .kept
+        .iter()
+        .any(|known| crate::local_path::comparable_text(known) == wanted)
 }
 
 // ---- paths from the webview, judged against the roots ------------------------
@@ -282,7 +336,9 @@ fn is_kept(trust: &Trust, folder: &Path) -> bool {
 /// which may be on the network. Before any filesystem call.
 pub(crate) fn text_allowed(text: &str, roots: &[PathBuf]) -> bool {
     crate::local_path::is_local_path_text(text)
-        || roots.iter().any(|root| crate::local_path::lexically_inside(text, root))
+        || roots
+            .iter()
+            .any(|root| crate::local_path::lexically_inside(text, root))
 }
 
 /// Whether a resolved path lies below (or is) one of the roots, once both are resolved.
@@ -315,7 +371,10 @@ static SNAPSHOT: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::n
 
 /// The roots as last computed (`recording_roots`); for helpers that cannot ask the app.
 pub(crate) fn snapshot() -> Vec<PathBuf> {
-    SNAPSHOT.read().unwrap_or_else(|error| error.into_inner()).clone()
+    SNAPSHOT
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
 }
 
 pub(crate) fn set_snapshot(roots: Vec<PathBuf>) {
@@ -345,7 +404,10 @@ mod tests {
         trust_folder(&memory, &base.path().join("recordings"), &protected).unwrap();
         assert_eq!(read(&memory).trusted, vec![base.path().join("recordings")]);
         for refused in ["profile", "system", "system/sub"] {
-            assert!(trust_folder(&memory, &base.path().join(refused), &protected).is_err(), "{refused}");
+            assert!(
+                trust_folder(&memory, &base.path().join(refused), &protected).is_err(),
+                "{refused}"
+            );
         }
         assert_eq!(read(&memory).trusted.len(), 1);
         // Never a drive root.
@@ -363,13 +425,20 @@ mod tests {
         crate::local_path::mark_remote_for_tests(&base.path().join("share"));
         let protected = protected(base.path());
         let memory = Memory::default();
-        let outcome = take_over_once(&memory, Some(&share), &[local.clone(), system.clone(), profile.clone()], &protected).unwrap();
+        let outcome = take_over_once(
+            &memory,
+            Some(&share),
+            &[local.clone(), system.clone(), profile.clone()],
+            &protected,
+        )
+        .unwrap();
         assert_eq!(outcome.trusted, vec![share.clone(), local.clone()]);
         assert_eq!(outcome.rejected, vec![system, profile]);
         let trust = read(&memory);
         assert!(trust.takeover_done && trust.trusted == vec![share.clone(), local]);
         // A second start changes nothing, even with other folders configured.
-        let again = take_over_once(&memory, Some(&base.path().join("new")), &[], &protected).unwrap();
+        let again =
+            take_over_once(&memory, Some(&base.path().join("new")), &[], &protected).unwrap();
         assert_eq!(again, Takeover::default());
         assert_eq!(read(&memory).trusted.len(), 2);
         assert!(is_trusted_or_default(&read(&memory), &share, &[]));
@@ -379,23 +448,39 @@ mod tests {
     fn the_parents_of_saved_meetings_are_taken_over_once_and_protected_ones_are_skipped() {
         let base = tempfile::tempdir().unwrap();
         let protected = protected(base.path());
-        let (a, b, share) = (base.path().join("old-a"), base.path().join("old-b"), base.path().join("share").join("rec"));
+        let (a, b, share) = (
+            base.path().join("old-a"),
+            base.path().join("old-b"),
+            base.path().join("share").join("rec"),
+        );
         crate::local_path::mark_remote_for_tests(&base.path().join("share"));
         let saved: Vec<String> = [
-            a.join("m1"), a.join("m2"), b.join("m3"), share.join("m4"),
-            base.path().join("profile").join("m5"), base.path().join("system").join("sub").join("m6"),
+            a.join("m1"),
+            a.join("m2"),
+            b.join("m3"),
+            share.join("m4"),
+            base.path().join("profile").join("m5"),
+            base.path().join("system").join("sub").join("m6"),
         ]
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
         let memory = Memory::default();
-        let (added, skipped) = take_over_registered_parents(&memory, Some(&saved), &protected).unwrap();
-        assert_eq!((added, skipped), (3, 2), "a, b and the share; profile and system skipped");
+        let (added, skipped) =
+            take_over_registered_parents(&memory, Some(&saved), &protected).unwrap();
+        assert_eq!(
+            (added, skipped),
+            (3, 2),
+            "a, b and the share; profile and system skipped"
+        );
         let trust = read(&memory);
         assert_eq!(trust.trusted, vec![a.clone(), b.clone(), share.clone()]);
         assert!(trust.registered_done);
         // Once only.
-        assert_eq!(take_over_registered_parents(&memory, Some(&saved), &protected).unwrap(), (0, 0));
+        assert_eq!(
+            take_over_registered_parents(&memory, Some(&saved), &protected).unwrap(),
+            (0, 0)
+        );
         assert_eq!(read(&memory).trusted.len(), 3);
     }
 
@@ -404,10 +489,23 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let memory = Memory::default();
         let protected = protected(base.path());
-        assert_eq!(take_over_registered_parents(&memory, None, &protected).unwrap(), (0, 0));
+        assert_eq!(
+            take_over_registered_parents(&memory, None, &protected).unwrap(),
+            (0, 0)
+        );
         assert!(!read(&memory).registered_done);
-        let saved = vec![base.path().join("old").join("m").to_string_lossy().into_owned()];
-        assert_eq!(take_over_registered_parents(&memory, Some(&saved), &protected).unwrap().0, 1);
+        let saved = vec![base
+            .path()
+            .join("old")
+            .join("m")
+            .to_string_lossy()
+            .into_owned()];
+        assert_eq!(
+            take_over_registered_parents(&memory, Some(&saved), &protected)
+                .unwrap()
+                .0,
+            1
+        );
         assert!(read(&memory).registered_done);
     }
 
@@ -420,15 +518,31 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         trust_folder(&memory, &root, &ProtectedFolders::default()).unwrap();
         let mut saved: Vec<String> = (0..80)
-            .map(|index| base.path().join(format!("old-{index:02}")).join("m").to_string_lossy().into_owned())
+            .map(|index| {
+                base.path()
+                    .join(format!("old-{index:02}"))
+                    .join("m")
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         saved.push(root.join("inside").join("m").to_string_lossy().into_owned());
-        saved.push(base.path().join("OLD-00").join("m2").to_string_lossy().into_owned());
-        let (added, skipped) = take_over_registered_parents(&memory, Some(&saved), &protected).unwrap();
+        saved.push(
+            base.path()
+                .join("OLD-00")
+                .join("m2")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let (added, skipped) =
+            take_over_registered_parents(&memory, Some(&saved), &protected).unwrap();
         assert_eq!(added, MAX_REGISTERED_PARENTS);
         assert!(skipped >= 30, "{skipped} skipped past the cap");
         assert_eq!(read(&memory).trusted.len(), MAX_REGISTERED_PARENTS + 1);
-        assert!(!read(&memory).trusted.contains(&root.join("inside")), "inside an existing root: not added");
+        assert!(
+            !read(&memory).trusted.contains(&root.join("inside")),
+            "inside an existing root: not added"
+        );
     }
 
     #[test]
@@ -436,12 +550,28 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(base.path().join("a")).unwrap();
         let memory = Memory::default();
-        trust_folder(&memory, &base.path().join("a"), &ProtectedFolders::default()).unwrap();
+        trust_folder(
+            &memory,
+            &base.path().join("a"),
+            &ProtectedFolders::default(),
+        )
+        .unwrap();
         *memory.fail_saves.borrow_mut() = true;
         std::fs::create_dir_all(base.path().join("b")).unwrap();
-        assert!(trust_folder(&memory, &base.path().join("b"), &ProtectedFolders::default()).is_err());
+        assert!(trust_folder(
+            &memory,
+            &base.path().join("b"),
+            &ProtectedFolders::default()
+        )
+        .is_err());
         assert_eq!(read(&memory).trusted, vec![base.path().join("a")]);
-        assert!(take_over_once(&memory, Some(&base.path().join("c")), &[], &ProtectedFolders::default()).is_err());
+        assert!(take_over_once(
+            &memory,
+            Some(&base.path().join("c")),
+            &[],
+            &ProtectedFolders::default()
+        )
+        .is_err());
         assert!(!read(&memory).takeover_done);
     }
 
@@ -464,7 +594,10 @@ mod tests {
         assert!(resolve_allowed(&inside, &roots).is_ok());
         assert!(resolve_allowed(&outside, &roots).is_err());
         // A local path is still accepted as before.
-        assert!(text_allowed(&base.path().join("elsewhere").to_string_lossy(), &roots));
+        assert!(text_allowed(
+            &base.path().join("elsewhere").to_string_lossy(),
+            &roots
+        ));
     }
 
     #[test]

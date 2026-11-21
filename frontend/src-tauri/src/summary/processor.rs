@@ -426,8 +426,9 @@ pub(crate) async fn generate_meeting_summary(
                     )
                     .await
                     .and_then(|text| require_summary_markdown(&text, "Meeting excerpt"))
-                })
-                .await?;
+                },
+            )
+            .await?;
 
             info!(
                 "Generating final markdown report with template: {}",

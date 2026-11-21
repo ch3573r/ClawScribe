@@ -1,10 +1,10 @@
+use super::request_config::{AuthorizedRequest, Execution};
 use crate::database::repositories::{
     meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
 };
 use crate::ollama::metadata::ModelMetadataCache;
 use crate::summary::codex_provider::{provider_from_app, CodexMeetingProcessRequest};
 use crate::summary::llm_client::{LLMProvider, SummaryDispatch};
-use super::request_config::{AuthorizedRequest, Execution};
 use crate::summary::openai_provider::{
     config_from_custom_openai, config_from_openai_api_key, OpenAICompatibleMeetingProcessRequest,
     OpenAICompatibleProcessingProvider,
@@ -168,7 +168,9 @@ async fn save_completed_with_retry(
     )
     .await?;
     if !committed {
-        let _ = SummaryProcessesRepository::update_process_failed(pool, meeting, TRANSCRIPT_CHANGED).await;
+        let _ =
+            SummaryProcessesRepository::update_process_failed(pool, meeting, TRANSCRIPT_CHANGED)
+                .await;
         return Err(TRANSCRIPT_CHANGED.into());
     }
     Ok(())
@@ -209,7 +211,15 @@ async fn finish_generation_error(
     if let Some(revision) = revision.filter(|_| !job.token.is_cancelled()) {
         let partial_notes = job.reduction.partial_notes();
         if !partial_notes.is_empty() {
-            match SummaryProcessesRepository::fail_with_partial(pool, meeting, error, revision, &partial_notes).await {
+            match SummaryProcessesRepository::fail_with_partial(
+                pool,
+                meeting,
+                error,
+                revision,
+                &partial_notes,
+            )
+            .await
+            {
                 Ok(true) => return,
                 Ok(false) => error = TRANSCRIPT_CHANGED,
                 Err(_) => error!("Could not save partial notes"),
@@ -224,17 +234,23 @@ fn remote_failure_diagnostic(error: &str) -> String {
     if [DESTINATION_CHANGED, DISABLED, REVIEW_REQUIRED].contains(&error) {
         return error.to_owned();
     }
-    if let Some(status) = error.strip_prefix("Summary provider HTTP ")
+    if let Some(status) = error
+        .strip_prefix("Summary provider HTTP ")
         .and_then(|rest| rest.split([':', '.', ' ']).next())
         .and_then(|status| status.parse::<u16>().ok())
         .filter(|status| (300..=599).contains(status))
     {
-        return format!("Summary provider HTTP {status}. Check the summary provider settings and try again.");
+        return format!(
+            "Summary provider HTTP {status}. Check the summary provider settings and try again."
+        );
     }
-    if let Some(position) = error.strip_prefix("The summary provider failed on excerpt ")
+    if let Some(position) = error
+        .strip_prefix("The summary provider failed on excerpt ")
         .and_then(|rest| rest.strip_suffix(". Check provider settings before retrying."))
         .and_then(|position| position.split_once(" of "))
-        .and_then(|(index, total)| Some((index.parse::<usize>().ok()?, total.parse::<usize>().ok()?)))
+        .and_then(|(index, total)| {
+            Some((index.parse::<usize>().ok()?, total.parse::<usize>().ok()?))
+        })
     {
         let (index, total) = position;
         return format!("The summary provider failed on excerpt {index} of {total}. Check provider settings before retrying.");
@@ -617,7 +633,9 @@ impl SummaryService {
         // Get Ollama endpoint if provider is Ollama
         let ollama_endpoint = if let Some(execution) = execution {
             match execution {
-                Execution::Ollama { base, .. } => Some(base.as_str().trim_end_matches('/').to_owned()),
+                Execution::Ollama { base, .. } => {
+                    Some(base.as_str().trim_end_matches('/').to_owned())
+                }
                 _ => None,
             }
         } else if provider == LLMProvider::Ollama {
@@ -710,8 +728,11 @@ impl SummaryService {
                     check()?;
                 }
                 let metadata = crate::ollama::metadata::fetch_model_info(
-                    client, &model_name, ollama_endpoint.as_deref(),
-                ).await;
+                    client,
+                    &model_name,
+                    ollama_endpoint.as_deref(),
+                )
+                .await;
                 Ok(metadata.map(|value| value.context_size).unwrap_or(8192))
             };
             match super::llm_client::with_cancellation(Some(cancellation_token), probe).await {
@@ -788,14 +809,16 @@ impl SummaryService {
                 .flatten();
             let output_dir = if execution.is_some() {
                 Ok(None)
-            } else { match _app.path().app_data_dir() {
-                Ok(data) => {
-                    super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id, &data)
-                        .await
-                        .map(Some)
+            } else {
+                match _app.path().app_data_dir() {
+                    Ok(data) => {
+                        super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id, &data)
+                            .await
+                            .map(Some)
+                    }
+                    Err(_) => Err("Could not locate meeting output storage".into()),
                 }
-                Err(_) => Err("Could not locate meeting output storage".into()),
-            }};
+            };
             let output_dir = match output_dir {
                 Ok(path) => path,
                 Err(error) => {
@@ -816,70 +839,71 @@ impl SummaryService {
                 }
             } else {
                 let provider_config = match provider {
-                LLMProvider::CustomOpenAI => {
-                    match SettingsRepository::get_custom_openai_config(&pool).await {
-                        Ok(Some(config)) => config_from_custom_openai(config),
-                        Ok(None) => {
-                            let err_msg = "OpenAI-compatible provider selected but no endpoint configuration found";
-                            Self::update_process_failed(&pool, &meeting_id, err_msg).await;
-                            return;
-                        }
-                        Err(e) => {
-                            let err_msg =
-                                format!("Failed to retrieve OpenAI-compatible config: {}", e);
-                            Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
-                            return;
-                        }
-                    }
-                }
-                LLMProvider::OpenAICompatible => {
-                    match SettingsRepository::get_custom_openai_config(&pool).await {
-                        Ok(Some(config)) => config_from_custom_openai(config),
-                        Ok(None) => {
-                            let api_key = match SettingsRepository::get_api_key(&pool, "openai")
-                                .await
-                            {
-                                Ok(key) => key,
-                                Err(e) => {
-                                    let err_msg =
-                                        format!("Failed to retrieve OpenAI API key: {}", e);
-                                    Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
-                                    return;
-                                }
-                            };
-                            if api_key.as_deref().unwrap_or("").trim().is_empty() {
-                                let err_msg = "OpenAI-compatible provider requires an OpenAI API key or a configured OpenAI-compatible endpoint";
+                    LLMProvider::CustomOpenAI => {
+                        match SettingsRepository::get_custom_openai_config(&pool).await {
+                            Ok(Some(config)) => config_from_custom_openai(config),
+                            Ok(None) => {
+                                let err_msg = "OpenAI-compatible provider selected but no endpoint configuration found";
                                 Self::update_process_failed(&pool, &meeting_id, err_msg).await;
                                 return;
                             }
-                            config_from_openai_api_key(api_key, model_name.clone())
-                        }
-                        Err(e) => {
-                            let err_msg =
-                                format!("Failed to retrieve OpenAI-compatible config: {}", e);
-                            Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
-                            return;
+                            Err(e) => {
+                                let err_msg =
+                                    format!("Failed to retrieve OpenAI-compatible config: {}", e);
+                                Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
+                                return;
+                            }
                         }
                     }
-                }
-                LLMProvider::OpenAI => {
-                    config_from_openai_api_key(Some(final_api_key.clone()), model_name.clone())
-                }
-                LLMProvider::OpenClaw => config_from_custom_openai(CustomOpenAIConfig {
-                    destination_problem: None,
-                    allow_unencrypted,
-                    endpoint: custom_openai_endpoint.clone().unwrap_or_default(),
-                    api_key: Some(final_api_key.clone()),
-                    model: model_name.clone(),
-                    timeout_seconds: None,
-                    organization: None,
-                    project: None,
-                    max_tokens: None,
-                    context_window: None,
-                    temperature: None,
-                    top_p: None,
-                }),
-                _ => unreachable!("provider checked above"),
+                    LLMProvider::OpenAICompatible => {
+                        match SettingsRepository::get_custom_openai_config(&pool).await {
+                            Ok(Some(config)) => config_from_custom_openai(config),
+                            Ok(None) => {
+                                let api_key = match SettingsRepository::get_api_key(&pool, "openai")
+                                    .await
+                                {
+                                    Ok(key) => key,
+                                    Err(e) => {
+                                        let err_msg =
+                                            format!("Failed to retrieve OpenAI API key: {}", e);
+                                        Self::update_process_failed(&pool, &meeting_id, &err_msg)
+                                            .await;
+                                        return;
+                                    }
+                                };
+                                if api_key.as_deref().unwrap_or("").trim().is_empty() {
+                                    let err_msg = "OpenAI-compatible provider requires an OpenAI API key or a configured OpenAI-compatible endpoint";
+                                    Self::update_process_failed(&pool, &meeting_id, err_msg).await;
+                                    return;
+                                }
+                                config_from_openai_api_key(api_key, model_name.clone())
+                            }
+                            Err(e) => {
+                                let err_msg =
+                                    format!("Failed to retrieve OpenAI-compatible config: {}", e);
+                                Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
+                                return;
+                            }
+                        }
+                    }
+                    LLMProvider::OpenAI => {
+                        config_from_openai_api_key(Some(final_api_key.clone()), model_name.clone())
+                    }
+                    LLMProvider::OpenClaw => config_from_custom_openai(CustomOpenAIConfig {
+                        destination_problem: None,
+                        allow_unencrypted,
+                        endpoint: custom_openai_endpoint.clone().unwrap_or_default(),
+                        api_key: Some(final_api_key.clone()),
+                        model: model_name.clone(),
+                        timeout_seconds: None,
+                        organization: None,
+                        project: None,
+                        max_tokens: None,
+                        context_window: None,
+                        temperature: None,
+                        top_p: None,
+                    }),
+                    _ => unreachable!("provider checked above"),
                 };
                 OpenAICompatibleProcessingProvider::new(provider_config)
             };
@@ -1073,7 +1097,9 @@ impl SummaryService {
 
         let template_fingerprint = template_cache_fingerprint(&template);
 
-        let automatic_fingerprint = automatic.as_ref().map(|job| job.request.review().fingerprint);
+        let automatic_fingerprint = automatic
+            .as_ref()
+            .map(|job| job.request.review().fingerprint);
         let cache_source = build_summary_cache_source(
             &text,
             &custom_prompt,
@@ -1082,7 +1108,9 @@ impl SummaryService {
             token_threshold,
             &model_provider,
             &model_name,
-            automatic_fingerprint.as_deref().or(ollama_endpoint.as_deref()),
+            automatic_fingerprint
+                .as_deref()
+                .or(ollama_endpoint.as_deref()),
             custom_openai_endpoint.as_deref(),
             custom_openai_max_tokens,
             custom_openai_temperature,
@@ -1117,7 +1145,9 @@ impl SummaryService {
         };
 
         let client = match execution {
-            Some(Execution::Ollama { client, .. } | Execution::Standard { client, .. }) => client.clone(),
+            Some(Execution::Ollama { client, .. } | Execution::Standard { client, .. }) => {
+                client.clone()
+            }
             _ => reqwest::Client::new(),
         };
         let dispatch = execution.map(|execution| SummaryDispatch {
@@ -1202,7 +1232,11 @@ impl SummaryService {
             }
             Err(e) => {
                 // Check if error is due to cancellation
-                let diagnostic = if provider == LLMProvider::BuiltInAI { e } else { remote_failure_diagnostic(&e) };
+                let diagnostic = if provider == LLMProvider::BuiltInAI {
+                    e
+                } else {
+                    remote_failure_diagnostic(&e)
+                };
                 finish_generation_error(&pool, &meeting_id, job, revision, &diagnostic).await;
             }
         }

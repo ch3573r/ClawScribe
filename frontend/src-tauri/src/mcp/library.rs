@@ -498,7 +498,13 @@ fn saved_audio(app_data: &Path, folder: &Path, id: &str) -> Option<PathBuf> {
         .as_ref()
         .and_then(|state| state.get("trusted"))
         .and_then(Value::as_array)
-        .map(|folders| folders.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
+        .map(|folders| {
+            folders
+                .iter()
+                .filter_map(Value::as_str)
+                .map(PathBuf::from)
+                .collect()
+        })
         .unwrap_or_default();
     let roots = recording_preferences::roots_from(trusted.clone(), Some(app_data.to_path_buf()));
     let inside = roots.iter().any(|root| {

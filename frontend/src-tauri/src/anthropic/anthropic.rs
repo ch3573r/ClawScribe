@@ -88,7 +88,9 @@ pub async fn get_anthropic_models(
 }
 
 /// The model list for a key the core already holds.
-pub async fn fetch_anthropic_models(api_key: Option<String>) -> Result<Vec<AnthropicModel>, String> {
+pub async fn fetch_anthropic_models(
+    api_key: Option<String>,
+) -> Result<Vec<AnthropicModel>, String> {
     // Return fallback if no API key provided
     let api_key = match api_key {
         Some(key) if !key.trim().is_empty() => key.trim().to_string(),

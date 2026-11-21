@@ -942,11 +942,16 @@ mod tests {
             ContinuousVadProcessor::new_with_max_segment_duration(16_000, 2000, Some(2_000))
                 .unwrap();
         let segments = processor.process_audio(&audio).unwrap();
-        assert!(!processor.in_speech, "fixture must end the speech before flush");
+        assert!(
+            !processor.in_speech,
+            "fixture must end the speech before flush"
+        );
         assert!(segments.len() >= 2, "fixture must force at least one cut");
         assert!(
-            segments.iter().any(|s| s.samples.len() < ms_to_samples(2_000)
-                && s.samples.len() > ms_to_samples(1_300)),
+            segments
+                .iter()
+                .any(|s| s.samples.len() < ms_to_samples(2_000)
+                    && s.samples.len() > ms_to_samples(1_300)),
             "fixture must shorten at least one forced cut"
         );
 
@@ -955,7 +960,10 @@ mod tests {
             let start = (segment.start_timestamp_ms * 16.0).round() as usize;
             let end = start + segment.samples.len();
             if last_end > 0 {
-                assert_eq!(start, last_end, "segments must neither drop nor repeat audio");
+                assert_eq!(
+                    start, last_end,
+                    "segments must neither drop nor repeat audio"
+                );
             }
             assert!(end <= audio.len());
             assert_eq!(segment.samples.as_slice(), &audio[start..end]);

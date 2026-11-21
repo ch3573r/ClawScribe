@@ -205,10 +205,12 @@ where
     A: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = Result<bool, String>>,
 {
-    let (seal_store, seal_scope, seal_value) = (store.clone(), scope.to_string(), value.to_string());
-    let new_reference = tokio::task::spawn_blocking(move || seal_store.seal(&seal_scope, &seal_value))
-        .await
-        .map_err(|_| UNAVAILABLE.to_string())??;
+    let (seal_store, seal_scope, seal_value) =
+        (store.clone(), scope.to_string(), value.to_string());
+    let new_reference =
+        tokio::task::spawn_blocking(move || seal_store.seal(&seal_scope, &seal_value))
+            .await
+            .map_err(|_| UNAVAILABLE.to_string())??;
     match apply(new_reference.clone()).await {
         Ok(true) => {
             if let Some(old) = old_reference.filter(|old| old != &new_reference) {
@@ -329,11 +331,27 @@ mod tests {
     #[test]
     fn the_hint_is_the_last_four_characters_of_a_long_enough_secret_only() {
         assert_eq!(secret_hint("fake-key-1234-fake-key"), Some("-key".into()));
-        assert_eq!(secret_hint("12345678901234567890"), Some("7890".into()), "exactly twenty");
-        assert_eq!(secret_hint("1234567890123456789"), None, "nineteen is too short");
-        assert_eq!(secret_hint("123456789012"), None, "twelve no longer gives a hint");
+        assert_eq!(
+            secret_hint("12345678901234567890"),
+            Some("7890".into()),
+            "exactly twenty"
+        );
+        assert_eq!(
+            secret_hint("1234567890123456789"),
+            None,
+            "nineteen is too short"
+        );
+        assert_eq!(
+            secret_hint("123456789012"),
+            None,
+            "twelve no longer gives a hint"
+        );
         assert_eq!(secret_hint(""), None);
-        assert_eq!(secret_hint("  fake-key-1234-fake-key  "), Some("-key".into()), "trimmed");
+        assert_eq!(
+            secret_hint("  fake-key-1234-fake-key  "),
+            Some("-key".into()),
+            "trimmed"
+        );
         // Multi-byte characters are counted as characters, never split.
         assert_eq!(secret_hint("ключ-ключ-ключ-ключ-ключ"), Some("ключ".into()));
     }
@@ -407,7 +425,12 @@ pub(crate) mod test_support {
             Ok(())
         }
         fn load(&self, account: &str) -> Result<String, String> {
-            self.0.lock().unwrap().get(account).cloned().ok_or_else(|| UNAVAILABLE.into())
+            self.0
+                .lock()
+                .unwrap()
+                .get(account)
+                .cloned()
+                .ok_or_else(|| UNAVAILABLE.into())
         }
         fn delete(&self, account: &str) -> Result<(), String> {
             self.0.lock().unwrap().remove(account);
@@ -425,7 +448,12 @@ pub(crate) mod test_support {
             self.0 .0.lock().unwrap().len()
         }
         pub(crate) fn contains_value(&self, value: &str) -> bool {
-            self.0 .0.lock().unwrap().values().any(|stored| stored == value)
+            self.0
+                 .0
+                .lock()
+                .unwrap()
+                .values()
+                .any(|stored| stored == value)
         }
     }
     impl SecretStore for MemoryStore {
@@ -454,37 +482,61 @@ mod replacement_tests {
     async fn the_old_entry_is_deleted_only_after_the_update_took_effect() {
         let memory = MemoryStore::new();
         let store = as_store(&memory);
-        let first = memory.seal("summary/openai", "fake-key-one-00000000").unwrap();
+        let first = memory
+            .seal("summary/openai", "fake-key-one-00000000")
+            .unwrap();
         assert_eq!(memory.entries(), 1);
         let observed = std::sync::Arc::new(std::sync::Mutex::new(0usize));
         let seen = observed.clone();
         let probe = memory.clone();
-        let second = commit_replacement(&store, "summary/openai", "fake-key-two-11111111", Some(first.clone()), |_new| async move {
-            // While the database update runs, both entries exist.
-            *seen.lock().unwrap() = probe.entries();
-            Ok(true)
-        })
+        let second = commit_replacement(
+            &store,
+            "summary/openai",
+            "fake-key-two-11111111",
+            Some(first.clone()),
+            |_new| async move {
+                // While the database update runs, both entries exist.
+                *seen.lock().unwrap() = probe.entries();
+                Ok(true)
+            },
+        )
         .await
         .unwrap();
-        assert_eq!(*observed.lock().unwrap(), 2, "the new entry is written before the update");
+        assert_eq!(
+            *observed.lock().unwrap(),
+            2,
+            "the new entry is written before the update"
+        );
         assert_eq!(memory.entries(), 1, "the old entry is gone afterwards");
         assert!(memory.open("summary/openai", &first).is_err());
-        assert_eq!(memory.open("summary/openai", &second).unwrap(), "fake-key-two-11111111");
+        assert_eq!(
+            memory.open("summary/openai", &second).unwrap(),
+            "fake-key-two-11111111"
+        );
     }
 
     #[tokio::test]
     async fn a_failing_update_removes_the_new_entry_and_keeps_the_old_one() {
         let memory = MemoryStore::new();
         let store = as_store(&memory);
-        let first = memory.seal("summary/openai", "fake-key-one-00000000").unwrap();
-        let error = commit_replacement(&store, "summary/openai", "fake-key-two-11111111", Some(first.clone()), |_new| async move {
-            Err("database unavailable".to_string())
-        })
+        let first = memory
+            .seal("summary/openai", "fake-key-one-00000000")
+            .unwrap();
+        let error = commit_replacement(
+            &store,
+            "summary/openai",
+            "fake-key-two-11111111",
+            Some(first.clone()),
+            |_new| async move { Err("database unavailable".to_string()) },
+        )
         .await
         .unwrap_err();
         assert_eq!(error, "database unavailable");
         assert_eq!(memory.entries(), 1, "only the old entry remains");
-        assert_eq!(memory.open("summary/openai", &first).unwrap(), "fake-key-one-00000000");
+        assert_eq!(
+            memory.open("summary/openai", &first).unwrap(),
+            "fake-key-one-00000000"
+        );
         assert!(!memory.contains_value("fake-key-two-11111111"));
     }
 
@@ -492,15 +544,24 @@ mod replacement_tests {
     async fn a_lost_race_removes_the_new_entry_and_keeps_the_old_one() {
         let memory = MemoryStore::new();
         let store = as_store(&memory);
-        let first = memory.seal("summary/openai", "fake-key-one-00000000").unwrap();
-        let error = commit_replacement(&store, "summary/openai", "fake-key-two-11111111", Some(first.clone()), |_new| async move {
-            Ok(false)
-        })
+        let first = memory
+            .seal("summary/openai", "fake-key-one-00000000")
+            .unwrap();
+        let error = commit_replacement(
+            &store,
+            "summary/openai",
+            "fake-key-two-11111111",
+            Some(first.clone()),
+            |_new| async move { Ok(false) },
+        )
         .await
         .unwrap_err();
         assert!(error.contains("changed"));
         assert_eq!(memory.entries(), 1);
-        assert_eq!(memory.open("summary/openai", &first).unwrap(), "fake-key-one-00000000");
+        assert_eq!(
+            memory.open("summary/openai", &first).unwrap(),
+            "fake-key-one-00000000"
+        );
     }
 
     #[tokio::test]
@@ -508,12 +569,25 @@ mod replacement_tests {
         let memory = MemoryStore::new();
         let store = as_store(&memory);
         let other = memory.seal("scope/other", "fake-other-key-2222").unwrap();
-        for old in [None, Some(String::new()), Some("legacy plaintext".to_string())] {
-            commit_replacement(&store, "scope/new", "fake-key-three-3333", old, |_new| async move { Ok(true) })
-                .await
-                .unwrap();
+        for old in [
+            None,
+            Some(String::new()),
+            Some("legacy plaintext".to_string()),
+        ] {
+            commit_replacement(
+                &store,
+                "scope/new",
+                "fake-key-three-3333",
+                old,
+                |_new| async move { Ok(true) },
+            )
+            .await
+            .unwrap();
         }
-        assert!(memory.open("scope/other", &other).is_ok(), "another scope's entry is untouched");
+        assert!(
+            memory.open("scope/other", &other).is_ok(),
+            "another scope's entry is untouched"
+        );
         assert_eq!(memory.entries(), 4);
     }
 }

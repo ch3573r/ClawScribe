@@ -36,7 +36,8 @@ fn legacy_database_candidates(app_data_dir: &std::path::Path) -> Vec<PathBuf> {
 fn find_legacy_database(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates.iter().find_map(|path| {
         let metadata = std::fs::symlink_metadata(path).ok()?;
-        (metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0).then(|| path.clone())
+        (metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0)
+            .then(|| path.clone())
     })
 }
 
@@ -85,7 +86,11 @@ mod tests {
         let known = dir.path().join("meeting_minutes.db");
         assert_eq!(find_legacy_database(&[known.clone()]), None);
         std::fs::write(&known, b"").unwrap();
-        assert_eq!(find_legacy_database(&[known.clone()]), None, "an empty file is not one");
+        assert_eq!(
+            find_legacy_database(&[known.clone()]),
+            None,
+            "an empty file is not one"
+        );
         std::fs::write(&known, b"SQLite format 3\0").unwrap();
         assert_eq!(find_legacy_database(&[known.clone()]), Some(known.clone()));
         std::fs::remove_file(&known).unwrap();

@@ -433,7 +433,11 @@ mod tests {
 
     #[test]
     fn debug_output_never_contains_the_api_key() {
-        let provider = MaiTranscribeProvider::new("https://speech.example.com".into(), "fake-provider-key-000000".into(), "model-a".into());
+        let provider = MaiTranscribeProvider::new(
+            "https://speech.example.com".into(),
+            "fake-provider-key-000000".into(),
+            "model-a".into(),
+        );
         let shown = format!("{provider:?}");
         assert!(!shown.contains("fake-provider-key-000000"));
         assert!(shown.contains("model-a"));

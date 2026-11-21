@@ -20,7 +20,15 @@ pub async fn knowledge_import_document(
 ) -> Result<super::documents::DocumentAttachment, String> {
     // Only a document the user chose in a dialog the core opened, once.
     let taken = crate::file_grants::take(crate::file_grants::Purpose::ReferenceDocument, &path)?;
-    let result = import_granted(&app, &state, &runtime, request_id, meeting_id, taken.path.clone()).await;
+    let result = import_granted(
+        &app,
+        &state,
+        &runtime,
+        request_id,
+        meeting_id,
+        taken.path.clone(),
+    )
+    .await;
     if result.is_err() {
         // A retry needs no new choice, and the grant keeps its original time.
         crate::file_grants::give_back(crate::file_grants::Purpose::ReferenceDocument, &taken);

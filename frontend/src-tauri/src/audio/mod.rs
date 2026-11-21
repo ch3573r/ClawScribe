@@ -24,12 +24,12 @@ pub mod async_logger;
 mod audio_spool;
 mod batch_audio;
 pub mod buffer_pool;
-pub mod disk_space;
 pub mod device_monitor; // NEW: Device disconnect/reconnect monitoring
+pub mod disk_space;
 pub mod hardware_detector;
 pub mod incremental_saver; // NEW: Incremental audio saving with checkpoints
-pub mod interrupted;
 pub(crate) mod inference;
+pub mod interrupted;
 pub mod level_monitor;
 pub mod outcome;
 pub mod pc_test;

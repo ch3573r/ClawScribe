@@ -1,6 +1,4 @@
-use crate::notifications::{
-    manager::NotificationManager, settings::NotificationSettings,
-};
+use crate::notifications::{manager::NotificationManager, settings::NotificationSettings};
 
 use anyhow::Result;
 use log::{error as log_error, info as log_info};

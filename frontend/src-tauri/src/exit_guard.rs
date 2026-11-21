@@ -199,7 +199,10 @@ mod tests {
     #[test]
     fn a_recording_is_stopped_before_the_exit_goes_through() {
         let mut gate = ExitGate::new();
-        assert_eq!(gate.request(Some(0), true), ExitDecision::StopRecordingFirst);
+        assert_eq!(
+            gate.request(Some(0), true),
+            ExitDecision::StopRecordingFirst
+        );
         // A second Quit while stopping neither exits nor starts a second stop.
         assert_eq!(gate.request(Some(0), true), ExitDecision::Defer);
         assert_eq!(gate.request(None, true), ExitDecision::Defer);
@@ -217,7 +220,10 @@ mod tests {
         gate.finish();
         assert_eq!(gate.request(Some(0), true), ExitDecision::Allow);
         // Back to normal: a later recording is protected again.
-        assert_eq!(gate.request(Some(0), true), ExitDecision::StopRecordingFirst);
+        assert_eq!(
+            gate.request(Some(0), true),
+            ExitDecision::StopRecordingFirst
+        );
     }
 
     #[test]
@@ -239,13 +245,19 @@ mod tests {
     #[test]
     fn a_follow_up_exit_that_does_not_happen_withdraws_the_release() {
         let mut gate = ExitGate::new();
-        assert_eq!(gate.request(Some(0), true), ExitDecision::StopRecordingFirst);
+        assert_eq!(
+            gate.request(Some(0), true),
+            ExitDecision::StopRecordingFirst
+        );
         gate.finish();
         // The unsaved-edits prompt held the exit back and the user kept the
         // app open; a new recording must be stopped again on the next Quit.
         gate.exit_not_taken();
         assert_eq!(gate.state, GateState::Idle);
-        assert_eq!(gate.request(Some(0), true), ExitDecision::StopRecordingFirst);
+        assert_eq!(
+            gate.request(Some(0), true),
+            ExitDecision::StopRecordingFirst
+        );
     }
 
     #[test]

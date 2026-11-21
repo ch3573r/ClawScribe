@@ -183,10 +183,16 @@ mod tests {
             (PathBuf::from("/data/recordings"), 30),
             (PathBuf::from("/other"), 40),
         ];
-        assert_eq!(pick_free_bytes(Path::new("/data/recordings/a"), &volumes), Some(30));
+        assert_eq!(
+            pick_free_bytes(Path::new("/data/recordings/a"), &volumes),
+            Some(30)
+        );
         assert_eq!(pick_free_bytes(Path::new("/data/x"), &volumes), Some(20));
         assert_eq!(pick_free_bytes(Path::new("/home"), &volumes), Some(10));
-        assert_eq!(pick_free_bytes(Path::new("/data/recordings-old"), &volumes), Some(20));
+        assert_eq!(
+            pick_free_bytes(Path::new("/data/recordings-old"), &volumes),
+            Some(20)
+        );
     }
 
     #[test]
@@ -229,7 +235,10 @@ mod tests {
         assert_eq!(watch.evaluate(Some(WARNING_BYTES)), None);
         assert_eq!(watch.evaluate(Some(WARNING_BYTES + 1)), None);
         assert_eq!(watch.evaluate(None), None);
-        assert_eq!(watch.evaluate(Some(WARNING_BYTES - 1)), Some(WARNING_BYTES - 1));
+        assert_eq!(
+            watch.evaluate(Some(WARNING_BYTES - 1)),
+            Some(WARNING_BYTES - 1)
+        );
         assert_eq!(watch.evaluate(Some(1)), None, "only once");
         assert_eq!(watch.evaluate(Some(WARNING_BYTES - 1)), None);
     }

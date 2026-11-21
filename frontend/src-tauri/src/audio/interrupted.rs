@@ -58,7 +58,11 @@ pub(crate) struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_examined: 2_000, max_candidates: 100, time_limit: Duration::from_secs(4) }
+        Self {
+            max_examined: 2_000,
+            max_candidates: 100,
+            time_limit: Duration::from_secs(4),
+        }
     }
 }
 
@@ -222,11 +226,15 @@ pub(crate) fn recovered_provenance(
 
 /// Files of a capture directory: how many chunk or temporary files, and their bytes.
 fn capture_entries(directory: &Path, accept: impl Fn(&Path) -> bool) -> (u32, u64) {
-    let Ok(metadata) = std::fs::symlink_metadata(directory) else { return (0, 0) };
+    let Ok(metadata) = std::fs::symlink_metadata(directory) else {
+        return (0, 0);
+    };
     if !metadata.is_dir() || is_link(&metadata) {
         return (0, 0);
     }
-    let Ok(entries) = std::fs::read_dir(directory) else { return (0, 0) };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return (0, 0);
+    };
     let mut count = 0u32;
     let mut bytes = 0u64;
     for entry in entries.take(MAX_DIR_ENTRIES).flatten() {
@@ -245,7 +253,11 @@ fn capture_entries(directory: &Path, accept: impl Fn(&Path) -> bool) -> (u32, u6
 fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extensions.iter().any(|wanted| extension.eq_ignore_ascii_case(wanted)))
+        .is_some_and(|extension| {
+            extensions
+                .iter()
+                .any(|wanted| extension.eq_ignore_ascii_case(wanted))
+        })
 }
 
 /// The transcript lines of the on-disk snapshot: how many and when the last one ends.
@@ -258,12 +270,19 @@ fn snapshot_summary(folder: &Path) -> (u32, Option<f64>) {
     };
     let lines = segments
         .iter()
-        .filter(|segment| segment.get("text").and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty()))
+        .filter(|segment| {
+            segment
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        })
         .count() as u32;
     let end = segments
         .iter()
         .filter_map(|segment| segment.get("audio_end_time").and_then(Value::as_f64))
-        .fold(None, |best: Option<f64>, value| Some(best.map_or(value, |best| best.max(value))));
+        .fold(None, |best: Option<f64>, value| {
+            Some(best.map_or(value, |best| best.max(value)))
+        });
     (lines, end)
 }
 
@@ -321,7 +340,9 @@ fn classify_folder_with_deletions(
         }
         let flagged = match &outcome {
             Ok(Some(outcome)) => {
-                outcome.audio_save_failed || outcome.capture_incomplete || outcome.recording_files_incomplete
+                outcome.audio_save_failed
+                    || outcome.capture_incomplete
+                    || outcome.recording_files_incomplete
             }
             // A damaged status file is a sign that something went wrong.
             Err(_) => true,
@@ -362,7 +383,10 @@ fn classify_folder_with_deletions(
             .map(str::trim)
             .filter(|title| !title.is_empty())
             .map(str::to_string),
-        started_at: marker.get("created_at").and_then(Value::as_str).map(str::to_string),
+        started_at: marker
+            .get("created_at")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         approx_duration_seconds: duration,
         size_bytes: spool_bytes + checkpoint_bytes + snapshot_bytes + audio_bytes,
         has_transcript: transcript_lines > 0,
@@ -413,11 +437,15 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
             continue;
         }
         seen_roots.push(root_key);
-        let Ok(root_metadata) = std::fs::symlink_metadata(root) else { continue };
+        let Ok(root_metadata) = std::fs::symlink_metadata(root) else {
+            continue;
+        };
         if !root_metadata.is_dir() || is_link(&root_metadata) {
             continue;
         }
-        let Ok(top) = std::fs::read_dir(root) else { continue };
+        let Ok(top) = std::fs::read_dir(root) else {
+            continue;
+        };
         for first in top.take(MAX_DIR_ENTRIES).flatten() {
             let mut level: Vec<PathBuf> = vec![first.path()];
             // Second level: only below a folder that is not a recording itself.
@@ -425,12 +453,16 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
             while index < level.len() {
                 let path = level[index].clone();
                 index += 1;
-                if started.elapsed() >= input.limits.time_limit || examined >= input.limits.max_examined {
+                if started.elapsed() >= input.limits.time_limit
+                    || examined >= input.limits.max_examined
+                {
                     result.truncated = true;
                     break 'roots;
                 }
                 examined += 1;
-                let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue };
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
                 if !metadata.is_dir() || is_link(&metadata) {
                     continue;
                 }
@@ -442,7 +474,12 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
                     // A container: look one level below, once.
                     if level.len() == 1 && index == 1 {
                         if let Ok(children) = std::fs::read_dir(&path) {
-                            level.extend(children.take(MAX_DIR_ENTRIES).flatten().map(|child| child.path()));
+                            level.extend(
+                                children
+                                    .take(MAX_DIR_ENTRIES)
+                                    .flatten()
+                                    .map(|child| child.path()),
+                            );
                         }
                     }
                     continue;
@@ -484,9 +521,11 @@ pub(crate) fn scan(input: &ScanInput<'_>) -> InterruptedScan {
             }
         }
     }
-    result
-        .recordings
-        .sort_by(|a, b| b.started_at.cmp(&a.started_at).then_with(|| a.folder.cmp(&b.folder)));
+    result.recordings.sort_by(|a, b| {
+        b.started_at
+            .cmp(&a.started_at)
+            .then_with(|| a.folder.cmp(&b.folder))
+    });
     result
 }
 
@@ -518,7 +557,10 @@ pub(crate) fn preview_lines(folder: &Path, limit: usize) -> Vec<PreviewLine> {
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string(),
-                        audio_start_time: segment.get("audio_start_time").and_then(Value::as_f64).unwrap_or(0.0),
+                        audio_start_time: segment
+                            .get("audio_start_time")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
                     })
                 })
                 .take(limit)
@@ -567,7 +609,10 @@ fn registered_map(
         map.insert(folder_key(Path::new(&folder)), id.clone());
         if local && started.elapsed() < budget {
             if let Ok(canonical) = std::fs::canonicalize(&folder) {
-                map.insert(folder_key(&crate::database::meeting_files::plain_path(&canonical)), id);
+                map.insert(
+                    folder_key(&crate::database::meeting_files::plain_path(&canonical)),
+                    id,
+                );
             }
         }
     }
@@ -642,7 +687,10 @@ pub async fn preview_interrupted_recording<R: tauri::Runtime>(
     let roots = super::recording_preferences::recording_roots(&app).await;
     tokio::task::spawn_blocking(move || -> Result<Vec<PreviewLine>, String> {
         let folder = crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
-        Ok(preview_lines(Path::new(&folder), limit.unwrap_or(10).clamp(1, 50)))
+        Ok(preview_lines(
+            Path::new(&folder),
+            limit.unwrap_or(10).clamp(1, 50),
+        ))
     })
     .await
     .map_err(|_| "Could not read the transcript".to_string())?
@@ -659,7 +707,8 @@ pub async fn keep_interrupted_recording<R: tauri::Runtime>(
     use tauri_plugin_store::StoreExt;
     let roots = super::recording_preferences::recording_roots(&app).await;
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let authorised = crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
+        let authorised =
+            crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
         let store = app
             .store(crate::trusted_roots::STORE_FILE)
             .map_err(|_| "Could not save the choice".to_string())?;
@@ -694,31 +743,40 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
     let roots = super::recording_preferences::recording_roots(&app).await;
     let rows = registered_rows(state.db_manager.pool()).await?;
     let active = super::recording_commands::active_recording_folder();
-    let (authorised, meeting_id, registered_path, marker) = tokio::task::spawn_blocking(move || {
-        let authorised = crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
-        if active.protects(Path::new(&authorised)) {
-            return Err("A recording is running. Try again when it has stopped.".into());
-        }
-        let registered = registered_map(rows.clone(), &roots, REGISTERED_BUDGET);
-        let meeting = registered
-            .get(&folder_key(Path::new(&authorised)))
-            .or_else(|| {
-                std::fs::canonicalize(&authorised)
-                    .ok()
-                    .and_then(|canonical| registered.get(&folder_key(&crate::database::meeting_files::plain_path(&canonical))))
-            })
-            .cloned()
-            .ok_or_else(|| "This recording is not saved in your library".to_string())?;
-        let registered_path = rows.into_iter().find_map(|(id, path)| (id == meeting).then_some(path))
-            .ok_or("The recording is no longer saved in your library.")?;
-        let marker = crate::database::meeting_files::read_marker(Path::new(&authorised));
-        Ok::<_, String>((authorised, meeting, registered_path, marker))
-    })
-    .await
-    .map_err(|_| "Could not repair the recording".to_string())??;
+    let (authorised, meeting_id, registered_path, marker) =
+        tokio::task::spawn_blocking(move || {
+            let authorised =
+                crate::database::meeting_files::authorize_new_meeting_folder(&folder, &roots)?;
+            if active.protects(Path::new(&authorised)) {
+                return Err("A recording is running. Try again when it has stopped.".into());
+            }
+            let registered = registered_map(rows.clone(), &roots, REGISTERED_BUDGET);
+            let meeting = registered
+                .get(&folder_key(Path::new(&authorised)))
+                .or_else(|| {
+                    std::fs::canonicalize(&authorised)
+                        .ok()
+                        .and_then(|canonical| {
+                            registered.get(&folder_key(
+                                &crate::database::meeting_files::plain_path(&canonical),
+                            ))
+                        })
+                })
+                .cloned()
+                .ok_or_else(|| "This recording is not saved in your library".to_string())?;
+            let registered_path = rows
+                .into_iter()
+                .find_map(|(id, path)| (id == meeting).then_some(path))
+                .ok_or("The recording is no longer saved in your library.")?;
+            let marker = crate::database::meeting_files::read_marker(Path::new(&authorised));
+            Ok::<_, String>((authorised, meeting, registered_path, marker))
+        })
+        .await
+        .map_err(|_| "Could not repair the recording".to_string())??;
 
     let status = super::incremental_saver::recover_audio_in_folder(authorised.clone()).await?;
-    let recovered = status.audio_file_path.is_some() && matches!(status.status.as_str(), "success" | "partial");
+    let recovered =
+        status.audio_file_path.is_some() && matches!(status.status.as_str(), "success" | "partial");
     if recovered {
         let transcribes = marker
             .as_ref()
@@ -755,7 +813,11 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
             super::recording_commands::wake_saved_recording_summary(&app, meeting_id.clone());
         }
     }
-    Ok(RepairedRecording { meeting_id, audio_status: status.status, audio_path: status.audio_file_path })
+    Ok(RepairedRecording {
+        meeting_id,
+        audio_status: status.status,
+        audio_path: status.audio_file_path,
+    })
 }
 
 async fn commit_repaired_audio(
@@ -866,16 +928,17 @@ pub(crate) fn discard_folder(
     if active.protects(&path) {
         return Err("A recording is running. Try again when it has stopped.".into());
     }
-    if registered.contains_key(&key) || canonical_key.as_ref().is_some_and(|key| registered.contains_key(key)) {
+    if registered.contains_key(&key)
+        || canonical_key
+            .as_ref()
+            .is_some_and(|key| registered.contains_key(key))
+    {
         return Err(REFUSED.into());
     }
     if classify_folder_with_deletions(&path, None, registered_ids, deleted).is_none() {
         return Err(REFUSED.into());
     }
-    let others: Vec<PathBuf> = registered
-        .keys()
-        .map(PathBuf::from)
-        .collect();
+    let others: Vec<PathBuf> = registered.keys().map(PathBuf::from).collect();
     let marker = crate::database::meeting_files::read_marker(&path).ok_or(REFUSED)?;
     let id = crate::database::meeting_files::stamped_meeting_id(&marker)
         .or_else(|| crate::database::meeting_files::recording_id(&marker));
@@ -975,7 +1038,11 @@ mod tests {
                 serde_json::json!({"text": format!("line {index}"), "audio_start_time": index as f64, "audio_end_time": index as f64 + 1.0, "display_time": "[00:00]"})
             })
             .collect();
-        std::fs::write(folder.join("transcripts.json"), serde_json::json!({"version": "1.0", "segments": segments}).to_string()).unwrap();
+        std::fs::write(
+            folder.join("transcripts.json"),
+            serde_json::json!({"version": "1.0", "segments": segments}).to_string(),
+        )
+        .unwrap();
     }
 
     fn outcome(folder: &Path, flags: serde_json::Value) {
@@ -1009,7 +1076,13 @@ mod tests {
         let mut names: Vec<String> = scan
             .recordings
             .iter()
-            .map(|found| Path::new(&found.folder).file_name().unwrap().to_string_lossy().into_owned())
+            .map(|found| {
+                Path::new(&found.folder)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         names.sort();
         names
@@ -1025,7 +1098,10 @@ mod tests {
         let finished = make(&root, "finished");
         marker(&finished, "completed", None);
         std::fs::write(finished.join("audio.mp4"), b"audio").unwrap();
-        outcome(&finished, serde_json::json!({"audio_save_failed": false, "transcription_incomplete": false}));
+        outcome(
+            &finished,
+            serde_json::json!({"audio_save_failed": false, "transcription_incomplete": false}),
+        );
 
         // Running recording: still says recording, spool growing.
         let running = make(&root, "running");
@@ -1049,16 +1125,32 @@ mod tests {
         let plain = make(&root, "plain");
         std::fs::write(plain.join("notes.txt"), b"x").unwrap();
 
-        let result = run(&[root.clone()], &HashMap::new(), ActiveFolder::Folder(running.clone()), Limits::default());
-        assert_eq!(names(&result), vec!["interrupted-bare", "interrupted-with-text"]);
-        let found = result.recordings.iter().find(|found| found.folder.ends_with("interrupted-with-text")).unwrap();
+        let result = run(
+            &[root.clone()],
+            &HashMap::new(),
+            ActiveFolder::Folder(running.clone()),
+            Limits::default(),
+        );
+        assert_eq!(
+            names(&result),
+            vec!["interrupted-bare", "interrupted-with-text"]
+        );
+        let found = result
+            .recordings
+            .iter()
+            .find(|found| found.folder.ends_with("interrupted-with-text"))
+            .unwrap();
         assert!(found.has_transcript && found.transcript_lines == 4 && found.has_capture);
         assert_eq!(found.reasons, vec!["unfinished_audio", "did_not_finish"]);
         assert_eq!(found.title.as_deref(), Some("Weekly sync"));
         assert_eq!(found.started_at.as_deref(), Some("2026-11-01T10:00:00Z"));
         assert_eq!(found.approx_duration_seconds, Some(4.0));
         assert!(found.size_bytes >= 500);
-        let bare = result.recordings.iter().find(|found| found.folder.ends_with("interrupted-bare")).unwrap();
+        let bare = result
+            .recordings
+            .iter()
+            .find(|found| found.folder.ends_with("interrupted-bare"))
+            .unwrap();
         assert!(!bare.has_transcript && !bare.has_capture && !bare.has_audio);
         assert!(found.has_audio);
         assert_eq!(bare.reasons, vec!["did_not_finish"]);
@@ -1074,14 +1166,40 @@ mod tests {
         spool(&running, 1);
         let other = make(&root, "other");
         marker(&other, "recording", None);
-        let with_active = run(&[root.clone()], &HashMap::new(), ActiveFolder::Folder(running.clone()), Limits::default());
+        let with_active = run(
+            &[root.clone()],
+            &HashMap::new(),
+            ActiveFolder::Folder(running.clone()),
+            Limits::default(),
+        );
         assert_eq!(names(&with_active), vec!["other"]);
         // The same folder spelled differently is still the running one.
         let spelled = PathBuf::from(format!("{}/", running.to_string_lossy()));
-        assert_eq!(names(&run(&[root.clone()], &HashMap::new(), ActiveFolder::Folder(spelled), Limits::default())), vec!["other"]);
-        let unknown = run(&[root.clone()], &HashMap::new(), ActiveFolder::Unknown, Limits::default());
+        assert_eq!(
+            names(&run(
+                &[root.clone()],
+                &HashMap::new(),
+                ActiveFolder::Folder(spelled),
+                Limits::default()
+            )),
+            vec!["other"]
+        );
+        let unknown = run(
+            &[root.clone()],
+            &HashMap::new(),
+            ActiveFolder::Unknown,
+            Limits::default(),
+        );
         assert!(unknown.recordings.is_empty() && unknown.recording_active);
-        assert_eq!(names(&run(&[root], &HashMap::new(), ActiveFolder::None, Limits::default())), vec!["other", "running"]);
+        assert_eq!(
+            names(&run(
+                &[root],
+                &HashMap::new(),
+                ActiveFolder::None,
+                Limits::default()
+            )),
+            vec!["other", "running"]
+        );
     }
 
     #[test]
@@ -1098,12 +1216,19 @@ mod tests {
         marker(&saved_unfinished, "completed", None);
         spool(&saved_unfinished, 2);
         let mut registered = HashMap::new();
-        for (folder, id) in [(&saved_ok, "meeting-1"), (&saved_finished, "meeting-2"), (&saved_unfinished, "meeting-3")] {
+        for (folder, id) in [
+            (&saved_ok, "meeting-1"),
+            (&saved_finished, "meeting-2"),
+            (&saved_unfinished, "meeting-3"),
+        ] {
             registered.insert(folder_key(folder), id.to_string());
         }
         let result = run(&[root], &registered, ActiveFolder::None, Limits::default());
         assert_eq!(names(&result), vec!["saved-no-audio"]);
-        assert_eq!(result.recordings[0].registered_meeting_id.as_deref(), Some("meeting-3"));
+        assert_eq!(
+            result.recordings[0].registered_meeting_id.as_deref(),
+            Some("meeting-3")
+        );
         assert_eq!(result.recordings[0].reasons, vec!["unfinished_audio"]);
     }
 
@@ -1113,21 +1238,41 @@ mod tests {
         let root = base.path().join("recordings");
         let failed = make(&root, "audio-failed");
         marker(&failed, "completed", None);
-        outcome(&failed, serde_json::json!({"audio_save_failed": true, "transcription_incomplete": false}));
+        outcome(
+            &failed,
+            serde_json::json!({"audio_save_failed": true, "transcription_incomplete": false}),
+        );
         let gaps = make(&root, "capture-gaps");
         marker(&gaps, "completed", None);
         std::fs::write(gaps.join("audio.mp4"), b"audio").unwrap();
-        outcome(&gaps, serde_json::json!({"audio_save_failed": false, "transcription_incomplete": false, "capture_incomplete": true}));
+        outcome(
+            &gaps,
+            serde_json::json!({"audio_save_failed": false, "transcription_incomplete": false, "capture_incomplete": true}),
+        );
         let damaged = make(&root, "damaged-status");
         marker(&damaged, "completed", None);
         std::fs::write(damaged.join("recording-outcome.json"), b"not json").unwrap();
         let clean = make(&root, "clean");
         marker(&clean, "completed", None);
         std::fs::write(clean.join("audio.mp4"), b"audio").unwrap();
-        outcome(&clean, serde_json::json!({"audio_save_failed": false, "transcription_incomplete": false}));
-        let result = run(&[root], &HashMap::new(), ActiveFolder::None, Limits::default());
-        assert_eq!(names(&result), vec!["audio-failed", "capture-gaps", "damaged-status"]);
-        assert!(result.recordings.iter().all(|found| found.reasons == vec!["marked_incomplete"]));
+        outcome(
+            &clean,
+            serde_json::json!({"audio_save_failed": false, "transcription_incomplete": false}),
+        );
+        let result = run(
+            &[root],
+            &HashMap::new(),
+            ActiveFolder::None,
+            Limits::default(),
+        );
+        assert_eq!(
+            names(&result),
+            vec!["audio-failed", "capture-gaps", "damaged-status"]
+        );
+        assert!(result
+            .recordings
+            .iter()
+            .all(|found| found.reasons == vec!["marked_incomplete"]));
     }
 
     #[test]
@@ -1138,10 +1283,25 @@ mod tests {
         marker(&folder, "completed", None);
         std::fs::create_dir_all(folder.join(".checkpoints")).unwrap();
         for index in 0..3 {
-            std::fs::write(folder.join(".checkpoints").join(format!("audio_chunk_{index:05}.mp4")), b"chunk").unwrap();
+            std::fs::write(
+                folder
+                    .join(".checkpoints")
+                    .join(format!("audio_chunk_{index:05}.mp4")),
+                b"chunk",
+            )
+            .unwrap();
         }
-        std::fs::write(folder.join(".checkpoints").join("concat_list.txt"), b"ignored").unwrap();
-        let result = run(&[root], &HashMap::new(), ActiveFolder::None, Limits::default());
+        std::fs::write(
+            folder.join(".checkpoints").join("concat_list.txt"),
+            b"ignored",
+        )
+        .unwrap();
+        let result = run(
+            &[root],
+            &HashMap::new(),
+            ActiveFolder::None,
+            Limits::default(),
+        );
         assert_eq!(result.recordings.len(), 1);
         assert_eq!(result.recordings[0].approx_duration_seconds, Some(30.0));
         assert_eq!(result.recordings[0].reasons, vec!["unfinished_audio"]);
@@ -1172,10 +1332,18 @@ mod tests {
         }
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, root.join("looks-inside")).unwrap();
-        let result = run(&[root.clone()], &HashMap::new(), ActiveFolder::None, Limits::default());
+        let result = run(
+            &[root.clone()],
+            &HashMap::new(),
+            ActiveFolder::None,
+            Limits::default(),
+        );
         assert_eq!(names(&result), vec!["inside"]);
         // The folder outside every root is not scanned at all.
-        assert!(result.recordings.iter().all(|found| !found.folder.ends_with("outside")));
+        assert!(result
+            .recordings
+            .iter()
+            .all(|found| !found.folder.ends_with("outside")));
         #[cfg(windows)]
         std::fs::remove_dir(root.join("looks-inside")).unwrap();
     }
@@ -1189,7 +1357,12 @@ mod tests {
         marker(&one, "recording", None);
         let too_deep = make(&make(&container, "nested"), "two");
         marker(&too_deep, "recording", None);
-        let result = run(&[root], &HashMap::new(), ActiveFolder::None, Limits::default());
+        let result = run(
+            &[root],
+            &HashMap::new(),
+            ActiveFolder::None,
+            Limits::default(),
+        );
         assert_eq!(names(&result), vec!["one"]);
     }
 
@@ -1201,14 +1374,43 @@ mod tests {
             let folder = make(&root, &format!("meeting-{index:02}"));
             marker(&folder, "recording", None);
         }
-        let capped = run(&[root.clone()], &HashMap::new(), ActiveFolder::None, Limits { max_candidates: 5, ..Limits::default() });
+        let capped = run(
+            &[root.clone()],
+            &HashMap::new(),
+            ActiveFolder::None,
+            Limits {
+                max_candidates: 5,
+                ..Limits::default()
+            },
+        );
         assert_eq!(capped.recordings.len(), 5);
         assert!(capped.truncated);
-        let examined = run(&[root.clone()], &HashMap::new(), ActiveFolder::None, Limits { max_examined: 10, ..Limits::default() });
+        let examined = run(
+            &[root.clone()],
+            &HashMap::new(),
+            ActiveFolder::None,
+            Limits {
+                max_examined: 10,
+                ..Limits::default()
+            },
+        );
         assert!(examined.recordings.len() <= 10 && examined.truncated);
-        let timed = run(&[root.clone()], &HashMap::new(), ActiveFolder::None, Limits { time_limit: Duration::ZERO, ..Limits::default() });
+        let timed = run(
+            &[root.clone()],
+            &HashMap::new(),
+            ActiveFolder::None,
+            Limits {
+                time_limit: Duration::ZERO,
+                ..Limits::default()
+            },
+        );
         assert!(timed.recordings.is_empty() && timed.truncated);
-        let full = run(&[root], &HashMap::new(), ActiveFolder::None, Limits::default());
+        let full = run(
+            &[root],
+            &HashMap::new(),
+            ActiveFolder::None,
+            Limits::default(),
+        );
         assert_eq!(full.recordings.len(), 30);
         assert!(!full.truncated);
     }
@@ -1259,7 +1461,12 @@ mod tests {
         assert_eq!(result.recordings.len(), 2);
         for found in &result.recordings {
             #[cfg(windows)]
-            assert_eq!(found.kept, found.folder.ends_with("kept"), "{}", found.folder);
+            assert_eq!(
+                found.kept,
+                found.folder.ends_with("kept"),
+                "{}",
+                found.folder
+            );
             #[cfg(not(windows))]
             let _ = found;
         }
@@ -1276,16 +1483,38 @@ mod tests {
         }
         crate::local_path::mark_remote_for_tests(&share);
         let rows = vec![
-            ("in-root".to_string(), trusted.join("m").to_string_lossy().into_owned()),
-            ("stranger".to_string(), stranger.join("m").to_string_lossy().into_owned()),
-            ("local".to_string(), base.path().to_string_lossy().into_owned()),
+            (
+                "in-root".to_string(),
+                trusted.join("m").to_string_lossy().into_owned(),
+            ),
+            (
+                "stranger".to_string(),
+                stranger.join("m").to_string_lossy().into_owned(),
+            ),
+            (
+                "local".to_string(),
+                base.path().to_string_lossy().into_owned(),
+            ),
         ];
         let map = registered_map(rows, &[trusted.clone()], Duration::from_secs(5));
-        assert_eq!(map.get(&folder_key(&trusted.join("m"))).map(String::as_str), Some("in-root"));
-        assert!(!map.contains_key(&folder_key(&stranger.join("m"))), "not inside a trusted root: skipped");
-        assert!(map.values().any(|id| id == "local"), "a local folder is looked up");
+        assert_eq!(
+            map.get(&folder_key(&trusted.join("m"))).map(String::as_str),
+            Some("in-root")
+        );
+        assert!(
+            !map.contains_key(&folder_key(&stranger.join("m"))),
+            "not inside a trusted root: skipped"
+        );
+        assert!(
+            map.values().any(|id| id == "local"),
+            "a local folder is looked up"
+        );
         // With no time left only the text keys are used.
-        let rushed = registered_map(vec![("local".into(), base.path().to_string_lossy().into_owned())], &[], Duration::ZERO);
+        let rushed = registered_map(
+            vec![("local".into(), base.path().to_string_lossy().into_owned())],
+            &[],
+            Duration::ZERO,
+        );
         assert_eq!(rushed.len(), 1);
     }
 
@@ -1354,7 +1583,14 @@ mod tests {
         let mut registered = HashMap::new();
         registered.insert(folder_key(&saved), "meeting-9".to_string());
         let active = ActiveFolder::Folder(running.clone());
-        for refused in [&saved, &running, &finished, &foreign, &outside, &root.join("missing")] {
+        for refused in [
+            &saved,
+            &running,
+            &finished,
+            &foreign,
+            &outside,
+            &root.join("missing"),
+        ] {
             let existed = refused.exists();
             assert!(
                 discard_folder(
@@ -1407,7 +1643,13 @@ mod tests {
         )
         .unwrap();
         assert!(!victim.exists());
-        assert!(saved.exists() && running.exists() && finished.exists() && foreign.exists() && outside.exists());
+        assert!(
+            saved.exists()
+                && running.exists()
+                && finished.exists()
+                && foreign.exists()
+                && outside.exists()
+        );
     }
 
     #[tokio::test]

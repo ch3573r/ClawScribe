@@ -19,7 +19,9 @@ use tauri_plugin_dialog::DialogExt;
 
 const GRANT_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const MAX_GRANTS: usize = 32;
-pub(crate) const AUDIO_EXTENSIONS: &[&str] = &["aac", "flac", "m4a", "mp3", "mp4", "ogg", "opus", "wav", "webm", "wma"];
+pub(crate) const AUDIO_EXTENSIONS: &[&str] = &[
+    "aac", "flac", "m4a", "mp3", "mp4", "ogg", "opus", "wav", "webm", "wma",
+];
 pub(crate) const DOCUMENT_EXTENSIONS: &[&str] = &["pdf", "docx", "txt", "md"];
 const CHOOSE_AGAIN: &str = "Choose the file again.";
 
@@ -65,7 +67,8 @@ fn key(path: &Path) -> String {
 
 fn sensible(path: &Path) -> Result<(), String> {
     let text = path.to_string_lossy();
-    if text.is_empty() || text.contains('\0') || (!path.is_absolute() && !text.starts_with("\\\\")) {
+    if text.is_empty() || text.contains('\0') || (!path.is_absolute() && !text.starts_with("\\\\"))
+    {
         return Err(crate::local_path::LOCAL_ONLY.into());
     }
     Ok(())
@@ -77,7 +80,12 @@ fn insert(purpose: Purpose, path: &Path, granted: Instant) -> Result<(), String>
     grants.retain(|grant| grant.granted.elapsed() < GRANT_LIFETIME);
     let wanted = key(path);
     grants.retain(|grant| !(grant.purpose == purpose && grant.key == wanted));
-    grants.push(Grant { purpose, key: wanted, path: path.to_path_buf(), granted });
+    grants.push(Grant {
+        purpose,
+        key: wanted,
+        path: path.to_path_buf(),
+        granted,
+    });
     grants.sort_by_key(|grant| grant.granted);
     while grants.len() > MAX_GRANTS {
         grants.remove(0);
@@ -94,7 +102,9 @@ pub(crate) fn grant(purpose: Purpose, path: &Path) -> Result<(), String> {
 fn find(grants: &mut Vec<Grant>, purpose: Purpose, text: &str) -> Option<usize> {
     grants.retain(|grant| grant.granted.elapsed() < GRANT_LIFETIME);
     let wanted = crate::local_path::comparable_text(text);
-    grants.iter().position(|grant| grant.purpose == purpose && grant.key == wanted)
+    grants
+        .iter()
+        .position(|grant| grant.purpose == purpose && grant.key == wanted)
 }
 
 /// Uses up the grant for exactly this path and purpose. A path that was not
@@ -104,7 +114,10 @@ pub(crate) fn take(purpose: Purpose, text: &str) -> Result<Taken, String> {
     let mut grants = GRANTS.lock().unwrap_or_else(|error| error.into_inner());
     let index = find(&mut grants, purpose, text).ok_or_else(|| CHOOSE_AGAIN.to_string())?;
     let grant = grants.remove(index);
-    Ok(Taken { path: grant.path, granted: grant.granted })
+    Ok(Taken {
+        path: grant.path,
+        granted: grant.granted,
+    })
 }
 
 /// The granted path, without using the grant up (a check before the real use).
@@ -136,7 +149,10 @@ pub(crate) fn inside_roots(path: &Path, roots: &[PathBuf]) -> bool {
 /// changes the path the user confirmed and a file by that name exists, the
 /// choice is refused rather than overwriting it silently.
 pub(crate) fn with_extension(path: PathBuf, extension: &str) -> Result<PathBuf, String> {
-    if path.extension().is_some_and(|current| current.eq_ignore_ascii_case(extension)) {
+    if path
+        .extension()
+        .is_some_and(|current| current.eq_ignore_ascii_case(extension))
+    {
         return Ok(path);
     }
     let mut name = path.into_os_string();
@@ -152,7 +168,9 @@ pub(crate) fn with_extension(path: PathBuf, extension: &str) -> Result<PathBuf, 
 /// A folder a save target is written into must exist.
 pub(crate) fn save_target_parent_exists(path: &Path) -> Result<(), String> {
     sensible(path)?;
-    let parent = path.parent().ok_or_else(|| crate::local_path::LOCAL_ONLY.to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| crate::local_path::LOCAL_ONLY.to_string())?;
     if parent.is_dir() {
         Ok(())
     } else {
@@ -160,7 +178,11 @@ pub(crate) fn save_target_parent_exists(path: &Path) -> Result<(), String> {
     }
 }
 
-async fn pick_file<R: Runtime>(app: AppHandle<R>, name: &'static str, extensions: &'static [&'static str]) -> Result<Option<PathBuf>, String> {
+async fn pick_file<R: Runtime>(
+    app: AppHandle<R>,
+    name: &'static str,
+    extensions: &'static [&'static str],
+) -> Result<Option<PathBuf>, String> {
     tokio::task::spawn_blocking(move || {
         app.dialog()
             .file()
@@ -180,15 +202,22 @@ pub(crate) async fn pick_save<R: Runtime>(
 ) -> Result<Option<PathBuf>, String> {
     let suggested: String = suggested
         .chars()
-        .filter(|c| !matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control())
+        .filter(|c| {
+            !matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control()
+        })
         .take(120)
         .collect();
     tokio::task::spawn_blocking(move || {
-        let mut dialog = app.dialog().file().add_filter(name, std::slice::from_ref(&extension));
+        let mut dialog = app
+            .dialog()
+            .file()
+            .add_filter(name, std::slice::from_ref(&extension));
         if !suggested.trim().is_empty() {
             dialog = dialog.set_file_name(suggested);
         }
-        dialog.blocking_save_file().and_then(|chosen| chosen.into_path().ok())
+        dialog
+            .blocking_save_file()
+            .and_then(|chosen| chosen.into_path().ok())
     })
     .await
     .map_err(|_| "The file dialog failed".to_string())
@@ -197,14 +226,22 @@ pub(crate) async fn pick_save<R: Runtime>(
 fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extensions.iter().any(|known| known.eq_ignore_ascii_case(extension)))
+        .is_some_and(|extension| {
+            extensions
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
 }
 
 /// Opens the file dialog for a hosted-transcription test file. Returns the
 /// chosen path, which the test command then accepts once.
 #[tauri::command]
-pub async fn pick_transcription_test_audio<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
-    let Some(path) = pick_file(app, "Audio", AUDIO_EXTENSIONS).await? else { return Ok(None) };
+pub async fn pick_transcription_test_audio<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Option<String>, String> {
+    let Some(path) = pick_file(app, "Audio", AUDIO_EXTENSIONS).await? else {
+        return Ok(None);
+    };
     let usable = std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file());
     if !has_extension(&path, AUDIO_EXTENSIONS) || !usable {
         return Err("Choose a supported audio file for the provider test".into());
@@ -215,8 +252,12 @@ pub async fn pick_transcription_test_audio<R: Runtime>(app: AppHandle<R>) -> Res
 
 /// Opens the file dialog for a reference document to attach to a meeting.
 #[tauri::command]
-pub async fn pick_reference_document<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
-    let Some(path) = pick_file(app, "Reference documents", DOCUMENT_EXTENSIONS).await? else { return Ok(None) };
+pub async fn pick_reference_document<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Option<String>, String> {
+    let Some(path) = pick_file(app, "Reference documents", DOCUMENT_EXTENSIONS).await? else {
+        return Ok(None);
+    };
     if !has_extension(&path, DOCUMENT_EXTENSIONS) {
         return Err("Choose a PDF, Word, text or Markdown document".into());
     }
@@ -226,8 +267,14 @@ pub async fn pick_reference_document<R: Runtime>(app: AppHandle<R>) -> Result<Op
 
 /// Opens the save dialog for a library backup.
 #[tauri::command]
-pub async fn pick_backup_save_path<R: Runtime>(app: AppHandle<R>, suggested_name: String) -> Result<Option<String>, String> {
-    let Some(chosen) = pick_save(app, "ClawScribe meeting archive", "zip", suggested_name).await? else { return Ok(None) };
+pub async fn pick_backup_save_path<R: Runtime>(
+    app: AppHandle<R>,
+    suggested_name: String,
+) -> Result<Option<String>, String> {
+    let Some(chosen) = pick_save(app, "ClawScribe meeting archive", "zip", suggested_name).await?
+    else {
+        return Ok(None);
+    };
     let path = with_extension(chosen, "zip")?;
     save_target_parent_exists(&path)?;
     grant(Purpose::BackupSave, &path)?;
@@ -236,16 +283,25 @@ pub async fn pick_backup_save_path<R: Runtime>(app: AppHandle<R>, suggested_name
 
 /// Opens the file dialog for a library backup to restore.
 #[tauri::command]
-pub async fn pick_backup_restore_path<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
-    let Some(path) = pick_file(app, "ClawScribe meeting archive", &["zip"]).await? else { return Ok(None) };
+pub async fn pick_backup_restore_path<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Option<String>, String> {
+    let Some(path) = pick_file(app, "ClawScribe meeting archive", &["zip"]).await? else {
+        return Ok(None);
+    };
     grant(Purpose::BackupOpen, &path)?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 /// Opens the save dialog for a Word export.
 #[tauri::command]
-pub async fn pick_word_save_path<R: Runtime>(app: AppHandle<R>, suggested_name: String) -> Result<Option<String>, String> {
-    let Some(chosen) = pick_save(app, "Word document", "docx", suggested_name).await? else { return Ok(None) };
+pub async fn pick_word_save_path<R: Runtime>(
+    app: AppHandle<R>,
+    suggested_name: String,
+) -> Result<Option<String>, String> {
+    let Some(chosen) = pick_save(app, "Word document", "docx", suggested_name).await? else {
+        return Ok(None);
+    };
     let path = with_extension(chosen, "docx")?;
     save_target_parent_exists(&path)?;
     grant(Purpose::WordSave, &path)?;
@@ -280,10 +336,17 @@ mod tests {
         grant(Purpose::BackupSave, &path).unwrap();
         assert!(take(Purpose::BackupOpen, &path.to_string_lossy()).is_err());
         assert!(take(Purpose::WordSave, &path.to_string_lossy()).is_err());
-        assert!(peek(Purpose::BackupSave, &path.to_string_lossy()).is_ok(), "a peek does not use it up");
+        assert!(
+            peek(Purpose::BackupSave, &path.to_string_lossy()).is_ok(),
+            "a peek does not use it up"
+        );
         let granted = take(Purpose::BackupSave, &path.to_string_lossy()).unwrap();
         assert_eq!(granted.path, path);
-        assert_eq!(take(Purpose::BackupSave, &path.to_string_lossy()).unwrap_err(), CHOOSE_AGAIN, "used up");
+        assert_eq!(
+            take(Purpose::BackupSave, &path.to_string_lossy()).unwrap_err(),
+            CHOOSE_AGAIN,
+            "used up"
+        );
     }
 
     #[test]
@@ -306,7 +369,13 @@ mod tests {
         let path = local("stale.zip");
         let stale = Instant::now().checked_sub(GRANT_LIFETIME + Duration::from_secs(1));
         if let Some(stale) = stale {
-            give_back(Purpose::BackupOpen, &Taken { path: path.clone(), granted: stale });
+            give_back(
+                Purpose::BackupOpen,
+                &Taken {
+                    path: path.clone(),
+                    granted: stale,
+                },
+            );
             assert!(take(Purpose::BackupOpen, &path.to_string_lossy()).is_err());
         }
     }
@@ -321,7 +390,10 @@ mod tests {
             assert!(take(Purpose::BackupSave, r"\\SERVER\share\OUT.zip").is_ok());
         }
         for refused in ["x.zip", "relative/x.zip", ""] {
-            assert!(grant(Purpose::BackupSave, Path::new(refused)).is_err(), "{refused}");
+            assert!(
+                grant(Purpose::BackupSave, Path::new(refused)).is_err(),
+                "{refused}"
+            );
         }
         // Without a grant nothing is accepted, whatever it looks like.
         for refused in [r"\\h\s\x.zip", "x.zip"] {
@@ -335,22 +407,38 @@ mod tests {
         let path = local("Spelling.zip");
         grant(Purpose::BackupOpen, &path).unwrap();
         #[cfg(windows)]
-        assert!(take(Purpose::BackupOpen, &path.to_string_lossy().to_ascii_uppercase().replace('\\', "/")).is_ok());
+        assert!(take(
+            Purpose::BackupOpen,
+            &path
+                .to_string_lossy()
+                .to_ascii_uppercase()
+                .replace('\\', "/")
+        )
+        .is_ok());
         #[cfg(not(windows))]
         assert!(take(Purpose::BackupOpen, &path.to_string_lossy()).is_ok());
         for index in 0..60 {
             grant(Purpose::TestAudio, &local(&format!("many-{index}.wav"))).unwrap();
         }
         assert!(GRANTS.lock().unwrap().len() <= MAX_GRANTS);
-        assert!(take(Purpose::TestAudio, &local("many-0.wav").to_string_lossy()).is_err(), "the oldest was dropped");
+        assert!(
+            take(Purpose::TestAudio, &local("many-0.wav").to_string_lossy()).is_err(),
+            "the oldest was dropped"
+        );
         assert!(take(Purpose::TestAudio, &local("many-59.wav").to_string_lossy()).is_ok());
     }
 
     #[test]
     fn adding_the_extension_never_silently_overwrites_another_file() {
         let base = tempfile::tempdir().unwrap();
-        assert_eq!(with_extension(base.path().join("a"), "zip").unwrap(), base.path().join("a.zip"));
-        assert_eq!(with_extension(base.path().join("a.ZIP"), "zip").unwrap(), base.path().join("a.ZIP"));
+        assert_eq!(
+            with_extension(base.path().join("a"), "zip").unwrap(),
+            base.path().join("a.zip")
+        );
+        assert_eq!(
+            with_extension(base.path().join("a.ZIP"), "zip").unwrap(),
+            base.path().join("a.ZIP")
+        );
         assert_eq!(
             with_extension(base.path().join("a.zip.txt"), "zip").unwrap(),
             base.path().join("a.zip.txt.zip")

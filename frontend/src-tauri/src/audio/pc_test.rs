@@ -366,12 +366,7 @@ impl CancelWindow {
     /// had been accepted before that.
     fn close(&self) -> bool {
         self.0
-            .compare_exchange(
-                Self::OPEN,
-                Self::CLOSED,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
+            .compare_exchange(Self::OPEN, Self::CLOSED, Ordering::SeqCst, Ordering::SeqCst)
             .is_err_and(|state| state == Self::CANCELLED)
     }
 }
@@ -534,7 +529,10 @@ mod tests {
     fn a_cancel_before_the_measurement_ends_is_accepted_and_wins() {
         let window = CancelWindow::new();
         assert!(window.cancel());
-        assert!(window.cancel(), "repeats of an accepted cancel stay accepted");
+        assert!(
+            window.cancel(),
+            "repeats of an accepted cancel stay accepted"
+        );
         assert!(window.close(), "the measurement result is discarded");
     }
 

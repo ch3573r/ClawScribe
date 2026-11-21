@@ -774,7 +774,9 @@ mod tests {
             .collect();
         let quiet_before = rms(&mixed[SAMPLE_RATE..]);
         raise_quiet_segment(&mut mixed);
-        let loudest = mixed.iter().fold(0.0f32, |max, sample| max.max(sample.abs()));
+        let loudest = mixed
+            .iter()
+            .fold(0.0f32, |max, sample| max.max(sample.abs()));
         assert!(loudest < 1.0, "loudest {loudest}");
         let clipped = mixed.iter().filter(|sample| sample.abs() >= 1.0).count();
         assert!(clipped <= mixed.len() / 1000);

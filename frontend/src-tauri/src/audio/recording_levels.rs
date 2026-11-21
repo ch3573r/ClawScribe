@@ -122,10 +122,22 @@ mod tests {
         let mut meter = LevelMeter::new(start);
         let chunk = [0.5f32; 480];
         assert!(meter
-            .observe(&DeviceType::Microphone, &chunk, start + Duration::from_millis(10), true, both)
+            .observe(
+                &DeviceType::Microphone,
+                &chunk,
+                start + Duration::from_millis(10),
+                true,
+                both
+            )
             .is_none());
         assert!(meter
-            .observe(&DeviceType::System, &chunk, start + Duration::from_millis(99), true, both)
+            .observe(
+                &DeviceType::System,
+                &chunk,
+                start + Duration::from_millis(99),
+                true,
+                both
+            )
             .is_none());
     }
 
@@ -159,9 +171,17 @@ mod tests {
         let start = Instant::now();
         let mut meter = LevelMeter::new(start);
         // Alternating +-0.5: rms 0.5, peak 0.5.
-        let wave: Vec<f32> = (0..480).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let wave: Vec<f32> = (0..480)
+            .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
         let levels = meter
-            .observe(&DeviceType::Microphone, &wave, start + LEVEL_WINDOW, true, both)
+            .observe(
+                &DeviceType::Microphone,
+                &wave,
+                start + LEVEL_WINDOW,
+                true,
+                both,
+            )
             .unwrap();
         let mic = levels.mic.unwrap();
         assert!((mic.rms - 0.5).abs() < 1e-6);
@@ -173,7 +193,13 @@ mod tests {
         let start = Instant::now();
         let mut meter = LevelMeter::new(start);
         let levels = meter
-            .observe(&DeviceType::System, &[2.0, -3.0], start + LEVEL_WINDOW, true, both)
+            .observe(
+                &DeviceType::System,
+                &[2.0, -3.0],
+                start + LEVEL_WINDOW,
+                true,
+                both,
+            )
             .unwrap();
         let system = levels.system.unwrap();
         assert_eq!(system.peak, 1.0);
@@ -186,16 +212,40 @@ mod tests {
         let mut meter = LevelMeter::new(start);
         // Only microphone chunks arrive; the system source is not captured.
         let levels = meter
-            .observe(&DeviceType::Microphone, &[0.25; 100], start + LEVEL_WINDOW, true, || (true, false))
+            .observe(
+                &DeviceType::Microphone,
+                &[0.25; 100],
+                start + LEVEL_WINDOW,
+                true,
+                || (true, false),
+            )
             .unwrap();
         assert_eq!(levels.system, None);
         assert!(levels.mic.is_some());
         // Captured but no chunk in the window reads as silence, not as missing.
         let levels = meter
-            .observe(&DeviceType::Microphone, &[], start + LEVEL_WINDOW * 2, true, || (true, true))
+            .observe(
+                &DeviceType::Microphone,
+                &[],
+                start + LEVEL_WINDOW * 2,
+                true,
+                || (true, true),
+            )
             .unwrap();
-        assert_eq!(levels.system, Some(SourceLevel { rms: 0.0, peak: 0.0 }));
-        assert_eq!(levels.mic, Some(SourceLevel { rms: 0.0, peak: 0.0 }));
+        assert_eq!(
+            levels.system,
+            Some(SourceLevel {
+                rms: 0.0,
+                peak: 0.0
+            })
+        );
+        assert_eq!(
+            levels.mic,
+            Some(SourceLevel {
+                rms: 0.0,
+                peak: 0.0
+            })
+        );
     }
 
     #[test]
@@ -203,11 +253,23 @@ mod tests {
         let start = Instant::now();
         let mut meter = LevelMeter::new(start);
         assert!(meter
-            .observe(&DeviceType::Microphone, &[0.9; 100], start + LEVEL_WINDOW, false, both)
+            .observe(
+                &DeviceType::Microphone,
+                &[0.9; 100],
+                start + LEVEL_WINDOW,
+                false,
+                both
+            )
             .is_none());
         // Audio from before is not carried into the first window after resuming.
         let levels = meter
-            .observe(&DeviceType::Microphone, &[0.1; 100], start + LEVEL_WINDOW * 2, true, both)
+            .observe(
+                &DeviceType::Microphone,
+                &[0.1; 100],
+                start + LEVEL_WINDOW * 2,
+                true,
+                both,
+            )
             .unwrap();
         assert!((levels.mic.unwrap().peak - 0.1).abs() < 1e-6);
     }
@@ -235,10 +297,16 @@ mod tests {
     #[test]
     fn the_payload_has_the_documented_shape() {
         let json = serde_json::to_value(RecordingLevels {
-            mic: Some(SourceLevel { rms: 0.25, peak: 0.5 }),
+            mic: Some(SourceLevel {
+                rms: 0.25,
+                peak: 0.5,
+            }),
             system: None,
         })
         .unwrap();
-        assert_eq!(json, serde_json::json!({ "mic": { "rms": 0.25, "peak": 0.5 }, "system": null }));
+        assert_eq!(
+            json,
+            serde_json::json!({ "mic": { "rms": 0.25, "peak": 0.5 }, "system": null })
+        );
     }
 }

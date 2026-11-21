@@ -1387,7 +1387,10 @@ mod secret_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing-folder").join("openclaw.json");
         let forgotten = RefCell::new(Vec::new());
-        let config = OpenClawConfig { bearer_token: "fake-new-token-0000".into(), ..untouched() };
+        let config = OpenClawConfig {
+            bearer_token: "fake-new-token-0000".into(),
+            ..untouched()
+        };
         let error = save_config_at(
             &path,
             config,
@@ -1396,7 +1399,11 @@ mod secret_tests {
         )
         .unwrap_err();
         assert!(!error.is_empty());
-        assert_eq!(*forgotten.borrow(), vec![NEW_REFERENCE.to_string()], "the new entry is removed, nothing else");
+        assert_eq!(
+            *forgotten.borrow(),
+            vec![NEW_REFERENCE.to_string()],
+            "the new entry is removed, nothing else"
+        );
         assert!(!path.exists());
     }
 
@@ -1406,9 +1413,18 @@ mod secret_tests {
         let path = write_stored(dir.path());
         let before = fs::read(&path).unwrap();
         for changed in [
-            OpenClawConfig { endpoint: "https://other.example.com".into(), ..untouched() },
-            OpenClawConfig { model_endpoint: "https://models.example.com".into(), ..untouched() },
-            OpenClawConfig { endpoint: "https://openclaw.example.com:8443".into(), ..untouched() },
+            OpenClawConfig {
+                endpoint: "https://other.example.com".into(),
+                ..untouched()
+            },
+            OpenClawConfig {
+                model_endpoint: "https://models.example.com".into(),
+                ..untouched()
+            },
+            OpenClawConfig {
+                endpoint: "https://openclaw.example.com:8443".into(),
+                ..untouched()
+            },
         ] {
             let error = save_config_at(
                 &path,
@@ -1426,8 +1442,17 @@ mod secret_tests {
     fn the_same_endpoint_in_another_spelling_keeps_the_token() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_stored(dir.path());
-        let spelled = OpenClawConfig { endpoint: " HTTPS://OpenClaw.Example.com/ ".into(), ..untouched() };
-        save_config_at(&path, spelled, |_| panic!("not sealed"), |_| panic!("not removed")).unwrap();
+        let spelled = OpenClawConfig {
+            endpoint: " HTTPS://OpenClaw.Example.com/ ".into(),
+            ..untouched()
+        };
+        save_config_at(
+            &path,
+            spelled,
+            |_| panic!("not sealed"),
+            |_| panic!("not removed"),
+        )
+        .unwrap();
         assert_eq!(stored_token(&path), OLD_REFERENCE);
     }
 
@@ -1441,10 +1466,25 @@ mod secret_tests {
             bearer_token: "fake-new-token-0000".into(),
             ..untouched()
         };
-        save_config_at(&path, moved, |_| Ok(NEW_REFERENCE.to_string()), |old| forgotten.borrow_mut().push(old.to_string())).unwrap();
+        save_config_at(
+            &path,
+            moved,
+            |_| Ok(NEW_REFERENCE.to_string()),
+            |old| forgotten.borrow_mut().push(old.to_string()),
+        )
+        .unwrap();
         assert_eq!(stored_token(&path), NEW_REFERENCE);
-        let short = OpenClawConfig { bearer_token: "abcd".into(), ..untouched() };
-        let error = save_config_at(&path, short, |_| panic!("not sealed"), |_| panic!("not removed")).unwrap_err();
+        let short = OpenClawConfig {
+            bearer_token: "abcd".into(),
+            ..untouched()
+        };
+        let error = save_config_at(
+            &path,
+            short,
+            |_| panic!("not sealed"),
+            |_| panic!("not removed"),
+        )
+        .unwrap_err();
         assert!(error.contains("too short"));
         assert_eq!(stored_token(&path), NEW_REFERENCE);
     }
@@ -1453,10 +1493,28 @@ mod secret_tests {
     fn without_a_stored_token_the_endpoint_changes_freely() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("openclaw.json");
-        let config = OpenClawConfig { endpoint: "https://one.example.com".into(), ..OpenClawConfig::default() };
-        save_config_at(&path, config, |_| panic!("no token"), |_| panic!("nothing stored")).unwrap();
-        let config = OpenClawConfig { endpoint: "https://two.example.com".into(), ..OpenClawConfig::default() };
-        save_config_at(&path, config, |_| panic!("no token"), |_| panic!("nothing stored")).unwrap();
+        let config = OpenClawConfig {
+            endpoint: "https://one.example.com".into(),
+            ..OpenClawConfig::default()
+        };
+        save_config_at(
+            &path,
+            config,
+            |_| panic!("no token"),
+            |_| panic!("nothing stored"),
+        )
+        .unwrap();
+        let config = OpenClawConfig {
+            endpoint: "https://two.example.com".into(),
+            ..OpenClawConfig::default()
+        };
+        save_config_at(
+            &path,
+            config,
+            |_| panic!("no token"),
+            |_| panic!("nothing stored"),
+        )
+        .unwrap();
     }
 
     #[test]

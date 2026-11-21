@@ -49,7 +49,9 @@ pub(crate) fn same_destination(a: &str, b: &str) -> bool {
         let url = Url::parse(value.trim()).ok()?;
         Some((
             url.scheme().to_string(),
-            url.host_str()?.trim_matches(['[', ']']).to_ascii_lowercase(),
+            url.host_str()?
+                .trim_matches(['[', ']'])
+                .to_ascii_lowercase(),
             url.port_or_known_default()?,
             url.path().trim_end_matches('/').to_ascii_lowercase(),
             url.query().unwrap_or("").to_string(),
@@ -57,8 +59,10 @@ pub(crate) fn same_destination(a: &str, b: &str) -> bool {
     }
     match (key(a), key(b)) {
         (Some(a), Some(b)) => a == b,
-        _ => a.trim().trim_end_matches('/').to_ascii_lowercase()
-            == b.trim().trim_end_matches('/').to_ascii_lowercase(),
+        _ => {
+            a.trim().trim_end_matches('/').to_ascii_lowercase()
+                == b.trim().trim_end_matches('/').to_ascii_lowercase()
+        }
     }
 }
 
@@ -78,7 +82,10 @@ pub(crate) fn keeps_destination(stored: &str, requested: &str) -> bool {
         && stored.host_str().map(str::to_ascii_lowercase)
             == requested.host_str().map(str::to_ascii_lowercase)
         && stored.port() == requested.port()
-        && stored.path().trim_end_matches('/').eq_ignore_ascii_case(requested.path().trim_end_matches('/'))
+        && stored
+            .path()
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case(requested.path().trim_end_matches('/'))
         && stored.query() == requested.query()
 }
 
@@ -177,24 +184,63 @@ mod tests {
     use super::*;
     #[test]
     fn destinations_compare_by_scheme_host_port_and_path() {
-        assert!(same_destination("https://gateway.example.com/v1", "https://gateway.example.com/v1/"));
-        assert!(same_destination(" HTTPS://Gateway.Example.com:443/V1 ", "https://gateway.example.com/v1"));
-        assert!(!same_destination("https://gateway.example.com/v1", "http://gateway.example.com/v1"));
-        assert!(!same_destination("https://gateway.example.com/v1", "https://other.example.com/v1"));
-        assert!(!same_destination("https://gateway.example.com/v1", "https://gateway.example.com:8443/v1"));
-        assert!(!same_destination("https://gateway.example.com/v1", "https://gateway.example.com/v2"));
-        assert!(!same_destination("not a url", "https://gateway.example.com"));
+        assert!(same_destination(
+            "https://gateway.example.com/v1",
+            "https://gateway.example.com/v1/"
+        ));
+        assert!(same_destination(
+            " HTTPS://Gateway.Example.com:443/V1 ",
+            "https://gateway.example.com/v1"
+        ));
+        assert!(!same_destination(
+            "https://gateway.example.com/v1",
+            "http://gateway.example.com/v1"
+        ));
+        assert!(!same_destination(
+            "https://gateway.example.com/v1",
+            "https://other.example.com/v1"
+        ));
+        assert!(!same_destination(
+            "https://gateway.example.com/v1",
+            "https://gateway.example.com:8443/v1"
+        ));
+        assert!(!same_destination(
+            "https://gateway.example.com/v1",
+            "https://gateway.example.com/v2"
+        ));
+        assert!(!same_destination(
+            "not a url",
+            "https://gateway.example.com"
+        ));
         assert!(same_destination("not a url/", "NOT A URL"));
     }
 
     #[test]
     fn a_key_may_move_from_http_to_https_on_the_same_host_and_nowhere_else() {
-        assert!(keeps_destination("http://openclaw.example.com", "https://openclaw.example.com"));
-        assert!(keeps_destination("http://openclaw.example.com:8080/a", "https://OpenClaw.example.com:8080/a/"));
-        assert!(!keeps_destination("https://openclaw.example.com", "http://openclaw.example.com"));
-        assert!(!keeps_destination("http://openclaw.example.com", "https://other.example.com"));
-        assert!(!keeps_destination("http://openclaw.example.com:8080", "https://openclaw.example.com:9090"));
-        assert!(!keeps_destination("http://openclaw.example.com/a", "https://openclaw.example.com/b"));
+        assert!(keeps_destination(
+            "http://openclaw.example.com",
+            "https://openclaw.example.com"
+        ));
+        assert!(keeps_destination(
+            "http://openclaw.example.com:8080/a",
+            "https://OpenClaw.example.com:8080/a/"
+        ));
+        assert!(!keeps_destination(
+            "https://openclaw.example.com",
+            "http://openclaw.example.com"
+        ));
+        assert!(!keeps_destination(
+            "http://openclaw.example.com",
+            "https://other.example.com"
+        ));
+        assert!(!keeps_destination(
+            "http://openclaw.example.com:8080",
+            "https://openclaw.example.com:9090"
+        ));
+        assert!(!keeps_destination(
+            "http://openclaw.example.com/a",
+            "https://openclaw.example.com/b"
+        ));
     }
 
     #[tokio::test]

@@ -52,9 +52,18 @@ mod tests {
 
     #[test]
     fn parses_each_flag() {
-        assert_eq!(parse_cli_action(&["app", "--toggle-recording"]), Some(CliAction::ToggleRecording));
-        assert_eq!(parse_cli_action(&["app", "--start-recording"]), Some(CliAction::StartRecording));
-        assert_eq!(parse_cli_action(&["app", "--stop-recording"]), Some(CliAction::StopRecording));
+        assert_eq!(
+            parse_cli_action(&["app", "--toggle-recording"]),
+            Some(CliAction::ToggleRecording)
+        );
+        assert_eq!(
+            parse_cli_action(&["app", "--start-recording"]),
+            Some(CliAction::StartRecording)
+        );
+        assert_eq!(
+            parse_cli_action(&["app", "--stop-recording"]),
+            Some(CliAction::StopRecording)
+        );
     }
 
     #[test]

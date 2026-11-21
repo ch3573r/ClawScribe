@@ -31,7 +31,10 @@ fn drive_is_remote(letter: char) -> bool {
         fn GetDriveTypeW(root_path_name: *const u16) -> u32;
     }
     const DRIVE_REMOTE: u32 = 4;
-    let root: Vec<u16> = format!("{}:\\", letter.to_ascii_uppercase()).encode_utf16().chain(Some(0)).collect();
+    let root: Vec<u16> = format!("{}:\\", letter.to_ascii_uppercase())
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
     // SAFETY: `root` is a NUL-terminated UTF-16 string that outlives the call.
     unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
 }
@@ -112,7 +115,11 @@ fn marked_remote(text: &str) -> bool {
 
 /// Whether `path` is a plain local absolute path. Pure text; no filesystem call.
 pub(crate) fn is_local_path_text(path: &str) -> bool {
-    if path.is_empty() || path.contains('\0') || path.starts_with(char::is_whitespace) || marked_remote(path) {
+    if path.is_empty()
+        || path.contains('\0')
+        || path.starts_with(char::is_whitespace)
+        || marked_remote(path)
+    {
         return false;
     }
     let mut chars = path.chars();
@@ -251,7 +258,10 @@ mod tests {
         assert!(!is_local_path_text(&share.to_string_lossy()));
         assert!(!is_local_path_text(&share.join("inner").to_string_lossy()));
         assert!(!is_local_canonical(&share.canonicalize().unwrap()));
-        assert!(is_local_path_text(&base.path().join("pretend-share-not").to_string_lossy()), "only below the marked folder");
+        assert!(
+            is_local_path_text(&base.path().join("pretend-share-not").to_string_lossy()),
+            "only below the marked folder"
+        );
     }
 
     #[test]

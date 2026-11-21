@@ -804,7 +804,11 @@ fn network_and_device_program_paths_are_refused_in_every_slash_mix_without_touch
 #[test]
 fn only_a_file_named_claude_is_accepted_as_the_program() {
     let dir = tempfile::tempdir().unwrap();
-    let name = if cfg!(windows) { "claude.exe" } else { "claude" };
+    let name = if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    };
     let good = dir.path().join(name);
     std::fs::write(&good, b"synthetic").unwrap();
     #[cfg(unix)]
@@ -812,9 +816,18 @@ fn only_a_file_named_claude_is_accepted_as_the_program() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let accepted = resolve_program(&ClaudeCodeConfig { program_path: Some(good.to_string_lossy().into_owned()) });
+    let accepted = resolve_program(&ClaudeCodeConfig {
+        program_path: Some(good.to_string_lossy().into_owned()),
+    });
     assert!(accepted.unwrap().is_some());
-    for other in ["cmd.exe", "powershell.exe", "claude-helper.exe", "notclaude.exe", "claude.exe.txt", "sh"] {
+    for other in [
+        "cmd.exe",
+        "powershell.exe",
+        "claude-helper.exe",
+        "notclaude.exe",
+        "claude.exe.txt",
+        "sh",
+    ] {
         let path = dir.path().join(other);
         std::fs::write(&path, b"synthetic").unwrap();
         #[cfg(unix)]
@@ -823,7 +836,10 @@ fn only_a_file_named_claude_is_accepted_as_the_program() {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         assert_eq!(
-            resolve_program(&ClaudeCodeConfig { program_path: Some(path.to_string_lossy().into_owned()) }).unwrap_err(),
+            resolve_program(&ClaudeCodeConfig {
+                program_path: Some(path.to_string_lossy().into_owned())
+            })
+            .unwrap_err(),
             INVALID_PROGRAM,
             "{other}"
         );
@@ -831,15 +847,32 @@ fn only_a_file_named_claude_is_accepted_as_the_program() {
     // A directory named claude, and a missing file, are not programs.
     let directory = dir.path().join("sub").join(name);
     std::fs::create_dir_all(&directory).unwrap();
-    assert!(resolve_program(&ClaudeCodeConfig { program_path: Some(directory.to_string_lossy().into_owned()) }).is_err());
-    assert!(resolve_program(&ClaudeCodeConfig { program_path: Some(dir.path().join("missing").join(name).to_string_lossy().into_owned()) }).is_err());
+    assert!(resolve_program(&ClaudeCodeConfig {
+        program_path: Some(directory.to_string_lossy().into_owned())
+    })
+    .is_err());
+    assert!(resolve_program(&ClaudeCodeConfig {
+        program_path: Some(
+            dir.path()
+                .join("missing")
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        )
+    })
+    .is_err());
     #[cfg(windows)]
     {
         let shouted = dir.path().join("shout").join("CLAUDE.CMD");
         std::fs::create_dir_all(shouted.parent().unwrap()).unwrap();
         std::fs::write(&shouted, b"synthetic").unwrap();
-        let accepted = resolve_program(&ClaudeCodeConfig { program_path: Some(shouted.to_string_lossy().into_owned()) });
-        assert!(accepted.is_ok(), "the file name's case does not matter on Windows: {accepted:?}");
+        let accepted = resolve_program(&ClaudeCodeConfig {
+            program_path: Some(shouted.to_string_lossy().into_owned()),
+        });
+        assert!(
+            accepted.is_ok(),
+            "the file name's case does not matter on Windows: {accepted:?}"
+        );
     }
 }
 
@@ -848,7 +881,12 @@ fn only_a_file_named_claude_is_accepted_as_the_program() {
 fn a_project_local_shim_is_refused_and_a_global_npm_shim_is_not() {
     let dir = tempfile::tempdir().unwrap();
     // <project>/node_modules/.bin/claude.cmd
-    let local = dir.path().join("project").join("node_modules").join(".bin").join("claude.cmd");
+    let local = dir
+        .path()
+        .join("project")
+        .join("node_modules")
+        .join(".bin")
+        .join("claude.cmd");
     // <npm prefix>\claude.cmd (global installs put the shim in the prefix folder itself)
     let global = dir.path().join("npm").join("claude.cmd");
     for shim in [&local, &global] {
@@ -858,10 +896,22 @@ fn a_project_local_shim_is_refused_and_a_global_npm_shim_is_not() {
     assert!(is_project_local_shim(&local));
     assert!(!is_project_local_shim(&global));
     assert_eq!(
-        resolve_program(&ClaudeCodeConfig { program_path: Some(local.to_string_lossy().into_owned()) }).unwrap_err(),
+        resolve_program(&ClaudeCodeConfig {
+            program_path: Some(local.to_string_lossy().into_owned())
+        })
+        .unwrap_err(),
         INVALID_PROGRAM
     );
-    assert!(resolve_program(&ClaudeCodeConfig { program_path: Some(global.to_string_lossy().into_owned()) }).is_ok());
+    assert!(resolve_program(&ClaudeCodeConfig {
+        program_path: Some(global.to_string_lossy().into_owned())
+    })
+    .is_ok());
     // The shim of the real package inside node_modules is not a shim: only scripts are judged.
-    assert!(!is_project_local_shim(&dir.path().join("npm").join("node_modules").join("x").join("claude.exe")));
+    assert!(!is_project_local_shim(
+        &dir.path()
+            .join("npm")
+            .join("node_modules")
+            .join("x")
+            .join("claude.exe")
+    ));
 }

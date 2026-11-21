@@ -444,4 +444,3 @@ pub async fn pull_ollama_model<R: Runtime>(
 
     Ok(())
 }
-

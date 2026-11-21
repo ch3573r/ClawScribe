@@ -168,7 +168,9 @@ pub(crate) fn roots_from(trusted: Vec<PathBuf>, app_data_dir: Option<PathBuf>) -
     roots
 }
 
-fn trust_backing<R: Runtime>(app: &AppHandle<R>) -> Option<std::sync::Arc<tauri_plugin_store::Store<R>>> {
+fn trust_backing<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Option<std::sync::Arc<tauri_plugin_store::Store<R>>> {
     app.store(crate::trusted_roots::STORE_FILE).ok()
 }
 
@@ -188,16 +190,26 @@ fn stored_folders<R: Runtime>(app: &AppHandle<R>) -> (Option<PathBuf>, Vec<PathB
 /// The first start of this version: the folders the user already had become
 /// roots. Idempotent, and cheap once done.
 pub(crate) fn ensure_takeover<R: Runtime>(app: &AppHandle<R>) {
-    let Some(backing) = trust_backing(app) else { return };
+    let Some(backing) = trust_backing(app) else {
+        return;
+    };
     if crate::trusted_roots::read(backing.as_ref()).takeover_done {
         return;
     }
     let (configured, previous) = stored_folders(app);
     let protected = protected_folders(tauri::Manager::path(app).app_data_dir().ok());
-    match crate::trusted_roots::take_over_once(backing.as_ref(), configured.as_deref(), &previous, &protected) {
+    match crate::trusted_roots::take_over_once(
+        backing.as_ref(),
+        configured.as_deref(),
+        &previous,
+        &protected,
+    ) {
         Ok(outcome) => {
             if !outcome.rejected.is_empty() {
-                warn!("{} earlier recordings folder(s) were not taken over; see Diagnostics", outcome.rejected.len());
+                warn!(
+                    "{} earlier recordings folder(s) were not taken over; see Diagnostics",
+                    outcome.rejected.len()
+                );
             }
         }
         Err(_) => warn!("The earlier recordings folders could not be taken over"),
@@ -210,7 +222,9 @@ pub(crate) fn ensure_takeover<R: Runtime>(app: &AppHandle<R>) {
 /// delete. Runs after the database is open. When it is not available nothing is
 /// recorded as done and the next start tries again.
 pub(crate) async fn take_over_registered_folders<R: Runtime>(app: &AppHandle<R>) {
-    let Some(backing) = trust_backing(app) else { return };
+    let Some(backing) = trust_backing(app) else {
+        return;
+    };
     if crate::trusted_roots::read(backing.as_ref()).registered_done {
         return;
     }
@@ -227,7 +241,11 @@ pub(crate) async fn take_over_registered_folders<R: Runtime>(app: &AppHandle<R>)
         warn!("The folders of saved meetings could not be taken over yet; trying again at the next start");
     }
     let protected = protected_folders(tauri::Manager::path(app).app_data_dir().ok());
-    match crate::trusted_roots::take_over_registered_parents(backing.as_ref(), saved.as_deref(), &protected) {
+    match crate::trusted_roots::take_over_registered_parents(
+        backing.as_ref(),
+        saved.as_deref(),
+        &protected,
+    ) {
         Ok((added, skipped)) if added + skipped > 0 => {
             info!("Took over {added} folder(s) of saved meetings; {skipped} skipped");
         }
@@ -256,12 +274,17 @@ pub(crate) async fn recording_folder_problems<R: Runtime>(app: &AppHandle<R>) ->
     let trust = trust_backing(app)
         .map(|store| crate::trusted_roots::read(store.as_ref()))
         .unwrap_or_default();
-    let defaults = [get_default_recordings_folder(), get_legacy_default_recordings_folder()];
+    let defaults = [
+        get_default_recordings_folder(),
+        get_legacy_default_recordings_folder(),
+    ];
     let (configured, previous) = stored_folders(app);
     let mut problems = Vec::new();
     if let Some(folder) = &configured {
         if !crate::trusted_roots::is_trusted_or_default(&trust, folder, &defaults) {
-            problems.push(format!("{FOLDER_NOTICE} Its recordings are not opened, recovered or deleted from the app."));
+            problems.push(format!(
+                "{FOLDER_NOTICE} Its recordings are not opened, recovered or deleted from the app."
+            ));
         }
     }
     let untrusted = previous
@@ -269,7 +292,9 @@ pub(crate) async fn recording_folder_problems<R: Runtime>(app: &AppHandle<R>) ->
         .filter(|folder| !crate::trusted_roots::is_trusted_or_default(&trust, folder, &defaults))
         .count();
     if untrusted > 0 {
-        problems.push(format!("{untrusted} earlier recordings folder(s) are not trusted and are ignored."));
+        problems.push(format!(
+            "{untrusted} earlier recordings folder(s) are not trusted and are ignored."
+        ));
     }
     static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !problems.is_empty() && !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -365,7 +390,10 @@ pub async fn load_recording_preferences<R: Runtime>(
     let trust = trust_backing(app)
         .map(|store| crate::trusted_roots::read(store.as_ref()))
         .unwrap_or_default();
-    let defaults = [get_default_recordings_folder(), get_legacy_default_recordings_folder()];
+    let defaults = [
+        get_default_recordings_folder(),
+        get_legacy_default_recordings_folder(),
+    ];
     if !crate::trusted_roots::is_trusted_or_default(&trust, &prefs.save_folder, &defaults) {
         warn!("The stored recordings folder is not trusted; the default folder is used");
         prefs.save_folder = get_default_recordings_folder();
@@ -494,15 +522,29 @@ pub(crate) fn protected_folders(app_data_dir: Option<PathBuf>) -> ProtectedFolde
     protected.exact.extend(dirs::download_dir());
     if let Some(home) = dirs::home_dir() {
         protected.exact.push(home.join("AppData"));
-        protected.exact.extend(home.parent().map(std::path::Path::to_path_buf));
+        protected
+            .exact
+            .extend(home.parent().map(std::path::Path::to_path_buf));
     }
-    for variable in ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"] {
-        protected.trees.extend(std::env::var_os(variable).map(PathBuf::from));
+    for variable in [
+        "SystemRoot",
+        "windir",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "ProgramData",
+    ] {
+        protected
+            .trees
+            .extend(std::env::var_os(variable).map(PathBuf::from));
     }
     #[cfg(unix)]
     protected.trees.extend(
-        ["/etc", "/usr", "/bin", "/sbin", "/lib", "/var", "/boot", "/dev", "/proc", "/sys", "/System", "/Library"]
-            .map(PathBuf::from),
+        [
+            "/etc", "/usr", "/bin", "/sbin", "/lib", "/var", "/boot", "/dev", "/proc", "/sys",
+            "/System", "/Library",
+        ]
+        .map(PathBuf::from),
     );
     protected
 }
@@ -513,18 +555,26 @@ pub(crate) fn protected_folders(app_data_dir: Option<PathBuf>) -> ProtectedFolde
 /// whichever drive letter they are on.
 pub(crate) fn is_system_top_level(path: &std::path::Path) -> bool {
     const TREES: &[&str] = &[
-        "windows", "program files", "program files (x86)", "programdata", "recovery", "boot",
-        "system volume information", "$recycle.bin", "windows.old", "perflogs",
+        "windows",
+        "program files",
+        "program files (x86)",
+        "programdata",
+        "recovery",
+        "boot",
+        "system volume information",
+        "$recycle.bin",
+        "windows.old",
+        "perflogs",
     ];
-    let mut parts = path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(name) => name.to_str().map(str::to_ascii_lowercase),
-            _ => None,
-        });
+    let mut parts = path.components().filter_map(|component| match component {
+        std::path::Component::Normal(name) => name.to_str().map(str::to_ascii_lowercase),
+        _ => None,
+    });
     #[cfg(windows)]
     {
-        let Some(top) = parts.next() else { return false };
+        let Some(top) = parts.next() else {
+            return false;
+        };
         if TREES.contains(&top.as_str()) {
             return true;
         }
@@ -549,7 +599,9 @@ pub(crate) fn validate_save_folder(
     // The folder comes from the core's own folder picker, so a network location
     // is fine; what is refused is a drive or share root, a system, profile or
     // application-data folder.
-    if requested.as_os_str().is_empty() || !requested.is_absolute() && !requested.to_string_lossy().starts_with("\\\\") {
+    if requested.as_os_str().is_empty()
+        || !requested.is_absolute() && !requested.to_string_lossy().starts_with("\\\\")
+    {
         return Err(SAVE_FOLDER_REFUSED.into());
     }
     let canonical = requested
@@ -605,7 +657,9 @@ pub async fn set_recording_preferences<R: Runtime>(
     // in this session, and becomes a trusted root.
     let current = load_recording_preferences(&app).await.ok();
     let change = classify_folder_request(
-        current.as_ref().map(|current| current.save_folder.as_path()),
+        current
+            .as_ref()
+            .map(|current| current.save_folder.as_path()),
         &preferences.save_folder,
         &get_default_recordings_folder(),
         |text| crate::file_grants::take(crate::file_grants::Purpose::RecordingsFolder, text),
@@ -623,7 +677,8 @@ pub async fn set_recording_preferences<R: Runtime>(
         let trusted_app = app.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
             validate_save_folder(&checked, &protected)?;
-            let backing = trust_backing(&trusted_app).ok_or_else(|| "Could not save the folder".to_string())?;
+            let backing = trust_backing(&trusted_app)
+                .ok_or_else(|| "Could not save the folder".to_string())?;
             crate::trusted_roots::trust_folder(backing.as_ref(), &checked, &protected)
         })
         .await
@@ -883,14 +938,32 @@ mod previous_folder_tests {
         assert_eq!(remembered[0], p("/old14"));
         assert!(!remembered.contains(&p("/old0")), "the oldest are dropped");
         let again = remember_previous_folder(&remembered, Path::new("/old14"), Path::new("/x"));
-        assert_eq!(again.iter().filter(|folder| **folder == p("/old14")).count(), 1);
+        assert_eq!(
+            again
+                .iter()
+                .filter(|folder| **folder == p("/old14"))
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn trailing_separators_do_not_make_a_folder_a_different_one() {
-        let remembered = remember_previous_folder(&[p("/data/old")], Path::new("/data/old/"), Path::new("/data/new"));
-        assert_eq!(remembered, vec![p("/data/old")], "the same folder with a trailing slash is not added twice");
-        let again = remember_previous_folder(&remembered, Path::new("/data/older//"), Path::new("/data/old/"));
+        let remembered = remember_previous_folder(
+            &[p("/data/old")],
+            Path::new("/data/old/"),
+            Path::new("/data/new"),
+        );
+        assert_eq!(
+            remembered,
+            vec![p("/data/old")],
+            "the same folder with a trailing slash is not added twice"
+        );
+        let again = remember_previous_folder(
+            &remembered,
+            Path::new("/data/older//"),
+            Path::new("/data/old/"),
+        );
         // The folder now in use leaves the list whatever its trailing slash.
         assert_eq!(again, vec![p("/data/older//")]);
         assert!(same_path(Path::new("/"), Path::new("/")));
@@ -900,13 +973,16 @@ mod previous_folder_tests {
     #[cfg(windows)]
     #[test]
     fn on_windows_slash_direction_and_case_do_not_matter() {
-        assert!(same_path(Path::new(r"D:\Recordings\"), Path::new("d:/recordings")));
+        assert!(same_path(
+            Path::new(r"D:\Recordings\"),
+            Path::new("d:/recordings")
+        ));
         assert!(same_path(Path::new(r"C:\"), Path::new("c:/")));
         assert!(!same_path(Path::new(r"C:\"), Path::new(r"D:\")));
-        let list = remember_previous_folder(&[p(r"D:\Old")], Path::new("d:/old/"), Path::new(r"E:\New"));
+        let list =
+            remember_previous_folder(&[p(r"D:\Old")], Path::new("d:/old/"), Path::new(r"E:\New"));
         assert_eq!(list.len(), 1);
     }
-
 }
 
 #[cfg(test)]
@@ -922,7 +998,12 @@ mod save_folder_tests {
 
     fn layout() -> (tempfile::TempDir, ProtectedFolders) {
         let base = tempfile::tempdir().unwrap();
-        for dir in ["profile/Documents/Recordings", "appdata", "system/sub", "ordinary/recordings"] {
+        for dir in [
+            "profile/Documents/Recordings",
+            "appdata",
+            "system/sub",
+            "ordinary/recordings",
+        ] {
             std::fs::create_dir_all(base.path().join(dir)).unwrap();
         }
         let protected = protected(&base.path().canonicalize().unwrap());
@@ -934,9 +1015,16 @@ mod save_folder_tests {
         let (base, protected) = layout();
         let folder = base.path().join("ordinary").join("recordings");
         let resolved = validate_save_folder(&folder, &protected).unwrap();
-        assert!(same_path(&resolved, &crate::database::meeting_files::plain_path(&folder.canonicalize().unwrap())));
+        assert!(same_path(
+            &resolved,
+            &crate::database::meeting_files::plain_path(&folder.canonicalize().unwrap())
+        ));
         // A folder below the profile is fine; the profile itself is not.
-        assert!(validate_save_folder(&base.path().join("profile/Documents/Recordings"), &protected).is_ok());
+        assert!(validate_save_folder(
+            &base.path().join("profile/Documents/Recordings"),
+            &protected
+        )
+        .is_ok());
         // `..` segments are resolved before judging.
         assert!(validate_save_folder(&folder.join("..").join("recordings"), &protected).is_ok());
     }
@@ -951,11 +1039,17 @@ mod save_folder_tests {
             base.path().join("system/sub"),
             base.path().join("ordinary/recordings/../../profile"),
         ] {
-            assert_eq!(validate_save_folder(&refused, &protected).unwrap_err(), SAVE_FOLDER_REFUSED);
+            assert_eq!(
+                validate_save_folder(&refused, &protected).unwrap_err(),
+                SAVE_FOLDER_REFUSED
+            );
         }
         // A filesystem root (a drive root on Windows) is never acceptable.
         let root = base.path().ancestors().last().unwrap().to_path_buf();
-        assert_eq!(validate_save_folder(&root, &ProtectedFolders::default()).unwrap_err(), SAVE_FOLDER_REFUSED);
+        assert_eq!(
+            validate_save_folder(&root, &ProtectedFolders::default()).unwrap_err(),
+            SAVE_FOLDER_REFUSED
+        );
     }
 
     #[test]
@@ -974,17 +1068,26 @@ mod save_folder_tests {
         ] {
             let error = validate_save_folder(&refused, &protected).unwrap_err();
             assert_eq!(error, SAVE_FOLDER_REFUSED);
-            assert!(!error.contains("server"), "the message never names the path");
+            assert!(
+                !error.contains("server"),
+                "the message never names the path"
+            );
         }
     }
 
     #[test]
     fn the_known_folders_of_this_machine_are_derived_not_hard_coded() {
         let protected = protected_folders(Some(PathBuf::from("app-data-root")));
-        assert!(protected.exact.iter().any(|folder| folder == &PathBuf::from("app-data-root")));
+        assert!(protected
+            .exact
+            .iter()
+            .any(|folder| folder == &PathBuf::from("app-data-root")));
         if let Some(home) = dirs::home_dir() {
             assert!(protected.exact.contains(&home));
-            assert_eq!(validate_save_folder(&home, &protected).unwrap_err(), SAVE_FOLDER_REFUSED);
+            assert_eq!(
+                validate_save_folder(&home, &protected).unwrap_err(),
+                SAVE_FOLDER_REFUSED
+            );
         }
         #[cfg(windows)]
         if let Some(root) = std::env::var_os("SystemRoot") {
@@ -1004,9 +1107,19 @@ mod root_tests {
     #[test]
     fn the_roots_are_the_defaults_the_restored_backups_and_what_the_user_trusted() {
         let base = tempfile::tempdir().unwrap();
-        let (share, local, data) = (base.path().join("share"), base.path().join("local"), base.path().join("data"));
+        let (share, local, data) = (
+            base.path().join("share"),
+            base.path().join("local"),
+            base.path().join("data"),
+        );
         let roots = roots_from(vec![share.clone(), local.clone()], Some(data.clone()));
-        for expected in [get_default_recordings_folder(), get_legacy_default_recordings_folder(), share, local, data.join("restored-recordings")] {
+        for expected in [
+            get_default_recordings_folder(),
+            get_legacy_default_recordings_folder(),
+            share,
+            local,
+            data.join("restored-recordings"),
+        ] {
             assert!(roots.contains(&expected), "{expected:?} missing");
         }
         assert_eq!(roots_from(vec![], None).len(), 2);
@@ -1015,24 +1128,54 @@ mod root_tests {
     #[test]
     fn a_changed_folder_as_plain_text_is_refused_and_only_the_pickers_choice_is_accepted() {
         let base = tempfile::tempdir().unwrap();
-        let (current, picked, typed) = (base.path().join("current"), base.path().join("picked"), base.path().join("typed"));
+        let (current, picked, typed) = (
+            base.path().join("current"),
+            base.path().join("picked"),
+            base.path().join("typed"),
+        );
         let default = get_default_recordings_folder();
-        let take = |text: &str| crate::file_grants::take(crate::file_grants::Purpose::RecordingsFolder, text);
+        let take = |text: &str| {
+            crate::file_grants::take(crate::file_grants::Purpose::RecordingsFolder, text)
+        };
         // Unchanged and the default need no grant.
-        assert!(matches!(classify_folder_request(Some(&current), &current, &default, take), Ok(FolderChange::Keep(_))));
-        assert!(matches!(classify_folder_request(Some(&current), &default, &default, take), Ok(FolderChange::Default)));
+        assert!(matches!(
+            classify_folder_request(Some(&current), &current, &default, take),
+            Ok(FolderChange::Keep(_))
+        ));
+        assert!(matches!(
+            classify_folder_request(Some(&current), &default, &default, take),
+            Ok(FolderChange::Default)
+        ));
         // Text the webview made up, a network folder included, is not trusted.
         crate::local_path::mark_remote_for_tests(&base.path().join("share"));
-        for text in [typed.clone(), base.path().join("share").join("recordings"), PathBuf::from(r"\\host\share\recordings")] {
-            assert!(classify_folder_request(Some(&current), &text, &default, take).is_err(), "{}", text.display());
+        for text in [
+            typed.clone(),
+            base.path().join("share").join("recordings"),
+            PathBuf::from(r"\\host\share\recordings"),
+        ] {
+            assert!(
+                classify_folder_request(Some(&current), &text, &default, take).is_err(),
+                "{}",
+                text.display()
+            );
         }
         // The folder the picker returned is accepted once, network or not.
         crate::file_grants::grant(crate::file_grants::Purpose::RecordingsFolder, &picked).unwrap();
-        assert!(matches!(classify_folder_request(Some(&current), &picked, &default, take), Ok(FolderChange::Granted(_))));
-        assert!(classify_folder_request(Some(&current), &picked, &default, take).is_err(), "used up");
+        assert!(matches!(
+            classify_folder_request(Some(&current), &picked, &default, take),
+            Ok(FolderChange::Granted(_))
+        ));
+        assert!(
+            classify_folder_request(Some(&current), &picked, &default, take).is_err(),
+            "used up"
+        );
         let share_pick = base.path().join("share").join("picked");
-        crate::file_grants::grant(crate::file_grants::Purpose::RecordingsFolder, &share_pick).unwrap();
-        assert!(matches!(classify_folder_request(Some(&current), &share_pick, &default, take), Ok(FolderChange::Granted(_))));
+        crate::file_grants::grant(crate::file_grants::Purpose::RecordingsFolder, &share_pick)
+            .unwrap();
+        assert!(matches!(
+            classify_folder_request(Some(&current), &share_pick, &default, take),
+            Ok(FolderChange::Granted(_))
+        ));
     }
 
     #[test]
@@ -1052,20 +1195,38 @@ mod root_tests {
         crate::local_path::mark_remote_for_tests(&share);
         assert!(validate_save_folder(&share.join("recordings"), &protected).is_ok());
         let root = base.path().ancestors().last().unwrap().to_path_buf();
-        assert!(validate_save_folder(&root, &protected).is_err(), "a drive root");
+        assert!(
+            validate_save_folder(&root, &protected).is_err(),
+            "a drive root"
+        );
     }
 
     #[test]
     fn the_known_user_folders_themselves_are_refused_and_subfolders_are_not() {
         let protected = protected_folders(None);
-        for known in [dirs::document_dir(), dirs::desktop_dir(), dirs::download_dir()].into_iter().flatten() {
+        for known in [
+            dirs::document_dir(),
+            dirs::desktop_dir(),
+            dirs::download_dir(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             if known.is_dir() {
-                assert_eq!(validate_save_folder(&known, &protected).unwrap_err(), SAVE_FOLDER_REFUSED, "{}", known.display());
+                assert_eq!(
+                    validate_save_folder(&known, &protected).unwrap_err(),
+                    SAVE_FOLDER_REFUSED,
+                    "{}",
+                    known.display()
+                );
             }
         }
         if let Some(home) = dirs::home_dir() {
             if let Some(users) = home.parent() {
-                assert!(validate_save_folder(users, &protected).is_err(), "the folder holding every profile");
+                assert!(
+                    validate_save_folder(users, &protected).is_err(),
+                    "the folder holding every profile"
+                );
             }
         }
     }
@@ -1073,23 +1234,47 @@ mod root_tests {
     #[test]
     fn only_trusted_or_default_folders_are_accepted_as_the_recordings_folder() {
         let trust = crate::trusted_roots::Trust::default();
-        let defaults = [get_default_recordings_folder(), get_legacy_default_recordings_folder()];
+        let defaults = [
+            get_default_recordings_folder(),
+            get_legacy_default_recordings_folder(),
+        ];
         let base = tempfile::tempdir().unwrap();
         let elsewhere = base.path().join("elsewhere");
-        assert!(!crate::trusted_roots::is_trusted_or_default(&trust, &elsewhere, &defaults));
-        assert!(crate::trusted_roots::is_trusted_or_default(&trust, &get_default_recordings_folder(), &defaults));
+        assert!(!crate::trusted_roots::is_trusted_or_default(
+            &trust, &elsewhere, &defaults
+        ));
+        assert!(crate::trusted_roots::is_trusted_or_default(
+            &trust,
+            &get_default_recordings_folder(),
+            &defaults
+        ));
         let memory = Memory::default();
         std::fs::create_dir_all(&elsewhere).unwrap();
-        crate::trusted_roots::trust_folder(&memory, &elsewhere, &ProtectedFolders::default()).unwrap();
-        assert!(crate::trusted_roots::is_trusted_or_default(&crate::trusted_roots::read(&memory), &elsewhere, &defaults));
+        crate::trusted_roots::trust_folder(&memory, &elsewhere, &ProtectedFolders::default())
+            .unwrap();
+        assert!(crate::trusted_roots::is_trusted_or_default(
+            &crate::trusted_roots::read(&memory),
+            &elsewhere,
+            &defaults
+        ));
         assert!(!FOLDER_NOTICE.contains(":\\"), "the notice names no path");
     }
 
     #[cfg(windows)]
     #[test]
     fn system_top_level_folders_are_recognised_on_any_drive() {
-        for refused in [r"C:\Windows", r"D:\windows\System32", r"E:\Program Files", r"G:\ProgramData", r"C:\Users", r"C:\$Recycle.Bin\S-1"] {
-            assert!(is_system_top_level(std::path::Path::new(refused)), "{refused}");
+        for refused in [
+            r"C:\Windows",
+            r"D:\windows\System32",
+            r"E:\Program Files",
+            r"G:\ProgramData",
+            r"C:\Users",
+            r"C:\$Recycle.Bin\S-1",
+        ] {
+            assert!(
+                is_system_top_level(std::path::Path::new(refused)),
+                "{refused}"
+            );
         }
         for fine in [r"D:\Recordings", r"E:\Data\Windows", r"C:\"] {
             assert!(!is_system_top_level(std::path::Path::new(fine)), "{fine}");
