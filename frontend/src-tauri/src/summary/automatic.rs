@@ -15,6 +15,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_store::StoreExt;
 
+pub(crate) mod publication;
+
 const LEGACY_AUTO_SUMMARY: &str = "automatic_summary";
 const AUTO_SUMMARY: &str = "automatic_summary_v2";
 pub(super) const DISABLED: &str = "Automatic summaries are off. You can generate notes here.";
@@ -247,17 +249,33 @@ pub(crate) async fn start<R: Runtime>(
     pool: SqlitePool,
     meeting_id: String,
 ) -> Result<(), String> {
+    launch_recording(app, pool, meeting_id).await?;
+    Ok(())
+}
+
+async fn launch_recording<R: Runtime>(
+    app: AppHandle<R>,
+    pool: SqlitePool,
+    meeting_id: String,
+) -> Result<Launch, String> {
+    if !recording_allowed(&app, &pool, &meeting_id).await? {
+        return Ok(Launch::Handled);
+    }
+    launch(app, pool, meeting_id, Start::Recording).await
+}
+
+async fn recording_allowed<R: Runtime>(
+    app: &AppHandle<R>,
+    pool: &SqlitePool,
+    meeting_id: &str,
+) -> Result<bool, String> {
     let restored = app
         .path()
         .app_data_dir()
         .map_err(|_| "Could not check the recording location")?
         .join("restored-recordings");
-    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
-    if !is_local_recording(&pool, &meeting_id, &restored, &roots).await? {
-        return Ok(());
-    }
-    launch(app, pool, meeting_id, Start::Recording).await?;
-    Ok(())
+    let roots = crate::audio::recording_preferences::recording_roots(app).await;
+    is_local_recording(pool, meeting_id, &restored, &roots).await
 }
 
 async fn is_local_recording(
@@ -324,6 +342,7 @@ pub(crate) async fn start_import<R: Runtime>(
 }
 
 pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: SqlitePool) {
+    publication::resume(&app, &pool).await;
     if get_automatic_summary_preference(app.clone()).await != Ok(true) {
         return;
     }
@@ -343,25 +362,35 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
     };
     drop(route_guard);
 
-    let Ok(candidates) =
-        SummaryProcessesRepository::automatic_resume_candidates(&pool, &fingerprint).await
+    let profile = publication::stored_profile(&app).ok().flatten();
+    let Ok(candidates) = SummaryProcessesRepository::automatic_resume_candidates(
+        &pool,
+        &fingerprint,
+        profile.as_deref(),
+    )
+    .await
     else {
         log::warn!("Could not read interrupted automatic notes");
         return;
     };
-    for meeting in candidates {
+    for (meeting, stored_fingerprint) in candidates {
+        if stored_fingerprint != fingerprint
+            && recording_allowed(&app, &pool, &meeting).await != Ok(true)
+        {
+            continue;
+        }
         match launch(
             app.clone(),
             pool.clone(),
             meeting,
-            Start::Resume(request.clone()),
+            Start::Resume(request.clone(), stored_fingerprint),
         )
         .await
         {
-            Ok(Some(worker)) => {
+            Ok(Launch::Started(worker)) => {
                 let _ = worker.await;
             }
-            Ok(None) => {}
+            Ok(_) => {}
             Err(_) => log::warn!("Could not resume automatic notes"),
         }
     }
@@ -370,7 +399,13 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
 enum Start {
     Recording,
     Import(AuthorizedRequest),
-    Resume(AuthorizedRequest),
+    Resume(AuthorizedRequest, String),
+}
+
+enum Launch {
+    Handled,
+    Busy,
+    Started(tauri::async_runtime::JoinHandle<()>),
 }
 
 async fn launch<R: Runtime>(
@@ -378,28 +413,28 @@ async fn launch<R: Runtime>(
     pool: SqlitePool,
     meeting: String,
     start: Start,
-) -> Result<Option<tauri::async_runtime::JoinHandle<()>>, String> {
+) -> Result<Launch, String> {
     let (origin, resume, prepared) = match start {
-        Start::Recording => ("recording", false, None),
-        Start::Import(request) => ("import", false, Some(request)),
-        Start::Resume(request) => ("", true, Some(request)),
+        Start::Recording => ("recording", None, None),
+        Start::Import(request) => ("import", None, Some(request)),
+        Start::Resume(request, fingerprint) => ("", Some(fingerprint), Some(request)),
     };
     // Stop and repair can both wake this path. Avoid even resolving a provider
     // for rows that cannot be claimed. The write repeats this eligibility check.
-    if !resume
+    if resume.is_none()
         && !SummaryProcessesRepository::can_start_automatic_process(&pool, &meeting, origin)
             .await
             .map_err(|_| "Could not read automatic notes status")?
     {
-        return Ok(None);
+        return Ok(Launch::Handled);
     }
     if origin != "import" && !get_automatic_summary_preference(app.clone()).await? {
         record_outcome(&app, &pool, &meeting, origin, DISABLED).await?;
-        return Ok(None);
+        return Ok(Launch::Handled);
     }
     if let Some(reason) = transcript_unavailable(&pool, &meeting).await? {
         record_outcome(&app, &pool, &meeting, origin, reason).await?;
-        return Ok(None);
+        return Ok(Launch::Handled);
     }
 
     let _route = ROUTE_CHANGE_LOCK.lock().await;
@@ -410,7 +445,7 @@ async fn launch<R: Runtime>(
             Ok(request) => request,
             Err(reason) => {
                 record_outcome(&app, &pool, &meeting, origin, &reason).await?;
-                return Ok(None);
+                return Ok(Launch::Handled);
             }
         };
         let check = dispatch_check(app.clone(), request.review());
@@ -419,16 +454,16 @@ async fn launch<R: Runtime>(
     if let Some(check) = &check {
         if let Err(reason) = check() {
             record_outcome(&app, &pool, &meeting, origin, &reason).await?;
-            return Ok(None);
+            return Ok(Launch::Handled);
         }
     }
     let fingerprint = request.review().fingerprint;
     let provider = super::llm_client::canonical_provider(&request.provider);
     let Some(job) = SummaryService::try_register_job(&meeting, provider)? else {
-        return Ok(None);
+        return Ok(Launch::Busy);
     };
 
-    let claimed = if resume {
+    let claimed = if let Some(fingerprint) = resume {
         SummaryProcessesRepository::claim_automatic_resume(&pool, &meeting, &fingerprint).await
     } else {
         SummaryProcessesRepository::create_automatic_process(&pool, &meeting, origin, &fingerprint)
@@ -436,12 +471,12 @@ async fn launch<R: Runtime>(
     }
     .map_err(|_| "Could not start automatic notes")?;
     if !claimed {
-        return Ok(None);
+        return Ok(Launch::Handled);
     }
     let _ = app.emit(CHANGED_EVENT, &meeting);
     drop(_route);
 
-    Ok(Some(tauri::async_runtime::spawn(async move {
+    Ok(Launch::Started(tauri::async_runtime::spawn(async move {
         match prepare(&app, &pool, &meeting).await {
             Ok((context, language)) => {
                 SummaryService::process_transcript_background(

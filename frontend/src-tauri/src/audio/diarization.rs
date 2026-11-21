@@ -2039,7 +2039,7 @@ pub async fn start_speaker_diarization_command<R: Runtime>(
             drop(guard);
             drop(job);
             if complete.published_retranscription {
-                super::recording_commands::wake_saved_recording_summary(&app, meeting_id);
+                crate::summary::automatic::publication::wake(&app, meeting_id);
             }
             Ok(complete)
         }
@@ -2336,6 +2336,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         &stored_segments,
         &mapped_segments,
         &roots,
+        |folder| crate::summary::automatic::publication::profile_for_folder(&app, folder),
     )
     .await?;
 
@@ -2384,6 +2385,7 @@ async fn save_diarization_labels(
     stored_segments: &[StoredTranscriptSegment],
     mapped_segments: &[TranscriptSegment],
     roots: &[PathBuf],
+    notes_profile: impl FnOnce(&Path) -> Result<Option<String>, String>,
 ) -> Result<(usize, Option<SyncedFiles>)> {
     begin_diarization_save(meeting_id)?;
     // Speaker labels do not change what produced the text; keep its provenance
@@ -2466,7 +2468,13 @@ async fn save_diarization_labels(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    let synced = crate::database::transcript_edits::sync_file(pool, meeting_id, roots).await;
+    let synced = crate::database::transcript_edits::sync_file_with_profile(
+        pool,
+        meeting_id,
+        roots,
+        notes_profile,
+    )
+    .await;
     Ok((updated_segments, synced.ok()))
 }
 
@@ -4319,7 +4327,7 @@ mod tests {
         cancel_speaker_diarization_command(meeting.into()).unwrap();
         assert!(native.await.unwrap().is_err());
         assert!(
-            save_diarization_labels(&pool, meeting, &stored, &mapped, &[])
+            save_diarization_labels(&pool, meeting, &stored, &mapped, &[], |_| Ok(None))
                 .await
                 .unwrap_err()
                 .to_string()
@@ -4375,7 +4383,7 @@ mod tests {
             .await
             .unwrap();
         let (updated, synced) =
-            save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
+            save_diarization_labels(&pool, "review-test", &stored, &mapped, &[], |_| Ok(None))
                 .await
                 .unwrap();
         assert_eq!(updated, 2);
@@ -4415,7 +4423,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
+        save_diarization_labels(&pool, "review-test", &stored, &mapped, &[], |_| Ok(None))
             .await
             .unwrap();
         let original: Option<String> =
@@ -4457,7 +4465,7 @@ mod tests {
         second_piece.id = "a-split-2".into();
         second_piece.text = "Second piece".into();
         mapped.push(second_piece);
-        save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
+        save_diarization_labels(&pool, "review-test", &stored, &mapped, &[], |_| Ok(None))
             .await
             .unwrap();
         let pieces: Vec<Option<String>> = sqlx::query_scalar(
@@ -4476,9 +4484,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let error = save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
-            .await
-            .unwrap_err();
+        let error =
+            save_diarization_labels(&pool, "review-test", &stored, &mapped, &[], |_| Ok(None))
+                .await
+                .unwrap_err();
         assert_eq!(error.to_string(), "The transcript changed while speakers were being detected. Run speaker detection again.");
         let rows: Vec<StoredTranscriptSegment> =
             sqlx::query_as("SELECT * FROM transcripts ORDER BY id")
@@ -4494,7 +4503,7 @@ mod tests {
     async fn speaker_save_applies_labels_when_the_snapshot_matches() {
         let (pool, stored, mapped) = label_save_fixture().await;
         assert_eq!(
-            save_diarization_labels(&pool, "review-test", &stored, &mapped, &[])
+            save_diarization_labels(&pool, "review-test", &stored, &mapped, &[], |_| Ok(None))
                 .await
                 .unwrap()
                 .0,

@@ -575,12 +575,25 @@ pub(crate) enum SyncedFiles {
     Retranscription,
 }
 
-// The calling job holds the inference permit through publication. Only the
-// caller that publishes a pending retranscription can wake automatic notes.
+#[cfg(test)]
 pub(crate) async fn sync_file(
     pool: &SqlitePool,
     meeting: &str,
     roots: &[PathBuf],
+) -> Result<SyncedFiles, String> {
+    sync_file_with_profile(pool, meeting, roots, |_| {
+        Ok(Some("synthetic-profile".into()))
+    })
+    .await
+}
+
+// The calling job holds the inference permit through publication. Only the
+// caller that publishes a pending retranscription can wake automatic notes.
+pub(crate) async fn sync_file_with_profile(
+    pool: &SqlitePool,
+    meeting: &str,
+    roots: &[PathBuf],
+    notes_profile: impl FnOnce(&Path) -> Result<Option<String>, String>,
 ) -> Result<SyncedFiles, String> {
     let Some(payload) = sqlx::query_scalar::<_, Option<String>>(
         "SELECT retranscription_json FROM transcript_file_sync WHERE meeting_id = ?",
@@ -686,6 +699,11 @@ pub(crate) async fn sync_file(
         })
         .await
         .map_err(error)??;
+    let owner = if synced == SyncedFiles::Retranscription {
+        notes_profile(&folder)?
+    } else {
+        None
+    };
     let mut tx = pool.begin().await.map_err(error)?;
     if payload.is_some() {
         sqlx::query(
@@ -701,6 +719,11 @@ pub(crate) async fn sync_file(
         .execute(&mut *tx)
         .await
         .map_err(error)?;
+    if let Some(owner) = owner {
+        crate::summary::automatic::publication::remember(&mut tx, meeting, &owner)
+            .await
+            .map_err(error)?;
+    }
     tx.commit().await.map_err(error)?;
     if recovered_audio
         && crate::audio::incremental_saver::release_registered_capture(
@@ -767,14 +790,17 @@ async fn complete<R: Runtime>(
     job: tokio::sync::OwnedSemaphorePermit,
 ) -> EditResult {
     let roots = crate::audio::recording_preferences::recording_roots(app).await;
-    let synced = sync_file(pool, meeting, &roots).await;
+    let synced = sync_file_with_profile(pool, meeting, &roots, |folder| {
+        crate::summary::automatic::publication::profile_for_folder(app, folder)
+    })
+    .await;
     let _ = app.emit(
         "transcript-text-edited",
         serde_json::json!({ "meeting_id": meeting }),
     );
     drop(job);
     if synced == Ok(SyncedFiles::Retranscription) {
-        crate::audio::recording_commands::wake_saved_recording_summary(app, meeting.to_owned());
+        crate::summary::automatic::publication::wake(app, meeting.to_owned());
     }
     EditResult {
         changed,
@@ -897,14 +923,17 @@ pub async fn api_sync_transcript_file<R: Runtime>(
 ) -> Result<(), String> {
     let job = crate::audio::inference::claim_job()?;
     let roots = crate::audio::recording_preferences::recording_roots(&app).await;
-    let synced = sync_file(state.db_manager.pool(), &meeting_id, &roots).await?;
+    let synced = sync_file_with_profile(state.db_manager.pool(), &meeting_id, &roots, |folder| {
+        crate::summary::automatic::publication::profile_for_folder(&app, folder)
+    })
+    .await?;
     let _ = app.emit(
         "transcript-files-synchronized",
         serde_json::json!({ "meeting_id": meeting_id }),
     );
     drop(job);
     if synced == SyncedFiles::Retranscription {
-        crate::audio::recording_commands::wake_saved_recording_summary(&app, meeting_id);
+        crate::summary::automatic::publication::wake(&app, meeting_id);
     }
     Ok(())
 }

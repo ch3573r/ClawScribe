@@ -203,7 +203,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved", None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -228,13 +228,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved", None)
                 .await
                 .unwrap(),
-            vec![meeting.to_owned()]
+            vec![(meeting.to_owned(), "approved".to_owned())]
         );
         assert!(
-            SummaryProcessesRepository::automatic_resume_candidates(&pool, "different")
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "different", None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -258,7 +258,7 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved")
+            SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved", None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -648,7 +648,9 @@ impl SummaryProcessesRepository {
     ) -> Result<bool, sqlx::Error> {
         Ok(sqlx::query(r#"
             INSERT INTO summary_processes (meeting_id, status, created_at, updated_at, start_time, automatic_origin, automatic_request_fingerprint)
-            SELECT id, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ? FROM meetings WHERE id = ?
+            SELECT id, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?,
+                COALESCE((SELECT profile || ':' FROM retranscription_notes_retry WHERE meeting_id = meetings.id), '') || ?
+            FROM meetings WHERE id = ?
             ON CONFLICT(meeting_id) DO UPDATE SET status = excluded.status, error = NULL,
                 start_time = excluded.start_time, updated_at = excluded.updated_at, end_time = NULL,
                 automatic_origin = excluded.automatic_origin, automatic_request_fingerprint = excluded.automatic_request_fingerprint
@@ -662,9 +664,12 @@ impl SummaryProcessesRepository {
     pub(crate) async fn automatic_resume_candidates(
         pool: &SqlitePool,
         fingerprint: &str,
-    ) -> Result<Vec<String>, sqlx::Error> {
-        sqlx::query_scalar("SELECT meeting_id FROM summary_processes WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ? AND automatic_resume_attempted = 0 AND status = 'failed' AND error = ? ORDER BY start_time DESC, meeting_id LIMIT 3")
-            .bind(fingerprint).bind(INTERRUPTED).fetch_all(pool).await
+        profile: Option<&str>,
+    ) -> Result<Vec<(String, String)>, sqlx::Error> {
+        sqlx::query_as("SELECT meeting_id, automatic_request_fingerprint FROM summary_processes
+            WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint IN (?1, ?2 || ':' || ?1)
+            AND automatic_resume_attempted = 0 AND status = 'failed' AND error = ?3 ORDER BY start_time DESC, meeting_id LIMIT 3")
+            .bind(fingerprint).bind(profile).bind(INTERRUPTED).fetch_all(pool).await
     }
 
     pub(crate) async fn claim_automatic_resume(

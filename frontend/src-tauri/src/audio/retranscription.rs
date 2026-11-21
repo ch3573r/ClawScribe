@@ -200,7 +200,7 @@ pub async fn start_retranscription<R: Runtime>(
             drop(guard);
             drop(job);
             if res.published_retranscription {
-                super::recording_commands::wake_saved_recording_summary(&app, meeting_id);
+                crate::summary::automatic::publication::wake(&app, meeting_id);
             }
         }
         Err(e) => {
@@ -728,7 +728,13 @@ async fn save_retranscription_transcripts<R: Runtime>(
     .await?;
 
     emit_progress(app, meeting_id, "saving", 90, "Updating recording files...");
-    let synced = crate::database::transcript_edits::sync_file(pool, meeting_id, &roots).await;
+    let synced = crate::database::transcript_edits::sync_file_with_profile(
+        pool,
+        meeting_id,
+        &roots,
+        |folder| crate::summary::automatic::publication::profile_for_folder(app, folder),
+    )
+    .await;
     if synced.is_err() {
         warn!("Retranscription saved; recording files need updating");
     }
@@ -1280,6 +1286,12 @@ mod tests {
                     .await
                     .unwrap();
             assert!(pending);
+            let retries: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM retranscription_notes_retry")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(retries, 0);
 
             pool.close().await;
             let pool = sqlx::SqlitePool::connect_with(
@@ -1293,10 +1305,25 @@ mod tests {
                 sync(&pool, "review-test", &[]).await.unwrap(),
                 SyncedFiles::Retranscription
             );
+            // Simulate exit immediately after publication, before the in-memory wake.
+            pool.close().await;
+            let pool = sqlx::SqlitePool::connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(folder.path().join("library.sqlite")),
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 sync(&pool, "review-test", &[]).await.unwrap(),
                 SyncedFiles::Other
             );
+            let owner: String = sqlx::query_scalar(
+                "SELECT profile FROM retranscription_notes_retry WHERE meeting_id='review-test'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(owner, "synthetic-profile");
             assert_eq!(std::fs::read(&original).unwrap(), b"synthetic audio bytes");
 
             let metadata: serde_json::Value = serde_json::from_slice(
