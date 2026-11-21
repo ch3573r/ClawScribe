@@ -374,7 +374,8 @@ See [call detection](docs/teams-detection.md).
   browser draft, or publishes through a configured self-hosted REST endpoint.
 - **OpenClaw** can send saved meeting transcripts to a configured destination.
   Each meeting shows its delivery result. You can review failed deliveries
-  and confirm uncertain ones before retrying.
+  and confirm uncertain ones at the original destination before retrying.
+  When recording files need repair, the handoff waits for your review.
 
 **Export history** shows Microsoft and Confluence results from the meeting and
 travels with portable backups. If an export has an unknown outcome, inspect the

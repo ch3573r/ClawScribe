@@ -41,7 +41,7 @@ const statusLabels: Record<ImportQueueItem['status'], string> = {
 export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: ImportAudioDialogProps) {
   const router = useRouter();
   const { selectedLanguage, transcriptModelConfig, modelConfig, isAutoSummary } = useConfig();
-  const { items, error: queueError, loading } = useImportQueue(open);
+  const { items, error: queueError, recoveryNotice, loading } = useImportQueue(open);
   const { availableModels, selectedModelKey, setSelectedModelKey, loadingModels, fetchModels } = useTranscriptionModels(transcriptModelConfig);
   const model = availableModels.find(option => `${option.provider}:${option.name}` === selectedModelKey);
   const cloudProvider = isCloud(model?.provider) ? model?.provider : undefined;
@@ -161,6 +161,7 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
 
         <div className="space-y-4">
           {queueError && <p role="alert" className="text-sm text-destructive">{queueError}</p>}
+          {recoveryNotice && <p role="status" className="text-sm text-warning-foreground">{recoveryNotice}</p>}
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
           {loading && <p role="status" className="text-sm text-muted-foreground">Loading imports…</p>}
           {items.length > 0 && <section className="space-y-2" aria-label="Import queue">

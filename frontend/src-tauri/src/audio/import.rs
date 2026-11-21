@@ -163,27 +163,19 @@ pub(crate) const IMPORT_OWNER_FILE: &str = ".clawscribe-import-owner";
 const COPY_BUFFER_BYTES: usize = 256 * 1024;
 
 pub(crate) fn owns_import_folder(folder: &Path, meeting_id: &str) -> bool {
+    if meeting_id.is_empty() || !unlinked_import_path(folder) {
+        return false;
+    }
     let marker = folder.join(IMPORT_OWNER_FILE);
-    unlinked_import_path(folder)
-        && std::fs::symlink_metadata(&marker)
-            .is_ok_and(|meta| meta.is_file() && meta.len() == meeting_id.len() as u64)
-        && std::fs::read_to_string(&marker).is_ok_and(|id| id == meeting_id)
+    std::fs::symlink_metadata(&marker).is_ok_and(|meta| {
+        meta.is_file()
+            && !crate::local_path::is_link(&meta)
+            && meta.len() == meeting_id.len() as u64
+    }) && std::fs::read_to_string(&marker).is_ok_and(|id| id == meeting_id)
 }
 
 fn unlinked_import_path(folder: &Path) -> bool {
-    folder.ancestors().all(|path| {
-        std::fs::symlink_metadata(path).is_ok_and(|meta| {
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt;
-                const REPARSE_POINT: u32 = 0x400;
-                if meta.file_attributes() & REPARSE_POINT != 0 {
-                    return false;
-                }
-            }
-            meta.is_dir() && !crate::database::meeting_files::is_link(&meta)
-        })
-    })
+    crate::local_path::require_unlinked_directory(folder).is_ok()
 }
 
 fn copy_audio_chunks(
@@ -308,6 +300,7 @@ pub struct ImportResult {
     pub title: String,
     pub segments_count: usize,
     pub duration_seconds: f64,
+    #[serde(default)]
     pub files_pending: bool,
     #[serde(default)]
     pub transcription_provider: Option<String>,

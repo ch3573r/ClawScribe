@@ -8,6 +8,8 @@ use tauri::Emitter;
 
 const CHANGED: &str = "openclaw-handoff-changed";
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const DEFERRED: &str =
+    "Automatic handoff paused for file repair. Review the destination before sending this meeting.";
 static ACTIVE: once_cell::sync::Lazy<std::sync::Mutex<HashSet<String>>> =
     once_cell::sync::Lazy::new(Default::default);
 
@@ -39,6 +41,7 @@ impl Drop for AttemptGuard {
 #[serde(rename_all = "snake_case")]
 enum State {
     Skipped,
+    Deferred,
     Pending,
     Submitted,
     Failed,
@@ -49,6 +52,7 @@ impl State {
     fn name(self) -> &'static str {
         match self {
             Self::Skipped => "skipped",
+            Self::Deferred => "deferred",
             Self::Pending => "pending",
             Self::Submitted => "submitted",
             Self::Failed => "failed",
@@ -135,6 +139,59 @@ impl Attempt {
         }
         self
     }
+
+    fn display_destination(&self, config: &OpenClawConfig) -> Option<String> {
+        self.destination_label.clone().or_else(|| {
+            (self.destination.is_some()
+                && self.destination == delivery_destination_key(&config.endpoint))
+            .then(|| display_endpoint(&config.endpoint))
+            .flatten()
+        })
+    }
+
+    fn reconciliation_token(&self, meeting_id: &str, config: &OpenClawConfig) -> Option<String> {
+        if self.state != State::Unknown {
+            return None;
+        }
+        let destination = self.destination.as_deref()?;
+        self.display_destination(config)?;
+        Some(hash(
+            format!(
+                "{meeting_id}\n{destination}\n{}\n{}",
+                self.idempotency_key, self.updated_at
+            )
+            .as_bytes(),
+        ))
+    }
+
+    fn encode_payload(
+        &mut self,
+        mut payload: Value,
+        old: Option<&Self>,
+    ) -> Result<Vec<u8>, String> {
+        let encode = |value: &Value| {
+            serde_json::to_vec(value).map_err(|_| "Could not encode the meeting handoff".to_owned())
+        };
+        let mut bytes = encode(&payload)?;
+        let mut fingerprint = hash(&bytes);
+        if old.is_some_and(|old| {
+            old.state == State::Failed
+                && old.destination == self.destination
+                && match old.payload_hash.as_deref() {
+                    Some(previous) => previous != fingerprint,
+                    None => old.reconciliation_required,
+                }
+        }) {
+            // A destination can cache an earlier response by key. A reviewed
+            // retry with different content needs its own key in both places.
+            self.idempotency_key = format!("clawscribe-{fingerprint}");
+            payload["idempotency_key"] = json!(self.idempotency_key);
+            bytes = encode(&payload)?;
+            fingerprint = hash(&bytes);
+        }
+        self.payload_hash = Some(fingerprint);
+        Ok(bytes)
+    }
 }
 
 #[derive(Serialize)]
@@ -148,6 +205,7 @@ pub struct MeetingHandoffStatus {
     attempted_destination: Option<String>,
     includes_audio_path: bool,
     review_token: Option<String>,
+    reconciliation_token: Option<String>,
     can_submit: bool,
     can_reconcile: bool,
 }
@@ -378,6 +436,7 @@ pub async fn get_openclaw_submission_status<R: Runtime>(
         "SELECT EXISTS(SELECT 1 FROM transcripts WHERE meeting_id = m.id AND length(trim(transcript)) > 0)
          AND m.folder_path IS NOT NULL AND trim(m.folder_path) <> ''
          AND NOT EXISTS(SELECT 1 FROM transcript_file_sync WHERE meeting_id = m.id)
+         AND NOT EXISTS(SELECT 1 FROM recording_outcomes WHERE meeting_id = m.id AND recording_files_incomplete = 1)
          FROM meetings m WHERE m.id = ?",
     ).bind(&meeting_id).fetch_optional(pool).await.map_err(|_| "Could not read this meeting")?;
     let eligible = eligible.ok_or("This meeting is unavailable")?;
@@ -407,12 +466,20 @@ fn meeting_status(
         !attempt.reconciliation_required
             || attempt.destination.is_some() && attempt.destination == destination
     });
+    let reconciliation_token = attempt
+        .as_ref()
+        .and_then(|attempt| attempt.reconciliation_token(&meeting_id, config));
     MeetingHandoffStatus {
         review_token: review_token(config, &meeting_id),
         meeting_id,
         state: state.map_or("not_sent", State::name),
-        message: if !same_destination && state == Some(State::Failed) {
+        message: if state == Some(State::Unknown) && reconciliation_token.is_none() {
+            "The original OpenClaw destination is unavailable. Check the delivery directly in OpenClaw.".into()
+        } else if !same_destination && state == Some(State::Failed) {
             "Restore the original OpenClaw destination before retrying this delivery.".into()
+        } else if eligible && state == Some(State::Deferred) {
+            "Automatic handoff was paused. Review the destination before sending this meeting."
+                .into()
         } else {
             attempt
                 .as_ref()
@@ -421,13 +488,17 @@ fn meeting_status(
         },
         updated_at: attempt.as_ref().map(|attempt| attempt.updated_at.clone()),
         status_code: attempt.as_ref().and_then(|attempt| attempt.status_code),
-        attempted_destination: attempt.and_then(|attempt| attempt.destination_label),
+        attempted_destination: attempt.and_then(|attempt| attempt.display_destination(config)),
         destination: display_endpoint(&config.endpoint),
         includes_audio_path: config.include_audio_path,
         can_submit: eligible
             && same_destination
-            && matches!(state, None | Some(State::Skipped | State::Failed)),
-        can_reconcile: state == Some(State::Unknown),
+            && matches!(
+                state,
+                None | Some(State::Skipped | State::Deferred | State::Failed)
+            ),
+        can_reconcile: reconciliation_token.is_some(),
+        reconciliation_token,
     }
 }
 
@@ -444,19 +515,20 @@ pub async fn submit_meeting_folder_to_openclaw<R: Runtime>(
 pub(super) async fn submit_automatic<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
-    empty: bool,
+    files_needed_repair: bool,
 ) -> Result<(), String> {
-    submit(app, meeting_id, None, empty).await
+    submit(app, meeting_id, None, files_needed_repair).await
 }
 
 async fn submit<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
     reviewed: Option<&str>,
-    empty: bool,
+    files_needed_repair: bool,
 ) -> Result<(), String> {
+    let _work = crate::updates::admit_work()?;
     let guard = AttemptGuard::acquire(meeting_id)?;
-    let result = submit_guarded(app, meeting_id, reviewed, empty).await;
+    let result = submit_guarded(app, meeting_id, reviewed, files_needed_repair).await;
     drop(guard);
     changed(app, meeting_id);
     result
@@ -466,7 +538,7 @@ async fn submit_guarded<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
     reviewed: Option<&str>,
-    empty: bool,
+    files_needed_repair: bool,
 ) -> Result<(), String> {
     let state = app
         .try_state::<AppState>()
@@ -498,7 +570,8 @@ async fn submit_guarded<R: Runtime>(
         }
     }
     let Some((title, pending_files, has_text)) = sqlx::query_as::<_, (String, bool, bool)>(
-        "SELECT m.title, EXISTS(SELECT 1 FROM transcript_file_sync WHERE meeting_id = m.id),
+        "SELECT m.title, EXISTS(SELECT 1 FROM transcript_file_sync WHERE meeting_id = m.id)
+           OR EXISTS(SELECT 1 FROM recording_outcomes WHERE meeting_id = m.id AND recording_files_incomplete = 1),
          EXISTS(SELECT 1 FROM transcripts WHERE meeting_id = m.id AND length(trim(transcript)) > 0)
          FROM meetings m WHERE id = ?",
     )
@@ -510,17 +583,19 @@ async fn submit_guarded<R: Runtime>(
         return Err("This meeting is unavailable".into());
     };
     let mut attempt = Attempt::new(meeting_id, &config);
-    if empty
-        || (!has_text
-            && !existing
-                .as_ref()
-                .is_some_and(|attempt| attempt.reconciliation_required))
-    {
+    if !has_text {
+        if reviewed.is_some() {
+            return Err("There is no saved transcript text to send".into());
+        }
         attempt.set(
             State::Skipped,
             "No transcript text was captured, so this meeting was skipped.",
             None,
         );
+        return persist(app, pool, meeting_id, &attempt).await;
+    }
+    if reviewed.is_none() && config.enabled && (files_needed_repair || pending_files) {
+        attempt.set(State::Deferred, DEFERRED, None);
         return persist(app, pool, meeting_id, &attempt).await;
     }
     let problem = config_problem.or_else(|| handoff_config_problem(&config));
@@ -558,7 +633,7 @@ async fn submit_guarded<R: Runtime>(
     .await
     {
         Ok(Some(payload)) => payload,
-        Ok(None) if !attempt.reconciliation_required => {
+        Ok(None) if reviewed.is_none() => {
             attempt.set(
                 State::Skipped,
                 "No transcript text was available, so this meeting was skipped.",
@@ -566,7 +641,7 @@ async fn submit_guarded<R: Runtime>(
             );
             return persist(app, pool, meeting_id, &attempt).await;
         }
-        Ok(None) => return Err("The original handoff payload is unavailable".into()),
+        Ok(None) => return Err("There is no saved transcript text to send".into()),
         Err(message) => {
             // Keep earlier evidence about an uncertain delivery intact.
             if existing.is_none() {
@@ -576,17 +651,7 @@ async fn submit_guarded<R: Runtime>(
             return Err(message);
         }
     };
-    let payload =
-        serde_json::to_vec(&payload).map_err(|_| "Could not encode the meeting handoff")?;
-    attempt.payload_hash = Some(hash(&payload));
-    if let Some(old) = &existing {
-        if old.reconciliation_required
-            && old.payload_hash.is_some()
-            && old.payload_hash != attempt.payload_hash
-        {
-            return Err("The saved transcript or handoff settings changed. The previous payload cannot be retried safely.".into());
-        }
-    }
+    let payload = attempt.encode_payload(payload, existing.as_ref())?;
 
     let client = crate::openai::secret_destination::secret_client(
         reqwest::Client::builder().timeout(SEND_TIMEOUT),
@@ -608,6 +673,11 @@ async fn submit_guarded<R: Runtime>(
     let (client, request) = match request {
         Ok(prepared) => prepared,
         Err(_) => {
+            // No POST happened. Preserve the most recent actual attempt and
+            // its key so a later reviewed retry can use that history.
+            if let Some(old) = existing.filter(|old| old.state == State::Failed) {
+                attempt = old;
+            }
             attempt.set(
                 State::Failed,
                 "OpenClaw could not be reached. Check the endpoint and network settings.",
@@ -646,7 +716,9 @@ pub async fn reconcile_openclaw_handoff<R: Runtime>(
     app: AppHandle<R>,
     meeting_id: String,
     received: bool,
+    reconciliation_token: String,
 ) -> Result<MeetingHandoffStatus, String> {
+    let _work = crate::updates::admit_work()?;
     let guard = AttemptGuard::acquire(&meeting_id)?;
     let state = app
         .try_state::<AppState>()
@@ -660,6 +732,13 @@ pub async fn reconcile_openclaw_handoff<R: Runtime>(
     let Some(mut attempt) = attempt.filter(|attempt| attempt.state == State::Unknown) else {
         return Err("There is no uncertain delivery to reconcile".into());
     };
+    if attempt
+        .reconciliation_token(&meeting_id, &config)
+        .as_deref()
+        != Some(reconciliation_token.as_str())
+    {
+        return Err("The handoff to review changed. Reopen the delivery review and check the original OpenClaw destination.".into());
+    }
     if received {
         attempt.set(
             State::Submitted,
@@ -667,12 +746,7 @@ pub async fn reconcile_openclaw_handoff<R: Runtime>(
             None,
         );
     } else {
-        if attempt.destination.is_none() {
-            return Err(
-                "The original destination is unavailable. Check the delivery directly in OpenClaw."
-                    .into(),
-            );
-        }
+        attempt.reconciliation_required = true;
         attempt.set(State::Failed, "You confirmed the meeting was absent in OpenClaw. You can review and retry the handoff.", None);
     }
     persist(&app, pool, &meeting_id, &attempt).await?;
@@ -765,5 +839,77 @@ mod tests {
         );
         config.endpoint = "https://elsewhere.example.com/meetings/completed".into();
         assert!(!meeting_status("meeting-example".into(), true, &config, Some(attempt)).can_submit);
+    }
+
+    #[test]
+    fn a_delivery_review_is_bound_to_the_original_attempt_even_after_settings_change() {
+        let mut config = OpenClawConfig {
+            endpoint: "https://openclaw.example.com/meetings/completed".into(),
+            ..OpenClawConfig::default()
+        };
+        let id = "meeting-review";
+        let mut attempt = Attempt::new(id, &config);
+        attempt.set(State::Unknown, "Check the original destination", None);
+        let review = attempt.reconciliation_token(id, &config).unwrap();
+        config.endpoint = "https://elsewhere.example.com/meetings/completed".into();
+        let status = meeting_status(id.into(), true, &config, Some(attempt.clone()));
+        assert_eq!(
+            status.reconciliation_token.as_deref(),
+            Some(review.as_str())
+        );
+        assert_eq!(
+            status.attempted_destination.as_deref(),
+            Some("https://openclaw.example.com/meetings/completed")
+        );
+        attempt.idempotency_key = "another-attempt".into();
+        assert_ne!(
+            attempt.reconciliation_token(id, &config).as_deref(),
+            Some(review.as_str())
+        );
+    }
+
+    #[test]
+    fn file_repair_defers_delivery_until_the_destination_can_be_reviewed() {
+        let mut config = OpenClawConfig {
+            endpoint: "https://openclaw.example.com/meetings/completed".into(),
+            ..OpenClawConfig::default()
+        };
+        let id = "meeting-repair";
+        let mut attempt = Attempt::new(id, &config);
+        attempt.set(State::Deferred, DEFERRED, None);
+        let waiting = meeting_status(id.into(), false, &config, Some(attempt.clone()));
+        assert_eq!(waiting.state, "deferred");
+        assert!(!waiting.can_submit);
+        config.endpoint = "https://elsewhere.example.com/meetings/completed".into();
+        let repaired = meeting_status(id.into(), true, &config, Some(attempt));
+        assert_eq!(repaired.state, "deferred");
+        assert!(repaired.can_submit);
+        assert!(repaired.review_token.is_some());
+    }
+
+    #[test]
+    fn reviewed_retry_of_edited_content_uses_a_new_key_then_reuses_it_for_identical_content() {
+        let config = OpenClawConfig {
+            endpoint: "https://openclaw.example.com/meetings/completed".into(),
+            ..OpenClawConfig::default()
+        };
+        let mut old = Attempt::new("meeting-example", &config);
+        let original = json!({ "title": "Original", "idempotency_key": old.idempotency_key });
+        old.payload_hash = Some(hash(&serde_json::to_vec(&original).unwrap()));
+        old.set(State::Failed, "Confirmed absent", None);
+        old.reconciliation_required = true;
+        let mut retry = old.clone();
+        let edited = json!({ "title": "Renamed", "idempotency_key": old.idempotency_key });
+        let body = retry.encode_payload(edited, Some(&old)).unwrap();
+        let sent: Value = serde_json::from_slice(&body).unwrap();
+        assert_ne!(retry.idempotency_key, old.idempotency_key);
+        assert_eq!(
+            sent["idempotency_key"].as_str(),
+            Some(retry.idempotency_key.as_str())
+        );
+        assert!(retry.reconciliation_required);
+        let mut repeated = retry.clone();
+        assert_eq!(repeated.encode_payload(sent, Some(&retry)).unwrap(), body);
+        assert_eq!(repeated.idempotency_key, retry.idempotency_key);
     }
 }

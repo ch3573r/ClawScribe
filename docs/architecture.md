@@ -155,6 +155,9 @@ operations. A single blocked filesystem operation can still delay cancellation.
 The meeting transaction includes a pending folder update. It records metadata
 publication before rebuilding the transcript file from saved rows. Repair checks
 the owner marker, registered location and other meetings before writing files.
+When `metadata.json` is absent, repair by folder and library deletion can use
+the matching `.clawscribe-import-owner`. An existing metadata file must agree
+with the owner marker.
 Batch inference retries each failed segment once. Imports retain successful text
 and mark persistent failures as incomplete.
 Retranscription replaces the transcript only when every segment succeeds.
@@ -537,11 +540,16 @@ Import records the selected, file-modified, or import timestamp as the meeting
 date and preserves the import time and chosen date source in meeting metadata.
 The core import queue uses the existing single-job transcription slot, yields
 to recording, and keeps running through dialog close and navigation. It saves
-item status and meeting IDs locally. After app restart, interrupted items with
-a committed meeting reopen that meeting. Other unfinished items need the user
-to select their original files again. Source paths and picker grants stay in
-memory. Hosted imports require explicit approval of the selected destination
-and check the saved endpoint and cloud setting again before upload.
+item status and meeting IDs locally. An active queue blocks update installation
+through result publication. Starting a recording can interrupt a running
+import before it starts saving, and queued files wait for recording to finish.
+After restart, interrupted items with a committed meeting reopen that meeting.
+An interrupted cancellation stays cancelled, and other unfinished items need
+their original files again. A damaged queue file is preserved in app settings
+and a fresh queue accepts new files. Deleting a meeting prunes its completed
+import entry. Source paths and picker grants stay in memory. Hosted imports
+require explicit approval of the selected destination and check the saved
+endpoint and cloud setting again before upload.
 
 ## Microsoft Export Persistence
 

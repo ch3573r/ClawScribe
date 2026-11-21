@@ -241,6 +241,13 @@ pub(crate) fn read_marker(folder: &Path) -> Option<serde_json::Value> {
     (text("version") && text("transcript_file")).then_some(value)
 }
 
+pub(crate) fn has_unpublished_import_owner(folder: &Path, meeting_id: &str) -> bool {
+    matches!(
+        std::fs::symlink_metadata(folder.join("metadata.json")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) && crate::audio::import::owns_import_folder(folder, meeting_id)
+}
+
 /// The stable meeting ID assigned before audio capture starts.
 pub(crate) fn recording_id(marker: &serde_json::Value) -> Option<&str> {
     marker_id(marker, "recording_id")
@@ -385,7 +392,12 @@ pub(crate) fn remove_library_recording_folder(
     if let Some(folder) =
         verify_recording_deletion(folder, meeting_id, roots, other_folders, exact_marker)?
     {
-        remove_recording_folder_contents(&folder).map_err(|_| "file deletion failed")?;
+        let owner = if has_unpublished_import_owner(&folder, meeting_id) {
+            crate::audio::import::IMPORT_OWNER_FILE
+        } else {
+            "metadata.json"
+        };
+        remove_recording_folder_contents(&folder, owner).map_err(|_| "file deletion failed")?;
     }
     Ok(())
 }
@@ -418,8 +430,20 @@ pub(crate) fn verify_recording_deletion(
     }
     let canonical = resolve_recording_folder(folder, roots)
         .map_err(|_| "outside the configured recording locations")?;
+    if contains_recording_root(&canonical, roots) {
+        return Err("the folder contains a configured recording location");
+    }
     let marker_error = "no ClawScribe recording marker for this meeting";
-    if exact_marker {
+    let owner_file = folder.join(crate::audio::import::IMPORT_OWNER_FILE);
+    let has_import_owner = match std::fs::symlink_metadata(owner_file) {
+        Ok(_) if crate::audio::import::owns_import_folder(folder, meeting_id) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        _ => return Err(marker_error),
+    };
+    // An import may commit before metadata is published. If metadata exists,
+    // both ownership records must agree.
+    let unpublished = has_import_owner && has_unpublished_import_owner(folder, meeting_id);
+    if !unpublished && (exact_marker || has_import_owner) {
         let marker = read_marker(folder).ok_or(marker_error)?;
         let ids = [marker.get("meeting_id"), marker.get("recording_id")];
         let mut present = ids.into_iter().flatten().filter(|value| !value.is_null());
@@ -428,7 +452,7 @@ pub(crate) fn verify_recording_deletion(
         {
             return Err(marker_error);
         }
-    } else if !has_app_marker(folder, Some(meeting_id)) {
+    } else if !unpublished && !has_app_marker(folder, Some(meeting_id)) {
         return Err(marker_error);
     }
     let compare = |a: &Path, b: &Path| {
@@ -451,14 +475,21 @@ pub(crate) fn verify_recording_deletion(
     Ok(Some(canonical))
 }
 
-fn remove_recording_folder_contents(folder: &Path) -> std::io::Result<()> {
+pub(crate) fn contains_recording_root(canonical: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .filter(|root| directory_chain(root).is_ok())
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| root.starts_with(canonical))
+}
+
+fn remove_recording_folder_contents(folder: &Path, owner: &str) -> std::io::Result<()> {
     // Keep the ownership marker while removing children, so a file held open
     // during this attempt can be retried after its handle closes.
     for entry in std::fs::read_dir(folder)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name == "metadata.json" || (cfg!(windows) && name.eq_ignore_ascii_case("metadata.json"))
-        {
+        if name == owner || (cfg!(windows) && name.eq_ignore_ascii_case(owner)) {
             continue;
         }
         let kind = entry.file_type()?;
@@ -476,13 +507,44 @@ fn remove_recording_folder_contents(folder: &Path) -> std::io::Result<()> {
             std::fs::remove_file(entry.path())?;
         }
     }
-    std::fs::remove_file(folder.join("metadata.json"))?;
+    std::fs::remove_file(folder.join(owner))?;
     std::fs::remove_dir(folder)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_accepts_an_unpublished_import_only_with_exact_unshared_ownership() {
+        let base = tempfile::tempdir().unwrap();
+        let roots = [base.path().to_path_buf()];
+        let folder = base.path().join("imported");
+        std::fs::create_dir(&folder).unwrap();
+        let id = "meeting-4f7b980e-b123-4ca9-82e7-927204456483";
+        let owner = folder.join(crate::audio::import::IMPORT_OWNER_FILE);
+        std::fs::write(&owner, id).unwrap();
+        for exact in [false, true] {
+            assert!(verify_recording_deletion(&folder, id, &roots, &[], exact)
+                .unwrap()
+                .is_some());
+            assert!(verify_recording_deletion(&folder, "foreign", &roots, &[], exact).is_err());
+            assert!(verify_recording_deletion(
+                &folder,
+                id,
+                &roots,
+                &[folder.join("nested")],
+                exact
+            )
+            .is_err());
+            assert!(verify_recording_deletion(&folder, id, &[folder.clone()], &[], exact).is_err());
+        }
+        std::fs::write(folder.join("metadata.json"), b"foreign metadata").unwrap();
+        assert!(verify_recording_deletion(&folder, id, &roots, &[], true).is_err());
+        std::fs::remove_file(folder.join("metadata.json")).unwrap();
+        remove_library_recording_folder(&folder, id, &roots, &[], true).unwrap();
+        assert!(!folder.exists());
+    }
 
     #[cfg(windows)]
     #[test]

@@ -2032,13 +2032,15 @@ async fn stop_recording_session<R: Runtime>(
         warn!("Could not notify the webview that recording stopped");
     }
 
-    if suspend_attempt.is_none() && transcribes && !outcome.needs_recovery() && !library_save_failed
+    if suspend_attempt.is_none()
+        && transcribes
+        && (!outcome.needs_recovery() || outcome.recording_files_incomplete)
     {
         if let Some(meeting_id) = meeting_id.clone() {
             crate::openclaw::submit_completed_recording(
                 app.clone(),
                 meeting_id,
-                transcript_count == 0,
+                outcome.recording_files_incomplete,
             );
         }
     }

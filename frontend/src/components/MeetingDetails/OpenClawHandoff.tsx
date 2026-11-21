@@ -9,12 +9,13 @@ import { errorText } from '@/lib/errorText';
 
 type HandoffStatus = {
   meeting_id: string;
-  state: 'not_sent' | 'skipped' | 'pending' | 'submitted' | 'failed' | 'unknown';
+  state: 'not_sent' | 'skipped' | 'deferred' | 'pending' | 'submitted' | 'failed' | 'unknown';
   message: string;
   destination: string | null;
   attempted_destination: string | null;
   includes_audio_path: boolean;
   review_token: string | null;
+  reconciliation_token: string | null;
   can_submit: boolean;
   can_reconcile: boolean;
 };
@@ -45,8 +46,11 @@ export function OpenClawHandoff({ meetingId }: { meetingId: string }) {
     const repaired = listen<{ meeting_id: string }>('transcript-files-synchronized', event => {
       if (mounted && event.payload.meeting_id === meetingId) void refresh();
     });
+    const retranscribed = listen<{ meeting_id: string }>('retranscription-complete', event => {
+      if (mounted && event.payload.meeting_id === meetingId) void refresh();
+    });
     const settings = listen('openclaw-config-changed', () => { if (mounted) void refresh(); });
-    const subscriptions = [subscription, repaired, settings];
+    const subscriptions = [subscription, repaired, retranscribed, settings];
     void Promise.allSettled(subscriptions).then(() => { if (mounted) void refresh(); });
     return () => {
       mounted = false;
@@ -101,9 +105,10 @@ export function OpenClawHandoff({ meetingId }: { meetingId: string }) {
         <DialogFooter>
           <Button variant="ghost" disabled={busy} onClick={() => setReview(null)}>Close</Button>
           {isReconciliation ? <>
-            {review?.attempted_destination && <Button variant="outline" disabled={busy}
-              onClick={() => void apply('reconcile_openclaw_handoff', { received: false })}>Confirmed absent</Button>}
-            <Button disabled={busy} onClick={() => void apply('reconcile_openclaw_handoff', { received: true })}>Confirmed received</Button>
+            <Button variant="outline" disabled={busy || !review?.reconciliation_token}
+              onClick={() => void apply('reconcile_openclaw_handoff', { received: false, reconciliationToken: review?.reconciliation_token })}>Confirmed absent</Button>
+            <Button disabled={busy || !review?.reconciliation_token}
+              onClick={() => void apply('reconcile_openclaw_handoff', { received: true, reconciliationToken: review?.reconciliation_token })}>Confirmed received</Button>
           </> : <Button disabled={busy || !review?.review_token} onClick={() => void apply('submit_meeting_folder_to_openclaw', { reviewToken: review?.review_token })}>
             {busy ? 'Sending…' : isRetry ? 'Retry handoff' : 'Send transcript'}
           </Button>}

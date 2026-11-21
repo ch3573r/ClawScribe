@@ -436,9 +436,11 @@ fn guarded_import_folder(
     const REFUSED: &str = "The import folder could not be verified for this meeting.";
     let path = Path::new(folder);
     let canonical = crate::database::meeting_files::resolve_recording_folder(path, roots)?;
-    if !crate::audio::import::owns_import_folder(path, meeting)
+    if crate::database::meeting_files::contains_recording_root(&canonical, roots)
+        || !crate::audio::import::owns_import_folder(path, meeting)
         || others.iter().any(|other| {
-            crate::local_path::comparable_text(other) == crate::local_path::comparable_text(folder)
+            crate::local_path::lexically_inside(other, path)
+                || crate::local_path::lexically_inside(folder, Path::new(other))
                 || (crate::trusted_roots::text_allowed(other, roots)
                     && Path::new(other).canonicalize().is_ok_and(|other| {
                         other == canonical
@@ -453,7 +455,8 @@ fn guarded_import_folder(
     match std::fs::symlink_metadata(folder.join("metadata.json")) {
         Ok(_)
             if !crate::database::meeting_files::read_marker(&folder).is_some_and(|marker| {
-                crate::database::meeting_files::stamped_meeting_id(&marker) == Some(meeting)
+                !crate::database::meeting_files::has_invalid_marker_id(&marker)
+                    && crate::database::meeting_files::stamped_meeting_id(&marker) == Some(meeting)
             }) =>
         {
             Err(REFUSED.into())
@@ -470,7 +473,9 @@ fn publish_import_metadata(
 ) -> Result<(), String> {
     let audio = crate::library::archive::storage::owned_audio_name(metadata, meeting)
         .ok_or("Missing import audio name")?;
-    if !std::fs::symlink_metadata(folder.join(audio)).is_ok_and(|meta| meta.is_file()) {
+    if !std::fs::symlink_metadata(folder.join(audio))
+        .is_ok_and(|meta| meta.is_file() && !crate::local_path::is_link(&meta))
+    {
         return Err("The saved import audio could not be verified".into());
     }
     let destination = folder.join("metadata.json");
@@ -844,7 +849,7 @@ pub(crate) async fn sync_file_with_profile(
                 };
                 publish_import_metadata(&folder, &meeting_id, &update.import_metadata)?;
                 match std::fs::symlink_metadata(&transcript_path) {
-                    Ok(meta) if meta.is_file() => {
+                    Ok(meta) if meta.is_file() && !crate::local_path::is_link(&meta) => {
                         let existing: serde_json::Value =
                             serde_json::from_reader(std::io::BufReader::new(
                                 std::fs::File::open(&transcript_path).map_err(error)?,
@@ -1148,15 +1153,19 @@ pub async fn api_sync_transcript_file<R: Runtime>(
         crate::summary::automatic::publication::profile_for_folder(&app, folder)
     })
     .await?;
-    let _ = app.emit(
-        "transcript-files-synchronized",
-        serde_json::json!({ "meeting_id": meeting_id }),
-    );
+    notify_file_sync(&app, &meeting_id);
     drop(job);
     if synced == SyncedFiles::Retranscription {
         crate::summary::automatic::publication::wake(&app, meeting_id);
     }
     Ok(())
+}
+
+pub(crate) fn notify_file_sync<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) {
+    let _ = app.emit(
+        "transcript-files-synchronized",
+        serde_json::json!({ "meeting_id": meeting_id }),
+    );
 }
 
 #[cfg(test)]
