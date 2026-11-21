@@ -7,6 +7,7 @@ use super::{
     KnowledgeState,
 };
 use sqlx::SqlitePool;
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -82,6 +83,9 @@ pub async fn index_source(
     let mut after: Option<String> = None;
     let mut ordinal = 0;
     let space = model::PINS.space();
+    const SHORT_ROW_BYTES: usize = 96;
+    const SHORT_ROW_CACHE: usize = 64;
+    let mut short_rows = VecDeque::<(String, String)>::with_capacity(SHORT_ROW_CACHE);
     loop {
         runtime.check_available()?;
         drop(super::scheduler::claim_snapshot(Arc::new(
@@ -124,6 +128,32 @@ pub async fn index_source(
                         end_byte: base + span.end_byte,
                     };
                     let passage = store::materialize(pool, &selected, span.clone(), true).await?;
+                    let can_share = !job.meeting_id.is_empty()
+                        && span.start_byte == 0
+                        && span.end_byte == total
+                        && passage.text.len() <= SHORT_ROW_BYTES;
+                    let shared = can_share
+                        .then(|| {
+                            short_rows
+                                .iter()
+                                .position(|(text, _)| *text == passage.text)
+                        })
+                        .flatten();
+                    if let Some(entry) = shared.and_then(|index| short_rows.remove(index)) {
+                        store::stage_index_chunk(
+                            pool,
+                            job,
+                            &passage.evidence,
+                            &passage.text,
+                            ordinal,
+                            store::StagedVector::Shared(&entry.1),
+                            &space.id,
+                        )
+                        .await?;
+                        short_rows.push_back(entry);
+                        ordinal += 1;
+                        continue;
+                    }
                     let vector =
                         match store::reusable_vector(pool, job, &span, &passage.text, &space.id)
                             .await?
@@ -145,6 +175,12 @@ pub async fn index_source(
                         &space.id,
                     )
                     .await?;
+                    if can_share {
+                        if short_rows.len() == SHORT_ROW_CACHE {
+                            short_rows.pop_front();
+                        }
+                        short_rows.push_back((passage.text, passage.evidence.chunk_id));
+                    }
                     ordinal += 1;
                 }
                 base = if partial {
@@ -347,6 +383,82 @@ pub async fn knowledge_model_cancel_download(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn repeated_short_rows_share_vectors_and_keep_citations_after_reindexing() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('repeat','Fixture','2026-01-01','2026-01-01');
+             INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time) VALUES
+                ('first','repeat','Ja.','00:01',1), ('second','repeat','Ja.','00:03',3),
+                ('third','repeat','Genau.','00:04',4);",
+        ).execute(&pool).await.unwrap();
+        let job = store::next_job(&pool).await.unwrap().unwrap();
+        let runtime = super::super::scheduler::synthetic_query_scheduler();
+        index_source(&pool, &runtime, &job).await.unwrap();
+        let stored_vectors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_vectors")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored_vectors, 2);
+        let scope = retrieval::freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "repeat".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let space = model::PINS.space();
+        let mut query_vector = [0.; 384];
+        query_vector[0] = 1.;
+        let candidates = retrieval::search_channels(
+            &pool,
+            &scope,
+            "unmatched query",
+            Some((&space.id, &query_vector)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            candidates.len(),
+            3,
+            "shared vectors still rank each canonical row"
+        );
+        let selected = store::SelectedRow::for_job(&job, "second".into());
+        let evidence = store::materialize(
+            &pool,
+            &selected,
+            TextSpan {
+                transcript_id: "second".into(),
+                start_byte: 0,
+                end_byte: 3,
+            },
+            false,
+        )
+        .await
+        .unwrap()
+        .evidence;
+        store::requeue_sources(&pool, &[job.source_id])
+            .await
+            .unwrap();
+        let rebuilt = store::next_job(&pool).await.unwrap().unwrap();
+        index_source(&pool, &runtime, &rebuilt).await.unwrap();
+        let resolved = super::super::evidence::resolve(&pool, &evidence)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.status,
+            super::super::evidence::EvidenceStatus::Current
+        );
+        assert_eq!(resolved.navigation.unwrap().start_seconds, Some(3.));
+    }
+
     #[tokio::test]
     async fn large_unicode_indexing_is_complete_bounded_and_defers_reads_during_capture() {
         use super::*;
