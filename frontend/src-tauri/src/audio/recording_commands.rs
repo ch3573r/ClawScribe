@@ -709,7 +709,6 @@ pub(crate) fn get_recording_health(session_id: String) -> Option<CaptureSnapshot
 
 fn start_health_watch(sink: &super::recording_manager::LiveTranscriptSink, live: bool) {
     let session_id = sink.session_id.clone();
-    let state = sink.capture.clone();
     let folder = RECORDING_MANAGER
         .lock()
         .unwrap()
@@ -729,6 +728,9 @@ fn start_health_watch(sink: &super::recording_manager::LiveTranscriptSink, live:
             let (destination, scratch) =
                 tokio::join!(capacity(folder.clone()), capacity(scratch.clone()));
             {
+                let Some(state) = active_capture(&disk_session) else {
+                    break;
+                };
                 let mut health = state.health.lock().unwrap();
                 health.destination_free_bytes = destination;
                 health.scratch_free_bytes = scratch;
