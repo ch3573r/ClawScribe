@@ -23,6 +23,7 @@ synthetic replies.
 ## What it measures
 
 The fixture feeds paired 10 ms blocks into the production capture callbacks.
+The final callback carries only the remaining samples.
 It uses the microphone high-pass filter and EBU R128 normalizer, the real
 mixer and disk queues, the live Silero VAD, and the same Parakeet decoder and
 blank retry used for local transcription. It runs a second decode from the
@@ -32,17 +33,17 @@ The fixture covers quiet background and simulated bleed, isolated German and
 English passages, two minutes of digital silence, four short replies, and
 overlapping speech. It reports word error rate and per-passage errors, blank
 segments, exact short replies, contiguous boundaries, and each fixture
-bookmark's distance from the corresponding transcript interval. The mixed
-overlap row reports word count because the two speakers have no single reference
-word order. Capture metrics include callback time, sampled resident memory, raw
-spool bytes and duration, sampled queued audio, and stop-to-last-decode time.
+bookmark's distance from the corresponding transcript interval. It also reports
+how much of each short cue reached the decoder and counts words in segments
+wholly within digital silence, excluding 0.5 s at each end. The mixed overlap row
+reports word count because the two speakers have no single reference word order.
+Capture metrics include callback time, sampled resident memory, raw spool bytes
+and duration, sampled queued audio, and stop-to-last-decode time.
 The saved pass reports AAC bytes and separate encode, preparation and inference
 times.
 
-Use the ratio of captured to input duration only to associate recognizer output
-with the known fixture passages when regular mixer padding shifts the timeline.
-Bookmark distance still uses the original fixture clock. Check the reported
-clock drift directly and use saved playback to check word-level timing.
+Passage scores and bookmark distances use the original fixture clock. Check
+the reported clock drift and use saved playback to check word-level timing.
 
 ## Comparisons
 
@@ -62,22 +63,60 @@ next baseline run. Each run creates fresh temporary outputs.
 
 ## Portable fixture observations
 
-An unpaced Linux CPU run using the ClawScribe audio sources, Parakeet v3 int8,
-and the built-in fictional passages produced these comparisons. It used
-synthetic callback injection with desktop/device services substituted.
+Release-profile Linux runs used the ClawScribe audio sources, Parakeet v3 int8
+on CPU and synthetic callback injection with desktop and device services
+substituted. The original mixer produced 180.890 s of PCM in paced and unpaced
+replays. The fixture timeline was 179.377 s, rounded up to 179.380 s by full
+callbacks at the end. The other 1.510 s came from the mixer padding one source
+when its callback arrived just after the other source at a window boundary.
+
+With up to 100 ms of sample lookahead for the second source, the mixer produced
+179.380 s from the original callbacks and 179.377 s with the exact final
+callback. The mismatched-rate regression feeds 44.1 and 48 kHz sources in
+317- and 1,024-frame callbacks. Stop now saves all 240,528 frames on the 48 kHz
+clock, including the final marker. The original mixer returned 241,296 frames.
+When one source stalls, the other still drives output after the lookahead.
+This fixture does not measure physical device-clock drift or reconnect gaps.
+
+In the paced replay, sampled peak queued audio went from 10.78 s to 10.57 s.
+Stop-to-last-decode went from 398 ms to 50 ms on these runs. The final AAC
+decoded to 179.392 s, within 15 ms of the mixed PCM duration.
+
+| Measure | Original mixer | Paired windows and VAD tail flush |
+| --- | ---: | ---: |
+| Exact replies, live | 0/4 | 1/4 |
+| Exact replies, saved AAC | 1/4 | 1/4 |
+| Live reply cues reaching the decoder | 4/4 | 4/4 |
+| Saved reply cues reaching the decoder | 4/4 | 3/4 |
+| Live word errors, excluding overlap | 4/79 | 3/79 |
+| Saved word errors, excluding overlap | 3/79 | 3/79 |
+
+All four original live replies returned nonempty text. With the corrected mix,
+all four live segments cover their full fixture cues and contain their
+bookmarks. Three still decode to different words. The saved pass misses one
+cue during VAD, although a direct window from the AAC decodes it correctly.
+Both corrected passes produced zero false words in 119 s of guarded digital
+silence, and both narrated passages retained zero word errors.
+
+The VAD resampler now drains the remaining input at Stop and trims the result
+to the capture endpoint. In a voiced cutoff regression it recovers 228
+samples at 16 kHz (14.25 ms). A separate sweep of 275 near-Stop cutoffs across
+six synthetic short replies yielded 83 VAD segments, up from 77. Parakeet
+returned text for all six newly delivered segments and two were exact matches.
+An identically cut digital-silence control yielded no segment. Short or
+ambiguous speech can still be misrecognized, and silence results do not
+characterize noisy rooms.
+
+### Earlier fixture comparisons
 
 - Capping gain reduced startup background RMS from 0.07074 to 0.01122.
   Both capped live narration passages had zero word errors. The uncapped
   German passage had two word errors out of 36.
-- All four short replies reached the decoder with non-empty text. The live
-  pass had zero exact matches and the saved pass matched one. The 192 kb/s
-  targeted pilot matched two of the replies with the silence lead. Shortening
-  speech confirmation in the forced-cut run left the live exact count at zero.
-  The 2 s cap produced 23 contiguous boundaries and increased narration errors.
-- The mixer produced 180.890 s of PCM from 179.377 s of paired input.
-  A ready source can trigger a window while the other source is one callback
-  behind, so repeated zero padding can accumulate on this schedule. The short
-  reply landmarks arrived roughly 0.8–0.95 s after their original bookmarks.
+- The 192 kb/s targeted pilot matched two of the replies with the silence lead.
+  It used the original mixer and a duration-ratio adjustment to locate cues.
+  Shortening speech confirmation in the forced-cut run left the live exact
+  count at zero. The 2 s cap produced 23 contiguous boundaries and increased
+  narration errors.
 - The 96 kb/s file used 724,001 bytes versus 1,145,015 at 192 kb/s. Both
   preserved the long passages, but the 96 kb/s saved pass matched zero short
   replies and the padded targeted pass matched one.

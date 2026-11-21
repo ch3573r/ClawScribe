@@ -141,12 +141,20 @@ fn word_errors(expected: &[String], actual: &[String]) -> usize {
     previous[actual.len()]
 }
 
-fn score(
-    passages: &[Passage],
-    decoded: &[Decoded],
-    isolated_source: Option<usize>,
-    media_clock_ratio: f64,
-) {
+fn score(passages: &[Passage], decoded: &[Decoded], isolated_source: Option<usize>) {
+    // Exclude adjacent speech and VAD context at the ends of the silent interval.
+    let silence_start = passages[1].end() as f64 / RATE as f64 + 0.5;
+    let silence_end = passages[2].start as f64 / RATE as f64 - 0.5;
+    let silence_words: usize = decoded
+        .iter()
+        .filter(|row| row.start >= silence_start && row.end <= silence_end)
+        .map(|row| row.words.len())
+        .sum();
+    println!(
+        "  interior_digital_silence_s={:.3} false_words={silence_words}",
+        silence_end - silence_start
+    );
+
     let mut by_passage = vec![Vec::new(); passages.len()];
     let mut unassigned = 0;
     for row in decoded {
@@ -154,8 +162,8 @@ fn score(
             .iter()
             .enumerate()
             .map(|(index, passage)| {
-                let start = passage.start as f64 / RATE as f64 * media_clock_ratio;
-                let end = passage.end() as f64 / RATE as f64 * media_clock_ratio;
+                let start = passage.start as f64 / RATE as f64;
+                let end = passage.end() as f64 / RATE as f64;
                 (index, row.end.min(end) - row.start.max(start))
             })
             .max_by(|left, right| left.1.total_cmp(&right.1));
@@ -169,7 +177,9 @@ fn score(
     let mut errors_total = unassigned;
     let mut reference_total = 0;
     for (passage, rows) in passages.iter().zip(by_passage) {
-        let bookmark = (passage.start + passage.end()) as f64 / (2 * RATE) as f64;
+        let start = passage.start as f64 / RATE as f64;
+        let end = passage.end() as f64 / RATE as f64;
+        let bookmark = (start + end) / 2.0;
         let bookmark_gap = rows
             .iter()
             .map(|row| (row.start - bookmark).max(bookmark - row.end).max(0.0))
@@ -201,8 +211,17 @@ fn score(
             let errors = word_errors(&expected, &actual);
             errors_total += errors;
             reference_total += expected.len();
+            let cue_coverage_pct = passage.short.then(|| {
+                let mut covered = 0.0;
+                let mut through = start;
+                for row in &rows {
+                    covered += (row.end.min(end) - row.start.max(through)).max(0.0);
+                    through = row.end.max(through);
+                }
+                (100.0 * covered / (end - start)).round() as u32
+            });
             println!(
-                "  {}: segments={} blank={} errors={errors}/{} short_reply_match={:?} bookmark_s={bookmark:.3} bookmark_gap_s={bookmark_gap:?}",
+                "  {}: segments={} blank={} errors={errors}/{} short_reply_match={:?} cue_coverage_pct={cue_coverage_pct:?} bookmark_s={bookmark:.3} bookmark_gap_s={bookmark_gap:?}",
                 passage.name,
                 rows.len(),
                 rows.iter().filter(|row| row.words.is_empty()).count(),
@@ -224,15 +243,14 @@ async fn probe_reply_windows(
     model: &mut ParakeetModel,
     saved_audio: &Path,
     passages: &[Passage],
-    media_clock_ratio: f64,
     isolated_source: Option<usize>,
 ) -> Result<()> {
     for passage in passages.iter().filter(|passage| passage.short) {
         if isolated_source.is_some_and(|source| passage.reference[source].is_empty()) {
             continue;
         }
-        let start = passage.start as f64 / RATE as f64 * media_clock_ratio - 0.15;
-        let end = passage.end() as f64 / RATE as f64 * media_clock_ratio + 0.20;
+        let start = passage.start as f64 / RATE as f64 - 0.15;
+        let end = passage.end() as f64 / RATE as f64 + 0.20;
         let mut decoder = batch_audio::audio_decoder_command(saved_audio)?;
         let output = tokio::time::timeout(
             Duration::from_secs(15),
@@ -288,6 +306,115 @@ struct CaptureOptions {
     uncapped: bool,
     paced: bool,
     isolated_source: Option<usize>,
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_capture_clock_survives_mismatched_callbacks_and_stop() -> Result<()> {
+    const MIC_RATE: usize = 44_100;
+    const MIC_FRAMES: usize = 220_985;
+    const SYSTEM_FRAMES: usize = 240_528; // 5.011 seconds at 48 kHz.
+    const MARKERS: [usize; 2] = [96_000, SYSTEM_FRAMES - 1];
+    let folder = tempfile::tempdir()?;
+    let (capture_writer, mut saved, _) = recording_audio_queue(folder.path())?;
+    let (speech_writer, _speech, _) = transcription_queue()?;
+    let (sender, receiver) = mpsc::channel(128);
+    let state = RecordingState::new();
+    let mic = AudioCapture::new(
+        Arc::new(AudioDevice::new(
+            "Fixture mic".into(),
+            CaptureDeviceType::Input,
+        )),
+        state.clone(),
+        MIC_RATE as u32,
+        1,
+        DeviceType::Microphone,
+    );
+    let system = AudioCapture::new(
+        Arc::new(AudioDevice::new(
+            "Fixture system".into(),
+            CaptureDeviceType::Output,
+        )),
+        state.clone(),
+        RATE as u32,
+        1,
+        DeviceType::System,
+    );
+    let mut pipeline = AudioPipeline::new(
+        receiver,
+        speech_writer,
+        state.clone(),
+        0,
+        RATE as u32,
+        "Fixture mic".into(),
+        InputDeviceKind::Unknown,
+        "Fixture system".into(),
+        InputDeviceKind::Unknown,
+        false,
+    );
+    pipeline.recording_sender_for_mixed =
+        Some(BufferedSpool::new(capture_writer, state.clone(), true));
+    let pipeline_task = tokio::spawn(pipeline.run());
+    state.set_audio_sender(sender.clone());
+    state.start_recording()?;
+
+    let (mut mic_cursor, mut system_cursor) = (0, 0);
+    while mic_cursor < MIC_FRAMES || system_cursor < SYSTEM_FRAMES {
+        let mic_end = (mic_cursor + 317).min(MIC_FRAMES);
+        let system_end = (system_cursor + 1_024).min(SYSTEM_FRAMES);
+        while sender.capacity() == 0 {
+            ensure!(!sender.is_closed(), "Fixture capture pipeline exited early");
+            tokio::task::yield_now().await;
+        }
+        // Order each callback by the time its last sample became available.
+        // No sleeps are needed to reproduce the same interleaving.
+        if mic_cursor < MIC_FRAMES
+            && (system_cursor == SYSTEM_FRAMES
+                || mic_end as u64 * RATE as u64 <= system_end as u64 * MIC_RATE as u64)
+        {
+            let samples: Vec<_> = (mic_cursor..mic_end)
+                .map(|index| {
+                    if (MIC_RATE..MIC_RATE + 1_323).contains(&index) {
+                        0.02 * (std::f32::consts::TAU * (index % 147) as f32 / 147.0).sin()
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            mic.process_audio_data(&samples);
+            mic_cursor = mic_end;
+        } else {
+            let samples: Vec<_> = (system_cursor..system_end)
+                .map(|index| if MARKERS.contains(&index) { 0.5 } else { 0.0 })
+                .collect();
+            system.process_audio_data(&samples);
+            system_cursor = system_end;
+        }
+    }
+
+    state.stop_recording();
+    drop(sender);
+    pipeline_task.await??;
+    let mut pcm = Vec::new();
+    while let Some(item) = saved.recv().await? {
+        pcm.extend(item.chunk.data);
+    }
+    assert!(!state.capture_incomplete());
+    assert_eq!(
+        pcm.len(),
+        SYSTEM_FRAMES,
+        "mixed PCM changed the sample clock"
+    );
+    let actual_markers: Vec<_> = pcm
+        .iter()
+        .enumerate()
+        .filter_map(|(index, sample)| (*sample > 0.49).then_some(index))
+        .collect();
+    assert_eq!(actual_markers, MARKERS);
+    // The 30 ms mic tone starts at 1 s, allowing for the 10 ms limiter delay.
+    assert!(pcm[RATE..RATE + 2_400]
+        .iter()
+        .any(|sample| sample.abs() > 0.01));
+    Ok(())
 }
 
 async fn capture_fixture(
@@ -366,7 +493,8 @@ async fn capture_fixture(
         }
         let mut mic_input = [0.0; CALLBACK_SAMPLES];
         let mut system_input = [0.0; CALLBACK_SAMPLES];
-        for offset in 0..CALLBACK_SAMPLES {
+        let callback_samples = (end - tick).min(CALLBACK_SAMPLES);
+        for offset in 0..callback_samples {
             let index = tick + offset;
             while passage_index < passages.len() && index >= passages[passage_index].end() {
                 passage_index += 1;
@@ -390,8 +518,8 @@ async fn capture_fixture(
             system_input.fill(0.0);
         }
         let before = Instant::now();
-        mic.process_audio_data(&mic_input);
-        system.process_audio_data(&system_input);
+        mic.process_audio_data(&mic_input[..callback_samples]);
+        system.process_audio_data(&system_input[..callback_samples]);
         let elapsed = before.elapsed();
         callback_total += elapsed;
         callback_peak = callback_peak.max(elapsed);
@@ -578,11 +706,7 @@ async fn two_source_capture_quality() -> Result<()> {
         "live segments={} contiguous_cuts={adjacent} decode_rtf={:?} sampled_peak_queued_audio_s={queued_seconds:.3} stop_to_last_decode_s={:.3}",
         live.len(), snapshot.processing_realtime_factor, live_end.saturating_duration_since(capture.stopped).as_secs_f64()
     );
-    // Fixed-size mixer windows can pad a source that is one callback behind.
-    // Use the measured duration ratio to assign words on this regular fixture
-    // timeline. Bookmark gaps still use the original, unadjusted input clock.
-    let media_clock_ratio = capture.media_seconds / expected_duration;
-    score(&passages, &live, isolated_source, media_clock_ratio);
+    score(&passages, &live, isolated_source);
 
     let output = folder.path().join("audio.mp4");
     let encode_started = Instant::now();
@@ -623,16 +747,9 @@ async fn two_source_capture_quality() -> Result<()> {
         "final media_s={duration:.3} aac_kbps={bitrate} aac_bytes={} encode_s={encode_seconds:.3} prepare_s={prepare_seconds:.3} decode_s={:.3} segments={}",
         std::fs::metadata(&output)?.len(), decode_started.elapsed().as_secs_f64(), final_rows.len(),
     );
-    score(&passages, &final_rows, isolated_source, media_clock_ratio);
+    score(&passages, &final_rows, isolated_source);
     if std::env::var_os("CLAWSCRIBE_AUDIO_BENCH_TARGETED").is_some() {
-        probe_reply_windows(
-            &mut model,
-            &output,
-            &passages,
-            media_clock_ratio,
-            isolated_source,
-        )
-        .await?;
+        probe_reply_windows(&mut model, &output, &passages, isolated_source).await?;
     }
     Ok(())
 }
