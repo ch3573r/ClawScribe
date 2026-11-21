@@ -41,6 +41,7 @@ will successfully use its GPU; validate the actual backend.
 
 ```powershell
 pnpm typecheck
+pnpm run lint
 pnpm test
 pnpm build
 pnpm run verify:icons
@@ -50,9 +51,8 @@ Run these from `frontend/`; icon verification uses PowerShell. The configured
 helper/control suite includes transcript display, scrolling, and speaker-save
 regressions. Those deterministic tests do not replace rendered desktop checks.
 
-`pnpm run lint` still invokes the legacy `next lint` command. Lint is not an
-enforced, validated release gate in this branch; Next builds explicitly skip it.
-Do not report a lint pass from successful typechecking or bundling.
+`pnpm run lint` still invokes the legacy `next lint` command. The validation workflow runs it
+separately from the frontend production build on pushes to main and trusted pull requests.
 
 ## Native Checks
 
@@ -66,7 +66,7 @@ cargo check --locked --manifest-path frontend/src-tauri/Cargo.toml --features wi
 
 The native test helper builds the real library test executable in the release
 profile, discovers it through Cargo JSON, and places the staged runtime DLLs
-beside it. It runs all four required groups and rejects zero-test matches. Bare
+beside it. It runs every non-ignored library test serially and rejects empty discovery. Bare
 `cargo test` can otherwise fail at startup with `STATUS_DLL_NOT_FOUND` outside
 the installer layout. For a deliberate CPU-path test, stage the CPU runtime and
 pass an empty `-Features` value; do not mix CPU and DirectML runtime sets.

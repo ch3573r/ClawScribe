@@ -48,7 +48,15 @@ test('the native-only preflight is reachable only with -CheckOnly and reuses the
   assert.match(build, /if \(\$NativeOnly -and -not \$CheckOnly\) \{\n    throw/);
   assert.match(build, /if \(-not \$NativeOnly\) \{\n        pnpm exec tsc --noEmit/);
   assert.match(build, /test-windows-native\.ps1/);
-  assert.match(read('frontend/scripts/test-windows-native.ps1'), /"self_test::tests"/);
+  assert.match(read('frontend/scripts/test-windows-native.ps1'), /self_test::tests::/);
+});
+
+test('normal validation builds and lints the frontend and runs the unfiltered native library suite', () => {
+  const validation = read('.github/workflows/pr-main-check.yml');
+  assert.match(validation, /- name: Lint frontend\n +working-directory: frontend\n +run: pnpm run lint/);
+  assert.match(validation, /- name: Build frontend\n +if: .*github.event_name != 'workflow_dispatch'/);
+  const native = read('frontend/scripts/test-windows-native.ps1');
+  assert.match(native, /& \$testExecutable --test-threads=1\n/);
 });
 
 test('release builds run packaged-binary acceptance after the native tests and before metadata', () => {
@@ -267,7 +275,7 @@ test('the self-test tests exercise real behaviour, not constants', () => {
     'bundled_template_list_matches_the_source_folder_and_the_bundle_config',
   ]) assert.ok(tests.includes(`fn ${name}`), name);
   // The migrate/import/summary/reopen fixture runs in the required PR test group.
-  assert.match(read('frontend/scripts/test-windows-native.ps1'), /"self_test::tests"/);
+  assert.match(read('frontend/scripts/test-windows-native.ps1'), /self_test::tests::/);
   assert.match(tests, /summary_stub\(manager\.pool\(\), &meeting_id\)/);
   assert.match(tests, /DatabaseManager::new_isolated\(/);
   // The seeded recent-schema fixture leaves the newest migrations to apply and checks them.

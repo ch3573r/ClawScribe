@@ -178,7 +178,7 @@ checkpoint fallback, capture gaps, transcript snapshot failures, duplicate saves
 outcome migrations and acceleration selection. Tests run serially where they
 share native resources.
 It does not perform live capture, GUI interaction, or model-quality benchmarking.
-The unfiltered library suite can also run in the runner's service session.
+The workflow runs the full non-ignored library suite in the runner's service session.
 Tests that require a real audio output device are explicitly ignored; run those
 with `--ignored --exact` in an interactive session with the required hardware.
 
@@ -195,7 +195,7 @@ after deleting the old folder, so a stale build left on the runner is never
 compiled in. A reused Codex runtime is re-verified against its pinned hash
 instead of being downloaded again (`stage-codex-runtime.ps1 -SkipIfCurrent`).
 
-`self_test::tests` is part of the required groups. Besides unit tests of the
+`self_test::tests` runs in the full library suite. Besides unit tests of the
 command line, the profile isolation checks, the bundled-template list and the
 package-layout checks, it runs the same code as the packaged self-test on a
 temporary profile, with no encoder and no packaged executable: it builds a

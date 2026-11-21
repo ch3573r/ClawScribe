@@ -82,77 +82,15 @@ try {
     # Prefer the build-staged encoder over PATH and runtime download fallback.
     Copy-Item -LiteralPath $stagedFfmpeg -Destination (Join-Path $testDirectory "ffmpeg.exe") -Force
 
-    foreach ($filter in @(
-        "summary::",
-        "knowledge::",
-        "model_download::tests",
-        "audio::decoder::tests",
-        "audio::com_anchor::tests",
-        "audio::vad::tests::flush_",
-        "audio::async_logger::tests",
-        "audio::hardware_detector::tests",
-        "updates::tests",
-        "diagnostics::report::tests",
-        "audio::recording_mode::tests",
-        "onboarding::tests",
-        "audio::pc_test::tests",
-        "mcp::",
-        "audio::pipeline::queue_failure_tests",
-        "audio::pipeline::source_attribution_tests",
-        "audio::recording_saver::snapshot_tests",
-        "audio::audio_spool::tests",
-        "audio::incremental_saver::tests",
-        "audio::audio_processing::folder_tests",
-        "audio::recording_state::tests",
-        "audio::recording_manager::reconnect_recovery_tests",
-        "audio::recording_commands::",
-        "audio::interrupted::tests",
-        "start_request::tests",
-        "tray::tests",
-        "power::tests",
-        "windows_lifecycle::tests",
-        "audio::transcription::queue::tests",
-        "audio::transcription::source_language::tests",
-        "audio::transcription::worker::metrics_lifecycle_tests",
-        "audio::transcription::worker::transcript_delivery_tests",
-        "audio::outcome::tests",
-        "audio::retranscription::tests",
-        "audio::import::tests",
-        "audio::import::phase_tests",
-        "audio::diarization::tests",
-        "api::",
-        "external_url::tests",
-        "database::repositories::transcript::recording_save_tests",
-        "whisper_engine::acceleration::tests",
-        "database::transcript_edits::tests",
-        "library::",
-        "database::repositories::meeting::tests",
-        "database::repositories::summary::tests",
-        "database::manager::tests",
-        "teams_detection::",
-        "database::meeting_files::tests",
-        "credentials::tests",
-        "ical_sources::",
-        "exports::",
-        "openclaw::tests",
-        "openai::",
-        "transcript_preservation_tests",
-        "model_switch_tests",
-        "audio::batch_audio::tests",
-        "audio::common::tests",
-        "audio::inference::tests",
-        "audio::transcription::nemotron_provider::tests",
-        "audio::transcription::cloud::",
-        "self_test::tests"
-    )) {
-        $listing = & $testExecutable $filter --list
-        if ($LASTEXITCODE -ne 0) { throw "Native test discovery failed for '$filter'." }
-        $testCount = @($listing | Where-Object { $_ -match ': test$' }).Count
-        if ($testCount -eq 0) { throw "No tests matched required filter '$filter'." }
-        Write-Host "Running $testCount required native tests: $filter"
-        & $testExecutable $filter --test-threads=1
-        if ($LASTEXITCODE -ne 0) { throw "Native tests failed for '$filter'." }
+    $listing = & $testExecutable --list
+    if ($LASTEXITCODE -ne 0) { throw "Native library test discovery failed." }
+    $tests = @($listing | Where-Object { $_ -match ': test$' })
+    if ($tests.Count -eq 0 -or -not ($tests -like 'self_test::tests::*')) {
+        throw "Expected the application library tests, including packaged self-test coverage."
     }
+    Write-Host "Discovered $($tests.Count) native library tests. Running all non-ignored tests."
+    & $testExecutable --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "Native library tests failed." }
 
     if ($env:CLAWSCRIBE_MEASURE_MAI -eq "true") {
         $fixture = "audio::transcription::cloud::tests::mai_conversion_and_upload_stream_measurements"

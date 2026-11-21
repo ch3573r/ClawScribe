@@ -137,12 +137,16 @@ jobs:
             Write-Warning 'Version may not be in X.Y.Z format.'
           }
 
+      - name: Lint frontend
+        working-directory: frontend
+        run: pnpm run lint
+
       - name: Typecheck frontend
         working-directory: frontend
         run: pnpm typecheck
 
       - name: Build frontend
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs['frontend-build'] }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs['frontend-build'] }}
         working-directory: frontend
         run: pnpm run build
 
