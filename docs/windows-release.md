@@ -549,6 +549,9 @@ version, audio devices, and result without publishing private meeting content.
    system audio. Verify both sources in the saved playback, stop cleanly, and
    start a second recording. The publication confirmation must cover the active
    `cpal` revision in `Cargo.lock`; never check it based on a mock or unit test.
+   The [installed dual-source harness](installed-capture-smoke.md) exercises
+   this short capture on isolated virtual endpoints and records the exact build,
+   both saved-audio markers and Stop timings.
 2. Verify retained meeting files, transcript playback, speaker-label editing,
    visible save failure/retry behavior, keyboard focus, scaling, and live-follow
    interruption/recovery. Test upgrade without losing existing meetings.
