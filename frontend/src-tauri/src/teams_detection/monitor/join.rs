@@ -25,6 +25,8 @@ pub(super) struct Invitation {
     open_before: Vec<String>,
     // Dropping the invitation also wakes and releases its timeout worker.
     timeout: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Only observations newer than the accepted pre-launch baseline belong to this invitation.
+    pub(super) baseline_serial: u64,
 }
 
 impl Invitation {
@@ -55,6 +57,7 @@ impl Invitation {
             active_before: None,
             open_before: Vec::new(),
             timeout: None,
+            baseline_serial: 0,
         })
     }
 
@@ -133,6 +136,9 @@ impl Tracker {
             .filter(|join| join.id == id)
             .ok_or(EXPIRED)?;
         let result = join.launch(baseline, open);
+        if result.is_ok() {
+            join.baseline_serial = self.seen.last_serial;
+        }
         self.revision += 1; // Reject any tick begun before the launch completed.
         result
     }
@@ -432,5 +438,98 @@ mod tests {
         assert!(tracker
             .launch_join(&next, Some(&baseline), || panic!("expired launch"))
             .is_err());
+    }
+
+    fn arm(tracker: &mut Tracker, baseline: &CallScan) -> String {
+        let join = invitation();
+        let id = join.id.clone();
+        tracker.reserve_join(join).unwrap();
+        tracker.launch_join(&id, Some(baseline), || Ok(())).unwrap();
+        id
+    }
+
+    #[test]
+    fn a_later_invitation_can_start_once_in_the_same_recurring_room() {
+        let mut tracker = Tracker::new(CallSettings::default());
+        let baseline = snapshot(vec![]);
+        let room = call("reused browser window", Some([1; 32]));
+        let active = snapshot(vec![room.clone()]);
+        let first = arm(&mut tracker, &baseline);
+        let first_revision = tracker.revision();
+        let Decision::Start {
+            serial: first_serial,
+            ..
+        } = tracker.observe(first_revision, Some(&active), IDLE)
+        else {
+            panic!("expected the first invitation to start");
+        };
+        assert!(tracker.clear_join(&first)); // Native admission consumes the first invitation.
+        assert!(!tracker.watching()); // No intervening scan observes its end.
+
+        arm(&mut tracker, &baseline);
+        let revision = tracker.revision();
+        let Decision::Start { serial, .. } = tracker.observe(revision, Some(&active), IDLE) else {
+            panic!("the old room observation suppressed the new invitation");
+        };
+        tracker.start_deferred(&room, first_serial); // Late work from the previous invitation.
+        assert!(!tracker.may_begin(&room, first_serial, first_revision, true, false));
+        assert!(tracker.may_begin(&room, serial, revision, true, false));
+        assert_eq!(
+            tracker.observe(revision, Some(&active), IDLE),
+            Decision::Nothing
+        );
+    }
+
+    #[test]
+    fn a_canceled_desktop_prompt_does_not_suppress_confirmation_for_the_next_join() {
+        let mut tracker = Tracker::new(CallSettings::default());
+        let baseline = snapshot(vec![]);
+        let desktop = snapshot(vec![call("reused desktop window", None)]);
+        let first = arm(&mut tracker, &baseline);
+        assert_eq!(
+            tracker.observe(tracker.revision(), Some(&desktop), IDLE),
+            Decision::Prompt
+        );
+        let old_key = tracker.prompt_view().unwrap().key;
+        assert!(tracker.clear_join(&first));
+
+        arm(&mut tracker, &baseline);
+        let revision = tracker.revision();
+        assert_eq!(
+            tracker.observe(revision, Some(&desktop), IDLE),
+            Decision::Prompt
+        );
+        assert_eq!(
+            tracker.observe(revision, Some(&desktop), IDLE),
+            Decision::Nothing
+        );
+        let key = tracker.prompt_view().unwrap().key;
+        assert!(tracker.confirm(&old_key).is_none());
+        let (call, serial, _) = tracker.confirm(&key).unwrap();
+        assert!(!tracker.may_begin(&call, serial, revision, true, false));
+        assert!(tracker.may_begin(&call, serial, revision, true, true));
+    }
+
+    #[test]
+    fn canceling_a_join_preserves_continuous_deduplication_for_an_existing_call() {
+        let mut tracker = Tracker::new(CallSettings {
+            mode: Mode::Auto,
+            ..Default::default()
+        });
+        let active = snapshot(vec![call("continuous call", Some([1; 32]))]);
+        assert!(matches!(
+            tracker.observe(tracker.revision(), Some(&active), IDLE),
+            Decision::Start { .. }
+        ));
+        let id = arm(&mut tracker, &active);
+        assert_eq!(
+            tracker.observe(tracker.revision(), Some(&active), IDLE),
+            Decision::Nothing
+        );
+        assert!(tracker.clear_join(&id));
+        assert_eq!(
+            tracker.observe(tracker.revision(), Some(&active), IDLE),
+            Decision::Nothing
+        );
     }
 }

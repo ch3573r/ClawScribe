@@ -111,10 +111,6 @@ struct ObservedCalls {
 }
 
 impl ObservedCalls {
-    fn has(&self, key: &str) -> bool {
-        self.calls.contains_key(key)
-    }
-
     fn serial(&self, key: &str) -> Option<u64> {
         self.calls.get(key).map(|observed| observed.serial)
     }
@@ -343,7 +339,13 @@ impl Tracker {
         }
         let call = &scan.active[0];
         let mode = self.mode_for(call);
-        if mode == Mode::Off || self.seen.has(&call.key) {
+        let baseline = self.join.as_ref().map_or(0, |join| join.baseline_serial);
+        if mode == Mode::Off
+            || self
+                .seen
+                .serial(&call.key)
+                .is_some_and(|serial| serial > baseline)
+        {
             return Decision::Nothing;
         }
         if !ctx.idle {
