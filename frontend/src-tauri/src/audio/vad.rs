@@ -127,15 +127,17 @@ impl VadResampler {
             self.input_samples * u64::from(VAD_SAMPLE_RATE) / u64::from(self.input_rate);
         let remaining = expected_samples.saturating_sub(self.output_samples) as usize;
         let mut tail = Vec::new();
-        // The partial block plus one zero block cover the sinc filter's lookahead.
-        // Use the input clock to keep only output samples from the real audio.
-        for _ in 0..2 {
+        // Drain each remaining input block, then pad as needed up to the input
+        // clock's output length. A previous processing error can leave full blocks.
+        for _ in 0..self.input_buffer.len().div_ceil(VAD_RESAMPLE_CHUNK) + 2 {
             if tail.len() == remaining {
                 break;
             }
-            self.input_buffer.resize(VAD_RESAMPLE_CHUNK, 0.0);
-            let waves = resampler.process(&[&self.input_buffer], None)?;
-            self.input_buffer.clear();
+            let count = self.input_buffer.len().min(VAD_RESAMPLE_CHUNK);
+            let mut frame = [0.0; VAD_RESAMPLE_CHUNK];
+            frame[..count].copy_from_slice(&self.input_buffer[..count]);
+            let waves = resampler.process(&[&frame[..]], None)?;
+            self.input_buffer.drain(..count);
             tail.extend(waves[0].iter().take(remaining - tail.len()));
         }
         anyhow::ensure!(
@@ -372,7 +374,16 @@ impl ContinuousVadProcessor {
     /// Finish the stream and return final speech segments. Start the next stream
     /// with a new processor so it has its own sample clock and model state.
     pub fn flush(&mut self) -> Result<Vec<SpeechSegment>> {
+        self.drain_resampler()?;
+        self.finish_buffered_speech()
+    }
+
+    pub(super) fn drain_resampler(&mut self) -> Result<()> {
         self.buffer.extend(self.resampler.flush()?);
+        Ok(())
+    }
+
+    pub(super) fn finish_buffered_speech(&mut self) -> Result<Vec<SpeechSegment>> {
         let mut completed_segments = self.process_buffered_frames()?;
         // Bound every segment emitted by the padded terminal frame to real PCM.
         let real_end_sample = self.processed_samples + self.buffer.len();
@@ -1259,6 +1270,38 @@ mod tests {
         assert_eq!(segments[0].end_timestamp_ms, samples_to_ms(38_030));
         assert!(rms(&segments[0].samples[segments[0].samples.len() - 80..]) > 0.05);
         assert!(vad.flush().unwrap().is_empty());
+
+        let mut capped =
+            ContinuousVadProcessor::new_with_max_segment_duration(48_000, 400, Some(137)).unwrap();
+        let mut cuts = Vec::new();
+        for chunk in audio.chunks(317) {
+            cuts.extend(capped.process_audio(chunk).unwrap());
+        }
+        cuts.extend(capped.flush().unwrap());
+        assert!(cuts.len() > 1);
+        assert_eq!(cuts[0].start_timestamp_ms, segments[0].start_timestamp_ms);
+        assert_eq!(
+            cuts.last().unwrap().end_timestamp_ms,
+            segments[0].end_timestamp_ms
+        );
+        assert!(cuts
+            .windows(2)
+            .all(|pair| pair[0].end_timestamp_ms == pair[1].start_timestamp_ms));
+        let joined: Vec<_> = cuts.into_iter().flat_map(|cut| cut.samples).collect();
+        assert_eq!(joined, segments[0].samples);
+
+        let mut interrupted = ContinuousVadProcessor::new(48_000, 400).unwrap();
+        for chunk in audio.chunks(317) {
+            assert!(interrupted.process_audio(chunk).unwrap().is_empty());
+        }
+        // Simulate a gap in resampler output that the terminal blocks cannot fill.
+        interrupted.resampler.output_samples -= VAD_SAMPLE_RATE as u64;
+        assert!(interrupted.drain_resampler().is_err());
+        let recovered = interrupted.finish_buffered_speech().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert!(!recovered[0].samples.is_empty());
+        assert!(segments[0].samples.starts_with(&recovered[0].samples));
+        assert!(interrupted.finish_buffered_speech().unwrap().is_empty());
     }
 
     #[test]

@@ -1427,7 +1427,11 @@ impl AudioPipeline {
         let Some(vad) = self.vad_processor.as_mut() else {
             return Ok(());
         };
-        match vad.flush() {
+        if vad.drain_resampler().is_err() {
+            self.transcription_sender.mark_failed();
+            self.state.report_warning("Final audio resampling failed. Retranscribe the saved audio to recover the end of the recording.");
+        }
+        match vad.finish_buffered_speech() {
             Ok(final_segments) => {
                 for segment in final_segments {
                     let segment_source =

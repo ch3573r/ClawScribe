@@ -75,13 +75,16 @@ With up to 100 ms of sample lookahead for the second source, the mixer produced
 179.380 s from the original callbacks and 179.377 s with the exact final
 callback. The mismatched-rate regression feeds 44.1 and 48 kHz sources in
 317- and 1,024-frame callbacks. Stop now saves all 240,528 frames on the 48 kHz
-clock, including the final marker. The original mixer returned 241,296 frames.
+clock, including the final system-audio marker. This check does not measure the
+44.1 kHz microphone resampler's final partial callback. The original mixer returned 241,296 frames.
 When one source stalls, the other still drives output after the lookahead.
 This fixture does not measure physical device-clock drift or reconnect gaps.
 
 In the paced replay, sampled peak queued audio went from 10.78 s to 10.57 s.
 Stop-to-last-decode went from 398 ms to 50 ms on these runs. The final AAC
 decoded to 179.392 s, within 15 ms of the mixed PCM duration.
+
+The following counts describe a single four-reply fixture comparison.
 
 | Measure | Original mixer | Paired windows and VAD tail flush |
 | --- | ---: | ---: |
@@ -101,7 +104,7 @@ silence, and both narrated passages retained zero word errors.
 
 The VAD resampler now drains the remaining input at Stop and trims the result
 to the capture endpoint. In a voiced cutoff regression it recovers 228
-samples at 16 kHz (14.25 ms). A separate sweep of 275 near-Stop cutoffs across
+samples at 16 kHz (14.25 ms). A separate, uncommitted experiment swept 275 near-Stop cutoffs across
 six synthetic short replies yielded 83 VAD segments, up from 77. Parakeet
 returned text for all six newly delivered segments and two were exact matches.
 An identically cut digital-silence control yielded no segment. Short or
