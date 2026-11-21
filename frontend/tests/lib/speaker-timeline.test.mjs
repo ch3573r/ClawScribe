@@ -280,6 +280,8 @@ test('meeting header metadata displays the total segment count', () => {
     './ProjectTags': { ProjectTags: 'tags' },
     './MeetingExportButtons': { MeetingExportButtons: 'exports' },
     './ReviewedActions': { ReviewedActions: 'reviewed-actions' },
+    './SeriesPreparation': { SavedSeriesReview: 'series-review' },
+    './FollowUpEmail': { FollowUpEmail: 'follow-up-email' },
     '@/components/ui/dropdown-menu': {},
   });
   try {

@@ -13,6 +13,7 @@ test('local assistant configuration appears only after a successful opt-in and d
   const hooks = createHookHarness();
   t.after(() => hooks.unmount());
   let grant = false;
+  let followThrough = false;
   const save = deferred();
   const calls = [];
   const command = String.raw`C:\Audio tools\Übung\ClawScribe.exe`;
@@ -28,14 +29,15 @@ test('local assistant configuration appears only after a successful opt-in and d
         if (args.enabled) await save.promise;
         grant = args.enabled;
       }
-      return { enabled: grant, command };
+      if (name === 'set_mcp_follow_through_access') followThrough = args.enabled;
+      return { enabled: grant, follow_through: followThrough, command };
     } },
   });
   const find = kind => nodes(hooks.render(LocalMcpSettings)).find(node => node.type === kind);
   assert.equal(find('Switch').props.disabled, true);
   await flush();
   assert.equal(find('Textarea'), undefined);
-  assert.ok(nodes(hooks.render(LocalMcpSettings)).some(node => /only setting that lets other apps read your library/.test(String(node.props.children))), 'warning note stays next to the opt-in');
+  assert.ok(nodes(hooks.render(LocalMcpSettings)).some(node => /may send what it reads to its own provider/.test(String(node.props.children))), 'the opt-in discloses provider sharing');
   const enable = find('Switch').props.onCheckedChange;
   enable(true);
   enable(true);
@@ -52,5 +54,14 @@ test('local assistant configuration appears only after a successful opt-in and d
   find('Switch').props.onCheckedChange(false);
   await flush();
   assert.equal(find('Switch').props.checked, false);
+  assert.equal(find('Textarea'), undefined);
+  const followThroughSwitch = () => nodes(hooks.render(LocalMcpSettings)).find(node => node.props.id === 'mcp-follow-through');
+  followThroughSwitch().props.onCheckedChange(true);
+  await flush();
+  assert.equal(find('Switch').props.checked, false);
+  assert.equal(followThroughSwitch().props.checked, true);
+  assert.ok(find('Textarea'));
+  followThroughSwitch().props.onCheckedChange(false);
+  await flush();
   assert.equal(find('Textarea'), undefined);
 });

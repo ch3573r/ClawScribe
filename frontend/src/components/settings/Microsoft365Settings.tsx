@@ -658,8 +658,8 @@ export function PlannerCard() {
             />
           )}
           <SettingsRow
-            title="Rewrite action items into task titles and notes"
-            description="Uses your summary model. You edit them in the export preview."
+            title="Offer AI polishing in Planner review"
+            description="Choose Polish selected with AI in the export preview to send the selected tasks to your summary provider."
             htmlFor="planner-ai-polish"
           >
             <Switch id="planner-ai-polish" checked={aiPolish} onCheckedChange={toggleAiPolish} />

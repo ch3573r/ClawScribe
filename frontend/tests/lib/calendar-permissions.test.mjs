@@ -24,6 +24,7 @@ test('upcoming meetings skip calendar requests on mount, timer, focus and visibi
       react: hooks.react,
       'lucide-react': {},
       '@/components/ui/button': { Button: 'button' },
+      '@/components/MeetingDetails/SeriesPreparation': { UpcomingSeriesPreparation: 'PreparationBrief' },
       sonner: { toast: { error() {} } },
       '@/lib/openExternal': { openExternal: async () => {} },
       '@/hooks/useICalendar': { useICalendar: () => ({ events: [], sources: [] }) },

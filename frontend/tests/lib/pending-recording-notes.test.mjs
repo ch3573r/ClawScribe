@@ -8,6 +8,7 @@ const recording = {
   folder_name: 'Synthetic workshop',
   first_note: 'Review the plan',
   note_count: 2,
+  live_answer_count: 1,
   include_in_summary: true,
 };
 
@@ -69,7 +70,7 @@ test('deleting pending notes sends only the reviewed identity and refreshes on s
     ui.find(node => node.type === 'Dialog');
     await flush();
     const request = ui.calls.find(([command]) => command === 'delete_pending_recording_notes');
-    assert.deepEqual({ ...request[1] }, { recordingId: recording.recording_id, noteCount: 2, includeInSummary: true });
+    assert.deepEqual({ ...request[1] }, { recordingId: recording.recording_id, noteCount: 2, liveAnswerCount: 1, includeInSummary: true });
     assert.equal(ui.button('Review removal'), undefined);
     assert.ok(ui.find(node => node.props?.children === 'No pending recording notes.'));
   } finally {

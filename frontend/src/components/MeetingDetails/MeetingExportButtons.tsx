@@ -56,6 +56,7 @@ import {
 } from "@/lib/exportDestinations";
 import { confluenceExportService } from "@/services/confluenceExportService";
 import { PlannerExportPreview } from "./PlannerExportPreview";
+import type { FollowUpDestination } from "@/lib/meeting-follow-through";
 import { ToDoExportPreview } from "./ToDoExportPreview";
 import { ExportContentOptions } from "./ExportContentOptions";
 import { defaultExportOptions, prepareMeetingExport, readExportSummary } from "@/lib/meetingExportContent";
@@ -69,6 +70,8 @@ interface MeetingExportButtonsProps {
   getMarkdown: () => Promise<string>;
   disabled?: boolean;
   onReviewActions?: () => void;
+  onReviewEmail?: () => void;
+  seriesDestination?: FollowUpDestination | null;
 }
 
 type DocumentDestination = "word" | "onedrive" | "confluence";
@@ -153,6 +156,8 @@ export function MeetingExportButtons({
   getMarkdown,
   disabled = false,
   onReviewActions,
+  onReviewEmail,
+  seriesDestination,
 }: MeetingExportButtonsProps) {
   const [connected, setConnected] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -642,19 +647,20 @@ export function MeetingExportButtons({
           {connected && (
             <DropdownMenuItem onClick={openPlanner}>
               <PlannerIcon className="mr-2 h-4 w-4" />
-              Planner action items
+              Planner action items{seriesDestination === "planner" && " · Series preference"}
             </DropdownMenuItem>
           )}
           {connected && (
             <DropdownMenuItem onClick={openToDo}>
               <ToDoIcon className="mr-2 h-4 w-4" />
-              Microsoft To Do tasks
+              Microsoft To Do tasks{seriesDestination === "todo" && " · Series preference"}
             </DropdownMenuItem>
           )}
           <DropdownMenuItem onClick={() => openDocumentExport("confluence")}>
             <ConfluenceIcon className="mr-2 h-4 w-4" />
             Confluence
           </DropdownMenuItem>
+          {onReviewEmail && <DropdownMenuItem onSelect={onReviewEmail}>Follow-up email{seriesDestination === "email" && " · Series preference"}</DropdownMenuItem>}
           <DropdownMenuItem onClick={() => void openHistory()}>Export history</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

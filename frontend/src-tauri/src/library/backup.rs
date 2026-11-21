@@ -1845,6 +1845,7 @@ mod tests {
     async fn archive_policy_accounts_for_every_database_table() {
         // Every new table must be explicitly portable or profile-local.
         let excluded = [
+            "approved_series_notes",
             "knowledge_chunks",
             "knowledge_document_fts",
             "knowledge_document_permissions",
@@ -1862,7 +1863,9 @@ mod tests {
             "recording_calendar_drafts",
             "recording_library_deletions",
             "recording_summary_bookmarks",
+            "recurring_meeting_preferences",
             "retranscription_notes_retry",
+            "saved_live_answers",
             "settings",
             "transcript_settings",
         ];

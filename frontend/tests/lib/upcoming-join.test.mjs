@@ -75,6 +75,7 @@ test('Upcoming opens plain Join independently and binds a double click to one un
   const calendar = loadTsModule('src/lib/meetingCalendar.ts');
   const jsx = (type, props) => ({ type, props });
   const { UpcomingMeetings } = loadTsModule('src/components/UpcomingMeetings.tsx', {
+    '@/components/MeetingDetails/SeriesPreparation': { UpcomingSeriesPreparation: 'PreparationBrief' },
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
     '@/components/ui/button': { Button: 'button' },
     '@/lib/meetingCalendar': calendar,

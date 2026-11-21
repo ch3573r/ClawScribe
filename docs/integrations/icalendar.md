@@ -68,6 +68,20 @@ to clear the preference. Changing a series template leaves attendance as it was.
 Single events, detached iCalendar imports, and links without a stable series ID
 use the regular summary template settings. Series preferences are stored locally.
 
+Choose **Preparation brief** for a recurring event under **Upcoming meetings**.
+The brief uses up to eight earlier reviewed occurrences of the same series and
+calendar source or Microsoft account. It lists open reviewed actions and
+approved decisions and notes with links to the source meetings. Briefs are
+assembled locally. Each saved recording needs a reviewed link to contribute.
+
+In the saved meeting menu, choose **Recurring meeting** to approve decisions
+and notes for that occurrence, choose a supported summary language for the
+series, or highlight a follow-up option in Export. An explicit meeting
+language overrides the series language. The language setting leaves the
+existing automatic summary permission in force. Planner and Microsoft To Do
+use the destinations configured for the active Microsoft connection and still
+open task review. The email option opens a review before any handoff.
+
 ClawScribe checks for calendar updates while Home or the Calendars page is
 open. **Refresh** requests an immediate update. Use the calendar's menu
 to remove it and stop future refreshes. Saved meeting associations can still

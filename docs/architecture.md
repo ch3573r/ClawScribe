@@ -966,9 +966,13 @@ configuration, index work, or live history persistence. The existing provider
 supervisor retains resources until actual cleanup completes. Producer IDs and
 request validation discard old results after Stop or another recording starts.
 Live requests and bounded conversation history are held in memory and cleared
-on Stop; no Live owners, requests, messages or evidence associations are written
-to the database. Background indexing pauses during capture, and the existing
-recording admission gate preempts document extraction and blocks local inference.
+on Stop. An explicit save accepts the current native session and its completed
+answer ID. It saves the answer, provider, finalized-through time, and cited
+live excerpts as a recording note under the durable recording ID. The recording
+handoff attaches those notes in the transaction that saves the meeting. Related
+saved documents and transcripts are stored as locators and checked at access.
+Background indexing pauses during capture, and the existing recording admission
+gate preempts document extraction and blocks local inference.
 
 `LiveAssistanceProvider` is mounted once in the root layout, inside shared
 recording/configuration providers and outside route lifetimes. Its production

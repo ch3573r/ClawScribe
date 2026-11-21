@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { invoke } from '@tauri-apps/api/core';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -39,9 +40,11 @@ export function LiveAssistancePanel() {
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewError, setPreviewError] = useState('');
   const previewRevision = useRef(0);
+  const [saveState, setSaveState] = useState<Record<string, "saving" | "saved" | string>>({});
+  const savingAnswers = useRef(new Set<string>());
   useEffect(() => {
     previewRevision.current++;
-    setPreview(null); setPreviewBusy(false); setPreviewError(''); setQuestion('');
+    setPreview(null); setPreviewBusy(false); setPreviewError(''); setQuestion(''); setSaveState({});
     return () => { previewRevision.current += 1; };
   }, [state.sessionId]);
   const audioOnly = recording.sessionMode === 'audio_only' || state.snapshot?.transcription_available === false;
@@ -52,6 +55,20 @@ export function LiveAssistancePanel() {
     !state.pending && !state.documentSharingBusy && !state.documentsLoading && !statusError &&
     !(state.referenceError && state.meetingIds.length);
   const submit = (text: string) => { if (ready && text.trim()) void actions.ask(text); };
+  async function saveAnswer(sessionId: string, answerId: string) {
+    const current = () => actions.getSnapshot().sessionId === sessionId;
+    if (!current() || savingAnswers.current.has(answerId) || saveState[answerId] === "saved") return;
+    savingAnswers.current.add(answerId);
+    setSaveState(previous => ({ ...previous, [answerId]: "saving" }));
+    try {
+      await invoke("save_selected_live_answer", { sessionId, answerId });
+      if (current()) setSaveState(previous => ({ ...previous, [answerId]: "saved" }));
+    } catch (failure) {
+      if (current()) setSaveState(previous => ({ ...previous, [answerId]: typeof failure === "string" ? failure : "Could not save the answer." }));
+    } finally {
+      savingAnswers.current.delete(answerId);
+    }
+  }
   async function inspect(reference: EvidenceRef, metadata: EvidenceDisplay, contextReference?: EvidenceRef) {
     const sessionId = actions.getSnapshot().sessionId;
     if (!sessionId) return;
@@ -157,6 +174,13 @@ export function LiveAssistancePanel() {
         <CitedAnswer reply={reply} state={{ inspect }} />
         <p className="text-xs text-muted-foreground">{knowledgeProviderLabel(reply.provider)} · Finalized through {time(reply.live_context?.finalized_through_seconds ?? 0)}
           {reply.live_context?.transcription_incomplete ? ' · Transcript incomplete' : ''}</p>
+        {reply.live_context && state.sessionId === reply.live_context.session_id && <div className="space-y-1">
+          <Button type="button" size="sm" variant="outline" disabled={["saving", "saved"].includes(saveState[reply.message_id])}
+            onClick={() => void saveAnswer(reply.live_context!.session_id, reply.message_id)}>
+            {saveState[reply.message_id] === "saved" ? "Saved to meeting notes" : saveState[reply.message_id] === "saving" ? "Saving answer…" : "Save answer to meeting notes"}
+          </Button>
+          {saveState[reply.message_id] && !["saving", "saved"].includes(saveState[reply.message_id]) && <p role="alert" className="text-sm text-destructive">{saveState[reply.message_id]}</p>}
+        </div>}
       </article>)}</div>
       <Dialog open={!!visiblePreview} onOpenChange={open => { if (!open) { previewRevision.current++; setPreview(null); setPreviewBusy(false); } }}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl"><DialogHeader><DialogTitle>Source passage</DialogTitle>

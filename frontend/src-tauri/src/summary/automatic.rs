@@ -669,6 +669,7 @@ async fn prepare<R: Runtime>(
     })
     .await
     .map_err(|_| "Could not read automatic summary preferences")??;
+    let language = language.or_else(|| context.series_language.clone());
     Ok((context, language))
 }
 

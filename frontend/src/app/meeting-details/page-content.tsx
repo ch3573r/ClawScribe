@@ -35,6 +35,8 @@ import { Button } from '@/components/ui/button';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
+import { SERIES_REVIEW_CHANGED, type SeriesPreferences } from '@/lib/meeting-follow-through';
+import { MEETING_SERIES_TEMPLATE_CHANGED } from '@/lib/meetingCalendarStore';
 
 export default function PageContent({
   meeting,
@@ -42,6 +44,7 @@ export default function PageContent({
   savedSourceToken,
   fromArchive,
   archiveAction,
+  actionId,
   summaryData,
   summaryJob,
   onMeetingUpdated,
@@ -67,6 +70,7 @@ export default function PageContent({
   savedSourceToken?: string | null;
   fromArchive?: boolean;
   archiveAction?: string | null;
+  actionId?: string | null;
   summaryData: MeetingSummary | null;
   summaryJob: SummaryJobSnapshot | null;
   onMeetingUpdated?: () => Promise<void>;
@@ -88,6 +92,26 @@ export default function PageContent({
   onLoadMore?: () => void;
 }) {
   const [focusedBookmark, setFocusedBookmark] = useState<string | null>(null);
+  const [seriesDefaults, setSeriesDefaults] = useState<{ meetingId: string; value: SeriesPreferences | null } | null>(null);
+  const series = seriesDefaults?.meetingId === meeting.id ? seriesDefaults.value : null;
+  useEffect(() => {
+    let revision = 0;
+    const load = () => {
+      const request = ++revision;
+      setSeriesDefaults(null);
+      void invoke<SeriesPreferences | null>('get_meeting_series_preferences', { meetingId: meeting.id }).then(value => {
+        if (request === revision) setSeriesDefaults({ meetingId: meeting.id, value });
+      }).catch(() => {});
+    };
+    load();
+    window.addEventListener(SERIES_REVIEW_CHANGED, load);
+    window.addEventListener(MEETING_SERIES_TEMPLATE_CHANGED, load);
+    return () => {
+      revision++;
+      window.removeEventListener(SERIES_REVIEW_CHANGED, load);
+      window.removeEventListener(MEETING_SERIES_TEMPLATE_CHANGED, load);
+    };
+  }, [meeting.id]);
   console.log('📄 PAGE CONTENT: Initializing with data:', {
     meetingId: meeting.id,
     hasSummary: !!summaryData,
@@ -344,11 +368,14 @@ export default function PageContent({
       className="flex h-full flex-col bg-background"
     >
       {fromArchive && <div className="shrink-0 px-4 pt-2">
-        <Button variant="ghost" size="sm" asChild><Link href="/meetings"><ChevronLeft />Back to archive</Link></Button>
+        <Button variant="ghost" size="sm" asChild><Link href="/meetings"><ChevronLeft />{archiveAction === 'actions' ? 'Back to open actions' : 'Back to archive'}</Link></Button>
       </div>}
       <EvidenceRoute token={evidenceToken} meetingId={meeting.id} audioReady={isAudioReady} audioStatus={audioStatus} audioError={audioPlayer.error} onReveal={revealEvidence} onPlay={playEvidence} />
       {savedSourceToken && <SavedSearchRoute key={savedSourceToken} token={savedSourceToken} meetingId={meeting.id} onBookmark={setFocusedBookmark} onPlay={isAudioReady ? playPassage : undefined} />}
-      <MeetingHeader meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
+      <MeetingHeader key={meeting.id} meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
+        initialActionId={archiveAction === 'actions' ? actionId : null}
+        initialSeriesOpen={archiveAction === 'series'}
+        seriesDestination={series?.destination}
         onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}
         duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
         disabled={summaryBusy}
@@ -423,6 +450,7 @@ export default function PageContent({
           onBookmarksChange={setBookmarks}
         />
         <SummaryPanel
+          seriesLanguage={series?.language}
           details={meetingData.details}
           onRevealSource={async (source) => {
             await onRevealTranscript?.(source.transcript_id, source.transcript_index);

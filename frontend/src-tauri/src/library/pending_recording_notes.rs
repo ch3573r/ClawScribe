@@ -12,6 +12,7 @@ struct PendingNotes {
     folder_name: Option<String>,
     first_note: Option<String>,
     note_count: i64,
+    live_answer_count: i64,
     include_in_summary: bool,
 }
 
@@ -27,12 +28,15 @@ async fn list(pool: &SqlitePool, page: u32) -> Result<PendingNotesPage, sqlx::Er
             SELECT recording_id FROM meeting_bookmarks
             WHERE meeting_id IS NULL AND recording_id IS NOT NULL
             UNION SELECT recording_id FROM recording_summary_bookmarks
+            UNION SELECT recording_id FROM saved_live_answers WHERE meeting_id IS NULL
          )
          SELECT p.recording_id,
             NULLIF(substr(b.folder_path, -1024), '') AS folder_name,
             substr(b.label, 1, 160) AS first_note,
             (SELECT COUNT(*) FROM meeting_bookmarks
              WHERE recording_id = p.recording_id AND meeting_id IS NULL) AS note_count,
+            (SELECT COUNT(*) FROM saved_live_answers
+             WHERE recording_id = p.recording_id AND meeting_id IS NULL) AS live_answer_count,
             EXISTS(SELECT 1 FROM recording_summary_bookmarks
                    WHERE recording_id = p.recording_id) AS include_in_summary
          FROM pending p
@@ -79,6 +83,7 @@ pub async fn delete_pending_recording_notes(
     state: tauri::State<'_, AppState>,
     recording_id: String,
     note_count: i64,
+    live_answer_count: Option<i64>,
     include_in_summary: bool,
 ) -> Result<(), String> {
     let _job = crate::audio::inference::claim_job()
@@ -90,6 +95,7 @@ pub async fn delete_pending_recording_notes(
         state.db_manager.pool(),
         &recording_id,
         note_count,
+        live_answer_count.unwrap_or_default(),
         include_in_summary,
     )
     .await
@@ -99,6 +105,7 @@ async fn delete_reviewed(
     pool: &SqlitePool,
     recording_id: &str,
     reviewed_count: i64,
+    reviewed_answer_count: i64,
     reviewed_consent: bool,
 ) -> Result<(), String> {
     let valid = recording_id.strip_prefix("meeting-").is_some_and(|text| {
@@ -114,11 +121,13 @@ async fn delete_reviewed(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|_| STORAGE_ERROR)?;
-    let (saved, count, consent): (bool, i64, bool) = sqlx::query_as(
+    let (saved, count, answer_count, consent): (bool, i64, i64, bool) = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?),
                 (SELECT COUNT(*) FROM meeting_bookmarks WHERE meeting_id IS NULL AND recording_id = ?),
+                (SELECT COUNT(*) FROM saved_live_answers WHERE meeting_id IS NULL AND recording_id = ?),
                 EXISTS(SELECT 1 FROM recording_summary_bookmarks WHERE recording_id = ?)",
     )
+    .bind(recording_id)
     .bind(recording_id)
     .bind(recording_id)
     .bind(recording_id)
@@ -128,10 +137,19 @@ async fn delete_reviewed(
     if saved {
         return Err("This recording has already been saved.".into());
     }
-    if (count == 0 && !consent) || count != reviewed_count || consent != reviewed_consent {
+    if (count == 0 && answer_count == 0 && !consent)
+        || count != reviewed_count
+        || answer_count != reviewed_answer_count
+        || consent != reviewed_consent
+    {
         return Err(STALE.into());
     }
     super::remove_pending_bookmarks(&mut tx, recording_id)
+        .await
+        .map_err(|_| STORAGE_ERROR)?;
+    sqlx::query("DELETE FROM saved_live_answers WHERE recording_id = ? AND meeting_id IS NULL")
+        .bind(recording_id)
+        .execute(&mut *tx)
         .await
         .map_err(|_| STORAGE_ERROR)?;
     tx.commit().await.map_err(|_| STORAGE_ERROR.into())
@@ -183,9 +201,11 @@ mod tests {
             .iter()
             .any(|row| row.recording_id == CONSENT_ONLY && row.note_count == 0));
 
-        assert!(delete_reviewed(&pool, "invalid", 1, true).await.is_err());
+        assert!(delete_reviewed(&pool, "invalid", 1, 0, true).await.is_err());
         assert_eq!(
-            delete_reviewed(&pool, REMOVE, 2, true).await.unwrap_err(),
+            delete_reviewed(&pool, REMOVE, 2, 0, true)
+                .await
+                .unwrap_err(),
             STALE
         );
         sqlx::raw_sql(
@@ -196,7 +216,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            delete_reviewed(&pool, REMOVE, 1, true).await.unwrap_err(),
+            delete_reviewed(&pool, REMOVE, 1, 0, true)
+                .await
+                .unwrap_err(),
             STORAGE_ERROR
         );
         assert_eq!(list(&pool, 0).await.unwrap().entries.len(), 3);
@@ -205,8 +227,10 @@ mod tests {
             .await
             .unwrap();
 
-        delete_reviewed(&pool, REMOVE, 1, true).await.unwrap();
-        delete_reviewed(&pool, CONSENT_ONLY, 0, true).await.unwrap();
+        delete_reviewed(&pool, REMOVE, 1, 0, true).await.unwrap();
+        delete_reviewed(&pool, CONSENT_ONLY, 0, 0, true)
+            .await
+            .unwrap();
         let entries = list(&pool, 0).await.unwrap().entries;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].recording_id, RECOVER);
