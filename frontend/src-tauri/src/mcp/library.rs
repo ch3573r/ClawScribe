@@ -240,7 +240,9 @@ async fn search_meetings(
         substr(created_at,1,64) created_at,substr(updated_at,1,64) updated_at FROM meetings {candidates}
         ORDER BY meetings.created_at DESC,meetings.id ASC LIMIT 64 OFFSET ?1");
     let transcript_filter = if anchor.is_some() {
-        "AND t.rowid IN (SELECT rowid FROM knowledge_transcript_literal(?3))"
+        // Probe the index for this segment. Materializing the global hit list
+        // once per meeting makes common terms time out on later result pages.
+        "AND EXISTS (SELECT 1 FROM knowledge_transcript_literal(?3) hit WHERE hit.rowid=t.rowid)"
     } else {
         ""
     };

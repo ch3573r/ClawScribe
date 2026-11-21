@@ -335,7 +335,7 @@ pub(crate) async fn search(
             tx.lock_handle()
                 .await?
                 .set_progress_handler(2_000, move || {
-                    running.strong_count() == 0 || std::time::Instant::now() < deadline
+                    running.strong_count() > 0 && std::time::Instant::now() < deadline
                 });
             let result = search_rows(&mut tx, &query, scope.as_ref(), one_per_meeting).await;
             drop(active);

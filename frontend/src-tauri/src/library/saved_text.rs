@@ -55,14 +55,18 @@ pub(crate) fn summary_overview(raw: &str, limit: usize) -> Option<String> {
     let value: Value = serde_json::from_str(raw).ok()?;
     validate_saved_summary(&value).ok()?;
     let markdown = value.get("markdown")?.as_str()?;
-    let text: String = markdown_text(markdown).chars().take(limit).collect();
+    let normalize = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text: String = normalize(&markdown_text(markdown))
+        .chars()
+        .take(limit)
+        .collect();
     if text.trim().is_empty() {
         return None;
     }
     if let Some(blocks) = value.get("summary_json").filter(|v| v.is_array()) {
-        if !editor_text(blocks)?.contains(text.trim()) {
-            return None;
-        }
+        let visible = normalize(&editor_text(blocks)?);
+        let (_, current) = visible.match_indices(text.trim()).next()?;
+        return Some(current.to_owned());
     }
     Some(text)
 }
@@ -170,6 +174,21 @@ pub(crate) fn markdown_text(markdown: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn matching_editor_paragraphs_supply_a_current_overview() {
+        let stored = serde_json::json!({
+            "markdown":"First paragraph.\n\nSecond paragraph.",
+            "summary_json":[
+                {"type":"paragraph","content":[{"type":"text","text":"First paragraph."}],"children":[]},
+                {"type":"paragraph","content":[{"type":"text","text":"Second paragraph."}],"children":[]}
+            ]
+        });
+        assert_eq!(
+            super::summary_overview(&stored.to_string(), 100).as_deref(),
+            Some("First paragraph. Second paragraph.")
+        );
+    }
+
     use super::*;
     use serde_json::json;
 
