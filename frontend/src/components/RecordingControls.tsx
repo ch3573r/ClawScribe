@@ -3,7 +3,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { appDataDir } from '@tauri-apps/api/path';
 import { useCallback, useEffect, useState } from 'react';
-import { Play, Pause, Square, Mic, AlertCircle, X } from 'lucide-react';
+import { Play, Pause, Square, Mic, AlertCircle, X, PictureInPicture2 } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
@@ -55,6 +55,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const [isStopping, setIsStopping] = useState(false);
   const [isPausing, setIsPausing] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
+  const [openingControls, setOpeningControls] = useState(false);
   const [deviceError, setDeviceError] = useState<{
     title: string;
     message: string;
@@ -336,6 +337,25 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
               ) : (
                 // Recording controls (pause/resume + stop)
                 <>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button variant="ghost" size="icon" className={secondaryButtonClassName}
+                        aria-label="Open floating controls" disabled={!recordingState.sessionId || openingControls || isStopping}
+                        onClick={async () => {
+                          setOpeningControls(true);
+                          try {
+                            await invoke('open_floating_controls', { sessionId: recordingState.sessionId });
+                          } catch {
+                            toast.error('Could not open floating controls. Try again from the tray.');
+                          } finally {
+                            setOpeningControls(false);
+                          }
+                        }}>
+                        <PictureInPicture2 />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Open floating controls. Some screen-sharing apps may show this window.</TooltipContent>
+                  </Tooltip>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="inline-flex">

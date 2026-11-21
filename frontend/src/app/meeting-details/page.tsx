@@ -15,7 +15,7 @@ import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-stat
 import { RecordingOutcome, recordingRecoveryMessage } from '@/lib/recording-outcome';
 
 function MeetingDetailsContent() {
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams() ?? new URLSearchParams();
   const meetingId = searchParams.get('id');
   const evidenceToken = searchParams.get('evidence');
   const fromArchive = searchParams.get('from') === 'archive';

@@ -26,6 +26,8 @@ use super::{
 // Import transcription modules
 use super::transcription;
 
+pub(crate) mod floating;
+
 // Re-export TranscriptUpdate for backward compatibility
 pub use super::transcription::TranscriptUpdate;
 
@@ -108,6 +110,9 @@ mod stop_tests {
             prepare_live_recording(&runtime, &mut second_manager, true).unwrap();
         let second = second_start.commit();
         assert_ne!(first, second);
+        assert!(StopTarget::Session(&first).matches(&first_manager));
+        assert!(!StopTarget::Session(&first).matches(&second_manager));
+        assert!(!StopTarget::DetectedCall(&first).matches(&first_manager));
         first_manager.mark_detected_call(&first);
         assert!(first_manager.owns_detected_call(&first));
         assert!(
@@ -327,6 +332,9 @@ struct StopState;
 // The Stop owner opens admission after it has validated the session and closes
 // it under the same lock when the save commits or the Stop unwinds.
 struct SavingRecording {
+    active_seconds: f64,
+    progress: u8,
+    message: &'static str,
     session_id: Option<String>,
     start_requested: Option<Instant>,
 }
@@ -377,6 +385,9 @@ mod save_intent_tests {
         let now = Instant::now();
         let mut saving = SavingRecording {
             session_id: Some("current".into()),
+            active_seconds: 12.0,
+            progress: 20,
+            message: "Stopping audio capture…",
             start_requested: None,
         };
         assert!(!saving.update(Some(true), Some("old"), now));
@@ -393,6 +404,26 @@ mod save_intent_tests {
 }
 
 impl StopState {
+    fn report<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        identity: &Option<crate::knowledge::live::RecordingIdentity>,
+        stage: &str,
+        progress: u8,
+        message: &'static str,
+    ) {
+        if let Some(owner) = SAVING_RECORDING.lock().unwrap().as_mut() {
+            owner.progress = progress;
+            owner.message = message;
+        }
+        let _ = app.emit(
+            "recording-shutdown-progress",
+            serde_json::json!({
+                "stage": stage, "identity": identity, "message": message, "progress": progress
+            }),
+        );
+    }
+
     fn close(&self) -> Option<Instant> {
         let mut saving = SAVING_RECORDING.lock().unwrap();
         IS_STOPPING.store(false, Ordering::Release);
@@ -1181,7 +1212,7 @@ pub async fn stop_detected_call_recording<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
 ) -> Result<bool, String> {
-    stop_recording_session(app, Some(&session_id), None).await
+    stop_recording_session(app, Some(StopTarget::DetectedCall(&session_id)), None).await
 }
 
 /// One nudge to the existing snapshot worker. The PCM spool is published
@@ -1218,9 +1249,23 @@ pub(crate) async fn stop_after_windows_suspend<R: Runtime>(app: AppHandle<R>, at
     }
 }
 
+enum StopTarget<'a> {
+    Session(&'a str),
+    DetectedCall(&'a str),
+}
+
+impl StopTarget<'_> {
+    fn matches(&self, manager: &RecordingManager) -> bool {
+        match *self {
+            Self::Session(id) => manager.live_session_id() == Some(id),
+            Self::DetectedCall(id) => manager.owns_detected_call(id),
+        }
+    }
+}
+
 async fn stop_recording_session<R: Runtime>(
     app: AppHandle<R>,
-    expected_session: Option<&str>,
+    expected_session: Option<StopTarget<'_>>,
     suspend_attempt: Option<u64>,
 ) -> Result<bool, String> {
     // All entry points share one owner through drain, save and completion.
@@ -1271,24 +1316,30 @@ async fn stop_recording_session<R: Runtime>(
         info!("Recording was not active");
         return Ok(false);
     }
-    // Validate inside the shared stop-owner guard. A delayed detector request
-    // cannot take ownership of a subsequent recording after a manual stop.
-    if let Some(expected) = expected_session {
+    // Validate inside the shared stop-owner guard. A delayed call detector or
+    // floating window request cannot take ownership of a later recording.
+    let active_seconds = {
         let manager = RECORDING_MANAGER
             .lock()
             .map_err(|_| "Recording state unavailable")?;
-        if !manager
-            .as_ref()
-            .is_some_and(|m| m.owns_detected_call(expected))
+        if expected_session
+            .is_some_and(|expected| !manager.as_ref().is_some_and(|m| expected.matches(m)))
         {
             return Ok(false);
         }
-    }
+        manager
+            .as_ref()
+            .and_then(|m| m.get_active_recording_duration())
+            .unwrap_or_default()
+    };
     let stopped_live_identity = {
         let mut saving = SAVING_RECORDING.lock().unwrap();
         IS_STOPPING.store(true, Ordering::Release);
         let identity = stop_live_assistance(&app.state::<crate::knowledge::KnowledgeState>());
         *saving = Some(SavingRecording {
+            active_seconds,
+            progress: 20,
+            message: "Stopping audio capture…",
             session_id: identity
                 .as_ref()
                 .map(|identity| identity.session_id.clone()),
@@ -1300,14 +1351,12 @@ async fn stop_recording_session<R: Runtime>(
     crate::tray::set_tray_state(&app, crate::tray::RecordingState::Stopping);
 
     // Emit shutdown progress to frontend
-    let _ = app.emit(
-        "recording-shutdown-progress",
-        serde_json::json!({
-            "stage": "stopping_audio",
-            "identity": stopped_live_identity,
-            "message": "Stopping audio capture...",
-            "progress": 20
-        }),
+    _stop_state.report(
+        &app,
+        &stopped_live_identity,
+        "stopping_audio",
+        20,
+        "Stopping audio capture...",
     );
 
     let mut audio_save_failed = false;
@@ -1359,14 +1408,12 @@ async fn stop_recording_session<R: Runtime>(
     let transcribes = LIVE_TRANSCRIPTION.load(Ordering::SeqCst);
     if transcribes {
         // Step 2: Signal transcription workers to finish processing ALL queued chunks
-        let _ = app.emit(
-            "recording-shutdown-progress",
-            serde_json::json!({
-                "stage": "processing_transcripts",
-                "identity": stopped_live_identity,
-                "message": "Processing remaining transcript chunks...",
-                "progress": 40
-            }),
+        _stop_state.report(
+            &app,
+            &stopped_live_identity,
+            "processing_transcripts",
+            40,
+            "Processing remaining transcript chunks...",
         );
     }
 
@@ -1481,14 +1528,12 @@ async fn stop_recording_session<R: Runtime>(
 
     if transcribes {
         // Step 3: Now safely unload Whisper model after ALL chunks are processed
-        let _ = app.emit(
-            "recording-shutdown-progress",
-            serde_json::json!({
-                "stage": "unloading_model",
-                "identity": stopped_live_identity,
-                "message": "Unloading speech recognition model...",
-                "progress": 70
-            }),
+        _stop_state.report(
+            &app,
+            &stopped_live_identity,
+            "unloading_model",
+            70,
+            "Unloading speech recognition model...",
         );
 
         info!("🧠 All transcript chunks processed. Now safely unloading transcription model...");
@@ -1598,14 +1643,12 @@ async fn stop_recording_session<R: Runtime>(
     }
 
     // Step 4: Finalize recording state and cleanup resources safely
-    let _ = app.emit(
-        "recording-shutdown-progress",
-        serde_json::json!({
-            "stage": "finalizing",
-            "identity": stopped_live_identity,
-            "message": "Finalizing recording and cleaning up resources...",
-            "progress": 90
-        }),
+    _stop_state.report(
+        &app,
+        &stopped_live_identity,
+        "finalizing",
+        90,
+        "Finalizing recording and cleaning up resources...",
     );
 
     // Perform final cleanup with the manager if available
@@ -1730,6 +1773,10 @@ async fn stop_recording_session<R: Runtime>(
         _ => (None, 0),
     };
     let library_save_failed = meeting_id.is_none();
+    floating::remember_outcome(
+        stopped_live_identity.as_ref(),
+        library_save_failed || outcome.needs_recovery(),
+    );
 
     // Release the recording job only after the outcome is persisted.
     IS_RECORDING.store(false, Ordering::SeqCst);

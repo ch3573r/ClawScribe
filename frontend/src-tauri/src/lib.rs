@@ -67,6 +67,7 @@ pub mod whisper_engine;
 #[cfg(windows)]
 mod windows_lifecycle;
 
+use audio::recording_commands::floating;
 use audio::{list_audio_devices, trigger_audio_permission, AudioDevice};
 use log::{error as log_error, info as log_info};
 use notifications::commands::NotificationManagerState;
@@ -553,7 +554,7 @@ pub fn get_language_preference_internal() -> Option<String> {
 }
 
 #[tauri::command]
-fn set_native_theme(app: AppHandle, theme: String) -> Result<(), String> {
+fn set_native_theme(app: AppHandle, theme: String, accent: Option<String>) -> Result<(), String> {
     let native_theme = match theme.as_str() {
         "light" => Some(Theme::Light),
         "dark" => Some(Theme::Dark),
@@ -561,6 +562,7 @@ fn set_native_theme(app: AppHandle, theme: String) -> Result<(), String> {
         other => return Err(format!("Unknown native theme preference: {}", other)),
     };
 
+    floating::set_appearance(theme, accent);
     app.set_theme(native_theme);
 
     if let Some(window) = app.get_webview_window("main") {
@@ -808,7 +810,12 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(floating::restrict_commands(tauri::generate_handler![
+            floating::open_floating_controls,
+            floating::floating_status,
+            floating::floating_note,
+            floating::floating_stop,
+            floating::dismiss_floating_controls,
             library::context::get_meeting_context,
             library::context::set_meeting_context,
             library::calendar::get_meeting_calendar,
@@ -1174,7 +1181,7 @@ pub fn run() {
             exports::confluence::confluence_settings_status,
             exports::confluence::confluence_connection_status,
             exports::confluence::confluence_export_page,
-        ])
+        ]))
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app_handle, event| {

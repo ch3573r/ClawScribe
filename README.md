@@ -69,6 +69,9 @@ is not brought to the front. See
 ## Capture And Transcription
 
 - Microphone and system-audio capture from the local Windows session.
+- Choose **Open floating controls** on the recording bar or tray menu to keep
+  elapsed time, audio levels, timestamped notes, and Stop above other windows.
+  Closing the controls leaves recording running.
 - Live transcription, audio/video import, and retranscription with a different
   model or language selection.
 - **Record now, transcribe later:** choose **Record audio now** on first launch

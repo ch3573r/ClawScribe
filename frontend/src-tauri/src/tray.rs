@@ -55,6 +55,17 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
         "pause_recording" => pause_recording_handler(app),
         "resume_recording" => resume_recording_handler(app),
         "stop_recording" => stop_recording_handler(app),
+        "floating_controls" => {
+            use crate::audio::recording_commands::floating;
+            if let Some(id) = floating::available_session() {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(message) = floating::open_floating_controls(app.clone(), id).await {
+                        start_feedback(&app, &message);
+                    }
+                });
+            }
+        }
         "bookmark_recording" => crate::library::bookmark_active_recording(app),
         "confirm_call" => {
             // Answers the call prompt without opening the window.
@@ -474,6 +485,15 @@ fn build_menu<R: Runtime>(
                 );
             }
         }
+    }
+
+    if matches!(
+        state,
+        RecordingState::Recording | RecordingState::Paused | RecordingState::Stopping
+    ) {
+        builder = builder.item(
+            &MenuItemBuilder::with_id("floating_controls", "Open floating controls").build(app)?,
+        );
     }
 
     builder

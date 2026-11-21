@@ -62,7 +62,7 @@ export async function applyNativeThemePreference(preference: ThemePreference): P
 
   try {
     const { invoke } = await import("@tauri-apps/api/core")
-    await invoke("set_native_theme", { theme: preference })
+    await invoke("set_native_theme", { theme: preference, accent: getStoredAccentId() })
   } catch {
     // Browser previews do not have Tauri's native window API.
   }
@@ -268,6 +268,7 @@ export function applyAccent(id: string): void {
 export function setAccent(id: string): void {
   writeStored(ACCENT_STORAGE_KEY, id)
   applyAccent(id)
+  void applyNativeThemePreference(getStoredThemePreference())
 }
 
 export function subscribeToSystemTheme(callback: () => void): () => void {

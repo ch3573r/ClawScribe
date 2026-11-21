@@ -26,6 +26,33 @@ doing in ClawScribe.
   recording through the same flow as the Stop button. If the stop fails, the
   window is brought forward and says why.
 
+## Floating recording controls
+
+During a recording, choose **Open floating controls** on the recording bar
+or tray menu. The small window stays above other apps. It opens only when you
+ask, including for recordings started by call detection or a shortcut.
+
+- The clock shows captured time and freezes during pauses. **Microphone** and
+  **System audio** show levels from the running capture.
+- Choose **Bookmark** to mark the current time, or type a note and press Enter.
+  Find both in the saved meeting. Tab moves between the controls.
+- **Stop** shows the current save stage. The window closes when saving finishes,
+  or directs you to the main app if the recording needs review.
+- Close the window with its title-bar button or Alt+F4 to continue recording.
+  Reopen it from the tray, including during a save.
+
+The window omits the meeting title and transcript. ClawScribe asks Windows to
+exclude the controls from capture. The result depends on the Windows version and
+the screen-sharing tool. Check the sharing preview before typing a sensitive note.
+[Windows capture protection](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity)
+
+The controls use a separate bundled page and a private WebView2 profile on
+Windows. The core supplies the selected theme and accent. The main window continues to own
+call prompts, recording starts and post-processing. The controls webview has
+no Tauri plugin permissions. Its app commands can read a small status snapshot,
+add a note, stop its own recording or close the controls. The native webview
+label binds those commands to the original session, including after a reload.
+
 ## What the tray shows
 
 The window shows the current Stop stage during capture shutdown, transcription
@@ -125,3 +152,11 @@ On the designated self-hosted machine with audio devices:
    first, and `powercfg /requests` no longer lists it.
 6. Start a recording and end the process from Task Manager. Restart ClawScribe:
    the recording is offered for recovery.
+7. Open the floating controls from Home. Check both meters, pause from the
+   tray and verify the clock freezes. Use Tab and Enter to add a note and a
+   bookmark. Close the controls with Alt+F4, reopen from the tray, then stop.
+   Verify the save progress, playback and note times in the saved meeting.
+8. With another app focused, start a second recording from a shortcut. Check
+   that focus stays put and the controls stay closed. Open them explicitly,
+   stop from the tray and verify that the controls close after saving. Check
+   light and dark appearance and how the controls appear in a sharing preview.
