@@ -8,6 +8,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import type { MeetingCalendarLink } from '@/lib/meetingCalendar';
+import type { MissingRecordingDevice, RecordingHealth } from '@/lib/recording-health';
 
 export interface RecordingState {
   session_id?: string | null;
@@ -44,35 +45,6 @@ export interface RecordingStoppedPayload {
   recording_id?: string | null;
   transcript_count?: number;
   library_save_failed?: boolean;
-}
-
-export type AudioDeviceEvent =
-  | {
-      type: 'DeviceDisconnected';
-      device_name: string;
-      device_type: 'Microphone' | 'SystemAudio';
-    }
-  | {
-      type: 'DeviceReconnected';
-      device_name: string;
-      device_type: 'Microphone' | 'SystemAudio';
-    }
-  | {
-      type: 'DeviceListChanged';
-    };
-
-export interface ReconnectionStatus {
-  is_reconnecting: boolean;
-  disconnected_devices: {
-    name: string;
-    device_type: 'Microphone' | 'SystemAudio';
-  }[];
-}
-
-export interface ReconnectResult {
-  reconnected: boolean;
-  microphone_active: boolean;
-  system_audio_active: boolean;
 }
 
 /**
@@ -161,20 +133,12 @@ export class RecordingService {
     return invoke('resume_recording');
   }
 
-  async pollAudioDeviceEvents(): Promise<AudioDeviceEvent | null> {
-    return invoke<AudioDeviceEvent | null>('poll_audio_device_events');
+  async getRecordingHealth(sessionId: string): Promise<RecordingHealth | null> {
+    return invoke('get_recording_health', { sessionId });
   }
 
-  async getReconnectionStatus(): Promise<ReconnectionStatus> {
-    return invoke<ReconnectionStatus>('get_reconnection_status');
-  }
-
-  async attemptDeviceReconnect(deviceName: string, deviceType: 'Microphone' | 'SystemAudio', sessionId: string): Promise<ReconnectResult> {
-    return invoke<ReconnectResult>('attempt_device_reconnect', {
-      deviceName,
-      deviceType,
-      sessionId,
-    });
+  async attemptDeviceReconnect(deviceName: string, deviceType: MissingRecordingDevice['device_type'], sessionId: string) {
+    return invoke<{ reconnected: boolean }>('attempt_device_reconnect', { deviceName, deviceType, sessionId });
   }
 
   // Event Listeners

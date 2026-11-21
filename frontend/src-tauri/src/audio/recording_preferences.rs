@@ -27,6 +27,8 @@ pub struct RecordingPreferences {
     pub auto_save: bool,
     #[serde(default = "default_auto_open_floating_controls")]
     pub auto_open_floating_controls: bool,
+    #[serde(default = "default_auto_open_floating_controls")]
+    pub remember_floating_position: bool,
     pub file_format: String,
     #[serde(default)]
     pub preferred_mic_device: Option<String>,
@@ -53,6 +55,7 @@ impl Default for RecordingPreferences {
             save_folder: get_default_recordings_folder(),
             auto_save: true,
             auto_open_floating_controls: default_auto_open_floating_controls(),
+            remember_floating_position: true,
             file_format: "mp4".to_string(),
             preferred_mic_device: None,
             preferred_system_device: None,

@@ -29,6 +29,7 @@ pub struct LiveTranscriptSink {
     pub recording_generation: crate::knowledge::live::RecordingGeneration,
     state: Arc<crate::knowledge::live::LiveState>,
     transcripts: Arc<RecordingTranscripts>,
+    pub(crate) capture: Arc<RecordingState>,
 }
 impl LiveTranscriptSink {
     pub(crate) fn ingest(&self, update: &super::transcription::TranscriptUpdate) -> bool {
@@ -40,7 +41,7 @@ impl LiveTranscriptSink {
         self.state.ingest(&self.session_id, update);
         true
     }
-    fn snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
+    pub(crate) fn snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
         self.state.snapshot(&self.session_id)
     }
 }
@@ -102,6 +103,7 @@ impl RecordingManager {
             session_id,
             recording_generation,
             state,
+            capture: self.state.clone(),
         };
         self.live = Some(sink.clone());
         sink
@@ -454,10 +456,13 @@ impl RecordingManager {
         // Stop recording state first - this clears device references
         self.state.stop_recording();
 
-        // Stop audio streams immediately
-        if let Err(_e) = self.stream_manager.stop_streams() {
-            error!("Error stopping audio streams");
-        }
+        // A native driver can block while pausing or destroying a stream.
+        // Freeze this session first, then bound how long Stop waits for release.
+        let mut streams = std::mem::replace(
+            &mut self.stream_manager,
+            AudioStreamManager::new(self.state.clone()),
+        );
+        let release = tokio::task::spawn_blocking(move || streams.stop_streams());
 
         if let Some(ref mut monitor) = self.device_monitor {
             let _ =
@@ -468,6 +473,15 @@ impl RecordingManager {
         // CRITICAL: Force pipeline to flush ALL accumulated audio before stopping
         debug!("💨 Forcing pipeline to flush accumulated audio immediately");
         let flush_result = self.pipeline_manager.force_flush_and_stop().await;
+        if !matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), release).await,
+            Ok(Ok(Ok(())))
+        ) {
+            self.state.mark_capture_incomplete();
+            self.state.report_warning(
+                "An audio device did not shut down cleanly. Check playback of the saved recording.",
+            );
+        }
         if flush_result.is_err() {
             self.state.mark_capture_incomplete();
         }

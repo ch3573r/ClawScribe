@@ -641,9 +641,10 @@ impl TranscriptsRepository {
         );
 
         if let Some(outcome) = outcome {
-            sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete, capture_incomplete, recording_files_incomplete) VALUES (?, ?, ?, ?, ?)")
+            sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete, capture_incomplete, recording_files_incomplete, capture_details) VALUES (?, ?, ?, ?, ?, ?)")
                 .bind(&meeting_id).bind(outcome.audio_save_failed).bind(outcome.transcription_incomplete)
                 .bind(outcome.capture_incomplete).bind(outcome.recording_files_incomplete)
+                .bind(outcome.capture_details.as_ref().map(sqlx::types::Json))
                 .execute(&mut *transaction).await?;
         }
         // Commit the meeting, transcript and recovery status together.

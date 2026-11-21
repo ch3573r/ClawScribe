@@ -616,14 +616,14 @@ pub(crate) fn live_snapshot() -> Result<crate::knowledge::live::LiveSnapshot, St
     if is_stopping() {
         return Err("This recording session is stopping".into());
     }
-    let guard = RECORDING_MANAGER
+    let sink = ACTIVE_CAPTURE
         .lock()
-        .map_err(|_| "Recording state unavailable")?;
-    guard
+        .map_err(|_| "Recording state unavailable")?
         .as_ref()
-        .filter(|manager| manager.is_recording())
-        .ok_or("No active recording")?
-        .live_snapshot()
+        .filter(|sink| sink.capture.is_recording())
+        .cloned()
+        .ok_or("No active recording")?;
+    sink.snapshot()
 }
 /// Stop never waits for provider/configuration/index locks or assistance cleanup.
 pub(crate) fn stop_live_assistance(
@@ -647,6 +647,7 @@ fn activate_recording<R: Runtime>(
     sink: super::recording_manager::LiveTranscriptSink,
 ) {
     let controls_session = auto_open_floating_controls.then(|| sink.session_id.clone());
+    start_health_watch(&sink, transcribes);
     LIVE_TRANSCRIPTION.store(transcribes, Ordering::SeqCst);
     let mut task = TRANSCRIPTION_TASK.lock().unwrap();
     RECORDING_EPOCH.fetch_add(1, Ordering::AcqRel);
@@ -658,6 +659,142 @@ fn activate_recording<R: Runtime>(
         floating::open_on_start(app.clone(), id);
     }
     crate::teams_detection::monitor::join::cancel_pending(app);
+}
+
+static ACTIVE_CAPTURE: Mutex<Option<super::recording_manager::LiveTranscriptSink>> =
+    Mutex::new(None);
+
+pub(crate) fn active_capture(
+    session_id: &str,
+) -> Option<Arc<super::recording_state::RecordingState>> {
+    ACTIVE_CAPTURE
+        .lock()
+        .ok()?
+        .as_ref()
+        .filter(|sink| sink.session_id == session_id)
+        .map(|sink| sink.capture.clone())
+}
+
+#[derive(Serialize)]
+pub(crate) struct CaptureSnapshot {
+    #[serde(flatten)]
+    health: super::recording_state::CaptureHealth,
+    disconnected_devices: Vec<DisconnectedDeviceInfo>,
+    reconnecting: bool,
+    capture_incomplete: bool,
+    transcription: Option<transcription::queue::TranscriptionMetricsSnapshot>,
+}
+
+fn capture_snapshot(session_id: &str) -> Option<CaptureSnapshot> {
+    let active = ACTIVE_CAPTURE.lock().ok()?;
+    let state = &active
+        .as_ref()
+        .filter(|sink| sink.session_id == session_id)?
+        .capture;
+    let health = state.health.lock().ok()?.clone();
+    Some(CaptureSnapshot {
+        health,
+        disconnected_devices: disconnected_devices(state),
+        reconnecting: RECONNECT_OWNER.try_lock().is_err() && !is_stopping(),
+        capture_incomplete: state.capture_incomplete(),
+        transcription: transcription::current_transcription_metrics(),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn get_recording_health(session_id: String) -> Option<CaptureSnapshot> {
+    capture_snapshot(&session_id)
+}
+
+fn start_health_watch(sink: &super::recording_manager::LiveTranscriptSink, live: bool) {
+    let session_id = sink.session_id.clone();
+    let state = sink.capture.clone();
+    let folder = RECORDING_MANAGER
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get_meeting_folder());
+    *ACTIVE_CAPTURE.lock().unwrap() = Some(sink.clone());
+    let disk_session = session_id.clone();
+    tokio::spawn(async move {
+        let scratch = live.then(transcription::queue::transcription_spool_root);
+        let capacity = |path: Option<std::path::PathBuf>| async move {
+            match path {
+                Some(path) => super::disk_space::free_space_bounded(&path).await,
+                None => None,
+            }
+        };
+        while active_capture(&disk_session).is_some() {
+            let (destination, scratch) =
+                tokio::join!(capacity(folder.clone()), capacity(scratch.clone()));
+            {
+                let mut health = state.health.lock().unwrap();
+                health.destination_free_bytes = destination;
+                health.scratch_free_bytes = scratch;
+            }
+            tokio::time::sleep(super::disk_space::CHECK_INTERVAL).await;
+        }
+    });
+    tokio::spawn(async move {
+        let retry_interval = std::time::Duration::from_secs(12);
+        let mut next_retry = Instant::now() + retry_interval;
+        while let Some(state) = active_capture(&session_id) {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if is_stopping() || !state.is_recording() {
+                continue;
+            }
+            let mut retry = {
+                let mut guard = RECORDING_MANAGER.lock().unwrap();
+                let Some(manager) = guard
+                    .as_mut()
+                    .filter(|m| m.live_session_id() == Some(session_id.as_str()))
+                else {
+                    continue;
+                };
+                let mut retry = Vec::new();
+                while let Some(event) = manager.poll_device_events() {
+                    match event {
+                        DeviceEvent::DeviceDisconnected {
+                            device_name,
+                            device_type,
+                        } => {
+                            retry.retain(|(name, kind)| {
+                                name != &device_name || kind != &device_type
+                            });
+                            manager.handle_device_disconnect_event(device_name, device_type);
+                        }
+                        DeviceEvent::DeviceReconnected {
+                            device_name,
+                            device_type,
+                        } => {
+                            retry.push((device_name, device_type));
+                        }
+                        DeviceEvent::DeviceListChanged => {}
+                    }
+                }
+                retry
+            };
+            if Instant::now() >= next_retry {
+                next_retry = Instant::now() + retry_interval;
+                use super::recording_state::DeviceType;
+                for (device, source) in state.disconnected_devices() {
+                    let kind = match source {
+                        DeviceType::Microphone => DeviceMonitorType::Microphone,
+                        DeviceType::System => DeviceMonitorType::SystemAudio,
+                    };
+                    if !retry
+                        .iter()
+                        .any(|(name, ty)| name == &device.name && ty == &kind)
+                    {
+                        retry.push((device.name.clone(), kind));
+                    }
+                }
+            }
+            for (name, kind) in retry {
+                let _ = reconnect_device(name, kind, session_id.clone()).await;
+            }
+        }
+    });
 }
 
 // ============================================================================
@@ -893,8 +1030,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     .map_err(|e| e.to_string())?;
 
     if mode != requested_mode {
-        let _ = app.emit("recording-warning",
-            "Speech recognition could not start. Audio is still recording. Choose Transcribe after saving the meeting.");
+        if let Some(state) = active_capture(&live_session_id) {
+            state.report_warning("Speech recognition could not start. Audio is still recording. Choose Transcribe after saving the meeting.");
+        }
     }
     crate::tray::update_tray_menu(&app);
 
@@ -1212,8 +1350,9 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     .unwrap_or_else(|_| warn!("Could not announce the started recording to the window"));
 
     if mode != requested_mode {
-        let _ = app.emit("recording-warning",
-            "Speech recognition could not start. Audio is still recording. Choose Transcribe after saving the meeting.");
+        if let Some(state) = active_capture(&live_session_id) {
+            state.report_warning("Speech recognition could not start. Audio is still recording. Choose Transcribe after saving the meeting.");
+        }
     }
     crate::tray::update_tray_menu(&app);
 
@@ -1333,7 +1472,7 @@ async fn stop_recording_session<R: Runtime>(
         Ok(guard) => guard,
         Err(()) => {
             warn!("Stop is waiting on an audio device call that has not returned");
-            return Err("The audio device is not responding, so the recording cannot be stopped yet. Everything recorded so far is saved on disk. Try Stop again in a moment.".to_string());
+            return Err("The audio device is still reconnecting, so Stop could not finish. Try Stop again in a moment.".to_string());
         }
     };
 
@@ -1450,6 +1589,8 @@ async fn stop_recording_session<R: Runtime>(
     };
 
     let mut transcription_incomplete = false;
+    let mut queued_segments = 0;
+    let mut unfinished_segments = 0;
     if let Some(mut task) = transcription_task {
         const TRANSCRIPTION_DRAIN_TIMEOUT: tokio::time::Duration =
             tokio::time::Duration::from_secs(120);
@@ -1525,11 +1666,12 @@ async fn stop_recording_session<R: Runtime>(
                 {
                     warn!("Transcription worker did not stop after cancellation; aborting it");
                     task.handle.abort();
-                    let _ = (&mut task.handle).await;
                 }
             }
         }
         let outcome = task.mark_stopped();
+        queued_segments = outcome.total_chunks_queued;
+        unfinished_segments = outcome.chunks_in_queue;
         if outcome.chunks_in_queue > 0 || outcome.failed_chunks > 0 {
             transcription_incomplete = true;
         }
@@ -1551,6 +1693,26 @@ async fn stop_recording_session<R: Runtime>(
         // Serialize closing with ingestion before taking the final snapshots.
         manager.close_transcript_input();
     }
+    let mut handoff = manager_for_cleanup.as_ref().and_then(|manager| {
+        Some((
+            manager.recording_id()?.to_owned(),
+            manager.library_transcripts(),
+            manager.recording_provenance(),
+        ))
+    });
+    let capture_details = manager_for_cleanup.as_ref().map(|manager| {
+        let mut details = manager.get_state().health.lock().unwrap().details.clone();
+        details.unfinished_segments = unfinished_segments;
+        details.empty_live_transcript = super::outcome::EmptyLiveTranscript::from_live_result(
+            transcribes,
+            handoff
+                .as_ref()
+                .is_some_and(|(_, transcripts, _)| !transcripts.is_empty()),
+            transcription_incomplete || capture_incomplete,
+            queued_segments,
+        );
+        details
+    });
 
     if transcribes {
         // Step 3: Now safely unload Whisper model after ALL chunks are processed
@@ -1679,7 +1841,7 @@ async fn stop_recording_session<R: Runtime>(
 
     // Perform final cleanup with the manager if available
     let mut finalization_returned = false;
-    let (meeting_folder, meeting_name, handoff) = if let Some(mut manager) = manager_for_cleanup {
+    let (meeting_folder, meeting_name) = if let Some(mut manager) = manager_for_cleanup {
         info!("🧹 Performing final cleanup and saving recording data");
 
         // Extract meeting info BEFORE async operations
@@ -1698,6 +1860,7 @@ async fn stop_recording_session<R: Runtime>(
                 super::outcome::RecordingOutcome {
                     transcription_incomplete,
                     capture_incomplete,
+                    capture_details: capture_details.clone(),
                     ..Default::default()
                 },
             ),
@@ -1723,14 +1886,13 @@ async fn stop_recording_session<R: Runtime>(
             }
         }
 
-        let provenance = manager.recording_provenance();
-        let handoff = manager
-            .recording_id()
-            .map(|id| (id.to_owned(), manager.library_transcripts(), provenance));
-        (meeting_folder, meeting_name, handoff)
+        if let Some((_, _, provenance)) = handoff.as_mut() {
+            *provenance = manager.recording_provenance();
+        }
+        (meeting_folder, meeting_name)
     } else {
         info!("ℹ️ No recording manager available for cleanup");
-        (None, None, None)
+        (None, None)
     };
 
     // Commit before announcing completion. The folder's stable ID also lets
@@ -1746,6 +1908,7 @@ async fn stop_recording_session<R: Runtime>(
         capture_incomplete,
         recording_files_incomplete,
         recovery_files_elsewhere: false,
+        capture_details,
     };
     if let (false, Some(folder)) = (finalization_returned, meeting_folder) {
         let disk_outcome = outcome.clone();
@@ -1799,10 +1962,16 @@ async fn stop_recording_session<R: Runtime>(
     let library_save_failed = meeting_id.is_none();
     floating::remember_outcome(
         stopped_live_identity.as_ref(),
-        library_save_failed || outcome.needs_recovery(),
+        library_save_failed
+            || outcome.needs_recovery()
+            || outcome
+                .capture_details
+                .as_ref()
+                .is_some_and(|details| details.empty_live_transcript.is_some()),
     );
 
     // Release the recording job only after the outcome is persisted.
+    ACTIVE_CAPTURE.lock().unwrap().take();
     IS_RECORDING.store(false, Ordering::SeqCst);
 
     // Step 5: Complete shutdown
@@ -1981,116 +2150,80 @@ pub async fn get_transcription_status() -> TranscriptionStatus {
     }
 }
 
-/// Pause the current recording
+/// Pause the current recording.
 #[tauri::command]
 pub async fn pause_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    info!("Pausing recording");
-
-    // Check if currently recording
-    if !IS_RECORDING.load(Ordering::SeqCst) {
-        return Err("No recording is currently active".to_string());
-    }
-
-    // A reconnection in flight owns the manager; wait for it briefly.
-    let _reconnecting = wait_for_reconnect(PAUSE_RECONNECT_WAIT)
-        .await
-        .map_err(|()| AUDIO_DEVICE_NOT_RESPONDING.to_string())?;
-
-    // Access the recording manager and pause it
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
-    if let Some(manager) = manager_guard.as_ref() {
-        manager.pause_recording().map_err(|e| e.to_string())?;
-
-        // Emit pause event to frontend
-        app.emit(
-            "recording-paused",
-            serde_json::json!({
-                "message": "Recording paused"
-            }),
-        )
-        .map_err(|e| e.to_string())?;
-
-        // Update tray menu to reflect paused state
-        crate::tray::update_tray_menu(&app);
-
-        info!("Recording paused successfully");
-        Ok(())
-    } else {
-        Err("No recording manager found".to_string())
-    }
+    set_recording_paused(&app, None, true).await
 }
 
-/// Resume the current recording
 #[tauri::command]
 pub async fn resume_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    info!("Resuming recording");
+    set_recording_paused(&app, None, false).await
+}
 
-    // Check if currently recording
-    if !IS_RECORDING.load(Ordering::SeqCst) {
-        return Err("No recording is currently active".to_string());
+async fn set_recording_paused<R: Runtime>(
+    app: &AppHandle<R>,
+    expected_session: Option<&str>,
+    paused: bool,
+) -> Result<(), String> {
+    if !IS_RECORDING.load(Ordering::Acquire) {
+        return Err("No recording is currently active.".into());
     }
-
-    // A reconnection in flight owns the manager; wait for it briefly.
+    let epoch = recording_epoch();
     let _reconnecting = wait_for_reconnect(PAUSE_RECONNECT_WAIT)
         .await
         .map_err(|()| AUDIO_DEVICE_NOT_RESPONDING.to_string())?;
-
-    // Access the recording manager and resume it
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
-    if let Some(manager) = manager_guard.as_ref() {
-        manager.resume_recording().map_err(|e| e.to_string())?;
-
-        // Emit resume event to frontend
-        app.emit(
-            "recording-resumed",
-            serde_json::json!({
-                "message": "Recording resumed"
-            }),
-        )
-        .map_err(|e| e.to_string())?;
-
-        // Update tray menu to reflect resumed state
-        crate::tray::update_tray_menu(&app);
-
-        info!("Recording resumed successfully");
-        Ok(())
-    } else {
-        Err("No recording manager found".to_string())
+    {
+        let guard = RECORDING_MANAGER.lock().unwrap();
+        let manager = guard
+            .as_ref()
+            .filter(|m| !is_stopping() && recording_epoch() == epoch && m.is_recording())
+            .filter(|m| expected_session.is_none_or(|id| m.live_session_id() == Some(id)))
+            .ok_or("This recording is no longer active.")?;
+        if paused {
+            manager.pause_recording()
+        } else {
+            manager.resume_recording()
+        }
+        .map_err(|error| error.to_string())?;
     }
+    let (event, message) = if paused {
+        ("recording-paused", "Recording paused")
+    } else {
+        ("recording-resumed", "Recording resumed")
+    };
+    let _ = app.emit(event, serde_json::json!({ "message": message }));
+    crate::tray::update_tray_menu(app);
+    Ok(())
 }
 
 /// Check if recording is currently paused
 pub async fn is_recording_paused() -> bool {
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
-    if let Some(manager) = manager_guard.as_ref() {
-        manager.is_paused()
-    } else {
-        false
-    }
+    ACTIVE_CAPTURE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|sink| sink.capture.is_paused())
 }
 
 /// Get detailed recording state
 #[tauri::command]
 pub async fn get_recording_state() -> serde_json::Value {
     let is_recording = IS_RECORDING.load(Ordering::SeqCst);
-    // A reconnection in flight has the manager out, which would read as "not
-    // paused". Wait for it, with the same bound as Pause; past it the manager
-    // is reported as absent, as during Stop.
-    let _reconnecting = wait_for_reconnect(PAUSE_RECONNECT_WAIT).await.ok();
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
-
-    if let Some(manager) = manager_guard.as_ref() {
+    let sink = ACTIVE_CAPTURE.lock().unwrap().clone();
+    if let Some(sink) = sink {
+        let state = &sink.capture;
         serde_json::json!({
             "is_recording": is_recording,
-            "session_id": manager.live_session_id(),
-            "recording_generation": manager.live_recording_generation(),
+            "session_id": sink.session_id,
+            "recording_generation": sink.recording_generation,
             "recording_mode": if LIVE_TRANSCRIPTION.load(Ordering::SeqCst) { "live" } else { "audio_only" },
-            "is_paused": manager.is_paused(),
-            "is_active": manager.is_active(),
-            "recording_duration": manager.get_recording_duration(),
-            "active_duration": manager.get_active_recording_duration(),
-            "total_pause_duration": manager.get_total_pause_duration(),
-            "current_pause_duration": manager.get_current_pause_duration()
+            "is_paused": state.is_paused(),
+            "is_active": state.is_active(),
+            "recording_duration": state.get_recording_duration(),
+            "active_duration": state.get_active_recording_duration(),
+            "total_pause_duration": state.get_total_pause_duration(),
+            "current_pause_duration": state.get_current_pause_duration()
         })
     } else {
         serde_json::json!({
@@ -2153,115 +2286,28 @@ pub async fn get_recording_meeting_name() -> Result<Option<String>, String> {
 // DEVICE MONITORING COMMANDS (AirPods/Bluetooth disconnect/reconnect support)
 // ============================================================================
 
-/// Response structure for device events
-#[derive(Debug, Serialize, Clone)]
-#[serde(tag = "type")]
-pub enum DeviceEventResponse {
-    DeviceDisconnected {
-        device_name: String,
-        device_type: String,
-    },
-    DeviceReconnected {
-        device_name: String,
-        device_type: String,
-    },
-    DeviceListChanged,
-}
-
-impl From<DeviceEvent> for DeviceEventResponse {
-    fn from(event: DeviceEvent) -> Self {
-        match event {
-            DeviceEvent::DeviceDisconnected {
-                device_name,
-                device_type,
-            } => DeviceEventResponse::DeviceDisconnected {
-                device_name,
-                device_type: format!("{:?}", device_type),
-            },
-            DeviceEvent::DeviceReconnected {
-                device_name,
-                device_type,
-            } => DeviceEventResponse::DeviceReconnected {
-                device_name,
-                device_type: format!("{:?}", device_type),
-            },
-            DeviceEvent::DeviceListChanged => DeviceEventResponse::DeviceListChanged,
-        }
-    }
-}
-
-/// Reconnection status information
-#[derive(Debug, Serialize, Clone)]
-pub struct ReconnectionStatus {
-    pub is_reconnecting: bool,
-    pub disconnected_devices: Vec<DisconnectedDeviceInfo>,
-}
-
-/// Information about a disconnected device
 #[derive(Debug, Serialize, Clone)]
 pub struct DisconnectedDeviceInfo {
     pub name: String,
     pub device_type: String,
 }
 
-/// Poll for audio device events (disconnect/reconnect)
-/// Should be called periodically (every 1-2 seconds) by frontend during recording
-#[tauri::command]
-pub async fn poll_audio_device_events() -> Result<Option<DeviceEventResponse>, String> {
-    let mut manager_guard = RECORDING_MANAGER.lock().unwrap();
-
-    if let Some(manager) = manager_guard.as_mut() {
-        if let Some(event) = manager.poll_device_events() {
-            info!("📱 Device event polled: {:?}", event);
-            if let DeviceEvent::DeviceDisconnected {
-                device_name,
-                device_type,
-            } = &event
-            {
-                manager.handle_device_disconnect_event(device_name.clone(), device_type.clone());
+fn disconnected_devices(
+    state: &super::recording_state::RecordingState,
+) -> Vec<DisconnectedDeviceInfo> {
+    use super::recording_state::DeviceType;
+    state
+        .disconnected_devices()
+        .into_iter()
+        .map(|(device, kind)| DisconnectedDeviceInfo {
+            name: device.name.clone(),
+            device_type: match kind {
+                DeviceType::Microphone => "Microphone",
+                DeviceType::System => "SystemAudio",
             }
-            Ok(Some(event.into()))
-        } else {
-            Ok(None)
-        }
-    } else {
-        // Not recording, no events
-        Ok(None)
-    }
-}
-
-/// Get current reconnection status
-/// Returns whether the system is attempting to reconnect and which device
-#[tauri::command]
-pub async fn get_reconnection_status() -> Result<ReconnectionStatus, String> {
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
-
-    if let Some(manager) = manager_guard.as_ref() {
-        let state = manager.get_state();
-        let disconnected_devices = state
-            .disconnected_devices()
-            .into_iter()
-            .map(|(device, device_type)| DisconnectedDeviceInfo {
-                name: device.name.clone(),
-                device_type: match device_type {
-                    super::recording_state::DeviceType::Microphone => "Microphone",
-                    super::recording_state::DeviceType::System => "SystemAudio",
-                }
-                .to_string(),
-            })
-            .collect();
-
-        Ok(ReconnectionStatus {
-            is_reconnecting: false,
-            disconnected_devices,
+            .into(),
         })
-    } else {
-        // Not recording, no reconnection in progress
-        Ok(ReconnectionStatus {
-            is_reconnecting: RECONNECT_OWNER.try_lock().is_err(),
-            disconnected_devices: Vec::new(),
-        })
-    }
+        .collect()
 }
 
 /// Manually trigger device reconnection attempt
@@ -2279,6 +2325,17 @@ pub async fn attempt_device_reconnect(
         _ => return Err(format!("Invalid device type: {}", device_type)),
     };
 
+    reconnect_device(device_name, monitor_type, session_id).await
+}
+
+async fn reconnect_device(
+    device_name: String,
+    monitor_type: DeviceMonitorType,
+    session_id: String,
+) -> Result<super::recording_manager::ReconnectResult, String> {
+    if active_capture(&session_id).is_none() {
+        return Err("The recording session has ended.".into());
+    }
     super::com_anchor::ensure_device_enumerator();
     let handle = tokio::runtime::Handle::current();
     let outcome = with_recording_manager_out(RECONNECT_TIMEOUT, move |manager| {

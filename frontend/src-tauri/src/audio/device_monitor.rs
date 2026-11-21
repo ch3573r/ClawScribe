@@ -208,7 +208,13 @@ impl AudioDeviceMonitor {
 
             // Check each monitored device
             for monitored in &mut monitored_devices {
-                let device_found = current_devices.iter().any(|d| d.name == monitored.name);
+                let kind = match monitored.device_type {
+                    DeviceMonitorType::Microphone => super::devices::DeviceType::Input,
+                    DeviceMonitorType::SystemAudio => super::devices::DeviceType::Output,
+                };
+                let device_found = current_devices
+                    .iter()
+                    .any(|device| device.name == monitored.name && device.device_type == kind);
 
                 if device_found {
                     // Device is present

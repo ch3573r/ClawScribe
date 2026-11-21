@@ -33,6 +33,7 @@ interface TranscriptPanelProps {
   hasMore?: boolean;
   isLoadingMore?: boolean;
   totalCount?: number;
+  emptyLiveMessage?: string | null;
   loadedCount?: number;
   onLoadMore?: () => void;
 
@@ -75,6 +76,7 @@ export function TranscriptPanel({
   hasMore,
   isLoadingMore,
   totalCount,
+  emptyLiveMessage,
   loadedCount,
   onLoadMore,
   meetingId,
@@ -182,12 +184,13 @@ export function TranscriptPanel({
       ) : audioStatus === 'found' ? (
         <>
           <h3 className="text-lg font-semibold text-foreground">No transcript yet</h3>
-          <p>This meeting&apos;s audio is saved but hasn&apos;t been transcribed.</p>
-          <Button onClick={() => setTranscribeOpen(true)}>Transcribe now</Button>
+          <p>{emptyLiveMessage ?? "This meeting's audio is saved but hasn't been transcribed."}</p>
+          <Button onClick={() => setTranscribeOpen(true)}>{emptyLiveMessage ? 'Retranscribe' : 'Transcribe now'}</Button>
         </>
       ) : (
         <>
-          <p>No transcript yet, and no audio file was found in this meeting&apos;s folder.</p>
+          <p>{emptyLiveMessage ? `${emptyLiveMessage} No audio file was found in this meeting's folder.`
+            : "No transcript yet, and no audio file was found in this meeting's folder."}</p>
           <Button variant="outline" onClick={onOpenMeetingFolder}>Open recording folder</Button>
         </>
       )}

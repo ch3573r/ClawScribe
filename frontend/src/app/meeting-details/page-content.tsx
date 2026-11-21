@@ -54,6 +54,7 @@ export default function PageContent({
   hasMore,
   isLoadingMore,
   totalCount,
+  emptyLiveMessage,
   loadedCount,
   onLoadMore,
 }: {
@@ -76,6 +77,7 @@ export default function PageContent({
   hasMore?: boolean;
   isLoadingMore?: boolean;
   totalCount?: number;
+  emptyLiveMessage?: string | null;
   loadedCount?: number;
   onLoadMore?: () => void;
 }) {
@@ -371,6 +373,7 @@ export default function PageContent({
       )}
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
         <TranscriptPanel
+          emptyLiveMessage={emptyLiveMessage}
           bindings={playerBindings}
           focusedBookmark={focusedBookmark}
           openTranscription={archiveAction === 'transcribe'}

@@ -1,5 +1,42 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmptyLiveTranscript {
+    NoSpeechDetected,
+    NoTextRecognized,
+    Incomplete,
+}
+
+impl EmptyLiveTranscript {
+    pub(crate) fn from_live_result(
+        live: bool,
+        has_text: bool,
+        incomplete: bool,
+        queued: u64,
+    ) -> Option<Self> {
+        if !live || has_text {
+            None
+        } else if incomplete {
+            Some(Self::Incomplete)
+        } else if queued == 0 {
+            Some(Self::NoSpeechDetected)
+        } else {
+            Some(Self::NoTextRecognized)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureDetails {
+    pub dropped_samples: u64,
+    pub system_silence_periods: u32,
+    pub backend: Option<String>,
+    pub unfinished_segments: usize,
+    pub empty_live_transcript: Option<EmptyLiveTranscript>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RecordingOutcome {
     pub audio_save_failed: bool,
@@ -13,6 +50,9 @@ pub struct RecordingOutcome {
     #[serde(default)]
     #[sqlx(default)]
     pub recovery_files_elsewhere: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(default, json(nullable))]
+    pub capture_details: Option<CaptureDetails>,
 }
 
 impl RecordingOutcome {
@@ -72,6 +112,64 @@ pub async fn get_recording_outcome(
 mod tests {
     use super::*;
 
+    #[test]
+    fn empty_live_recording_reports_what_the_pipeline_observed() {
+        use EmptyLiveTranscript::*;
+        let reason = EmptyLiveTranscript::from_live_result;
+        assert_eq!(reason(false, false, false, 0), None);
+        assert_eq!(reason(true, true, true, 9), None);
+        assert_eq!(reason(true, false, true, 0), Some(Incomplete));
+        assert_eq!(reason(true, false, false, 0), Some(NoSpeechDetected));
+        assert_eq!(reason(true, false, false, 9), Some(NoTextRecognized));
+    }
+
+    #[tokio::test]
+    async fn capture_details_round_trip_without_requiring_them_for_existing_meetings() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO meetings (id, title, created_at, updated_at) VALUES
+            ('previous', 'Previous', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+            ('recorded', 'Recorded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+            INSERT INTO recording_outcomes (meeting_id) VALUES ('previous');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let details = CaptureDetails {
+            dropped_samples: 480,
+            system_silence_periods: 2,
+            empty_live_transcript: Some(EmptyLiveTranscript::Incomplete),
+            ..Default::default()
+        };
+        sqlx::query("INSERT INTO recording_outcomes (meeting_id, capture_incomplete, capture_details) VALUES ('recorded', 1, ?)")
+            .bind(sqlx::types::Json(&details)).execute(&pool).await.unwrap();
+        let old: RecordingOutcome =
+            sqlx::query_as("SELECT * FROM recording_outcomes WHERE meeting_id = 'previous'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(old.capture_details.is_none());
+        let saved: RecordingOutcome =
+            sqlx::query_as("SELECT * FROM recording_outcomes WHERE meeting_id = 'recorded'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(saved.capture_incomplete);
+        let saved = saved.capture_details.unwrap();
+        assert_eq!(
+            (saved.dropped_samples, saved.system_silence_periods),
+            (480, 2)
+        );
+        assert_eq!(
+            saved.empty_live_transcript,
+            Some(EmptyLiveTranscript::Incomplete)
+        );
+    }
     #[tokio::test]
     async fn recovery_location_migration_preserves_previous_version_outcomes() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()

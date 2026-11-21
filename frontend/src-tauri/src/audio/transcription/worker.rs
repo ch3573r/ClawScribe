@@ -193,6 +193,7 @@ pub fn start_transcription_task<R: Runtime>(
             Ok(engine) => engine,
             Err(e) => {
                 error!("Failed to initialize transcription engine");
+                live_sink.capture.report_warning("Live transcription could not start. Check the saved audio and model settings after stopping.");
                 let _ = app.emit("transcription-error", serde_json::json!({
                     "error": e,
                     "userMessage": "Live transcription could not start. Stop and save the recording, check model settings, then retranscribe the saved audio.",
@@ -353,7 +354,7 @@ pub fn start_transcription_task<R: Runtime>(
                             };
 
                             // Transcribe with provider-agnostic approach
-                            match transcribe_chunk_with_provider(&engine_clone, chunk, language)
+                            match transcribe_chunk_with_provider(&engine_clone, chunk, language, &live_sink.capture)
                                 .await
                             {
                                 Ok((
@@ -698,6 +699,7 @@ async fn transcribe_chunk_with_provider(
     engine: &TranscriptionEngine,
     chunk: AudioChunk,
     language: Option<String>,
+    capture: &crate::audio::recording_state::RecordingState,
 ) -> std::result::Result<
     (
         String,
@@ -748,7 +750,19 @@ async fn transcribe_chunk_with_provider(
                 .transcribe_live(speech_samples, language)
                 .await
             {
-                Ok(((text, confidence, is_partial), detected)) => {
+                Ok(((text, confidence, is_partial), backend, detected)) => {
+                    use crate::whisper_engine::acceleration::WhisperCompiledBackend;
+                    let backend = match backend {
+                        Some(WhisperCompiledBackend::Cpu)
+                            if WhisperCompiledBackend::current() != WhisperCompiledBackend::Cpu =>
+                        {
+                            "CPU fallback"
+                        }
+                        Some(backend) => backend.as_str(),
+                        None => "backend unconfirmed",
+                    };
+                    capture.health.lock().unwrap().details.backend =
+                        Some(format!("Whisper · {backend}"));
                     let cleaned_text = text.trim().to_string();
                     if cleaned_text.is_empty() {
                         return Ok((String::new(), confidence, is_partial, None, None));
@@ -776,6 +790,18 @@ async fn transcribe_chunk_with_provider(
                 .await
             {
                 Ok(result) => {
+                    if let Some((directml, _)) = parakeet_engine.session_status().await {
+                        use crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML;
+                        let backend = if directml {
+                            "DirectML + CPU"
+                        } else if USE_PARAKEET_DIRECTML.load(Ordering::Relaxed) {
+                            "CPU fallback"
+                        } else {
+                            "CPU"
+                        };
+                        capture.health.lock().unwrap().details.backend =
+                            Some(format!("Parakeet · {backend}"));
+                    }
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
                         return Ok((String::new(), None, false, None, None));
@@ -809,6 +835,8 @@ async fn transcribe_chunk_with_provider(
             // NEW: Trait-based provider (clean, unified interface)
             match provider.transcribe(speech_samples, language).await {
                 Ok(result) => {
+                    let backend = provider.live_backend().await;
+                    capture.health.lock().unwrap().details.backend = backend;
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
                         return Ok((

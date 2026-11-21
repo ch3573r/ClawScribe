@@ -27,12 +27,22 @@ an unavailable preferred microphone falls back to the current default, with the
 actual tested device and fallback shown beside its levels. Saved preferences
 remain unchanged.
 
-The system-audio warning checks captured system samples, independently of the
-microphone test. It appears once after 15 seconds without a non-silent system
-sample when an output device is selected. If system sound starts later, its
-warning clears without hiding a newer capture or transcription warning. Silence
-at startup alone does not establish that the selected output cannot be captured;
-confirm microphone and meeting audio in saved playback.
+The system-audio warning appears after 15 seconds without audible system
+samples, including after the output has already carried sound. Audible system
+samples clear it. Pausing resets the silence timer. The saved meeting records
+that quiet periods occurred. Normal quiet periods can produce this observation.
+Confirm microphone and meeting audio in saved playback.
+
+The recorder watches the selected input and output during capture, including
+while the main window is hidden or reloading. It tries to restore the same
+missing source while the other stream continues. Use **Retry** to check sooner.
+The live health display shows speech waiting or processing, free space for the
+recording and transcription scratch volumes when known, and the backend observed
+during inference. Whisper reports its runtime backend. Parakeet reports its
+loaded CPU or DirectML/CPU session. Nemotron reports its encoder and decoder
+backends. CPU fallback is shown when reported by the engine. Mixer overflow,
+capture-queue loss and source disconnects can leave gaps. The saved meeting
+flags those gaps even after capture reconnects successfully.
 
 Speak with the microphone at a usable level, avoid clipping, and use the intended
 language/model selection. Playback is the reference when a name, number, short
@@ -203,6 +213,16 @@ is frozen before transcription drain, and device-error limits apply to a recent
 and once more before audio finalization. The core saves the finalized transcript
 and outcome directly to the library. If the library write fails after the files
 are saved, open **Interrupted recordings** to finish saving the meeting.
+Stop gives a driver up to five seconds to release its streams after the capture
+pipeline flush. A driver that is already busy reconnecting has a separately
+bounded wait. Live transcription gets up to two minutes to drain and five
+seconds to cancel. Saved audio remains available for manual retranscription
+when speech segments are unfinished. Live capture and Stop use local
+transcription even when a hosted file provider is configured.
+
+An empty live transcript reports whether the speech detector produced no
+segments, the engine returned no text, or the session was incomplete. The
+audio-only recording flow still offers **Transcribe now**.
 Transcript, audio and metadata writes each get an independent attempt; failures
 are reported together. Each recording has a stable library ID. Retries reuse it,
 and library deletion leaves retained recording files out of recovery. A failed

@@ -22,6 +22,7 @@ export interface RecordingPreferences {
   save_folder: string;
   auto_save: boolean;
   auto_open_floating_controls: boolean;
+  remember_floating_position: boolean;
   file_format: string;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
@@ -45,6 +46,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     save_folder: '',
     auto_save: true,
     auto_open_floating_controls: true,
+    remember_floating_position: true,
     file_format: 'mp4',
     preferred_mic_device: null,
     preferred_system_device: null
@@ -276,6 +278,11 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             disabled={saving}
             onCheckedChange={enabled => void savePreferences({ ...preferences, auto_open_floating_controls: enabled })}
           />
+        </SettingsRow>
+
+        <SettingsRow title="Remember floating controls position" htmlFor="remember-floating-position">
+          <Switch id="remember-floating-position" checked={preferences.remember_floating_position} disabled={saving}
+            onCheckedChange={enabled => void savePreferences({ ...preferences, remember_floating_position: enabled })} />
         </SettingsRow>
 
         <SettingsRow
