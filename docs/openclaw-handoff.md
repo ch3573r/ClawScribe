@@ -122,7 +122,9 @@ the original destination and verify whether it received that meeting. Record
 **Confirmed received** to close the handoff or **Confirmed absent** to unlock a
 reviewed retry to the original destination. The retry uses the current saved
 title and transcript. Identical content reuses the prior request key and
-changed content gets a new key. ClawScribe never automatically replays a
+changed content gets a new key. For an older handoff with no recorded
+destination, you can confirm receipt after finding the meeting in OpenClaw.
+ClawScribe never automatically replays a
 handoff after restart or an uncertain result. An in-flight handoff blocks update
 installation until its result is recorded. The local delivery history is
 outside portable backups.

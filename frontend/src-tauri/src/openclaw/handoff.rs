@@ -153,8 +153,10 @@ impl Attempt {
         if self.state != State::Unknown {
             return None;
         }
-        let destination = self.destination.as_deref()?;
-        self.display_destination(config)?;
+        let destination = self.destination.as_deref().unwrap_or("");
+        if !destination.is_empty() {
+            self.display_destination(config)?;
+        }
         Some(hash(
             format!(
                 "{meeting_id}\n{destination}\n{}\n{}",
@@ -350,11 +352,11 @@ fn legacy_attempt(
         (FAILED_MARKER, State::Failed),
     ] {
         let path = folder.join(name);
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_file() && meta.len() <= 128 * 1024 => {}
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() && meta.len() <= 128 * 1024 => meta,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             _ => return Err("Could not verify a previous OpenClaw handoff marker".into()),
-        }
+        };
         let marker = read_json_if_exists(&path)?;
         let mut attempt = Attempt::new(meeting_id, config);
         attempt.destination = marker["endpoint"]
@@ -384,9 +386,14 @@ fn legacy_attempt(
             _ => "A previous OpenClaw delivery could not be confirmed.",
         };
         attempt.set(state, message, code);
-        if let Some(date) = read_string(&marker, &["submitted_at", "pending_at", "failed_at"]) {
-            attempt.updated_at = date;
-        }
+        attempt.updated_at = read_string(&marker, &["submitted_at", "pending_at", "failed_at"])
+            .or_else(|| {
+                metadata
+                    .modified()
+                    .ok()
+                    .map(|time| chrono::DateTime::<Utc>::from(time).to_rfc3339())
+            })
+            .unwrap_or_default();
         attempt.reconciliation_required = state == State::Unknown;
         return Ok(Some(attempt));
     }
@@ -473,7 +480,11 @@ fn meeting_status(
         review_token: review_token(config, &meeting_id),
         meeting_id,
         state: state.map_or("not_sent", State::name),
-        message: if state == Some(State::Unknown) && reconciliation_token.is_none() {
+        message: if state == Some(State::Unknown)
+            && attempt.as_ref().is_some_and(|a| a.destination.is_none())
+        {
+            "The original destination was not saved. You can confirm receipt if you find this meeting in OpenClaw.".into()
+        } else if state == Some(State::Unknown) && reconciliation_token.is_none() {
             "The original OpenClaw destination is unavailable. Check the delivery directly in OpenClaw.".into()
         } else if !same_destination && state == Some(State::Failed) {
             "Restore the original OpenClaw destination before retrying this delivery.".into()
@@ -486,7 +497,10 @@ fn meeting_status(
                 .map(|attempt| attempt.message.clone())
                 .unwrap_or_default()
         },
-        updated_at: attempt.as_ref().map(|attempt| attempt.updated_at.clone()),
+        updated_at: attempt
+            .as_ref()
+            .map(|attempt| attempt.updated_at.clone())
+            .filter(|date| !date.is_empty()),
         status_code: attempt.as_ref().and_then(|attempt| attempt.status_code),
         attempted_destination: attempt.and_then(|attempt| attempt.display_destination(config)),
         destination: display_endpoint(&config.endpoint),
@@ -746,6 +760,12 @@ pub async fn reconcile_openclaw_handoff<R: Runtime>(
             None,
         );
     } else {
+        if attempt.destination.is_none() {
+            return Err(
+                "The original destination is unknown. Only confirmed receipt can be recorded."
+                    .into(),
+            );
+        }
         attempt.reconciliation_required = true;
         attempt.set(State::Failed, "You confirmed the meeting was absent in OpenClaw. You can review and retry the handoff.", None);
     }
@@ -817,6 +837,23 @@ mod tests {
         assert!(!safe_rejection(409));
         assert!(!safe_rejection(503));
         assert!(safe_rejection(401));
+    }
+
+    #[test]
+    fn legacy_unknown_destination_allows_receipt_review_without_a_retry() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join(PENDING_MARKER), b"{}").unwrap();
+        let config = OpenClawConfig::default();
+        let read = || {
+            let attempt = legacy_attempt(folder.path(), "legacy-meeting", &config).unwrap();
+            meeting_status("legacy-meeting".into(), true, &config, attempt)
+        };
+        let status = read();
+        assert_eq!(status.state, "unknown");
+        assert!(status.can_reconcile);
+        assert!(!status.can_submit);
+        assert!(status.attempted_destination.is_none());
+        assert_eq!(status.reconciliation_token, read().reconciliation_token);
     }
 
     #[test]

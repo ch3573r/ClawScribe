@@ -105,8 +105,8 @@ export function OpenClawHandoff({ meetingId }: { meetingId: string }) {
         <DialogFooter>
           <Button variant="ghost" disabled={busy} onClick={() => setReview(null)}>Close</Button>
           {isReconciliation ? <>
-            <Button variant="outline" disabled={busy || !review?.reconciliation_token}
-              onClick={() => void apply('reconcile_openclaw_handoff', { received: false, reconciliationToken: review?.reconciliation_token })}>Confirmed absent</Button>
+            {review?.attempted_destination && <Button variant="outline" disabled={busy || !review.reconciliation_token}
+              onClick={() => void apply('reconcile_openclaw_handoff', { received: false, reconciliationToken: review.reconciliation_token })}>Confirmed absent</Button>}
             <Button disabled={busy || !review?.reconciliation_token}
               onClick={() => void apply('reconcile_openclaw_handoff', { received: true, reconciliationToken: review?.reconciliation_token })}>Confirmed received</Button>
           </> : <Button disabled={busy || !review?.review_token} onClick={() => void apply('submit_meeting_folder_to_openclaw', { reviewToken: review?.review_token })}>
