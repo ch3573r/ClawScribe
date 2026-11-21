@@ -129,6 +129,17 @@ imports/retranscription to temporary PCM on disk, uses one continuous VAD state,
 and reads one bounded speech segment for inference. Preparation needs temporary
 disk capacity; it does not retain a full decoded meeting in RAM.
 
+`audio/vad.rs` calls the pinned Silero model directly for each 30 ms frame and
+owns one PCM history for endpointing. During confirmed speech, it retains less
+than the segment cap of uncommitted PCM after each frame, plus any already
+emitted samples needed to preserve the last 300 ms of pre-roll. Only the longer
+of those two ranges is kept. Live caps are 3, 6, or 12 seconds by provider, and
+the import and saved-meeting preparation cap is 60 seconds. At 16 kHz f32 mono,
+the largest active history holds under 3.84 MB of PCM between frames, excluding
+allocation slack, input buffering, and segments returned to callers. Forced
+cuts advance an absolute sample cursor without resetting Silero's recurrent
+state, so the natural endpoint or final flush emits only the remaining tail.
+
 Imports own their newly created folder until the meeting database transaction
 commits. Failed or cancelled imports remove that copy; the source file is kept.
 Cancellation reports the same status during decoding, cloud and local inference.
