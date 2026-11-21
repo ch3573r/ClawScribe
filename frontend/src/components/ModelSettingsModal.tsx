@@ -87,10 +87,6 @@ interface OpenRouterModel {
   completion_price?: string;
 }
 
-interface OpenAIModel {
-  id: string;
-}
-
 interface OpenAIAuthStatus {
   mode: 'disabled' | 'api_key' | 'oauth_pkce';
   configured: boolean;
@@ -189,16 +185,6 @@ interface CodexInstallRepairPlan {
 
 const CODEX_DEFAULT_MODEL = 'gpt-5.6-sol';
 
-interface AnthropicModel {
-  id: string;
-  display_name?: string;
-}
-
-interface GroqModel {
-  id: string;
-  owned_by?: string;
-}
-
 // Fallback models for when API fetch fails or no API key provided
 const OPENAI_FALLBACK_MODELS = [
   'gpt-6.1-sol',
@@ -284,6 +270,40 @@ interface ModelSettingsModalProps {
   autosave?: boolean;
 }
 
+type CatalogStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'invalid' | 'forbidden' | 'unavailable';
+const catalogCommands = { openai: 'get_openai_models', claude: 'get_anthropic_models', groq: 'get_groq_models' } as const;
+
+function useHostedCatalog(provider: string, key: string | null, usable: boolean) {
+  const [catalog, setCatalog] = useState<{ provider: string; models: string[]; status: CatalogStatus }>({
+    provider: '', models: [], status: 'idle',
+  });
+  const generation = useRef(0);
+  const refresh = useCallback(async () => {
+    const request = ++generation.current;
+    if (!(provider === 'openai' || provider === 'claude' || provider === 'groq') || !usable) {
+      setCatalog({ provider, models: [], status: 'idle' });
+      return;
+    }
+    setCatalog({ provider, models: [], status: 'loading' });
+    try {
+      const rows = await invoke<{ id: string }[]>(catalogCommands[provider], { apiKey: newKeyPayload(key) });
+      if (generation.current === request) {
+        setCatalog({ provider, models: rows.map(model => model.id), status: rows.length ? 'ready' : 'empty' });
+      }
+    } catch (error) {
+      if (generation.current !== request) return;
+      const code = error instanceof Error ? error.message : error;
+      const status = code === 'invalid_api_key' ? 'invalid' : code === 'catalog_forbidden' ? 'forbidden' : 'unavailable';
+      setCatalog({ provider, models: [], status });
+    }
+  }, [provider, key, usable]);
+  useEffect(() => {
+    void refresh();
+    return () => { generation.current += 1; };
+  }, [refresh]);
+  return { catalog, refresh };
+}
+
 export function ModelSettingsModal({
   modelConfig: propsModelConfig,
   setModelConfig: propsSetModelConfig,
@@ -362,13 +382,9 @@ export function ModelSettingsModal({
   // Combobox state
   const [modelComboboxOpen, setModelComboboxOpen] = useState<boolean>(false);
 
-  // Dynamic model fetching state for OpenAI, Claude, and Groq
-  const [openaiModels, setOpenaiModels] = useState<string[]>([]);
-  const [claudeModels, setClaudeModels] = useState<string[]>([]);
-  const [groqModels, setGroqModels] = useState<string[]>([]);
-  const [isLoadingOpenAI, setIsLoadingOpenAI] = useState<boolean>(false);
-  const [isLoadingClaude, setIsLoadingClaude] = useState<boolean>(false);
-  const [isLoadingGroq, setIsLoadingGroq] = useState<boolean>(false);
+  const { catalog, refresh: refreshHostedCatalog } = useHostedCatalog(
+    modelConfig.provider, apiKey, hasUsableKey(apiKey, keyStatus),
+  );
   const [openAIAuthStatus, setOpenAIAuthStatus] = useState<OpenAIAuthStatus | null>(null);
   const [isLoadingOpenAIAuthStatus, setIsLoadingOpenAIAuthStatus] = useState<boolean>(false);
   const [openClawStatus, setOpenClawStatus] = useState<OpenClawConfigStatus | null>(null);
@@ -405,7 +421,6 @@ export function ModelSettingsModal({
   // Settings page (autosave) state
   const feedback = useSaveFeedback();
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(false);
-  const [modelListFailed, setModelListFailed] = useState<boolean>(false);
   const [customCheck, setCustomCheck] = useState<{ state: 'idle' | 'checking' | 'ok' | 'error'; message: string }>({ state: 'idle', message: '' });
   const [claudeRecheck, setClaudeRecheck] = useState<number>(0);
   const [claudeGuideError, setClaudeGuideError] = useState<string>('');
@@ -459,16 +474,16 @@ export function ModelSettingsModal({
 
   const modelOptions = useMemo<Record<string, string[]>>(() => ({
     ollama: models.map((model) => model.name),
-    claude: claudeModels.length > 0 ? claudeModels : CLAUDE_FALLBACK_MODELS,
-    groq: groqModels.length > 0 ? groqModels : GROQ_FALLBACK_MODELS,
-    openai: openaiModels.length > 0 ? openaiModels : OPENAI_FALLBACK_MODELS,
+    claude: catalog.provider === 'claude' && catalog.models.length ? catalog.models : CLAUDE_FALLBACK_MODELS,
+    groq: catalog.provider === 'groq' && catalog.models.length ? catalog.models : GROQ_FALLBACK_MODELS,
+    openai: catalog.provider === 'openai' && catalog.models.length ? catalog.models : OPENAI_FALLBACK_MODELS,
     openrouter: openRouterModels.map((m) => m.id),
     'builtin-ai': builtinAiModels.map((m) => m.name),
     'custom-openai': [customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL],
     openclaw: ['openclaw-managed'],
     codex: codexPickerModels.map((model) => model.id),
     'claude-code': CLAUDE_CODE_MODELS,
-  }), [models, claudeModels, groqModels, openaiModels, openRouterModels, builtinAiModels, customOpenAIModel, codexPickerModels]);
+  }), [models, catalog, openRouterModels, builtinAiModels, customOpenAIModel, codexPickerModels]);
 
   const requiresApiKey =
     modelConfig.provider === 'claude' ||
@@ -636,7 +651,6 @@ export function ModelSettingsModal({
 
   useEffect(() => {
     setAdvancedOpen(false);
-    setModelListFailed(false);
     setCustomCheck({ state: 'idle', message: '' });
     setClaudeGuideError('');
   }, [modelConfig.provider]);
@@ -751,66 +765,6 @@ export function ModelSettingsModal({
     } catch (err) {
       console.error('Error loading Built-in AI models:', err);
       toast.error('Failed to load Built-in AI models');
-    }
-  };
-
-  // Fetch OpenAI models from API
-  const loadOpenAIModels = async (key: string | null, useStoredKey = false) => {
-    if (!key?.trim() && !useStoredKey) {
-      setOpenaiModels([]); // Will use fallback via modelOptions
-      return;
-    }
-    setIsLoadingOpenAI(true);
-    try {
-      const data = (await invoke('get_openai_models', { apiKey: newKeyPayload(key) })) as OpenAIModel[];
-      setOpenaiModels(data.map((m) => m.id));
-      setModelListFailed(false);
-    } catch (err) {
-      console.error('Error loading OpenAI models:', err);
-      setOpenaiModels([]); // Will use fallback via modelOptions
-      setModelListFailed(true);
-    } finally {
-      setIsLoadingOpenAI(false);
-    }
-  };
-
-  // Fetch Anthropic (Claude) models from API
-  const loadClaudeModels = async (key: string | null, useStoredKey = false) => {
-    if (!key?.trim() && !useStoredKey) {
-      setClaudeModels([]); // Will use fallback via modelOptions
-      return;
-    }
-    setIsLoadingClaude(true);
-    try {
-      const data = (await invoke('get_anthropic_models', { apiKey: newKeyPayload(key) })) as AnthropicModel[];
-      setClaudeModels(data.map((m) => m.id));
-      setModelListFailed(false);
-    } catch (err) {
-      console.error('Error loading Claude models:', err);
-      setClaudeModels([]); // Will use fallback via modelOptions
-      setModelListFailed(true);
-    } finally {
-      setIsLoadingClaude(false);
-    }
-  };
-
-  // Fetch Groq models from API
-  const loadGroqModels = async (key: string | null, useStoredKey = false) => {
-    if (!key?.trim() && !useStoredKey) {
-      setGroqModels([]); // Will use fallback via modelOptions
-      return;
-    }
-    setIsLoadingGroq(true);
-    try {
-      const data = (await invoke('get_groq_models', { apiKey: newKeyPayload(key) })) as GroqModel[];
-      setGroqModels(data.map((m) => m.id));
-      setModelListFailed(false);
-    } catch (err) {
-      console.error('Error loading Groq models:', err);
-      setGroqModels([]); // Will use fallback via modelOptions
-      setModelListFailed(true);
-    } finally {
-      setIsLoadingGroq(false);
     }
   };
 
@@ -977,15 +931,6 @@ export function ModelSettingsModal({
     }
   };
 
-  const usableProviderKey = hasUsableKey(apiKey, keyStatus);
-
-  // Auto-fetch OpenAI models when provider is openai and we have an API key
-  useEffect(() => {
-    if (modelConfig.provider === 'openai' && usableProviderKey) {
-      loadOpenAIModels(apiKey, keyStatus.stored);
-    }
-  }, [modelConfig.provider, apiKey, keyStatus.stored, usableProviderKey]);
-
   useEffect(() => {
     if (modelConfig.provider === 'openai') {
       loadOpenAIAuthStatus();
@@ -1021,19 +966,6 @@ export function ModelSettingsModal({
   }, [modelConfig.provider, setModelConfig, checkCodexInstallation]);
 
   // Auto-fetch Claude models when provider is claude and we have an API key
-  useEffect(() => {
-    if (modelConfig.provider === 'claude' && usableProviderKey) {
-      loadClaudeModels(apiKey, keyStatus.stored);
-    }
-  }, [modelConfig.provider, apiKey, keyStatus.stored, usableProviderKey]);
-
-  // Auto-fetch Groq models when provider is groq and we have an API key
-  useEffect(() => {
-    if (modelConfig.provider === 'groq' && usableProviderKey) {
-      loadGroqModels(apiKey, keyStatus.stored);
-    }
-  }, [modelConfig.provider, apiKey, keyStatus.stored, usableProviderKey]);
-
   // Restore cached model when async model lists become available
   useEffect(() => {
     const providerModels = modelOptions[modelConfig.provider];
@@ -1618,8 +1550,7 @@ export function ModelSettingsModal({
   };
 
   const modelListLoading =
-    (modelConfig.provider === 'openrouter' && isLoadingOpenRouter) || (modelConfig.provider === 'openai' && isLoadingOpenAI) ||
-    (modelConfig.provider === 'claude' && isLoadingClaude) || (modelConfig.provider === 'groq' && isLoadingGroq) ||
+    (modelConfig.provider === 'openrouter' && isLoadingOpenRouter) || (catalog.provider === modelConfig.provider && catalog.status === 'loading') ||
     (modelConfig.provider === 'ollama' && isLoadingOllama);
 
   const runCustomCheck = async () => {
@@ -1658,9 +1589,18 @@ export function ModelSettingsModal({
     if (needsKey(provider)) {
       if (!hasUsableKey(apiKey, keyStatus)) return { tone: 'warning', text: 'Needs an API key' };
       if (modelListLoading) return { tone: 'neutral', text: 'Loading models…' };
-      if (provider === 'openrouter' && openRouterError) return { tone: 'warning', text: 'Key saved, model list unavailable' };
-      if (modelListFailed) return { tone: 'warning', text: 'Key saved, using the default model list' };
-      return { tone: 'ok', text: 'API key saved' };
+      if (provider === 'openrouter') return openRouterError
+        ? { tone: 'warning', text: 'Public model list unavailable' }
+        : { tone: 'neutral', text: 'API key not verified by the public model list' };
+      if (catalog.provider !== provider) return { tone: 'neutral', text: 'Checking provider�' };
+      switch (catalog.status) {
+        case 'invalid': return { tone: 'error', text: 'The provider rejected this API key. Replace it and try again.' };
+        case 'forbidden': return { tone: 'warning', text: 'This key cannot list models. Check its permissions.' };
+        case 'unavailable': return { tone: 'warning', text: 'Could not verify this key. Showing default models.' };
+        case 'empty': return { tone: 'warning', text: 'The provider returned no supported chat models.' };
+        case 'ready': return { tone: 'ok', text: 'Model list verified with this key' };
+        default: return { tone: 'neutral', text: 'Key not checked yet' };
+      }
     }
     if (provider === 'custom-openai') {
       if (customCheck.state === 'checking') return { tone: 'neutral', text: 'Checking connection…' };
@@ -1704,9 +1644,8 @@ export function ModelSettingsModal({
     if (provider === 'openclaw') return loadOpenClawStatus();
     if (provider === 'ollama') return fetchOllamaModels(true, ollamaEndpoint);
     if (provider === 'custom-openai') return runCustomCheck();
-    if (provider === 'openai') { await loadOpenAIAuthStatus(); return loadOpenAIModels(apiKey, keyStatus.stored); }
-    if (provider === 'claude') return loadClaudeModels(apiKey, keyStatus.stored);
-    if (provider === 'groq') return loadGroqModels(apiKey, keyStatus.stored);
+    if (provider === 'openai') await loadOpenAIAuthStatus();
+    if (provider === 'openai' || provider === 'claude' || provider === 'groq') return refreshHostedCatalog();
     if (provider === 'openrouter') { setOpenRouterModels([]); setOpenRouterError(''); return loadOpenRouterModels(); }
   };
 
@@ -2232,9 +2171,7 @@ export function ModelSettingsModal({
                     <CommandInput placeholder="Search models..." />
                     <CommandList className="max-h-[300px]">
                       {(modelConfig.provider === 'openrouter' && isLoadingOpenRouter) ||
-                       (modelConfig.provider === 'openai' && isLoadingOpenAI) ||
-                       (modelConfig.provider === 'claude' && isLoadingClaude) ||
-                       (modelConfig.provider === 'groq' && isLoadingGroq) ? (
+                       (catalog.provider === modelConfig.provider && catalog.status === 'loading') ? (
                         <div className="py-6 text-center text-sm text-muted-foreground">
                           <RefreshCw className="mx-auto h-4 w-4 animate-spin mb-2" />
                           Loading models...
@@ -2762,6 +2699,7 @@ export function ModelSettingsModal({
                 draft={apiKey || ''} onDraftChange={(value) => setApiKey(value || null)}
                 onRemove={removeStoredKey} removeWarning={removeWarning(modelConfig.provider)}
               />
+              <p role="status" className="text-xs text-muted-foreground">{providerStatus().text}</p>
             </div>
           </div>
         )}

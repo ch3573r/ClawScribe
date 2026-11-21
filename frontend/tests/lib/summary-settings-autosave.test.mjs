@@ -165,7 +165,7 @@ test('See everything in Privacy opens the Privacy tab', () => {
 
 // ---- Model settings: immediate-save mode versus the explicit Save button ----------------
 
-function modalHarness({ provider = 'claude', stored = false, onSave, autosave = true, model = 'claude-sonnet-5' } = {}) {
+function modalHarness({ provider = 'claude', stored = false, onSave, catalogResponse, autosave = true, model = 'claude-sonnet-5' } = {}) {
   const hooks = createHookHarness();
   const calls = [];
   // The core never returns a stored key: the settings only know whether one is stored.
@@ -181,7 +181,7 @@ function modalHarness({ provider = 'claude', stored = false, onSave, autosave = 
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' },
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push([command, args]);
-      if (command === 'get_anthropic_models') return [{ id: 'claude-sonnet-5' }];
+      if (command === 'get_anthropic_models') return catalogResponse ? catalogResponse() : [{ id: 'claude-sonnet-5' }];
       if (command === 'get_groq_models') return [];
       if (command === 'codex_get_config') return {};
       return null;
@@ -359,4 +359,24 @@ test('the same component keeps its explicit Save button and draft behaviour for 
   assert.equal(app.saves.length, 0, 'nothing saves until Save is pressed');
   assert.equal(nodes(tree).some(node => node.type === 'select' && node.props.value === 'claude'), true, 'the provider select is the original one');
   app.hooks.unmount();
+});
+
+test('hosted catalog failures distinguish a rejected key, denied model listing, and a provider outage', async () => {
+  for (const [failure, message] of [
+    ['invalid_api_key', /provider rejected this API key/i],
+    ['catalog_forbidden', /key cannot list models/i],
+    ['catalog_unavailable', /could not verify this key/i],
+  ]) {
+    for (const autosave of [true, false]) {
+      const app = modalHarness({
+        stored: true, autosave,
+        catalogResponse: () => Promise.reject(failure),
+      });
+      app.render(); await flush();
+      const rendered = text(app.render());
+      assert.match(rendered, message);
+      assert.doesNotMatch(rendered, /Model list verified with this key/);
+      app.hooks.unmount();
+    }
+  }
 });
