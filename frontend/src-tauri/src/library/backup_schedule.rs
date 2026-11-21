@@ -47,6 +47,8 @@ struct Schedule {
     incomplete_meetings: usize,
     #[serde(default)]
     skipped_template_items: usize,
+    #[serde(default)]
+    omitted_saved_live_answers: u64,
     files: Vec<OwnedArchive>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     staging: Option<OwnedArchive>,
@@ -67,6 +69,7 @@ pub(crate) struct ScheduleStatus {
     last_error: Option<String>,
     incomplete_meetings: usize,
     skipped_template_items: usize,
+    omitted_saved_live_answers: u64,
 }
 
 impl Schedule {
@@ -80,6 +83,7 @@ impl Schedule {
             last_error: None,
             incomplete_meetings: 0,
             skipped_template_items: 0,
+            omitted_saved_live_answers: 0,
             files: Vec::new(),
             staging: None,
         }
@@ -243,6 +247,9 @@ pub(crate) async fn scheduled_backup_status(app: AppHandle) -> Result<ScheduleSt
             skipped_template_items: schedule
                 .as_ref()
                 .map_or(0, |schedule| schedule.skipped_template_items),
+            omitted_saved_live_answers: schedule
+                .as_ref()
+                .map_or(0, |schedule| schedule.omitted_saved_live_answers),
         })
     })
     .await
@@ -445,6 +452,7 @@ async fn run_backup(
     schedule.last_error = None;
     schedule.incomplete_meetings = report.incomplete_meetings.len();
     schedule.skipped_template_items = report.skipped_template_items;
+    schedule.omitted_saved_live_answers = report.omitted_saved_live_answers;
     // Make the new archive durable in the local index before touching old files.
     let settings = settings.to_owned();
     let mut index = schedule.clone();

@@ -14,6 +14,7 @@ interface ScheduleStatus {
   last_error: string | null;
   incomplete_meetings: number;
   skipped_template_items: number;
+  omitted_saved_live_answers: number;
 }
 
 export function ScheduledBackups({ disabled }: { disabled: boolean }) {
@@ -86,6 +87,7 @@ export function ScheduledBackups({ disabled }: { disabled: boolean }) {
             : `Last saved ${new Date(status.last_success * 1000).toLocaleString()}.`}
           {!status.running && status.incomplete_meetings > 0 && ` Incomplete audio in ${status.incomplete_meetings} meetings.`}
           {!status.running && status.skipped_template_items > 0 && ` Skipped ${status.skipped_template_items} template ${status.skipped_template_items === 1 ? 'item' : 'items'}.`}
+          {!status.running && status.omitted_saved_live_answers > 0 && ` Excluded ${status.omitted_saved_live_answers} saved live ${status.omitted_saved_live_answers === 1 ? 'answer' : 'answers'}.`}
         </p>
       </>}
       {(status || error) && <Button variant="outline" size="sm" disabled={unavailable} onClick={() => void change()}>

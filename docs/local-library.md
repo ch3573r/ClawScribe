@@ -64,8 +64,9 @@ the saved answer, but citations to changed passages may no longer display.
 Choose **Remove** to delete a saved answer from the meeting.
 Unselected live chat clears at Stop. Saved answers attach to that specific
 recording at Stop or during local recovery and can be removed from **Manage
-pending notes** if the recording was never saved. Portable archives currently
-exclude saved live answers, approved series notes, and the new series defaults.
+pending notes** if the recording was never saved. Portable archives
+include explicitly saved answers whose only sources were finalized excerpts
+from that recording.
 
 ## Local assistant access
 
@@ -383,17 +384,21 @@ saved OneNote sections in the new profile. Existing meetings keep their own
 history. Older archives restore the export history they contain.
 If an archived calendar link cannot be read, restore keeps the meeting and
 reports how many links it left unset.
-Backups also carry custom summary templates, custom vocabulary, and template
-choices for calendar series linked to an archived meeting. Restore adds missing
+Backups also carry custom summary templates and vocabulary. For calendar series
+linked to an archived meeting, they carry template and summary language choices,
+the setting for including approved notes, and the preferred follow-up
+destination. Restore adds missing
 custom templates by ID and installs the vocabulary only if the destination has
 no vocabulary file. It adds a missing series preference when restoring a meeting
 linked to that series. An existing template, vocabulary list, or series
-preference takes precedence. Restored iCalendar series still use their original
-source IDs. Calendar subscriptions, account and provider approvals, provider
-settings, credentials, models, UI preferences, backup schedules, and unfinished
-recording recovery spools stay with the source profile. Missing
-recording folders are reported by meeting title without blocking the backup;
-their meeting data is included, and restore leaves their recording folder unset.
+preference takes precedence. An approved note travels only with the archived
+meeting whose reviewed event and series still match the note. Restored iCalendar
+series still use their original source IDs. Calendar subscriptions, account and
+provider approvals, provider settings, credentials, models, UI preferences,
+backup schedules, and unfinished recording recovery spools stay with the source
+profile. Missing recording folders are reported by meeting title without
+blocking the backup. The archive includes their meeting data, and restore
+leaves their recording folder unset.
 Unreadable folders and folder links still stop backup with a named error.
 Nonempty `.audio-spool` and `.checkpoints` directories
 remain on the source computer. They do not block backup: available saved audio,
@@ -405,6 +410,15 @@ cancelling the file picker keeps it. Preserve a separate copy of source recordin
 folders, including hidden files, if you need the recovery originals. Backup never
 removes them.
 Archives are not encrypted; keep them in trusted storage.
+
+Version 3 backups include explicitly saved live answers attached to an archived
+recording when ClawScribe can verify that every source came from that recording.
+These answers retain their provider, model, finalized-through time, and original
+cited recording excerpts even when audio is unavailable. Answers with incomplete
+source records or any dependency on another meeting or reference document are
+excluded. The backup reports their count, and restore reports omissions for
+meetings it adds. Unsaved live chat, pending answers from unfinished recordings,
+connection settings, and sharing approvals stay out of the archive.
 
 Restore adds meetings whose IDs are absent from the library and skips existing
 IDs without overwriting them. Restore validates the archive structure and checks
@@ -437,10 +451,10 @@ and model downloads are excluded; restored sources are queued for indexing.
 Version 3 archives put transcript segments, chunks, revisions and correction
 batches in separate streams of newline-delimited JSON records. Each record is
 limited to 128 MiB. The manifest holds the record counts, meeting roster,
-remaining metadata, and file references. This lets accumulated transcript
-history exceed the 128 MiB manifest limit while export and restore process one
-record at a time. Archives still have a 100 GiB total data limit and can contain
-up to 100,000 recording and reference files.
+remaining metadata, optional follow-through records, and file references. This
+lets accumulated transcript history exceed the 128 MiB manifest limit while
+export and restore process one record at a time. Archives still have a 100 GiB
+total data limit and can contain up to 100,000 recording and reference files.
 
 Version 2 archives add reference metadata, extracted blocks, attachment relations
 and original files with verified hashes. Reference sharing permissions are not
@@ -475,9 +489,9 @@ or an archive operation is active. Starting a recording interrupts a scheduled b
 is still reading the library. ClawScribe discards the partial ZIP and retries
 when the library is idle. A completed ZIP can finish saving during recording.
 If ClawScribe can measure free space, it budgets the ZIP and temporary
-transcript records to leave room for recording. The dialog shows
-the current destination, last successful backup, incomplete audio and skipped template counts, and
-any recent error.
+transcript records to leave room for recording. The dialog shows the current
+destination, last successful backup, incomplete audio, skipped template and
+excluded saved answer counts, and any recent error.
 
 ClawScribe creates a dedicated folder in the location you choose. After a new
 backup is saved, retention keeps the three newest tracked archives. It removes
