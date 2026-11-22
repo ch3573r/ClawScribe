@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfig } from "@/contexts/ConfigContext";
 import { useCloudTranscription } from "@/hooks/useCloudTranscription";
+import { useWebhookSettings } from "@/hooks/useWebhookSettings";
 import { getExportDestinations } from "@/lib/exportDestinations";
 import type { Loadable, PrivacyInput } from "@/lib/privacy";
 import { AUTO_UPDATE_CHECK_CHANGED_EVENT, getAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
@@ -32,6 +33,7 @@ function useLoadable<T>(load: () => Promise<T>, tick: number): Loadable<T> {
 export function usePrivacyInput(): PrivacyInput {
   const { isAutoSummary } = useConfig();
   const cloud = useCloudTranscription();
+  const webhook = useWebhookSettings();
   const [tick, setTick] = useState(0);
   const [updateCheck, setUpdateCheck] = useState(true);
   const [confluenceRest, setConfluenceRest] = useState(false);
@@ -124,5 +126,6 @@ export function usePrivacyInput(): PrivacyInput {
     updateCheck,
     semanticSearch,
     handoff,
+    webhook,
   };
 }

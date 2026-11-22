@@ -38,7 +38,7 @@ pub(crate) fn local_meeting_date(row: &SqliteRow, column: &str) -> Option<NaiveD
         .or_else(|| calendar_date(row.try_get::<&str, _>(column).ok()?))
 }
 
-fn meeting_timestamp(row: &SqliteRow, column: &str) -> Result<String, sqlx::Error> {
+pub(crate) fn meeting_timestamp(row: &SqliteRow, column: &str) -> Result<String, sqlx::Error> {
     match row.try_get::<DateTime<Utc>, _>(column) {
         Ok(date) => Ok(date.to_rfc3339()),
         Err(error) => match row.try_get::<String, _>(column) {

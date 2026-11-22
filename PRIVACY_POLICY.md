@@ -58,6 +58,13 @@ from MAI transcription credentials and AI-provider credentials.
 publishing sends the chosen document to the configured Server/Data Center
 endpoint. Review the destination and content before publishing.
 
+**Outbound webhook.** The webhook is off by default. If you enable it, ClawScribe
+sends meeting details to your saved endpoint when you export or when the
+recording, import or summary events you select occur. You can choose whether
+to include summary and action items or transcript text. Test deliveries use
+sample data. The local delivery history stores the event, meeting ID, time,
+attempt count and outcome. [Webhook configuration and payload](docs/integrations/webhook.md)
+
 **Export history and recovery.** The local meeting history can contain task,
 page, and file names, remote item and destination IDs, service links, status,
 timestamps, and account and export revision fingerprints. It travels with
@@ -86,6 +93,11 @@ The bundled Codex provider uses an isolated profile and keyring-only ChatGPT
 sign-in, with no credential-file fallback. An old `auth.json` is removed after a
 keyring sign-in succeeds. The Confluence token and its destination binding are
 stored in the keyring.
+
+The webhook URL and optional signing secret use the platform credential store
+with the current-user DPAPI fallback on Windows. Settings show the scheme, host
+and port. ClawScribe excludes the full URL, signing secret and body from
+logs and delivery history.
 
 Microsoft session persistence stores the refresh token and associated account
 metadata, not the short-lived access token. It first uses the platform credential

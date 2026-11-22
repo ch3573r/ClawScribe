@@ -63,6 +63,7 @@ pub mod tray;
 pub(crate) mod trusted_roots;
 pub mod updates;
 pub mod utils;
+mod webhook;
 pub mod whisper_engine;
 #[cfg(windows)]
 mod windows_lifecycle;
@@ -963,6 +964,11 @@ pub fn run() {
             openclaw::handoff::get_openclaw_submission_status,
             openclaw::handoff::submit_meeting_folder_to_openclaw,
             openclaw::handoff::reconcile_openclaw_handoff,
+            webhook::get_webhook_settings,
+            webhook::save_webhook_settings,
+            webhook::remove_webhook_settings,
+            webhook::send_webhook_test,
+            webhook::send_meeting_webhook,
             // Teams meeting detection commands
             teams_detection::get_teams_detection_config,
             teams_detection::get_teams_detection_status,

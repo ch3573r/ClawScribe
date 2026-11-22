@@ -143,6 +143,7 @@ rayon = "1.10"
 rubato = "0.15.0"
 ringbuf = "0.4.8"
 sha2 = "0.10"
+hmac = "0.12"
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 tempfile = "3.3.0"
 whatlang = "0.16.4"

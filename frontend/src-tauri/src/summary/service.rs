@@ -47,6 +47,7 @@ struct ActiveSummaryJob {
 /// Early returns and cancelled futures always remove their registered token.
 pub(crate) struct SummaryJob {
     meeting_id: String,
+    generation: uuid::Uuid,
     token: CancellationToken,
     _install_guard: tokio::sync::RwLockReadGuard<'static, ()>,
     reduction: Arc<super::context_budget::Reduction>,
@@ -177,23 +178,30 @@ where
     Err(SUMMARY_SAVE_FAILED.into())
 }
 
-async fn save_completed_with_retry(
-    pool: &SqlitePool,
-    meeting: &str,
+struct CompletedSummary<'a> {
     result: serde_json::Value,
     chunks: i64,
     duration: f64,
     revision: Option<i64>,
+    title_source: Option<&'a str>,
+}
+
+async fn save_completed_with_retry<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pool: &SqlitePool,
+    job: &SummaryJob,
+    completed: CompletedSummary<'_>,
 ) -> Result<(), String> {
+    let meeting = &job.meeting_id;
     let committed = retry_save(
         || {
             SummaryProcessesRepository::complete_for_revision(
                 pool,
                 meeting,
-                result.clone(),
-                chunks,
-                duration,
-                revision,
+                completed.result.clone(),
+                completed.chunks,
+                completed.duration,
+                completed.revision,
             )
         },
         || SummaryProcessesRepository::update_process_failed(pool, meeting, SUMMARY_SAVE_FAILED),
@@ -205,6 +213,10 @@ async fn save_completed_with_retry(
                 .await;
         return Err(TRANSCRIPT_CHANGED.into());
     }
+    if let Some(markdown) = completed.title_source {
+        apply_generated_title(pool, meeting, markdown).await;
+    }
+    crate::webhook::summary_ready(app, meeting, job.generation, completed.result);
     Ok(())
 }
 
@@ -597,6 +609,7 @@ impl SummaryService {
         );
         Ok(Some(SummaryJob {
             meeting_id: meeting_id.to_string(),
+            generation: uuid::Uuid::new_v4(),
             token,
             _install_guard: install_guard,
             reduction,
@@ -669,7 +682,7 @@ impl SummaryService {
     /// the main thread. It updates the database with progress and results.
     ///
     /// # Arguments
-    /// * `_app` - Tauri app handle (for future use)
+    /// * `app` - Tauri app handle for delivery of committed meeting events
     /// * `pool` - SQLx connection pool
     /// * `meeting_id` - Unique identifier for the meeting
     /// * `text` - Full transcript text
@@ -678,7 +691,7 @@ impl SummaryService {
     /// * `custom_prompt` - Optional user-provided context
     /// * `template_id` - Template identifier (e.g., "daily_standup", "standard_meeting")
     pub(crate) async fn process_transcript_background<R: tauri::Runtime>(
-        _app: AppHandle<R>,
+        app: AppHandle<R>,
         pool: SqlitePool,
         meeting_id: String,
         text: String,
@@ -1171,12 +1184,16 @@ impl SummaryService {
                     }
                     super::sources::attach(&mut result_json, &summary_sources);
                     if let Err(e) = save_completed_with_retry(
+                        &app,
                         &pool,
-                        &meeting_id,
-                        result_json,
-                        job.reduction.source_excerpts() as i64,
-                        duration,
-                        revision,
+                        job,
+                        CompletedSummary {
+                            result: result_json,
+                            chunks: job.reduction.source_excerpts() as i64,
+                            duration,
+                            revision,
+                            title_source: Some(&api_result.markdown),
+                        },
                     )
                     .await
                     {
@@ -1184,8 +1201,6 @@ impl SummaryService {
                             "Failed to save OpenAI-compatible process for {}: {}",
                             meeting_id, e
                         );
-                    } else {
-                        apply_generated_title(&pool, &meeting_id, &api_result.markdown).await;
                     }
                 }
                 Err(e) => {
@@ -1284,18 +1299,20 @@ impl SummaryService {
                     });
                     super::sources::attach(&mut result_json, &summary_sources);
                     if let Err(e) = save_completed_with_retry(
+                        &app,
                         &pool,
-                        &meeting_id,
-                        result_json,
-                        job.reduction.source_excerpts() as i64,
-                        duration,
-                        revision,
+                        job,
+                        CompletedSummary {
+                            result: result_json,
+                            chunks: job.reduction.source_excerpts() as i64,
+                            duration,
+                            revision,
+                            title_source: Some(&codex_result.markdown),
+                        },
                     )
                     .await
                     {
                         error!("Failed to save Codex process for {}: {}", meeting_id, e);
-                    } else {
-                        apply_generated_title(&pool, &meeting_id, &codex_result.markdown).await;
                     }
                 }
                 Err(e) => {
@@ -1493,18 +1510,20 @@ impl SummaryService {
                 }
                 // Update database with completed status
                 if let Err(e) = save_completed_with_retry(
+                    &app,
                     &pool,
-                    &meeting_id,
-                    result_json,
-                    num_chunks,
-                    duration,
-                    revision,
+                    job,
+                    CompletedSummary {
+                        result: result_json,
+                        chunks: num_chunks,
+                        duration,
+                        revision,
+                        title_source: translation_error.is_none().then_some(&final_markdown),
+                    },
                 )
                 .await
                 {
                     error!("Failed to save completed process for {}: {}", meeting_id, e);
-                } else if translation_error.is_none() {
-                    apply_generated_title(&pool, &meeting_id, &final_markdown).await;
                 }
             }
             Err(e) => {

@@ -14,6 +14,7 @@ import {
   CalendarClock,
   Bot,
   Activity,
+  Webhook,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -29,6 +30,7 @@ import { KnowledgeSettings } from "@/components/KnowledgeSettings";
 import { Microsoft365Settings } from "@/components/settings/Microsoft365Settings";
 import { CalendarsSettings } from "@/components/settings/CalendarsSettings";
 import { ConfluenceSettings } from "@/components/settings/ConfluenceSettings";
+import { WebhookSettings } from "@/components/settings/WebhookSettings";
 import { AssistantAccessSettings } from "@/components/settings/AssistantAccessSettings";
 import { DiagnosticsSettings } from "@/components/settings/DiagnosticsSettings";
 import { resolveSettingsTab } from "@/components/settings/settings-tabs";
@@ -70,6 +72,7 @@ const GROUPS: { label: string; items: SectionItem[] }[] = [
       { value: "ms365", label: "Microsoft 365", icon: Microsoft365Icon, desc: "Where exports go in OneNote, OneDrive, Planner and To Do" },
       { value: "calendars", label: "Calendars", icon: CalendarClock, desc: "Meeting titles and invitees for your recordings" },
       { value: "confluence", label: "Confluence", icon: ConfluenceIcon, desc: "Publish meeting notes as a Confluence page" },
+      { value: "webhook", label: "Webhook", icon: Webhook, desc: "Send saved meeting data to your automation endpoint" },
       { value: "assistant", label: "Assistant access", icon: Bot, desc: "Let an MCP-compatible assistant read your saved meetings" },
     ],
   },
@@ -145,6 +148,8 @@ export default function SettingsPage() {
         return <CalendarsSettings />;
       case "confluence":
         return <ConfluenceSettings />;
+      case "webhook":
+        return <WebhookSettings />;
       case "assistant":
         return <AssistantAccessSettings />;
       case "diagnostics":

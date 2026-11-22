@@ -196,7 +196,7 @@ impl CalendarLink {
         serde_json::to_string(self).map_err(|_| "Could not save the calendar link.".into())
     }
 
-    pub(super) fn confirmed_names(&self) -> Vec<&str> {
+    pub(crate) fn confirmed_names(&self) -> Vec<&str> {
         let excluded: std::collections::HashSet<_> = self
             .attendees
             .iter()

@@ -19,6 +19,7 @@ const base = () => ({
   updateCheck: false,
   semanticSearch: ready(true),
   handoff: ready({ enabled: false, endpoint: null }),
+  webhook: ready({ enabled: false, configured: false, destination: null }),
 });
 const derive = overrides => derivePrivacy({ ...base(), ...overrides });
 const rowOf = (model, id) => model.rows.find(row => row.id === id);
@@ -35,6 +36,26 @@ test('a fully local setup reports nothing leaving and no automatic data', () => 
   assert.equal(rowOf(model, 'assistant').tone, 'off');
   assert.equal(rowOf(model, 'recording').detail, 'C:\\Recordings');
   assert.equal(rowOf(model, 'recording').detailIsPath, true);
+});
+
+test('webhook privacy lists the masked destination, triggers and selected content', () => {
+  const webhook = {
+    enabled: true, configured: true, destination: 'https://hooks.example.com',
+    onSummary: true, onRecording: true, includeSummary: true, includeTranscript: true,
+  };
+  const model = derive({ webhook: ready(webhook) });
+  assert.equal(rowOf(model, 'webhook').destination, 'https://hooks.example.com');
+  assert.equal(rowOf(model, 'webhook').tone, 'warning');
+  assert.match(rowOf(model, 'webhook').when, /summary is ready or a recording or import is saved/);
+  assert.match(rowOf(model, 'webhook').detail, /summary and action items, transcript text/);
+  assert.equal(factOf(model, 'text').value, 'Leaves automatically');
+  assert.match(factOf(model, 'automatic').detail, /hooks.example.com/);
+
+  const manual = derive({ webhook: ready({ ...webhook, onSummary: false, onRecording: false }) });
+  assert.equal(rowOf(manual, 'webhook').when, 'When you export');
+  assert.equal(factOf(manual, 'text').value, 'Leaves when you ask');
+  assert.equal(factOf(manual, 'automatic').value, 'None');
+  assert.equal(factOf(derive({ webhook: { status: 'error' } }), 'automatic').value, 'Could not check');
 });
 
 test('cloud transcription with a cloud engine says audio leaves, with the warning tone', () => {
@@ -134,7 +155,7 @@ test('every row links to the settings page that controls it', () => {
   const tabs = Object.fromEntries(derive({}).rows.map(row => [row.id, row.tab]));
   assert.deepEqual(tabs, {
     recording: 'recording', transcription: 'transcription', conversation: 'recording', memory: 'memory', summary: 'summary', live: 'summary', handoff: 'summary',
-    exports: 'ms365', calendars: 'calendars', assistant: 'assistant', update: 'general',
+    exports: 'ms365', webhook: 'webhook', calendars: 'calendars', assistant: 'assistant', update: 'general',
   });
 });
 

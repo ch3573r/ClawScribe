@@ -560,6 +560,7 @@ async fn start_import<R: Runtime>(
     drop(phase);
     drop(job);
     if let Ok(res) = &result {
+        crate::webhook::recording_saved(&app, &res.meeting_id);
         if let Some(request) = options.summary_request {
             if let Some(state) = app.try_state::<AppState>() {
                 if crate::summary::automatic::start_import(
