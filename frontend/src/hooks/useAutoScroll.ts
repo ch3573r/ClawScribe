@@ -49,8 +49,11 @@ export function useAutoScroll({ scrollRef, contentRef, segmentCount, enabled, is
         };
         const handleScroll = () => {
             const { scrollTop, scrollHeight, clientHeight } = container;
-            if (scrollTop < previousTop.current - SCROLL_TOLERANCE &&
-                scrollHeight - clientHeight - scrollTop > SCROLL_TOLERANCE) {
+            const atTail = scrollHeight - clientHeight - scrollTop <= SCROLL_TOLERANCE;
+            if (!following.current && scrollTop > previousTop.current && atTail) {
+                following.current = true;
+                setAutoScroll(true);
+            } else if (!atTail && scrollTop < previousTop.current - SCROLL_TOLERANCE) {
                 detach();
             }
             previousTop.current = scrollTop;

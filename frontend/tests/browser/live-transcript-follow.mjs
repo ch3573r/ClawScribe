@@ -269,6 +269,21 @@ async function exercise({ send, evaluate }, url) {
   await append(1, 11);
   assert.ok((await metrics()).gap <= 2, 'New speech must follow after jumping to live');
 
+  await wheel(-320);
+  await until('Wheel scroll-back did not detach', async () => (await metrics()).jump);
+  await wheel(2800);
+  await until('Reaching the bottom by wheel did not resume following', async () => !(await metrics()).jump);
+  await append(1, 12);
+  assert.ok((await metrics()).gap <= 2, 'New speech must follow a manual return to the bottom');
+
+  await wheel(-320);
+  await until('Second wheel scroll-back did not detach', async () => (await metrics()).jump);
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'End', code: 'End', windowsVirtualKeyCode: 35 });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'End', code: 'End', windowsVirtualKeyCode: 35 });
+  await until('End did not resume following', async () => !(await metrics()).jump);
+  await append(1, 13);
+  assert.ok((await metrics()).gap <= 2, 'New speech must follow after End');
+
   await evaluate('openSaved()');
   await until('Saved transcript did not mount', () => evaluate('typeof window.play === "function"'));
   await evaluate('play(420)');

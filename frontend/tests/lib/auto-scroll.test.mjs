@@ -101,14 +101,22 @@ test("jump restores the live tail after scroll-back, including a second scroll-b
     const control = h.render();
     assert.equal(control.autoScroll, false);
 
-    // Arriving at the bottom through unrelated layout changes cannot resume following.
-    h.scroll(h.viewport.scrollHeight);
-    assert.equal(h.render().autoScroll, false);
     control.scrollToBottom();
     assert.equal(h.render().autoScroll, true);
     h.grow(75);
     assert.equal(h.viewport.scrollTop, h.viewport.scrollHeight - 410);
   }
+});
+
+test("scrolling down resumes following only when the reader reaches the tail", t => {
+  const h = mounted(t);
+  h.scroll(120);
+  h.scroll(782);
+  assert.equal(h.render().autoScroll, false);
+  h.scroll(789.5);
+  assert.equal(h.render().autoScroll, true);
+  h.grow(100);
+  assert.equal(h.viewport.scrollTop, 890);
 });
 
 test("pause preserves detachment and Stop leaves the position alone", t => {

@@ -115,7 +115,7 @@ output is correct. Check suspected hallucinations against the saved audio.
 
 Use a timestamp button to play the associated audio in a saved meeting.
 During recording, scrolling back holds your place while speech arrives.
-**Jump to live transcript** returns to the latest passage and resumes following.
+Scroll back to the bottom or select **Jump to live transcript** to resume following.
 Reloading during active capture opens the restored transcript at the tail.
 Speaker-name edits report failures visibly and retain custom input for retry.
 A manually assigned speaker label is not independently verified speaker identity.
