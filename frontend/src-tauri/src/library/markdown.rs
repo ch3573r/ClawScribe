@@ -17,10 +17,10 @@ fn escape_inline(value: &str) -> String {
     let line = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let list_marker = line.bytes().take_while(u8::is_ascii_digit).count();
     for (index, ch) in line.char_indices() {
-        if matches!(
-            ch,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '#' | '+' | '<' | '>' | '&' | '|' | '~' | '='
-        ) || (index == 0 && ch == '-')
+        // Escape only what changes meaning here, so the file stays readable as text:
+        // inline markup anywhere, block markers at the start of the line.
+        if matches!(ch, '\\' | '`' | '*' | '_' | '[' | ']' | '<')
+            || (index == 0 && matches!(ch, '#' | '-' | '+' | '>'))
             || (index == list_marker && list_marker > 0 && matches!(ch, '.' | ')'))
         {
             escaped.push('\\');
@@ -209,12 +209,12 @@ mod tests {
             true,
             true,
         );
-        assert!(output.starts_with("# \\- Draft \\[A\\] \\# Next\n"));
+        assert!(output.starts_with("# \\- Draft \\[A\\] # Next\n"));
         assert!(output.contains("- Attendees: Dana \\[guest\\]"));
         assert!(output.contains("See (00:00:12)."));
         assert!(!output.contains("clawscribe-source"));
-        assert!(output.contains("## Notes and bookmarks\n\n- **[00:00:12]** \\- Read \\<draft\\>"));
+        assert!(output.contains("## Notes and bookmarks\n\n- **[00:00:12]** \\- Read \\<draft>"));
         assert!(output
-            .contains("**[00:00:42] \\*Dana\\* \\[guest\\]:** First line \\# still the passage"));
+            .contains("**[00:00:42] \\*Dana\\* \\[guest\\]:** First line # still the passage"));
     }
 }
