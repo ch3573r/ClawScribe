@@ -1298,6 +1298,9 @@ impl AudioPipeline {
             mic_rms / self.mic_floor,
             sys_rms / self.sys_floor,
         );
+        let position_ms =
+            self.attribution_history.input_samples * 1000 / u64::from(self.sample_rate);
+        self.state.set_speech_clock_ms(position_ms);
     }
 
     fn segment_source(&self, start_ms: f64, end_ms: f64) -> DeviceType {

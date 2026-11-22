@@ -946,6 +946,7 @@ pub fn run() {
             audio::recording_commands::get_recording_meeting_name,
             // Device monitoring commands (AirPods/Bluetooth disconnect/reconnect)
             audio::recording_commands::get_recording_health,
+            audio::recording_commands::get_live_conversation_metrics,
             audio::recording_commands::attempt_device_reconnect,
             // Playback device detection (Bluetooth warning)
             // OpenClaw handoff commands
@@ -1112,6 +1113,7 @@ pub fn run() {
             behavior_settings::get_behavior_settings,
             behavior_settings::migrate_legacy_behavior_settings,
             behavior_settings::set_recording_notification_preference,
+            behavior_settings::set_conversation_metrics_preference,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,

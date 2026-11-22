@@ -163,9 +163,10 @@ pub struct TranscriptUpdate {
 fn publish_transcript_update(
     sink: &LiveTranscriptSink,
     update: &TranscriptUpdate,
+    clear_source: bool,
     notify_frontend: impl FnOnce(&TranscriptUpdate),
 ) {
-    if sink.ingest(update) {
+    if sink.ingest(update, clear_source) {
         notify_frontend(update);
     }
 }
@@ -324,9 +325,10 @@ pub fn start_transcription_task<R: Runtime>(
                             let chunk_timestamp = chunk.timestamp;
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
                             let source = chunk.device_type.clone();
+                            let clear_source = queued_chunk.clear_source;
                             let mut language = crate::get_language_preference_internal();
                             let auto = matches!(language.as_deref(), None | Some("auto"));
-                            let input = if auto && queued_chunk.clear_source {
+                            let input = if auto && clear_source {
                                 metrics_clone.source_languages.lock().ok().and_then(|state|
                                     state.as_ref().map(|s| s.input(&source, chunk_timestamp, chunk_duration)))
                             } else {
@@ -430,7 +432,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             word_timestamps,
                                         };
 
-                                        publish_transcript_update(&live_sink, &update, |update| {
+                                        publish_transcript_update(&live_sink, &update, clear_source, |update| {
                                             if app_clone.emit("transcript-update", update).is_err() {
                                                 error!("Failed to emit transcript update");
                                             }
@@ -948,7 +950,7 @@ mod transcript_delivery_tests {
         };
 
         let mut notifications = 0;
-        publish_transcript_update(&sink, &update, |event| {
+        publish_transcript_update(&sink, &update, true, |event| {
             notifications += 1;
             assert_eq!(event.session_id, update.session_id);
             let rows = manager.get_transcript_segments();
@@ -967,7 +969,7 @@ mod transcript_delivery_tests {
         assert_eq!(rows[0].duration, Some(1.0));
         assert_eq!(rows[0].word_timestamps, update.word_timestamps);
 
-        publish_transcript_update(&sink, &update, |_| {});
+        publish_transcript_update(&sink, &update, true, |_| {});
         assert_eq!(manager.library_transcripts().len(), 1);
     }
 }

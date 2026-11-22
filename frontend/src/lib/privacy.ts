@@ -335,6 +335,10 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
   const rows = [
     withheld(recordingBase, blocked(input.recording)),
     withheld(transcriptionBase, blocked(input.transcription)),
+    row({
+      id: "conversation", title: "Conversation metrics", tab: "recording", tabLabel: "Recording",
+      destination: "This PC", when: "Never leaves", tone: "neutral", detail: "Calculated during live transcription and cleared when the recording ends",
+    }),
     memoryRow,
     withheld(summaryBase, blocked(input.summary)),
     withheld(liveBase, liveState),

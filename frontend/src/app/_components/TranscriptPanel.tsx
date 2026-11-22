@@ -1,5 +1,6 @@
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { PermissionWarning } from '@/components/PermissionWarning';
+import { LiveConversationMetrics } from '@/components/LiveConversationMetrics';
 import { LiveSourceLanguages } from '@/components/LiveSourceLanguages';
 import { RecordingCalendarReview } from '@/components/MeetingAttendance';
 import { Button } from '@/components/ui/button';
@@ -65,6 +66,11 @@ export function TranscriptPanel({
         </ButtonGroup>
       </div>
       {isRecording && sessionId && <RecordingCalendarReview key={sessionId} sessionId={sessionId} disabled={isStopping || isProcessingStop} />}
+      {isRecording && sessionMode === 'live' && sessionId && (
+        <div className="mx-auto w-full max-w-[750px] empty:hidden">
+          <LiveConversationMetrics sessionId={sessionId} />
+        </div>
+      )}
       {isRecording && sessionMode === 'live' && sessionId && selectedLanguage === 'auto' && (
         <LiveSourceLanguages key={sessionId} sessionId={sessionId} />
       )}

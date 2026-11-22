@@ -87,6 +87,24 @@ For development, the [two-source capture benchmark](local-capture-benchmark.md)
 measures capture processing, transcript quality and saved audio on the same
 fictional meeting timeline.
 
+## Conversation metrics
+
+During live transcription, **Conversation** uses finalized speech to show talk time,
+speaking pace, questions and uninterrupted stretches on this PC. You can hide it
+in **Settings → Recording**. Metrics clear when the recording ends.
+
+The split between you and others requires **Label lines as Me or Participants**
+in **Settings → Transcription** and clear microphone or system audio for every
+finalized segment so far. When the sources are unclear, the panel shows overall
+speech time and questions. Talk time uses the union of speech intervals for each
+source. Questions are estimated from closing punctuation. Pace uses words separated
+by spaces and is unavailable for scripts such as Chinese, Japanese and Thai.
+The overall word estimate counts space-separated tokens.
+The recent pace covers two minutes of recorded audio and estimates the words in a
+segment that crosses the window boundary. Your monologue ends when others speak
+or after a gap longer than two seconds of recorded audio. This readout can lag
+behind the conversation while speech is being transcribed. Time spent paused is excluded.
+
 ## Live Transcript Behavior
 
 With **Auto** selected, ClawScribe compares each speech segment with the

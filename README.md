@@ -235,6 +235,10 @@ reference material distinct from the recorded discussion. Sending excerpts to
 an external answer provider requires **Use selected references for answers** for that
 conversation, off by default.
 
+The **Conversation** readout estimates talk time, pace, questions and uninterrupted
+speaking stretches during live transcription. It runs on this PC and can be hidden
+in **Settings → Recording**. See [conversation metrics](docs/meeting-quality.md#conversation-metrics).
+
 Source also includes a collapsible **Live assistance** panel above the Home
 transcript. Explicitly choose **Ask**, **Summarize the last 10 minutes**, or **List open
 questions** using the configured summary provider; no provider request runs

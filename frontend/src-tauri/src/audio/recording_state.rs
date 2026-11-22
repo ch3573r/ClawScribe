@@ -107,6 +107,7 @@ pub struct RecordingState {
     capture_incomplete: AtomicBool,
     recovery_signal: tokio::sync::Notify,
     live_transcription_disabled: AtomicBool,
+    speech_clock_ms: AtomicU64,
     is_paused: AtomicBool,
 
     // Audio devices
@@ -566,6 +567,16 @@ impl RecordingState {
         self.stats.lock().unwrap().clone()
     }
 
+    // The mixer counts only samples sent to the speech detector. Paused
+    // wall time never enters this timeline.
+    pub(super) fn set_speech_clock_ms(&self, position_ms: u64) {
+        self.speech_clock_ms.store(position_ms, Ordering::Relaxed);
+    }
+
+    pub(super) fn speech_clock_seconds(&self) -> f64 {
+        self.speech_clock_ms.load(Ordering::Relaxed) as f64 / 1000.0
+    }
+
     pub fn get_recording_duration(&self) -> Option<f64> {
         self.recording_start.lock().unwrap().map(|start| {
             self.recording_end
@@ -649,6 +660,7 @@ impl Default for RecordingState {
             capture_incomplete: AtomicBool::new(false),
             recovery_signal: tokio::sync::Notify::new(),
             live_transcription_disabled: AtomicBool::new(false),
+            speech_clock_ms: AtomicU64::new(0),
             is_recording: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
             microphone_device: Mutex::new(None),

@@ -97,10 +97,10 @@ mod stop_tests {
             duration: 1.,
             word_timestamps: None,
         };
-        first_sink.ingest(&update);
+        first_sink.ingest(&update, true);
         assert!(runtime.live.snapshot(&first).unwrap().segments.is_empty());
         update.is_partial = false;
-        first_sink.ingest(&update);
+        first_sink.ingest(&update, true);
         assert_eq!(
             runtime.live.snapshot(&first).unwrap().segments[0].text,
             "Ja"
@@ -127,10 +127,10 @@ mod stop_tests {
         assert!(!second_manager.owns_detected_call(&second));
         assert!(uuid::Uuid::parse_str(&second).is_ok());
         drop(first_start); // A late failed-start guard must not clear the newer session.
-        first_sink.ingest(&update); // The old producer retains its first ID.
+        first_sink.ingest(&update, true); // The old producer retains its first ID.
         assert!(runtime.live.snapshot(&second).unwrap().segments.is_empty());
         update.session_id = Some(second.clone());
-        second_sink.ingest(&update);
+        second_sink.ingest(&update, true);
         assert_eq!(
             runtime.live.snapshot(&second).unwrap().segments[0].text,
             "Ja"
@@ -661,6 +661,11 @@ fn activate_recording<R: Runtime>(
     let mut task = TRANSCRIPTION_TASK.lock().unwrap();
     RECORDING_EPOCH.fetch_add(1, Ordering::AcqRel);
     IS_RECORDING.store(true, Ordering::SeqCst);
+    if transcribes {
+        sink.conversation
+            .clone()
+            .watch(app.clone(), sink.capture.clone());
+    }
     *task =
         transcribes.then(|| transcription::start_transcription_task(app.clone(), receiver, sink));
     drop(task);
@@ -726,6 +731,18 @@ fn capture_snapshot(session_id: &str) -> Option<CaptureSnapshot> {
         capture_incomplete: state.capture_incomplete(),
         transcription: transcription::current_transcription_metrics(),
     })
+}
+
+#[tauri::command]
+pub(crate) fn get_live_conversation_metrics(
+    session_id: String,
+) -> Option<super::live_conversation::Readout> {
+    let active = ACTIVE_CAPTURE.lock().ok()?;
+    let sink = &active.as_ref()?.sink;
+    if sink.session_id != session_id || !sink.capture.is_recording() {
+        return None;
+    }
+    sink.conversation.read()
 }
 
 #[tauri::command]

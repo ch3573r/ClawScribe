@@ -121,10 +121,19 @@ test('exports, calendars, assistant access and the update check follow their set
   assert.equal(rowOf(derive({ confluenceRest: true }), 'exports').tab, 'confluence');
 });
 
+test('conversation metrics stay local even when live assistance shares transcript text', () => {
+  const model = derive({
+    liveSharing: ready(true),
+    summary: ready({ provider: 'anthropic' }),
+  });
+  assert.equal(rowOf(model, 'conversation').destination, 'This PC');
+  assert.equal(rowOf(model, 'conversation').when, 'Never leaves');
+});
+
 test('every row links to the settings page that controls it', () => {
   const tabs = Object.fromEntries(derive({}).rows.map(row => [row.id, row.tab]));
   assert.deepEqual(tabs, {
-    recording: 'recording', transcription: 'transcription', memory: 'memory', summary: 'summary', live: 'summary', handoff: 'summary',
+    recording: 'recording', transcription: 'transcription', conversation: 'recording', memory: 'memory', summary: 'summary', live: 'summary', handoff: 'summary',
     exports: 'ms365', calendars: 'calendars', assistant: 'assistant', update: 'general',
   });
 });
