@@ -2390,6 +2390,7 @@ mod tests {
             "saved_live_answer_dependencies",
             "settings",
             "transcript_settings",
+            "webhook_deliveries", // delivery history belongs to this profile's destination
         ];
         let source = empty_conversation_destination().await;
         let records = tempfile::tempdir().unwrap();

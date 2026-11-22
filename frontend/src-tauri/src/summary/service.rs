@@ -891,7 +891,7 @@ impl SummaryService {
                 }
             }
         } else if provider == LLMProvider::OpenClaw {
-            match crate::openclaw::load_config(&_app) {
+            match crate::openclaw::load_config(&app) {
                 Ok(config) if config.enabled && !config.bearer_token.trim().is_empty() => {
                     allow_unencrypted = config.allow_unencrypted;
                     info!("Using the configured OpenClaw model endpoint");
@@ -960,7 +960,7 @@ impl SummaryService {
                 .context_tokens;
 
         // Get app data directory for BuiltInAI provider
-        let app_data_dir = _app.path().app_data_dir().ok();
+        let app_data_dir = app.path().app_data_dir().ok();
 
         if let Some(code) = &summary_language {
             info!("📝 Summary language preference: {}", code);
@@ -1031,7 +1031,7 @@ impl SummaryService {
             let output_dir = if execution.is_some() {
                 Ok(None)
             } else {
-                match _app.path().app_data_dir() {
+                match app.path().app_data_dir() {
                     Ok(data) => {
                         super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id, &data)
                             .await
@@ -1224,7 +1224,7 @@ impl SummaryService {
                 return;
             }
 
-            let output_dir = match _app.path().app_data_dir() {
+            let output_dir = match app.path().app_data_dir() {
                 Ok(data) => {
                     super::codex_provider::ensure_meeting_output_dir(&pool, &meeting_id, &data)
                         .await
@@ -1239,7 +1239,7 @@ impl SummaryService {
                 }
             };
 
-            let codex_provider = provider_from_app(&_app);
+            let codex_provider = provider_from_app(&app);
             let generation_model = codex_provider
                 .as_ref()
                 .ok()
