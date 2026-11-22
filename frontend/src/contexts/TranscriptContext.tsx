@@ -15,7 +15,6 @@ interface TranscriptContextType {
   addTranscript: (update: TranscriptUpdate) => void;
   copyTranscript: () => void;
   flushBuffer: () => void;
-  transcriptContainerRef: React.RefObject<HTMLDivElement | null>;
   meetingTitle: string;
   setMeetingTitle: (title: string) => void;
   clearTranscripts: () => void;
@@ -35,52 +34,12 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
   // Refs for transcript management
   const transcriptsRef = useRef<Transcript[]>(transcripts);
-  const isUserAtBottomRef = useRef<boolean>(true);
-  const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const initializingCache = useRef<{ id: string; task: Promise<void> } | null>(null);
   const finalFlushRef = useRef<(() => void) | null>(null);
 
   // Keep ref updated with current transcripts
   useEffect(() => {
     transcriptsRef.current = transcripts;
-  }, [transcripts]);
-
-  // Smart auto-scroll: Track user scroll position
-  useEffect(() => {
-    const handleScroll = () => {
-      const container = transcriptContainerRef.current;
-      if (!container) return;
-
-      const { scrollTop, scrollHeight, clientHeight } = container;
-      const isAtBottom = scrollTop + clientHeight >= scrollHeight - 10; // 10px tolerance
-      isUserAtBottomRef.current = isAtBottom;
-    };
-
-    const container = transcriptContainerRef.current;
-    if (container) {
-      container.addEventListener('scroll', handleScroll);
-      return () => container.removeEventListener('scroll', handleScroll);
-    }
-  }, []);
-
-  // Auto-scroll when transcripts change (only if user is at bottom)
-  useEffect(() => {
-    // Only auto-scroll if user was at the bottom before new content
-    if (isUserAtBottomRef.current && transcriptContainerRef.current) {
-      // Wait for Framer Motion animation to complete (150ms) before scrolling
-      // This ensures scrollHeight includes the full rendered height of the new transcript
-      const scrollTimeout = setTimeout(() => {
-        const container = transcriptContainerRef.current;
-        if (container) {
-          container.scrollTo({
-            top: container.scrollHeight,
-            behavior: 'smooth'
-          });
-        }
-      }, 150); // Match Framer Motion transition duration
-
-      return () => clearTimeout(scrollTimeout);
-    }
   }, [transcripts]);
 
   // The recovery cache uses the native session ID. A delayed cache cleanup
@@ -402,7 +361,6 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     addTranscript,
     copyTranscript,
     flushBuffer,
-    transcriptContainerRef,
     meetingTitle,
     setMeetingTitle,
     clearTranscripts,
