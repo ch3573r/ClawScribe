@@ -72,7 +72,7 @@ test("live conversation formats the ratio, pace and stretches and ignores stale 
   metrics.render();
   metrics.event({
     ...snapshot("available", 2, {
-      me_share: 2 / 3, pace_wpm: null, recent_pace_wpm: 127,
+      me_share: 2 / 3, unclear_share: 0, pace_wpm: null, recent_pace_wpm: 127,
       me_questions: 1, others_questions: 1,
       current_monologue_seconds: 9.7, longest_monologue_seconds: 62,
     }),

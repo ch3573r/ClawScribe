@@ -140,7 +140,11 @@ mod tests {
         assert_eq!(snapshot(true).sides.unwrap().me_seconds, 2.0);
         state.ingest(&update(2, "Participants"), true);
         assert_eq!(snapshot(true).sides.unwrap().others_seconds, 2.0);
-        state.ingest(&update(3, ""), true);
+        // Unclear speech beside clear speech is tolerated until it dominates.
+        let mut unclear = update(3, "");
+        unclear.audio_start_time = 3.0;
+        unclear.audio_end_time = 13.0;
+        state.ingest(&unclear, true);
         assert!(snapshot(true).sides.is_none());
     }
 

@@ -18,6 +18,7 @@ interface ConversationSnapshot {
     me_seconds: number;
     others_seconds: number;
     me_share: number;
+    unclear_share: number;
     pace_wpm: number | null;
     recent_pace_wpm: number | null;
     me_questions: number;
@@ -70,6 +71,7 @@ export function ConversationReadout({ sessionId }: { sessionId: string }) {
 
   const sides = current?.sides;
   const me = sides ? Math.round(sides.me_share * 100) : 0;
+  const unclear = sides ? Math.round(sides.unclear_share * 100) : 0;
   return (
     <PageSection aria-label="Conversation" className="space-y-3 p-4">
       <h2 className="text-sm font-semibold">Conversation</h2>
@@ -113,6 +115,9 @@ export function ConversationReadout({ sessionId }: { sessionId: string }) {
               <dd className="text-muted-foreground">Longest {duration(sides.longest_monologue_seconds)}</dd>
             </div>
           </dl>
+          {unclear >= 5 && (
+            <p className="text-xs text-muted-foreground">About {unclear}% of speech had no clear source and is left out.</p>
+          )}
         </>
       ) : (
         <>
@@ -129,7 +134,7 @@ export function ConversationReadout({ sessionId }: { sessionId: string }) {
               </Button>
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground">Some speech could not be separated by source.</p>
+            <p className="text-xs text-muted-foreground">Too much speech could not be separated by source.</p>
           )}
         </>
       )}

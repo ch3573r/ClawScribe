@@ -137,6 +137,34 @@ fn pace_is_unavailable_for_scripts_without_consistent_word_spaces() {
 }
 
 #[test]
+fn a_small_share_of_unclear_speech_keeps_side_metrics() {
+    let mut metrics = ConversationMetrics::default();
+    add(&mut metrics, 1, Side::Me, 0., 6., "First part");
+    add(&mut metrics, 2, Side::Unknown, 6.5, 8.5, "Crosstalk");
+    add(&mut metrics, 3, Side::Me, 9., 12., "Second part");
+    add(&mut metrics, 4, Side::Others, 12., 18., "A reply");
+    let snapshot = metrics.summarize().snapshot(18., true);
+    assert_eq!(snapshot.availability, Availability::Available);
+    let sides = snapshot.sides.unwrap();
+    assert_eq!(sides.me_share, 0.6);
+    assert!((sides.unclear_share - 2. / 17.).abs() < 1e-9);
+    // Unclear speech may be someone else, so it splits the monologue.
+    assert_eq!(sides.longest_monologue_seconds, 6.);
+
+    add(
+        &mut metrics,
+        5,
+        Side::Unknown,
+        18.,
+        26.,
+        "A long unclear stretch",
+    );
+    let snapshot = metrics.summarize().snapshot(26., true);
+    assert_eq!(snapshot.availability, Availability::UnclearSource);
+    assert!(snapshot.sides.is_none());
+}
+
+#[test]
 fn unknown_sides_and_disabled_attribution_keep_overall_totals() {
     let mut metrics = ConversationMetrics::default();
     add(&mut metrics, 1, Side::Me, 0., 3., "One?");

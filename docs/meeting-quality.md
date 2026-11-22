@@ -94,9 +94,10 @@ speaking pace, questions and uninterrupted stretches on this PC. You can hide it
 in **Settings → Recording**. Metrics clear when the recording ends.
 
 The split between you and others requires **Label lines as Me or Participants**
-in **Settings → Transcription** and clear microphone or system audio for every
-finalized segment so far. When the sources are unclear, the panel shows overall
-speech time and questions. Talk time uses the union of speech intervals for each
+in **Settings → Transcription** and clear microphone or system audio for most of
+the speech so far. Speech without a clear source, such as crosstalk, is left out
+of the split. When it passes a quarter of the speech time, the panel shows only
+overall speech time and questions. Talk time uses the union of speech intervals for each
 source. Questions are estimated from closing punctuation. Pace uses words separated
 by spaces and is unavailable for scripts such as Chinese, Japanese and Thai.
 The overall word estimate counts space-separated tokens.

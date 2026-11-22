@@ -5,6 +5,9 @@ use std::collections::{btree_map::Entry, BTreeMap};
 
 const MONOLOGUE_GAP_MS: u64 = 2_000;
 const RECENT_WINDOW_MS: u64 = 120_000;
+/// Side metrics stay available while at most this share of speech time has no
+/// clear source. Crosstalk makes some unclear speech normal in a real meeting.
+const MAX_UNCLEAR_SHARE: f64 = 0.25;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -51,7 +54,10 @@ pub struct Totals {
 pub struct SideMetrics {
     pub me_seconds: f64,
     pub others_seconds: f64,
+    /// Share of the attributed speech time, which excludes unclear speech.
     pub me_share: f64,
+    /// Share of all speech time that had no clear source.
+    pub unclear_share: f64,
     pub pace_wpm: Option<u32>,
     pub recent_pace_wpm: Option<u32>,
     pub me_questions: usize,
@@ -132,8 +138,6 @@ impl ConversationMetrics {
                 summary.me_questions += speech.questions;
             } else if speech.side == Side::Others {
                 summary.others_questions += speech.questions;
-            } else {
-                summary.has_unknown = true;
             }
             edges.push((speech.start, speech.side, 1));
             edges.push((speech.end, speech.side, -1));
@@ -148,8 +152,14 @@ impl ConversationMetrics {
             if span > 0 {
                 let me = active[Side::Me as usize] > 0;
                 let others = active[Side::Others as usize] > 0;
-                if me || others || active[Side::Unknown as usize] > 0 {
+                let unclear = !me && !others && active[Side::Unknown as usize] > 0;
+                if me || others || unclear {
                     total_ms += span;
+                }
+                if unclear {
+                    // Unclear speech may be someone else, so it ends a monologue.
+                    summary.unclear_ms += span;
+                    summary.monologue = None;
                 }
                 if me {
                     summary.me_ms += span;
@@ -169,6 +179,7 @@ impl ConversationMetrics {
             active[side as usize] += delta;
             summary.end = time;
         }
+        summary.speech_ms = total_ms;
         summary.totals.speech_seconds = seconds(total_ms);
         if summary.me.iter().all(|speech| speech.pace_supported) {
             let words = summary.me.iter().map(|speech| speech.words).sum::<usize>();
@@ -184,7 +195,8 @@ impl ConversationMetrics {
 pub struct Summary {
     totals: Totals,
     end: u64,
-    has_unknown: bool,
+    speech_ms: u64,
+    unclear_ms: u64,
     me: Vec<Speech>,
     me_ms: u64,
     others_ms: u64,
@@ -201,7 +213,7 @@ impl Summary {
             Availability::WaitingForSpeech
         } else if !attribution_enabled {
             Availability::LabelsOff
-        } else if self.has_unknown {
+        } else if self.unclear_share() > MAX_UNCLEAR_SHARE {
             Availability::UnclearSource
         } else {
             Availability::Available
@@ -212,6 +224,7 @@ impl Summary {
                 me_seconds: seconds(self.me_ms),
                 others_seconds: seconds(self.others_ms),
                 me_share: self.me_ms as f64 / (self.me_ms as f64 + self.others_ms as f64),
+                unclear_share: self.unclear_share(),
                 pace_wpm: self.pace_wpm,
                 recent_pace_wpm: self.recent_pace(now.saturating_sub(RECENT_WINDOW_MS)),
                 me_questions: self.me_questions,
@@ -228,6 +241,13 @@ impl Summary {
             totals: self.totals.clone(),
             sides,
         }
+    }
+
+    fn unclear_share(&self) -> f64 {
+        if self.speech_ms == 0 {
+            return 0.0;
+        }
+        self.unclear_ms as f64 / self.speech_ms as f64
     }
 
     fn recent_pace(&self, cutoff: u64) -> Option<u32> {
