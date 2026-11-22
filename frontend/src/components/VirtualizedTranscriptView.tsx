@@ -423,7 +423,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                 role="region"
                 aria-label="Transcript"
                 tabIndex={liveTranscript ? 0 : undefined}
-                className={`relative min-h-0 flex-1 overflow-y-auto px-4 pt-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${liveTranscript ? 'pb-24' : 'pb-2'}`}
+                className={`relative min-h-0 flex-1 overflow-y-auto px-4 pt-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${liveTranscript ? 'pb-32' : 'pb-2'}`}
             >
             <div ref={headerRef} className="sticky top-0 z-10 bg-card">
                 {header}
