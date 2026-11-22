@@ -1,19 +1,24 @@
 //! One floating window per native recording. Its immutable webview
 //! label binds every request to the recording, including requests after reload.
 use super::{
-    is_stopping, stop_recording_session, StopTarget, IS_RECORDING, RECORDING_MANAGER,
-    SAVING_RECORDING,
+    active_capture, capture_snapshot, is_stopping, reconnect_device, set_recording_paused,
+    stop_recording_session, CaptureSnapshot, StopTarget, IS_RECORDING, SAVING_RECORDING,
 };
+use crate::audio::outcome::RecordingOutcome;
 use crate::audio::recording_levels::RecordingLevels;
 use serde::Serialize;
-use std::sync::{atomic::Ordering, Mutex, TryLockError};
+use std::sync::{atomic::Ordering, Mutex};
 use tauri::{
-    ipc::Invoke, webview::NewWindowResponse, AppHandle, Emitter, Manager, Runtime, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder,
+    ipc::Invoke, webview::NewWindowResponse, AppHandle, Emitter, LogicalSize, Manager,
+    PhysicalPosition, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
+use tauri_plugin_store::StoreExt;
 
 const PREFIX: &str = "recording-controls-";
 const ROUTE: &str = "/recording-controls";
+const WIDTH: u32 = 366;
+const BAR_HEIGHT: u32 = 62;
+const MAX_HEIGHT: u32 = 640;
 const OPEN_FAILED: &str = "Could not open floating controls. Try again from the tray.";
 // Opening WebView2 can block. Only window workers hold this lock, never capture.
 static LAST_OPENED_SESSION: Mutex<Option<String>> = Mutex::new(None);
@@ -21,7 +26,7 @@ static LAST_REVIEW: Mutex<Option<String>> = Mutex::new(None);
 static APPEARANCE: Mutex<Option<Appearance>> = Mutex::new(None);
 
 #[derive(Clone, Serialize)]
-struct Appearance {
+pub(crate) struct Appearance {
     theme: String,
     accent: Option<String>,
 }
@@ -29,6 +34,11 @@ struct Appearance {
 pub(crate) fn set_appearance(theme: String, accent: Option<String>) {
     let accent = accent.filter(|id| id.len() <= 32 && id.bytes().all(|b| b.is_ascii_lowercase()));
     *APPEARANCE.lock().unwrap() = Some(Appearance { theme, accent });
+}
+
+#[tauri::command]
+pub(crate) fn recording_window_appearance() -> Option<Appearance> {
+    APPEARANCE.lock().ok()?.clone()
 }
 
 fn session(label: &str) -> Result<&str, &'static str> {
@@ -40,10 +50,25 @@ fn session(label: &str) -> Result<&str, &'static str> {
 
 fn allowed(label: &str, command: &str) -> bool {
     label == "main"
+        || (label == crate::teams_detection::monitor::prompt_window::LABEL
+            && matches!(
+                command,
+                "get_pending_call_prompt"
+                    | "confirm_call_detection_prompt"
+                    | "recording_window_appearance"
+            ))
         || (session(label).is_ok()
             && matches!(
                 command,
-                "floating_status" | "floating_note" | "floating_stop" | "dismiss_floating_controls"
+                "floating_status"
+                    | "floating_note"
+                    | "floating_stop"
+                    | "dismiss_floating_controls"
+                    | "floating_set_paused"
+                    | "floating_reconnect"
+                    | "floating_drag"
+                    | "floating_resize"
+                    | "floating_open_main"
             ))
 }
 
@@ -170,18 +195,24 @@ fn open<R: Runtime>(
     let builder =
         WebviewWindowBuilder::new(app, &label, WebviewUrl::App("recording-controls".into()));
     #[cfg(windows)]
-    let builder = builder.visible(manual).data_directory(
+    let builder = builder.data_directory(
         app.path()
             .app_local_data_dir()
             .map_err(|_| OPEN_FAILED)?
             .join("controls-webview"),
     );
     let window = builder
+        .visible(false)
         .focused(manual)
         .incognito(true)
         .title("Recording controls")
-        .inner_size(340., 214.)
-        .min_inner_size(294., 190.)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .inner_size(WIDTH.into(), BAR_HEIGHT.into())
+        .min_inner_size(WIDTH.into(), BAR_HEIGHT.into())
+        .center()
         .maximizable(false)
         .always_on_top(true)
         .content_protected(true)
@@ -195,6 +226,7 @@ fn open<R: Runtime>(
         .on_new_window(|_, _| NewWindowResponse::Deny)
         .build()
         .map_err(|_| OPEN_FAILED)?;
+    remember_position(&window);
     // The webview may take longer to initialize than a short recording. Keep
     // a late window from replacing any other session's controls.
     if reason.current_session(app).as_deref() != Some(session_id) {
@@ -203,9 +235,9 @@ fn open<R: Runtime>(
     }
     // On Windows the first show of a focused(false) window uses
     // SW_SHOWNOACTIVATE. The webview also skips its initial focus request.
-    #[cfg(windows)]
-    if !manual {
-        window.show().map_err(|_| OPEN_FAILED)?;
+    window.show().map_err(|_| OPEN_FAILED)?;
+    if manual {
+        window.set_focus().map_err(|_| OPEN_FAILED)?;
     }
     for (other_label, previous) in app.webview_windows() {
         if other_label != label && session(&other_label).is_ok() && previous.destroy().is_err() {
@@ -228,18 +260,42 @@ pub(crate) enum Status {
         progress: u8,
         message: &'static str,
     },
-    Reconnecting,
     Review,
     Ended,
 }
 
-pub(super) fn remember_outcome(
-    identity: Option<&crate::knowledge::live::RecordingIdentity>,
-    needs_review: bool,
-) {
-    *LAST_REVIEW.lock().unwrap() = identity
-        .filter(|_| needs_review)
-        .map(|id| id.session_id.clone());
+impl Status {
+    pub(super) fn from_outcome(outcome: &RecordingOutcome, library_save_failed: bool) -> Self {
+        if library_save_failed || outcome.needs_recovery() {
+            Self::Review
+        } else {
+            Self::Ended
+        }
+    }
+
+    pub(super) fn remember_outcome(&self, session_id: Option<&str>) {
+        *LAST_REVIEW.lock().unwrap() = session_id
+            .filter(|_| matches!(self, Self::Review))
+            .map(str::to_owned);
+    }
+
+    fn close_finished_window(&self, session_id: Option<&str>, close: impl FnOnce(&str)) {
+        if let (Self::Ended, Some(id)) = (self, session_id) {
+            close(&format!("{PREFIX}{id}"));
+        }
+    }
+
+    pub(super) fn finish<R: Runtime>(&self, app: &AppHandle<R>, session_id: Option<&str>) {
+        // Save admission must be closed before this lookup. An open still
+        // building at this point sees a finished session in its late guard.
+        self.close_finished_window(session_id, |label| {
+            if let Some(window) = app.get_webview_window(label) {
+                if window.destroy().is_err() {
+                    log::warn!("Could not close finished floating controls");
+                }
+            }
+        });
+    }
 }
 
 #[derive(Serialize)]
@@ -247,15 +303,18 @@ pub(crate) struct Snapshot {
     #[serde(flatten)]
     status: Status,
     appearance: Option<Appearance>,
+    health: Option<CaptureSnapshot>,
 }
 
 #[tauri::command]
 pub(crate) async fn floating_status<R: Runtime>(
     window: WebviewWindow<R>,
 ) -> Result<Snapshot, String> {
+    let id = session(window.label())?;
     Ok(Snapshot {
-        status: recording_status(session(window.label())?)?,
-        appearance: APPEARANCE.lock().unwrap().clone(),
+        status: recording_status(id)?,
+        appearance: recording_window_appearance(),
+        health: capture_snapshot(id),
     })
 }
 
@@ -278,20 +337,161 @@ fn recording_status(id: &str) -> Result<Status, String> {
     if LAST_REVIEW.lock().unwrap().as_deref() == Some(id) {
         return Ok(Status::Review);
     }
-    let manager = match RECORDING_MANAGER.try_lock() {
-        Ok(manager) => manager,
-        Err(TryLockError::WouldBlock) => return Ok(Status::Reconnecting),
-        Err(TryLockError::Poisoned(_)) => return Err("Recording status unavailable.".into()),
-    };
-    Ok(match manager.as_ref() {
-        Some(m) if m.live_session_id() == Some(id) && m.is_recording() => Status::Recording {
-            seconds: m.get_active_recording_duration().unwrap_or_default(),
-            paused: m.is_paused(),
-            levels: m.get_state().latest_levels(),
+    Ok(match active_capture(id) {
+        Some(state) => Status::Recording {
+            seconds: state.get_active_recording_duration().unwrap_or_default(),
+            paused: state.is_paused(),
+            levels: state.latest_levels(),
         },
-        None if IS_RECORDING.load(Ordering::Acquire) => Status::Reconnecting,
         _ => Status::Ended,
     })
+}
+
+#[tauri::command]
+pub(crate) async fn floating_set_paused<R: Runtime>(
+    window: WebviewWindow<R>,
+    paused: bool,
+) -> Result<(), String> {
+    set_recording_paused(window.app_handle(), Some(session(window.label())?), paused).await
+}
+
+#[tauri::command]
+pub(crate) async fn floating_reconnect<R: Runtime>(
+    window: WebviewWindow<R>,
+    device_name: String,
+    device_type: String,
+) -> Result<super::super::recording_manager::ReconnectResult, String> {
+    use super::super::device_monitor::DeviceMonitorType;
+    let kind = match device_type.as_str() {
+        "Microphone" => DeviceMonitorType::Microphone,
+        "SystemAudio" => DeviceMonitorType::SystemAudio,
+        _ => return Err("Invalid audio source.".into()),
+    };
+    reconnect_device(device_name, kind, session(window.label())?.into()).await
+}
+
+fn remember_position<R: Runtime>(window: &WebviewWindow<R>) {
+    let app = window.app_handle();
+    if app
+        .store("recording_preferences.json")
+        .ok()
+        .and_then(|store| store.get("preferences"))
+        .and_then(|prefs| prefs.get("remember_floating_position")?.as_bool())
+        == Some(false)
+    {
+        return;
+    }
+    let Ok(store) = app.store("floating_controls.json") else {
+        return;
+    };
+    if let Some((x, y)) = store
+        .get("position")
+        .and_then(|value| serde_json::from_value::<(i32, i32)>(value).ok())
+    {
+        if let Ok(monitors) = window.available_monitors() {
+            if let Some(monitor) = monitors.iter().find(|monitor| {
+                let work = monitor.work_area();
+                position_visible(
+                    (x, y),
+                    (work.position.x, work.position.y),
+                    (work.size.width, work.size.height),
+                )
+            }) {
+                fit_position(window, &monitor, PhysicalPosition::new(x, y), BAR_HEIGHT);
+            }
+        }
+    }
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::Moved(position) = event {
+            store.set("position", serde_json::json!([position.x, position.y]));
+        }
+    });
+}
+
+fn position_visible(point: (i32, i32), origin: (i32, i32), size: (u32, u32)) -> bool {
+    let x = i64::from(point.0) - i64::from(origin.0);
+    let y = i64::from(point.1) - i64::from(origin.1);
+    x >= 0 && y >= 0 && x + 96 <= i64::from(size.0) && y + 48 <= i64::from(size.1)
+}
+
+fn fit_position<R: Runtime>(
+    window: &WebviewWindow<R>,
+    monitor: &tauri::Monitor,
+    position: PhysicalPosition<i32>,
+    height: u32,
+) {
+    let work = monitor.work_area();
+    let size = LogicalSize::new(WIDTH, height).to_physical::<u32>(monitor.scale_factor());
+    let fitted = PhysicalPosition::new(
+        position.x.clamp(
+            work.position.x,
+            work.position.x + work.size.width.saturating_sub(size.width) as i32,
+        ),
+        position.y.clamp(
+            work.position.y,
+            work.position.y + work.size.height.saturating_sub(size.height) as i32,
+        ),
+    );
+    if fitted != position
+        || window
+            .outer_position()
+            .is_ok_and(|current| current != fitted)
+    {
+        let _ = window.set_position(fitted);
+    }
+}
+
+#[tauri::command]
+pub(crate) fn floating_drag<R: Runtime>(window: WebviewWindow<R>) -> Result<(), String> {
+    session(window.label())?;
+    window
+        .start_dragging()
+        .map_err(|_| "Could not move controls.".into())
+}
+
+#[tauri::command]
+pub(crate) fn floating_resize<R: Runtime>(
+    window: WebviewWindow<R>,
+    height: u32,
+) -> Result<(), String> {
+    session(window.label())?;
+    let height = height.clamp(BAR_HEIGHT, MAX_HEIGHT);
+    let height = if let (Ok(Some(monitor)), Ok(point)) =
+        (window.current_monitor(), window.outer_position())
+    {
+        let work_height =
+            (f64::from(monitor.work_area().size.height) / monitor.scale_factor()).floor() as u32;
+        let height = height.min(work_height.max(BAR_HEIGHT));
+        fit_position(&window, &monitor, point, height);
+        height
+    } else {
+        height
+    };
+    window
+        .set_size(LogicalSize::new(WIDTH, height))
+        .map_err(|_| "Could not resize controls.".into())
+}
+
+#[tauri::command]
+pub(crate) async fn floating_open_main<R: Runtime>(window: WebviewWindow<R>) -> Result<(), String> {
+    let id = session(window.label())?;
+    // A later recording replaces the remembered review, so any finished
+    // session may bring the main window forward. Only a live one may not.
+    if matches!(
+        recording_status(id)?,
+        Status::Recording { .. } | Status::Saving { .. }
+    ) {
+        return Err("This recording is still in progress.".into());
+    }
+    let main = window
+        .app_handle()
+        .get_webview_window("main")
+        .ok_or("Could not open ClawScribe.")?;
+    main.unminimize()
+        .and_then(|_| main.show())
+        .and_then(|_| main.set_focus())
+        .map_err(|_| "Could not open ClawScribe.")?;
+    dismiss_floating_controls(window)
 }
 
 #[tauri::command]
@@ -322,7 +522,7 @@ pub(crate) fn dismiss_floating_controls<R: Runtime>(
     session(window.label())?;
     window
         .destroy()
-        .map_err(|_| "Close this window using its title bar.".into())
+        .map_err(|_| "Could not close controls. Press Alt+F4 to close the window.".into())
 }
 
 #[cfg(test)]
@@ -361,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_recorder_bound_window_can_use_the_four_panel_commands() {
+    fn only_a_recorder_bound_window_can_use_the_panel_commands() {
         let id = uuid::Uuid::new_v4().to_string();
         let label = format!("{PREFIX}{id}");
         assert_eq!(session(&label), Ok(id.as_str()));
@@ -369,6 +569,11 @@ mod tests {
             "floating_status",
             "floating_note",
             "floating_stop",
+            "floating_set_paused",
+            "floating_reconnect",
+            "floating_drag",
+            "floating_resize",
+            "floating_open_main",
             "dismiss_floating_controls",
         ] {
             assert!(allowed(&label, command));
@@ -385,5 +590,70 @@ mod tests {
             assert!(!allowed(&label, command));
             assert!(allowed("main", command));
         }
+    }
+
+    #[test]
+    fn only_outcomes_needing_recovery_keep_the_window() {
+        use crate::audio::outcome::{CaptureDetails, EmptyLiveTranscript};
+        let mut outcome = RecordingOutcome::default();
+        assert!(matches!(
+            Status::from_outcome(&outcome, false),
+            Status::Ended
+        ));
+        for empty in [
+            EmptyLiveTranscript::NoSpeechDetected,
+            EmptyLiveTranscript::NoTextRecognized,
+        ] {
+            outcome.capture_details = Some(CaptureDetails {
+                empty_live_transcript: Some(empty),
+                ..Default::default()
+            });
+            assert!(matches!(
+                Status::from_outcome(&outcome, false),
+                Status::Ended
+            ));
+        }
+        assert!(matches!(
+            Status::from_outcome(&outcome, true),
+            Status::Review
+        ));
+        outcome.capture_incomplete = true;
+        assert!(matches!(
+            Status::from_outcome(&outcome, false),
+            Status::Review
+        ));
+    }
+
+    #[test]
+    fn core_finish_closes_only_the_matching_session_for_an_ended_outcome() {
+        let a = uuid::Uuid::new_v4().to_string();
+        let b = uuid::Uuid::new_v4().to_string();
+        let first = format!("{PREFIX}{a}");
+        let second = format!("{PREFIX}{b}");
+        let mut windows = std::collections::HashSet::from([first.clone(), second.clone()]);
+        Status::Review.close_finished_window(Some(&b), |_| panic!("review must stay open"));
+        Status::Ended.close_finished_window(None, |_| panic!("finish requires a session"));
+        Status::Ended.close_finished_window(Some(&a), |label| {
+            assert!(windows.remove(label));
+        });
+        assert!(!windows.contains(&first));
+        assert!(windows.contains(&second));
+    }
+
+    #[test]
+    fn remembered_position_accepts_a_secondary_monitor_and_rejects_off_screen_title_bar() {
+        assert!(position_visible((-1200, 32), (-1920, 0), (1920, 1080)));
+        assert!(!position_visible((-1200, 32), (0, 0), (1920, 1080)));
+        assert!(!position_visible((1900, 100), (0, 0), (1920, 1080)));
+    }
+
+    #[test]
+    fn call_prompt_can_only_read_appearance_or_read_and_confirm_the_pending_call() {
+        let label = crate::teams_detection::monitor::prompt_window::LABEL;
+        assert!(allowed(label, "get_pending_call_prompt"));
+        assert!(allowed(label, "confirm_call_detection_prompt"));
+        assert!(allowed(label, "recording_window_appearance"));
+        assert!(!allowed(label, "start_recording_with_devices_and_meeting"));
+        assert!(!allowed(label, "floating_note"));
     }
 }

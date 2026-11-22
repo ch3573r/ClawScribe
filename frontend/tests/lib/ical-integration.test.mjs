@@ -143,6 +143,7 @@ test('Home offers an imported event for the next recording with Microsoft discon
     start: new Date(Date.now() + 3_600_000).toISOString(), end: new Date(Date.now() + 7_200_000).toISOString(),
     attendees: [{ name: 'Alex', email: null }] };
   const { UpcomingMeetings } = loadTsModule('src/components/UpcomingMeetings.tsx', {
+    '@/components/MeetingDetails/SeriesPreparation': { UpcomingSeriesPreparation: 'PreparationBrief' },
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {}, sonner: { toast: { error() {} } },
     '@/components/ui/button': { Button: 'button' }, '@/lib/openExternal': {},
     '@/hooks/useICalendar': { useICalendar: () => ({ events: [event], sources: [calendar] }) },

@@ -163,9 +163,10 @@ pub struct TranscriptUpdate {
 fn publish_transcript_update(
     sink: &LiveTranscriptSink,
     update: &TranscriptUpdate,
+    clear_source: bool,
     notify_frontend: impl FnOnce(&TranscriptUpdate),
 ) {
-    if sink.ingest(update) {
+    if sink.ingest(update, clear_source) {
         notify_frontend(update);
     }
 }
@@ -193,6 +194,7 @@ pub fn start_transcription_task<R: Runtime>(
             Ok(engine) => engine,
             Err(e) => {
                 error!("Failed to initialize transcription engine");
+                live_sink.capture.report_warning("Live transcription could not start. Check the saved audio and model settings after stopping.");
                 let _ = app.emit("transcription-error", serde_json::json!({
                     "error": e,
                     "userMessage": "Live transcription could not start. Stop and save the recording, check model settings, then retranscribe the saved audio.",
@@ -323,9 +325,10 @@ pub fn start_transcription_task<R: Runtime>(
                             let chunk_timestamp = chunk.timestamp;
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
                             let source = chunk.device_type.clone();
+                            let clear_source = queued_chunk.clear_source;
                             let mut language = crate::get_language_preference_internal();
                             let auto = matches!(language.as_deref(), None | Some("auto"));
-                            let input = if auto && queued_chunk.clear_source {
+                            let input = if auto && clear_source {
                                 metrics_clone.source_languages.lock().ok().and_then(|state|
                                     state.as_ref().map(|s| s.input(&source, chunk_timestamp, chunk_duration)))
                             } else {
@@ -353,7 +356,7 @@ pub fn start_transcription_task<R: Runtime>(
                             };
 
                             // Transcribe with provider-agnostic approach
-                            match transcribe_chunk_with_provider(&engine_clone, chunk, language)
+                            match transcribe_chunk_with_provider(&engine_clone, chunk, language, &live_sink.capture)
                                 .await
                             {
                                 Ok((
@@ -429,7 +432,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             word_timestamps,
                                         };
 
-                                        publish_transcript_update(&live_sink, &update, |update| {
+                                        publish_transcript_update(&live_sink, &update, clear_source, |update| {
                                             if app_clone.emit("transcript-update", update).is_err() {
                                                 error!("Failed to emit transcript update");
                                             }
@@ -698,6 +701,7 @@ async fn transcribe_chunk_with_provider(
     engine: &TranscriptionEngine,
     chunk: AudioChunk,
     language: Option<String>,
+    capture: &crate::audio::recording_state::RecordingState,
 ) -> std::result::Result<
     (
         String,
@@ -748,7 +752,20 @@ async fn transcribe_chunk_with_provider(
                 .transcribe_live(speech_samples, language)
                 .await
             {
-                Ok(((text, confidence, is_partial), detected)) => {
+                Ok(((text, confidence, is_partial), backend, detected)) => {
+                    use crate::whisper_engine::acceleration::WhisperCompiledBackend;
+                    let backend = match backend {
+                        Some(WhisperCompiledBackend::Cpu)
+                            if WhisperCompiledBackend::current() != WhisperCompiledBackend::Cpu =>
+                        {
+                            Some("CPU fallback")
+                        }
+                        Some(backend) => Some(backend.as_str()),
+                        None => None,
+                    };
+                    if let Some(backend) = backend {
+                        capture.observe_transcription_backend(format!("Whisper · {backend}"));
+                    }
                     let cleaned_text = text.trim().to_string();
                     if cleaned_text.is_empty() {
                         return Ok((String::new(), confidence, is_partial, None, None));
@@ -776,6 +793,17 @@ async fn transcribe_chunk_with_provider(
                 .await
             {
                 Ok(result) => {
+                    if let Some((directml, _)) = parakeet_engine.session_status().await {
+                        use crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML;
+                        let backend = if directml {
+                            "DirectML + CPU"
+                        } else if USE_PARAKEET_DIRECTML.load(Ordering::Relaxed) {
+                            "CPU fallback"
+                        } else {
+                            "CPU"
+                        };
+                        capture.observe_transcription_backend(format!("Parakeet · {backend}"));
+                    }
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
                         return Ok((String::new(), None, false, None, None));
@@ -809,6 +837,9 @@ async fn transcribe_chunk_with_provider(
             // NEW: Trait-based provider (clean, unified interface)
             match provider.transcribe(speech_samples, language).await {
                 Ok(result) => {
+                    if let Some(backend) = provider.live_backend().await {
+                        capture.observe_transcription_backend(backend);
+                    }
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
                         return Ok((
@@ -919,7 +950,7 @@ mod transcript_delivery_tests {
         };
 
         let mut notifications = 0;
-        publish_transcript_update(&sink, &update, |event| {
+        publish_transcript_update(&sink, &update, true, |event| {
             notifications += 1;
             assert_eq!(event.session_id, update.session_id);
             let rows = manager.get_transcript_segments();
@@ -938,7 +969,7 @@ mod transcript_delivery_tests {
         assert_eq!(rows[0].duration, Some(1.0));
         assert_eq!(rows[0].word_timestamps, update.word_timestamps);
 
-        publish_transcript_update(&sink, &update, |_| {});
+        publish_transcript_update(&sink, &update, true, |_| {});
         assert_eq!(manager.library_transcripts().len(), 1);
     }
 }

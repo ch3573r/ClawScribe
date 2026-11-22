@@ -66,6 +66,18 @@ async fn error_message(
         body.extend_from_slice(&chunk);
     }
     let value = serde_json::from_slice::<Value>(&body).ok();
+    if value.as_ref().is_some_and(|value| {
+        matches!(
+            value.pointer("/error/code").and_then(Value::as_str),
+            Some(
+                "context_length_exceeded"
+                    | "context_window_exceeded"
+                    | "model_context_window_exceeded"
+            )
+        )
+    }) {
+        return (super::context_budget::MODEL_LIMIT.into(), false);
+    }
     let quota_exhausted = value.as_ref().is_some_and(|value| {
         ["/error/code", "/error/type"]
             .iter()

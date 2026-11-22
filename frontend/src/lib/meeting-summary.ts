@@ -5,6 +5,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+// Providers that run on this PC. Matches the aliases the summary service accepts.
+const LOCAL_SUMMARY_PROVIDERS = new Set(['builtin-ai', 'local-llama', 'localllama', 'ollama']);
+
+export const LOCAL_SUMMARY_HINT = 'Generated on this PC. Check tasks, owners and dates against the transcript.';
+
 export function summaryDetails(input: string | SummaryDataResponse | null | undefined) {
   let data: unknown = input;
   if (typeof input === 'string') {
@@ -17,7 +22,16 @@ export function summaryDetails(input: string | SummaryDataResponse | null | unde
   const template = generation.template ?? cache.template_id;
   const structured = isRecord(record.structured_meeting_output) ? record.structured_meeting_output : {};
   const email = record.follow_up_email ?? structured.follow_up_email;
+  const translation = isRecord(record.translation) ? record.translation : {};
+  const reduction = isRecord(generation.reduction) ? generation.reduction : {};
+  const provider = typeof cache.model_provider === 'string' ? cache.model_provider.trim().toLowerCase() : '';
   return {
+    // Only the recorded provider counts; unknown provenance never shows the local-model hint.
+    localProvider: LOCAL_SUMMARY_PROVIDERS.has(provider),
+    translation: typeof translation.target === 'string' && typeof translation.message === 'string'
+      ? { target: translation.target, message: translation.message } : null,
+    reduction: typeof reduction.source_excerpts === 'number' && typeof reduction.passes === 'number'
+      ? { sourceExcerpts: reduction.source_excerpts, passes: reduction.passes, limitRetries: typeof reduction.limit_retries === 'number' ? reduction.limit_retries : 0 } : null,
     model: typeof model === 'string' ? model : '',
     template: typeof template === 'string' ? template.replace(/_/g, ' ') : '',
     email: isRecord(email) && typeof email.body_markdown === 'string' && email.body_markdown.trim()

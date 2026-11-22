@@ -28,6 +28,7 @@ pub mod onenote;
 mod onenote_resume;
 pub mod planner;
 pub mod reqwest_transport;
+mod resolution;
 pub mod todo;
 pub mod token_store;
 pub mod transport;

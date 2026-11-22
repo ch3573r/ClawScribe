@@ -17,6 +17,21 @@ test('saved notes show their original model, template and available email draft 
   assert.equal(summaryDetails({ markdown: 'Older notes' }).email, null);
 });
 
+test('saved English draft exposes its translation retry and reduction details', () => {
+  const { summaryDetails } = loadTsModule('src/lib/meeting-summary.ts');
+  const details = summaryDetails({
+    markdown: 'English notes',
+    generation: { reduction: { source_excerpts: 6, passes: 2, limit_retries: 1 } },
+    translation: { target: 'de', message: 'Ollama. The request timed out.' },
+  });
+  assert.equal(details.translation.target, 'de');
+  assert.equal(details.translation.message, 'Ollama. The request timed out.');
+  assert.equal(details.reduction.sourceExcerpts, 6);
+  assert.equal(details.reduction.passes, 2);
+  assert.equal(details.reduction.limitRetries, 1);
+  assert.equal(summaryDetails({ markdown: 'Legacy notes' }).translation, null);
+});
+
 function createHook(invoke) {
   const messages = [];
   const harness = createHookHarness();

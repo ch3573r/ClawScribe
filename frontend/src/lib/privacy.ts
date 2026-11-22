@@ -1,3 +1,5 @@
+import { canSendWebhook, type WebhookConfig } from "./webhook";
+
 /**
  * Derives the Privacy page from the real settings. State goes in, rows come
  * out: nothing here is fixed text that could be wrong for the current setup.
@@ -27,14 +29,10 @@ export interface PrivacyInput {
   confluenceRest: boolean;
   calendars: Loadable<{ files: number; subscriptions: number }>;
   assistant: Loadable<boolean>;
-  /** "Check for updates at startup" on the General page. */
+  /** "Check for updates automatically" on the General page. */
   updateCheck: boolean;
   semanticSearch: Loadable<boolean>;
-  /**
-   * OpenClaw handoff. When enabled, the app posts every finished recording,
-   * including its transcript, to the gateway, whatever the summary provider is.
-   */
-  handoff: Loadable<{ enabled: boolean; endpoint: string | null }>;
+  webhook: Loadable<WebhookConfig>;
 }
 
 export interface PrivacyRow {
@@ -97,8 +95,7 @@ export interface ProviderClass {
 
 /**
  * Where a summary provider sends text. "unknown" means the code cannot tell
- * from the provider alone (for example OpenClaw, which the user points at a
- * gateway), and the page then says so instead of guessing.
+ * from the provider alone, and the page then says so instead of guessing.
  */
 export function classifySummaryProvider(
   provider: string | null | undefined,
@@ -131,7 +128,6 @@ export function classifySummaryProvider(
     case "openrouter": return { kind: "remote", label: "OpenRouter" };
     case "groq": return { kind: "remote", label: "Groq" };
     case "gemini": return { kind: "remote", label: "Gemini" };
-    case "openclaw": return { kind: "unknown", label: "OpenClaw" };
     default: return { kind: "unknown", label: "Configured provider" };
   }
 }
@@ -268,21 +264,6 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
     }
   }
 
-  // Meeting handoff
-  const handoffOn = input.handoff.status === "ready" && input.handoff.value.enabled;
-  const handoffHost = input.handoff.status === "ready" ? endpointHost(input.handoff.value.endpoint) : null;
-  const handoffTarget = handoffHost ? `OpenClaw on ${handoffHost}` : "OpenClaw gateway";
-  const handoffBase = handoffOn
-    ? row({
-        id: "handoff", title: "Meeting handoff", tab: "summary", tabLabel: "Summary",
-        destination: handoffTarget, when: "After every recording", tone: "warning",
-        detail: "The full transcript and meeting details. Switch it off in the OpenClaw provider settings",
-      })
-    : row({
-        id: "handoff", title: "Meeting handoff", tab: "summary", tabLabel: "Summary",
-        destination: "Off", when: "Off", tone: "off", detail: "Sends finished meetings to an OpenClaw gateway",
-      });
-
   // Exports
   const exportTargets: string[] = [];
   if (input.microsoft.status === "ready" && input.microsoft.value.connected) exportTargets.push("Microsoft 365");
@@ -298,6 +279,29 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
         destination: "Not connected", when: "Nothing is sent", tone: "off", detail: "Notes, tasks and files you export",
       });
   const exportsState = blocked(input.microsoft);
+
+  const webhook = input.webhook.status === "ready" ? input.webhook.value : null;
+  const webhookActive = canSendWebhook(webhook) ? webhook : null;
+  const webhookHost = endpointHost(webhookActive?.destination);
+  const webhookLeaves = !!webhookHost && !isLoopbackHost(webhookHost);
+  const webhookTriggers = [
+    webhookActive?.onSummary && "a summary is ready",
+    webhookActive?.onRecording && "a recording or import is saved",
+  ].filter(Boolean).join(" or ");
+  const webhookAuto = webhookLeaves && !!webhookTriggers;
+  const webhookText = webhookLeaves && webhookActive?.includeTranscript;
+  const webhookContents = [
+    "Meeting details",
+    webhookActive?.includeSummary && "summary and action items",
+    webhookActive?.includeTranscript && "transcript text",
+  ].filter(Boolean).join(", ");
+  const webhookBase = row({
+    id: "webhook", title: "Webhook", tab: "webhook", tabLabel: "Webhook",
+    destination: webhookActive?.destination ?? (webhook?.enabled ? "Destination unavailable" : "Off"),
+    when: webhookActive ? (webhookTriggers ? `When ${webhookTriggers} or you export` : "When you export") : "Off",
+    tone: webhookActive ? (webhookLeaves ? (webhookAuto ? "warning" : "active") : "neutral") : "off",
+    detail: webhookActive ? webhookContents : "Sends meeting data to your automation endpoint",
+  });
 
   // Calendars
   const calendarsState: PrivacyState = blocked(input.microsoft, input.calendars);
@@ -329,17 +333,21 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
   const updateRow = row({
     id: "update", title: "Update check", tab: "general", tabLabel: "General",
     destination: "GitHub", detail: "Asks for the latest version, no meeting data",
-    ...(input.updateCheck ? { when: "At startup", tone: "warning" as const } : { when: "Only when you check", tone: "active" as const }),
+    ...(input.updateCheck ? { when: "At startup and periodically", tone: "warning" as const } : { when: "Only when you check", tone: "active" as const }),
   });
 
   const rows = [
     withheld(recordingBase, blocked(input.recording)),
     withheld(transcriptionBase, blocked(input.transcription)),
+    row({
+      id: "conversation", title: "Conversation metrics", tab: "recording", tabLabel: "Recording",
+      destination: "This PC", when: "Never leaves", tone: "neutral", detail: "Calculated during live transcription and cleared when the recording ends",
+    }),
     memoryRow,
     withheld(summaryBase, blocked(input.summary)),
     withheld(liveBase, liveState),
-    withheld(handoffBase, blocked(input.handoff)),
     withheld(exportsBase, exportsState),
+    withheld(webhookBase, blocked(input.webhook)),
     withheld(calendarsBase, calendarsState),
     withheld(assistantBase, blocked(input.assistant)),
     updateRow,
@@ -353,15 +361,9 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       ? { id: "audio", label: "Audio", value: "Leaves this PC", detail: `Imports and Enhance use ${outcome.engine}`, tone: "warning", state: "ready" }
       : { id: "audio", label: "Audio", value: "Stays on this PC", detail: null, tone: "neutral", state: "ready" };
 
-  // An unreadable handoff setting must not be reported as "stays on this PC".
-  const textState = blocked(input.summary, input.handoff);
+  const textState = blocked(input.summary, input.webhook);
   let textFact: PrivacyFact;
-  if (handoffOn) {
-    const alsoProvider = summaryClass && textLeavesKind
-      ? `, and to ${summaryClass.kind === "unknown" ? "your summary provider" : summaryClass.label} for summaries`
-      : "";
-    textFact = { id: "text", label: "Transcript text", value: "Leaves automatically", detail: `To ${handoffTarget} after every recording${alsoProvider}`, tone: "warning", state: "ready" };
-  } else if (textState !== "ready" || !summaryClass) {
+  if (textState !== "ready" || !summaryClass) {
     textFact = { id: "text", label: "Transcript text", value: textState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: textState === "ready" ? "unavailable" : textState };
   } else if (summaryClass.kind === "none" || summaryClass.kind === "local") {
     textFact = { id: "text", label: "Transcript text", value: "Stays on this PC", detail: null, tone: "neutral", state: "ready" };
@@ -371,21 +373,34 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       ? { id: "text", label: "Transcript text", value: "Leaves automatically", detail: where, tone: "warning", state: "ready" }
       : { id: "text", label: "Transcript text", value: "Leaves when you ask", detail: where, tone: "active", state: "ready" };
   }
+  if (webhookText) {
+    const automatic = webhookAuto || textFact.tone === "warning";
+    textFact = {
+      ...textFact,
+      value: automatic ? "Leaves automatically" : "Leaves when you ask",
+      detail: [textFact.detail, `Webhook on ${webhookHost}`].filter(Boolean).join(" · "),
+      tone: automatic ? "warning" : "active",
+      state: "ready",
+    };
+  }
 
-  const automaticState = input.autoSummary ? blocked(input.summary, input.handoff) : blocked(input.handoff);
+  const automaticState = input.autoSummary ? blocked(input.summary, input.webhook) : blocked(input.webhook);
   let automaticFact: PrivacyFact;
-  if (handoffOn) {
-    // Automatic summaries can add a second destination; name both.
-    const alsoSummaries = input.autoSummary && summaryClass && textLeavesKind
-      ? `, and to ${summaryClass.kind === "unknown" ? "your summary provider" : summaryClass.label} for summaries`
-      : "";
-    automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "Transcript text", detail: `To ${handoffTarget} after every recording${alsoSummaries}`, tone: "warning", state: "ready" };
-  } else if (automaticState !== "ready") {
+  if (automaticState !== "ready") {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: automaticState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: automaticState };
   } else if (input.autoSummary && textLeavesKind) {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "Transcript text", detail: summaryClass && summaryClass.kind === "unknown" ? UNKNOWN_DESTINATION : `To ${summaryClass?.label ?? ""}`, tone: "warning", state: "ready" };
   } else {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "None", detail: null, tone: "neutral", state: "ready" };
+  }
+  if (webhookAuto) {
+    automaticFact = {
+      ...automaticFact,
+      value: automaticFact.tone === "warning" || webhookText ? "Meeting details and transcript text" : "Meeting details",
+      detail: [automaticFact.detail, `${webhookContents} to ${webhookHost}`].filter(Boolean).join(" · "),
+      tone: "warning",
+      state: "ready",
+    };
   }
 
   return { facts: [audioFact, textFact, automaticFact], rows };

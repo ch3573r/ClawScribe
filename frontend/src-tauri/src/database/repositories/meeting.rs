@@ -1,27 +1,67 @@
 use crate::api::{MeetingDetails, MeetingTranscript, TranscriptWord};
-use crate::database::models::{MeetingModel, Transcript};
+use crate::database::models::{MeetingModel, Transcript, TranscriptTimelineRow};
 use chrono::Utc;
 use sqlx::{Connection, Error as SqlxError, SqliteConnection, SqlitePool};
 use tracing::{error, info};
 
 pub struct MeetingsRepository;
 
+pub(crate) struct DeletedMeetingFiles {
+    pub folder: Option<String>,
+    pub cleanup_ids: Vec<i64>,
+}
+
 impl MeetingsRepository {
     pub async fn get_meetings(pool: &SqlitePool) -> Result<Vec<MeetingModel>, sqlx::Error> {
-        let meetings =
-            sqlx::query_as::<_, MeetingModel>("SELECT * FROM meetings ORDER BY created_at DESC")
-                .fetch_all(pool)
-                .await?;
-        Ok(meetings)
+        sqlx::query_as("SELECT id,title,created_at,updated_at,folder_path FROM meetings ORDER BY created_at DESC")
+            .fetch_all(pool)
+            .await
     }
 
+    #[cfg(test)]
     pub async fn delete_meeting(pool: &SqlitePool, meeting_id: &str) -> Result<bool, SqlxError> {
         Self::delete_meeting_with_documents(pool, meeting_id)
             .await
             .map(|(deleted, _)| deleted)
     }
 
+    /// Persist the requested cleanup before committing the deletion, including
+    /// the original storage names that will no longer be reachable from SQLite.
+    pub(crate) async fn delete_from_library(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        delete_files: bool,
+    ) -> Result<Option<DeletedMeetingFiles>, SqlxError> {
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some((title, folder)) = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT title, folder_path FROM meetings WHERE id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let (deleted, originals) = delete_meeting_with_transaction(&mut tx, meeting_id).await?;
+        if !deleted {
+            return Ok(None);
+        }
+        let recording = folder
+            .as_deref()
+            .filter(|path| delete_files && !path.trim().is_empty());
+        let cleanup_ids = crate::library::file_cleanup::enqueue(
+            &mut tx, meeting_id, &title, recording, &originals,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Some(DeletedMeetingFiles {
+            folder,
+            cleanup_ids,
+        }))
+    }
+
     /// Return original storage names only after the database deletion commits.
+    #[cfg(test)]
     pub async fn delete_meeting_with_documents(
         pool: &SqlitePool,
         meeting_id: &str,
@@ -112,8 +152,8 @@ impl MeetingsRepository {
             Ok(Some(MeetingDetails {
                 id: meeting.id,
                 title: meeting.title,
-                created_at: meeting.created_at.0.to_rfc3339(),
-                updated_at: meeting.updated_at.0.to_rfc3339(),
+                created_at: meeting.created_at,
+                updated_at: meeting.updated_at,
                 transcripts: meeting_transcripts,
             }))
         } else {
@@ -185,6 +225,22 @@ impl MeetingsRepository {
 
         transaction.commit().await?;
         Ok((transcripts, total.0))
+    }
+
+    pub async fn get_meeting_transcript_timeline(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<Vec<TranscriptTimelineRow>, SqlxError> {
+        // The review list uses this text for whole-meeting Find and follow-along.
+        // Read word alignment and other large fields only in the paged API.
+        sqlx::query_as(
+            "SELECT id, transcript AS text, original_transcript AS original_text,
+                    audio_start_time, audio_end_time, speaker
+             FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
+        )
+        .bind(meeting_id)
+        .fetch_all(pool)
+        .await
     }
 
     pub async fn update_meeting_title(
@@ -350,6 +406,26 @@ async fn delete_meeting_with_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn timeline_keeps_saved_text_and_timing_without_word_alignment() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let timeline = MeetingsRepository::get_meeting_transcript_timeline(&pool, "review-test")
+            .await
+            .unwrap();
+        assert_eq!(timeline.len(), 2);
+        assert_eq!(timeline[1].text, "Project confirmed");
+        assert_eq!(timeline[1].audio_start_time, Some(900.));
+        assert!(serde_json::to_value(&timeline[1])
+            .unwrap()
+            .get("word_timestamps")
+            .is_none());
+        let (page, _) =
+            MeetingsRepository::get_meeting_transcripts_paginated(&pool, "review-test", 1, 1)
+                .await
+                .unwrap();
+        assert_eq!(page[0].word_timestamps_json.as_deref(), Some("[]"));
+    }
 
     #[tokio::test]
     async fn pagination_is_bounded_and_matches_full_transcript_order() {

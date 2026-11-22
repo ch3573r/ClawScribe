@@ -1,7 +1,7 @@
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_store::StoreExt;
 
@@ -14,6 +14,8 @@ use crate::audio::capture::AudioCaptureBackend;
 
 const DEFAULT_RECORDINGS_FOLDER_NAME: &str = "ClawScribe";
 const LEGACY_RECORDINGS_FOLDER_NAME: &str = "meetily-recordings";
+const DEVICE_PREFERENCES_CHANGED: &str = "recording-device-preferences-changed";
+static PREFERENCE_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn default_auto_open_floating_controls() -> bool {
     true
@@ -25,6 +27,8 @@ pub struct RecordingPreferences {
     pub auto_save: bool,
     #[serde(default = "default_auto_open_floating_controls")]
     pub auto_open_floating_controls: bool,
+    #[serde(default = "default_auto_open_floating_controls")]
+    pub remember_floating_position: bool,
     pub file_format: String,
     #[serde(default)]
     pub preferred_mic_device: Option<String>,
@@ -39,12 +43,19 @@ pub struct RecordingPreferences {
     pub folder_notice: Option<String>,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+pub struct RecordingDevicePreferences {
+    preferred_mic_device: Option<String>,
+    preferred_system_device: Option<String>,
+}
+
 impl Default for RecordingPreferences {
     fn default() -> Self {
         Self {
             save_folder: get_default_recordings_folder(),
             auto_save: true,
             auto_open_floating_controls: default_auto_open_floating_controls(),
+            remember_floating_position: true,
             file_format: "mp4".to_string(),
             preferred_mic_device: None,
             preferred_system_device: None,
@@ -93,10 +104,16 @@ fn platform_recordings_folder(folder_name: &str) -> PathBuf {
 
 /// Get the default recordings folder based on platform.
 pub fn get_default_recordings_folder() -> PathBuf {
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return root.join("recordings");
+    }
     platform_recordings_folder(DEFAULT_RECORDINGS_FOLDER_NAME)
 }
 
 pub(crate) fn get_legacy_default_recordings_folder() -> PathBuf {
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return root.join("legacy-recordings");
+    }
     platform_recordings_folder(LEGACY_RECORDINGS_FOLDER_NAME)
 }
 
@@ -375,19 +392,16 @@ pub async fn load_recording_preferences<R: Runtime>(
         .unwrap_or_default();
 
     if migrate_legacy_recordings_folder(&mut prefs) {
-        info!(
-            "Migrated legacy default recordings folder to {:?}",
-            prefs.save_folder
-        );
+        info!("Migrated the legacy default recordings folder");
 
         match serde_json::to_value(&prefs) {
             Ok(prefs_value) => {
                 store.set("preferences", prefs_value);
-                if let Err(e) = store.save() {
-                    warn!("Failed to persist migrated recording preferences: {}", e);
+                if store.save().is_err() {
+                    warn!("Could not persist migrated recording preferences");
                 }
             }
-            Err(e) => warn!("Failed to serialize migrated preferences: {}", e),
+            Err(_) => warn!("Could not serialize migrated recording preferences"),
         }
     }
 
@@ -407,9 +421,6 @@ pub async fn load_recording_preferences<R: Runtime>(
         prefs.folder_notice = Some(FOLDER_NOTICE.to_string());
     }
 
-    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, mic={:?}, system={:?}",
-          prefs.save_folder, prefs.auto_save, prefs.file_format,
-          prefs.preferred_mic_device, prefs.preferred_system_device);
     Ok(prefs)
 }
 
@@ -420,9 +431,6 @@ pub async fn save_recording_preferences<R: Runtime>(
 ) -> Result<()> {
     // Check the folder before changing either the in-memory or on-disk state.
     ensure_recordings_directory(&preferences.save_folder)?;
-    info!("Saving recording preferences: save_folder={:?}, auto_save={}, format={}, mic={:?}, system={:?}",
-          preferences.save_folder, preferences.auto_save, preferences.file_format,
-          preferences.preferred_mic_device, preferences.preferred_system_device);
 
     // Get or create store
     let store = app
@@ -475,8 +483,6 @@ pub async fn save_recording_preferences<R: Runtime>(
         }
         return Err(anyhow::anyhow!("Failed to save store to disk: {}", error));
     }
-
-    info!("Successfully persisted recording preferences to disk");
 
     // Save backend preference to global config
     #[cfg(target_os = "macos")]
@@ -594,11 +600,9 @@ pub(crate) fn is_system_top_level(path: &std::path::Path) -> bool {
     }
 }
 
-/// The recordings folder a caller asked for, if it may be one: an existing
-/// local directory that is not a drive root, UNC or device path, the profile or
-/// application-data root, or part of the system. UNC, device and
-/// extended-length text is refused before any filesystem call. Returns the
-/// resolved folder; the error never contains the path.
+/// Validate a folder obtained from the core picker, including a network share.
+/// Persist its resolved path so recording and recovery use the same directory
+/// without following the original alias again.
 pub(crate) fn validate_save_folder(
     requested: &std::path::Path,
     protected: &ProtectedFolders,
@@ -614,11 +618,10 @@ pub(crate) fn validate_save_folder(
     let canonical = requested
         .canonicalize()
         .map_err(|_| SAVE_FOLDER_REFUSED.to_string())?;
-    if !canonical.is_dir() {
-        return Err(SAVE_FOLDER_REFUSED.into());
-    }
     let resolved = crate::database::meeting_files::plain_path(&canonical);
-    if crate::trusted_roots::root_problem(&resolved, protected, true).is_some() {
+    if crate::database::meeting_files::directory_chain(&resolved).is_err()
+        || crate::trusted_roots::root_problem(&resolved, protected, true).is_some()
+    {
         return Err(SAVE_FOLDER_REFUSED.into());
     }
     Ok(resolved)
@@ -657,12 +660,26 @@ pub(crate) fn classify_folder_request(
 pub async fn set_recording_preferences<R: Runtime>(
     app: AppHandle<R>,
     mut preferences: RecordingPreferences,
+    preserve_device_preferences: Option<bool>,
 ) -> Result<(), String> {
+    let _write = PREFERENCE_WRITE.lock().await;
     // The folder is not taken from the text the webview sends. Unchanged, it
     // stays; the default folder is always allowed; anything else must be a
     // folder the user chose in the core's folder picker (`select_recording_folder`)
     // in this session, and becomes a trusted root.
     let current = load_recording_preferences(&app).await.ok();
+    let preserve_devices = preserve_device_preferences.unwrap_or(false);
+    if preserve_devices {
+        let current = current
+            .as_ref()
+            .ok_or("Could not load audio device preferences")?;
+        preferences
+            .preferred_mic_device
+            .clone_from(&current.preferred_mic_device);
+        preferences
+            .preferred_system_device
+            .clone_from(&current.preferred_system_device);
+    }
     let change = classify_folder_request(
         current
             .as_ref()
@@ -682,28 +699,89 @@ pub async fn set_recording_preferences<R: Runtime>(
         let protected = protected_folders(tauri::Manager::path(&app).app_data_dir().ok());
         let checked = granted.clone();
         let trusted_app = app.clone();
-        let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            validate_save_folder(&checked, &protected)?;
+        let result = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
+            let resolved = validate_save_folder(&checked, &protected)?;
+            if !same_path(&checked, &resolved) {
+                return Err(
+                    "The selected folder changed. Choose it again in Settings → Recording.".into(),
+                );
+            }
             let backing = trust_backing(&trusted_app)
                 .ok_or_else(|| "Could not save the folder".to_string())?;
-            crate::trusted_roots::trust_folder(backing.as_ref(), &checked, &protected)
+            crate::trusted_roots::trust_folder(backing.as_ref(), &resolved, &protected)?;
+            Ok(resolved)
         })
         .await
         .map_err(|_| "Could not check the recordings folder".to_string())
         .and_then(|result| result);
-        if let Err(message) = result {
-            crate::file_grants::give_back(crate::file_grants::Purpose::RecordingsFolder, &taken);
-            return Err(message);
-        }
-        preferences.save_folder = granted;
+        preferences.save_folder = match result {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                crate::file_grants::give_back(
+                    crate::file_grants::Purpose::RecordingsFolder,
+                    &taken,
+                );
+                return Err(message);
+            }
+        };
     }
     preferences.folder_notice = None;
-    let saved = save_recording_preferences(&app, &preferences)
+    save_recording_preferences(&app, &preferences)
         .await
-        .map_err(|e| format!("Failed to save recording preferences: {}", e));
+        .map_err(|_| {
+            warn!("Could not persist recording preferences");
+            "Could not save recording preferences".to_string()
+        })?;
     // The roots changed with it.
     let _ = recording_roots(&app).await;
-    saved
+    if !preserve_devices {
+        let _ = app.emit(
+            DEVICE_PREFERENCES_CHANGED,
+            RecordingDevicePreferences {
+                preferred_mic_device: preferences.preferred_mic_device,
+                preferred_system_device: preferences.preferred_system_device,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Patch just the device fields so Home and Settings never write a stale
+/// recordings folder or other unrelated preferences when choosing a device.
+#[tauri::command]
+pub async fn set_recording_device_preferences<R: Runtime>(
+    app: AppHandle<R>,
+    preferences: RecordingDevicePreferences,
+) -> Result<RecordingDevicePreferences, String> {
+    let _write = PREFERENCE_WRITE.lock().await;
+    let current = load_recording_preferences(&app)
+        .await
+        .map_err(|_| "Could not load recording preferences")?;
+    let store = app
+        .store("recording_preferences.json")
+        .map_err(|_| "Could not access recording preferences")?;
+    let previous = store.get("preferences");
+    let mut stored = match &previous {
+        Some(value) => value.clone(),
+        None => {
+            serde_json::to_value(current).map_err(|_| "Could not prepare recording preferences")?
+        }
+    };
+    stored["preferred_mic_device"] = serde_json::json!(preferences.preferred_mic_device);
+    stored["preferred_system_device"] = serde_json::json!(preferences.preferred_system_device);
+    store.set("preferences", stored);
+    if store.save().is_err() {
+        match previous {
+            Some(value) => store.set("preferences", value),
+            None => {
+                store.delete("preferences");
+            }
+        }
+        warn!("Could not persist audio device preferences");
+        return Err("Could not save audio device preferences".into());
+    }
+    let _ = app.emit(DEVICE_PREFERENCES_CHANGED, &preferences);
+    Ok(preferences)
 }
 
 #[tauri::command]
@@ -760,21 +838,18 @@ pub async fn select_recording_folder<R: Runtime>(
             .map_err(|e| format!("Folder dialog task failed: {}", e))?;
 
     if let Some(path) = folder_path {
-        let folder_path = path.to_string();
-        let folder = PathBuf::from(&folder_path);
-        ensure_recordings_directory(&folder)
-            .map_err(|e| format!("Failed to create selected recordings folder: {}", e))?;
+        let folder = PathBuf::from(path.to_string());
         let protected = protected_folders(tauri::Manager::path(&app).app_data_dir().ok());
-        let checked = folder.clone();
-        tokio::task::spawn_blocking(move || validate_save_folder(&checked, &protected))
-            .await
-            .map_err(|_| "Could not check the recordings folder".to_string())??;
+        let resolved =
+            tokio::task::spawn_blocking(move || validate_save_folder(&folder, &protected))
+                .await
+                .map_err(|_| "Could not check the recordings folder".to_string())??;
         // The choice is remembered by the core; `set_recording_preferences`
         // accepts a changed folder only if it is this one.
-        crate::file_grants::grant(crate::file_grants::Purpose::RecordingsFolder, &folder)?;
+        crate::file_grants::grant(crate::file_grants::Purpose::RecordingsFolder, &resolved)?;
 
         info!("User selected a recordings folder");
-        Ok(Some(folder_path))
+        Ok(Some(resolved.to_string_lossy().into_owned()))
     } else {
         info!("User cancelled recordings folder selection");
         Ok(None)

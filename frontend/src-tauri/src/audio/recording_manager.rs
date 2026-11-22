@@ -29,19 +29,29 @@ pub struct LiveTranscriptSink {
     pub recording_generation: crate::knowledge::live::RecordingGeneration,
     state: Arc<crate::knowledge::live::LiveState>,
     transcripts: Arc<RecordingTranscripts>,
+    pub(super) conversation: Arc<super::live_conversation::LiveConversation>,
+    pub(crate) capture: Arc<RecordingState>,
 }
 impl LiveTranscriptSink {
-    pub(crate) fn ingest(&self, update: &super::transcription::TranscriptUpdate) -> bool {
+    pub(crate) fn ingest(
+        &self,
+        update: &super::transcription::TranscriptUpdate,
+        clear_source: bool,
+    ) -> bool {
         // A finished decode can be marked partial when some text was unreadable.
         // Keep the readable portion in the recording; live assistance filters it.
         if !self.transcripts.record_update(&self.session_id, update) {
             return false;
         }
         self.state.ingest(&self.session_id, update);
+        self.conversation.ingest(update, clear_source);
         true
     }
-    fn snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
+    pub(crate) fn snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
         self.state.snapshot(&self.session_id)
+    }
+    pub(super) fn transcript_segments(&self) -> Vec<super::recording_saver::TranscriptSegment> {
+        self.transcripts.segments()
     }
 }
 
@@ -99,9 +109,11 @@ impl RecordingManager {
     ) -> LiveTranscriptSink {
         let sink = LiveTranscriptSink {
             transcripts: self.recording_saver.bind_transcript_session(&session_id),
+            conversation: Arc::new(super::live_conversation::LiveConversation::new(&session_id)),
             session_id,
             recording_generation,
             state,
+            capture: self.state.clone(),
         };
         self.live = Some(sink.clone());
         sink
@@ -408,9 +420,7 @@ impl RecordingManager {
             return;
         }
         if let Some(ref mut monitor) = self.device_monitor {
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(3), monitor.stop_monitoring())
-                    .await;
+            monitor.stop_monitoring().await;
         }
         self.state.stop_recording();
         let streams_stopped = self.stream_manager.stop_streams().is_ok();
@@ -454,20 +464,27 @@ impl RecordingManager {
         // Stop recording state first - this clears device references
         self.state.stop_recording();
 
-        // Stop audio streams immediately
-        if let Err(_e) = self.stream_manager.stop_streams() {
-            error!("Error stopping audio streams");
-        }
+        // A native driver can block while pausing or destroying a stream.
+        // Freeze this session first, then bound how long Stop waits for release.
+        let mut streams = std::mem::replace(
+            &mut self.stream_manager,
+            AudioStreamManager::new(self.state.clone()),
+        );
+        let release = tokio::task::spawn_blocking(move || streams.stop_streams());
 
         if let Some(ref mut monitor) = self.device_monitor {
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(3), monitor.stop_monitoring())
-                    .await;
+            monitor.stop_monitoring().await;
         }
 
         // CRITICAL: Force pipeline to flush ALL accumulated audio before stopping
         debug!("💨 Forcing pipeline to flush accumulated audio immediately");
         let flush_result = self.pipeline_manager.force_flush_and_stop().await;
+        if !matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), release).await,
+            Ok(Ok(Ok(())))
+        ) {
+            warn!("An audio device did not release cleanly after capture stopped");
+        }
         if flush_result.is_err() {
             self.state.mark_capture_incomplete();
         }
@@ -475,7 +492,7 @@ impl RecordingManager {
         // stop_recording already releases capture devices. Retain frozen timing
         // and failure statistics until metadata and the final outcome are saved.
 
-        info!("Recording streams stopped");
+        info!("Recording capture stopped");
         flush_result
     }
 
@@ -778,13 +795,9 @@ impl RecordingManager {
         device_type: DeviceMonitorType,
     ) -> Result<ReconnectResult> {
         let (source, kind) = source_types(device_type);
-        let pending = self.state.disconnected_devices();
-        if !pending
-            .iter()
-            .any(|(device, missing)| device.name == device_name && *missing == source)
-        {
+        let Some(revision) = self.state.source_failure_revision(device_name, &source) else {
             return Ok(self.reconnect_result(false));
-        }
+        };
 
         let device = list_audio_devices()
             .await?
@@ -793,27 +806,24 @@ impl RecordingManager {
         let Some(device) = device.map(Arc::new) else {
             return Ok(self.reconnect_result(false));
         };
-        self.state.mark_source_reconnected(&source);
         if self
             .stream_manager
-            .reconnect_source(device.clone(), source.clone())
+            .reconnect_source(device, source.clone())
             .await
             .is_err()
         {
-            self.state.mark_source_missing(device, source.clone());
             warn!("Requested audio source could not be reopened");
+        } else {
+            // Keep the source visibly unavailable until it opens, and never
+            // clear a newer error reported by a callback during that open.
+            self.state.mark_source_reconnected(&source, revision);
         }
         // An error callback can report a disconnect even while the stream is opening.
         Ok(self.reconnect_result(self.source_active(&source)))
     }
 
     fn source_active(&self, source: &RecordingDeviceType) -> bool {
-        self.stream_manager.source_active(source)
-            && !self
-                .state
-                .disconnected_devices()
-                .iter()
-                .any(|(_, missing)| missing == source)
+        self.stream_manager.source_active(source) && !self.state.source_is_missing(source)
     }
 
     fn reconnect_result(&self, reconnected: bool) -> ReconnectResult {
@@ -865,6 +875,7 @@ mod reconnect_recovery_tests {
     #[test]
     fn failed_loopback_stays_pending_when_mic_returns_and_gaps_survive_retry() {
         let manager = RecordingManager::new();
+        manager.state.start_recording().unwrap();
         let (mic, mic_kind) = source_types(DeviceMonitorType::Microphone);
         let (system, system_kind) = source_types(DeviceMonitorType::SystemAudio);
         manager.state.mark_source_missing(
@@ -875,13 +886,63 @@ mod reconnect_recovery_tests {
             Arc::new(AudioDevice::new("synthetic microphone".into(), mic_kind)),
             mic.clone(),
         );
-        manager.state.mark_source_reconnected(&mic);
+        let mic_failure = manager
+            .state
+            .source_failure_revision("synthetic microphone", &mic)
+            .unwrap();
+        manager.state.mark_source_reconnected(&mic, mic_failure);
         let pending = manager.state.disconnected_devices();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].1, system);
         assert!(!manager.reconnect_result(false).reconnected);
-        manager.state.mark_source_reconnected(&system);
+        let system_failure = manager
+            .state
+            .source_failure_revision("synthetic output", &system)
+            .unwrap();
+        manager
+            .state
+            .mark_source_reconnected(&system, system_failure);
         assert!(manager.state.disconnected_devices().is_empty());
         assert!(manager.state.capture_incomplete());
+    }
+
+    #[test]
+    fn a_new_source_error_during_open_stays_pending() {
+        let manager = RecordingManager::new();
+        manager.state.start_recording().unwrap();
+        let (source, kind) = source_types(DeviceMonitorType::SystemAudio);
+        let device = Arc::new(AudioDevice::new("synthetic output".into(), kind));
+        manager
+            .state
+            .mark_source_missing(device.clone(), source.clone());
+        let opening_revision = manager
+            .state
+            .source_failure_revision(&device.name, &source)
+            .unwrap();
+        manager
+            .state
+            .mark_source_missing(device.clone(), source.clone());
+        manager
+            .state
+            .mark_source_reconnected(&source, opening_revision);
+        assert!(manager
+            .state
+            .source_failure_revision(&device.name, &source)
+            .is_some());
+        assert!(manager.state.capture_incomplete());
+    }
+
+    #[test]
+    fn a_late_disconnect_from_stream_release_does_not_create_a_capture_gap() {
+        let manager = RecordingManager::new();
+        manager.state.start_recording().unwrap();
+        manager.state.stop_recording();
+        let (source, kind) = source_types(DeviceMonitorType::SystemAudio);
+        manager.state.mark_source_missing(
+            Arc::new(AudioDevice::new("synthetic output".into(), kind)),
+            source,
+        );
+        assert!(manager.state.disconnected_devices().is_empty());
+        assert!(!manager.state.capture_incomplete());
     }
 }

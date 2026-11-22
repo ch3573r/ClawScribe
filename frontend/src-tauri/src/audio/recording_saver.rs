@@ -103,6 +103,13 @@ impl RecordingTranscripts {
         self.lock().segments.clone()
     }
 
+    pub(super) fn segments(&self) -> Vec<TranscriptSegment> {
+        self.snapshot()
+            .iter()
+            .map(|segment| (**segment).clone())
+            .collect()
+    }
+
     pub(super) fn record_update(&self, session_id: &str, update: &TranscriptUpdate) -> bool {
         if update.session_id.as_deref() != Some(session_id) || update.text.trim().is_empty() {
             return false;
@@ -394,9 +401,9 @@ impl RecordingSaver {
 
     pub async fn failed_start(&mut self, capture_drained: bool) {
         self.close_transcript_input();
-        if let Some(task) = self.snapshot_task.take() {
+        if let Some(mut task) = self.snapshot_task.take() {
             task.abort();
-            let _ = task.await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), &mut task).await;
         }
         let Some(folder) = &self.meeting_folder else {
             return;
@@ -567,9 +574,9 @@ impl RecordingSaver {
     ) -> Result<RecordingSaveReport, String> {
         info!("Stopping recording saver");
         self.close_transcript_input();
-        if let Some(task) = self.snapshot_task.take() {
+        if let Some(mut task) = self.snapshot_task.take() {
             task.abort();
-            let _ = task.await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), &mut task).await;
         }
         let mut report = RecordingSaveReport {
             outcome,
@@ -697,11 +704,7 @@ impl RecordingSaver {
 
     /// Get accumulated transcript segments (for reload sync)
     pub fn get_transcript_segments(&self) -> Vec<TranscriptSegment> {
-        self.transcripts
-            .snapshot()
-            .iter()
-            .map(|segment| (**segment).clone())
-            .collect()
+        self.transcripts.segments()
     }
 
     /// Get meeting name (for reload sync)
@@ -802,6 +805,79 @@ async fn save_snapshot(
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    #[cfg(any(windows, unix))]
+    #[tokio::test]
+    async fn selected_recording_target_survives_start_save_and_recovery_checks() {
+        use crate::audio::{interrupted, recording_preferences, recording_state::RecordingState};
+        use crate::database::meeting_files;
+        let base = tempfile::tempdir().unwrap();
+        let base_path = meeting_files::plain_path(&base.path().canonicalize().unwrap());
+        let target = base_path.join("recordings");
+        let alias = base_path.join("selected-link");
+        std::fs::create_dir(&target).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/C", "mklink", "/J"])
+                .arg(&alias)
+                .arg(&target)
+                .creation_flags(0x08000000)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        }
+
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(alias.clone());
+        let error = saver
+            .start_accumulation(false, RecordingState::new())
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("Settings → Recording"));
+        assert!(saver.get_meeting_folder().is_none());
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+
+        let resolved = recording_preferences::validate_save_folder(
+            &alias,
+            &recording_preferences::ProtectedFolders::default(),
+        )
+        .unwrap();
+        assert_eq!(resolved, target);
+        let roots = [resolved.clone()];
+        saver.set_recordings_folder(resolved);
+        saver
+            .start_accumulation(false, RecordingState::new())
+            .unwrap();
+        let folder = saver.get_meeting_folder().unwrap().clone();
+        let stored =
+            meeting_files::authorize_new_meeting_folder(&folder.to_string_lossy(), &roots).unwrap();
+        assert_eq!(std::path::Path::new(&stored), folder.as_path());
+        saver.add_transcript_chunk("Synthetic draft".into());
+        saver.write_transcripts_json(&folder).await.unwrap();
+        let scan = interrupted::scan(&interrupted::ScanInput {
+            roots: &roots,
+            kept: &[],
+            registered: &Default::default(),
+            registered_ids: &Default::default(),
+            deleted: &Default::default(),
+            active: interrupted::ActiveFolder::None,
+            limits: interrupted::Limits::default(),
+        });
+        assert_eq!(scan.recordings.len(), 1);
+        assert_eq!(
+            std::path::Path::new(&scan.recordings[0].folder),
+            folder.as_path()
+        );
+        assert_eq!(scan.recordings[0].transcript_lines, 1);
+        let linked_folder = alias.join(folder.file_name().unwrap());
+        assert!(meeting_files::resolve_recording_folder(&linked_folder, &roots).is_err());
+        #[cfg(windows)]
+        std::fs::remove_dir(&alias).unwrap();
+    }
 
     fn poison<T>(lock: &Mutex<T>) {
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

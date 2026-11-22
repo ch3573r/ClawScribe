@@ -92,17 +92,28 @@ trait CredentialBackend {
 struct PlatformCredentials;
 impl CredentialBackend for PlatformCredentials {
     fn save(&self, account: &str, value: &str) -> Result<(), String> {
-        keyring::Entry::new(SERVICE, account)
-            .and_then(|entry| entry.set_password(value))
-            .map_err(|_| UNAVAILABLE.into())
+        keyring::Entry::new(
+            &crate::database::recovery::credential_service(SERVICE),
+            account,
+        )
+        .and_then(|entry| entry.set_password(value))
+        .map_err(|_| UNAVAILABLE.into())
     }
     fn load(&self, account: &str) -> Result<String, String> {
-        keyring::Entry::new(SERVICE, account)
-            .and_then(|entry| entry.get_password())
-            .map_err(|_| UNAVAILABLE.into())
+        keyring::Entry::new(
+            &crate::database::recovery::credential_service(SERVICE),
+            account,
+        )
+        .and_then(|entry| entry.get_password())
+        .map_err(|_| UNAVAILABLE.into())
     }
     fn delete(&self, account: &str) -> Result<(), String> {
-        match keyring::Entry::new(SERVICE, account).and_then(|entry| entry.delete_credential()) {
+        match keyring::Entry::new(
+            &crate::database::recovery::credential_service(SERVICE),
+            account,
+        )
+        .and_then(|entry| entry.delete_credential())
+        {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(_) => Err(UNAVAILABLE.into()),
         }
@@ -151,6 +162,43 @@ fn forget_with(scope: &str, stored: &str, backend: &dyn CredentialBackend) -> Re
         return Ok(());
     }
     Err(UNAVAILABLE.into())
+}
+
+/// Forget the retired integration's keyring entry without opening the token.
+/// Old config files and inline values are inert.
+pub(crate) fn forget_retired_openclaw_credential<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use std::io::Read;
+    use tauri::Manager;
+    use tauri_plugin_store::StoreExt;
+
+    const DONE: &str = "retired_openclaw_credential_checked";
+    let Ok(store) = app.store(crate::behavior_settings::STORE_FILE) else {
+        return;
+    };
+    if store.get(DONE).and_then(|value| value.as_bool()) == Some(true) {
+        return;
+    }
+    let Ok(directory) = app.path().app_config_dir() else {
+        return;
+    };
+    let Ok(file) = std::fs::File::open(directory.join("openclaw.json")) else {
+        return;
+    };
+    #[derive(serde::Deserialize)]
+    struct RetiredConfig {
+        bearer_token: Option<String>,
+    }
+    let Ok(config) = serde_json::from_reader::<_, RetiredConfig>(file.take(64 * 1024)) else {
+        return;
+    };
+    if let Some(reference) = config.bearer_token {
+        if reference.starts_with("clawscribe:secret:v1:keyring:")
+            && forget("openclaw/bearer-token", &reference).is_err()
+        {
+            return;
+        }
+    }
+    let _ = crate::behavior_settings::persist_bool(store.as_ref(), DONE, true);
 }
 
 /// The credential store as the repositories use it. The platform store is the

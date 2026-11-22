@@ -46,7 +46,7 @@ export function SummarySettings() {
       <SummaryModelSettings />
       <SettingsCard>
         <SettingsRow title="Summarize automatically" htmlFor="summary-auto" description={error ?? (
-          reviewRequired ? "Automatic notes are paused until you review the new destination."
+          reviewRequired ? "Review what ClawScribe sends before automatic notes can run."
             : "Generate notes with your selected summary provider after a recording is saved."
         )}>
           {reviewRequired && <Button variant="outline" size="sm" disabled={automaticSummaryBusy} onClick={() => setReview(destination)}>Review destination</Button>}
@@ -63,7 +63,7 @@ export function SummarySettings() {
         }}>
           <DialogHeader>
             <DialogTitle>Allow automatic notes with {review && providerLabel(review.provider)}?</DialogTitle>
-            <DialogDescription>After you save a recording, ClawScribe will send its transcript and notes context to the destination below to generate notes.</DialogDescription>
+            <DialogDescription>ClawScribe will send the saved transcript and notes context to this destination. The context includes the local meeting date and weekday, duration when known, and title when permitted.</DialogDescription>
           </DialogHeader>
           {review && <div className="space-y-1 text-sm">
             <p className="break-all">{review.endpoint}</p>

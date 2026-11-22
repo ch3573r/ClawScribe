@@ -15,6 +15,31 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn editing_notes_requires_a_summary_row() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        let before: String = sqlx::query_scalar("SELECT updated_at FROM meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let saved = SummaryProcessesRepository::update_meeting_summary(
+            &pool,
+            meeting,
+            &serde_json::json!({"markdown": "Unsaved notes"}),
+        )
+        .await
+        .unwrap();
+        assert!(!saved);
+        let after: String = sqlx::query_scalar("SELECT updated_at FROM meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
     async fn editing_notes_preserves_their_generation_revision_and_email_without_reusing_cached_text(
     ) {
         let pool = crate::database::transcript_edits::tests::fixture().await;
@@ -29,10 +54,13 @@ mod tests {
             .await
             .unwrap();
         let result = serde_json::json!({
-            "markdown":"Generated",
+            "markdown":"## Action items\n- Removed during review",
             "english_cache":{"markdown":"Previous English text"},
             "generation":{"model":"example-model","template":"Standard","transcript_fingerprint":"original"},
-            "structured_meeting_output":{"follow_up_email":{"subject":"Next steps","body_markdown":"Send draft"}}
+            "structured_meeting_output":{
+                "action_items":[{"task":"Send draft", "owner":"Dana"}, {"task":"Removed during review"}],
+                "follow_up_email":{"subject":"Next steps","body_markdown":"Send draft"}
+            }
         });
         assert!(SummaryProcessesRepository::complete_for_revision(
             &pool,
@@ -64,6 +92,17 @@ mod tests {
         assert_ne!(row.current_content_revision, Some(revision));
         assert_eq!(saved["generation"]["model"], "example-model");
         assert_eq!(saved["follow_up_email"]["subject"], "Next steps");
+        assert_eq!(
+            saved["structured_meeting_output"]["action_items"][0]["owner"],
+            "Dana"
+        );
+        assert_eq!(
+            saved["structured_meeting_output"]["action_items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(saved.get("english_cache").is_none());
     }
 
@@ -269,6 +308,56 @@ mod tests {
             .unwrap();
         assert_eq!(row.result.as_deref(), Some("previous"));
         assert_eq!(row.metadata.as_deref(), Some("partial"));
+    }
+
+    #[tokio::test]
+    async fn local_preemption_resumes_with_one_claim_and_user_cancellation_stays_final() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        let fingerprint = "approved-local";
+        assert!(SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            fingerprint,
+        )
+        .await
+        .unwrap());
+        SummaryProcessesRepository::update_process_cancelled_with_reason(
+            &pool,
+            meeting,
+            crate::summary::automatic::PAUSED_FOR_INFERENCE,
+        )
+        .await
+        .unwrap();
+        for allowed in [false, true] {
+            assert_eq!(
+                SummaryProcessesRepository::automatic_resume_candidates_after(
+                    &pool,
+                    fingerprint,
+                    None,
+                    "",
+                    allowed,
+                )
+                .await
+                .unwrap()
+                .len(),
+                usize::from(allowed),
+            );
+        }
+        let (first, second) = tokio::join!(
+            SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, fingerprint),
+            SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, fingerprint),
+        );
+        assert_ne!(first.unwrap(), second.unwrap());
+        SummaryProcessesRepository::update_process_cancelled(&pool, meeting)
+            .await
+            .unwrap();
+        assert!(
+            !SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, fingerprint,)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -499,10 +588,6 @@ impl SummaryProcessesRepository {
             .is_some();
 
         if !meeting_exists {
-            log_info!(
-                "Attempted to save summary for a non-existent meeting_id: {}",
-                meeting_id
-            );
             transaction.rollback().await?;
             return Ok(false);
         }
@@ -515,7 +600,7 @@ impl SummaryProcessesRepository {
             ));
         }
 
-        // Editing replaces the document, not its generation provenance or companion email.
+        // Keep the generation provenance, structured suggestions, and email when editing the document.
         // Never reuse the English generation cache after an edit.
         let previous: Option<String> =
             sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id = ?")
@@ -530,6 +615,7 @@ impl SummaryProcessesRepository {
                 "generation",
                 "transcript_content_revision",
                 "follow_up_email",
+                "structured_meeting_output",
             ] {
                 if let Some(value) = previous.get(key) {
                     saved[key] = value.clone();
@@ -538,6 +624,7 @@ impl SummaryProcessesRepository {
             if let Some(email) = previous.pointer("/structured_meeting_output/follow_up_email") {
                 saved["follow_up_email"] = email.clone();
             }
+            crate::exports::actions::prune_removed_summary_actions(&previous, &mut saved);
             if saved.get("generation").is_none() {
                 if let Some(source) = previous.pointer("/english_cache/source") {
                     saved["generation"] = serde_json::json!({
@@ -556,12 +643,18 @@ impl SummaryProcessesRepository {
         }
         let now = Utc::now();
 
-        sqlx::query("UPDATE summary_processes SET result = ?, updated_at = ? WHERE meeting_id = ?")
-            .bind(&result_json.unwrap())
-            .bind(now)
-            .bind(meeting_id)
-            .execute(&mut *transaction)
-            .await?;
+        let saved = sqlx::query(
+            "UPDATE summary_processes SET result = ?, updated_at = ? WHERE meeting_id = ?",
+        )
+        .bind(&result_json.unwrap())
+        .bind(now)
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+        if saved.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
 
         sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
             .bind(now)
@@ -571,10 +664,6 @@ impl SummaryProcessesRepository {
 
         transaction.commit().await?;
 
-        log_info!(
-            "Successfully updated summary and timestamp for meeting_id: {}",
-            meeting_id
-        );
         Ok(true)
     }
 
@@ -661,15 +750,32 @@ impl SummaryProcessesRepository {
         "#).bind(origin).bind(fingerprint).bind(meeting).bind(RECOVERY_NEEDED).bind(NO_TRANSCRIPT).execute(pool).await?.rows_affected() == 1)
     }
 
+    #[cfg(test)]
     pub(crate) async fn automatic_resume_candidates(
         pool: &SqlitePool,
         fingerprint: &str,
         profile: Option<&str>,
     ) -> Result<Vec<(String, String)>, sqlx::Error> {
+        Self::automatic_resume_candidates_after(pool, fingerprint, profile, "", false).await
+    }
+
+    pub(crate) async fn automatic_resume_candidates_after(
+        pool: &SqlitePool,
+        fingerprint: &str,
+        profile: Option<&str>,
+        after: &str,
+        local: bool,
+    ) -> Result<Vec<(String, String)>, sqlx::Error> {
         sqlx::query_as("SELECT meeting_id, automatic_request_fingerprint FROM summary_processes
             WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint IN (?1, ?2 || ':' || ?1)
-            AND automatic_resume_attempted = 0 AND status = 'failed' AND error = ?3 ORDER BY start_time DESC, meeting_id LIMIT 3")
-            .bind(fingerprint).bind(profile).bind(INTERRUPTED).fetch_all(pool).await
+            AND meeting_id > ?3 AND (
+                (status = 'failed' AND automatic_resume_attempted = 0 AND error = ?4)
+                OR (?5 AND status = 'cancelled' AND result IS NULL AND error IN (?6, ?7))
+            ) ORDER BY meeting_id LIMIT 3")
+            .bind(fingerprint).bind(profile).bind(after).bind(INTERRUPTED).bind(local)
+            .bind(crate::summary::automatic::PAUSED_FOR_INFERENCE)
+            .bind(crate::summary::service::RECORDING_INTERRUPTED_SUMMARY)
+            .fetch_all(pool).await
     }
 
     pub(crate) async fn claim_automatic_resume(
@@ -677,8 +783,16 @@ impl SummaryProcessesRepository {
         meeting: &str,
         fingerprint: &str,
     ) -> Result<bool, sqlx::Error> {
-        Ok(sqlx::query("UPDATE summary_processes SET status = 'pending', automatic_resume_attempted = 1, error = NULL, start_time = CURRENT_TIMESTAMP, end_time = NULL, updated_at = CURRENT_TIMESTAMP WHERE meeting_id = ? AND automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ? AND automatic_resume_attempted = 0 AND status = 'failed' AND error = ?")
-            .bind(meeting).bind(fingerprint).bind(INTERRUPTED).execute(pool).await?.rows_affected() == 1)
+        Ok(sqlx::query("UPDATE summary_processes SET
+            automatic_resume_attempted = CASE WHEN status = 'failed' THEN 1 ELSE automatic_resume_attempted END,
+            status = 'pending', error = NULL, start_time = CURRENT_TIMESTAMP, end_time = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE meeting_id = ?1 AND automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ?2
+            AND ((status = 'failed' AND automatic_resume_attempted = 0 AND error = ?3)
+                OR (status = 'cancelled' AND result IS NULL AND error IN (?4, ?5)))")
+            .bind(meeting).bind(fingerprint).bind(INTERRUPTED)
+            .bind(crate::summary::automatic::PAUSED_FOR_INFERENCE)
+            .bind(crate::summary::service::RECORDING_INTERRUPTED_SUMMARY)
+            .execute(pool).await?.rows_affected() == 1)
     }
 
     pub(crate) async fn record_automatic_outcome(

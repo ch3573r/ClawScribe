@@ -285,7 +285,7 @@ impl ParakeetEngine {
                 661,
                 QuantizationType::Int8,
                 "Fast (v2)",
-                "Previous version with int8 quantization, good balance of speed and accuracy",
+                "English-only v2 int8 with a smaller download.",
             ),
         ];
 
@@ -782,6 +782,9 @@ impl ParakeetEngine {
             .get(model_name)
             .cloned()
             .ok_or_else(|| anyhow!("Unknown Parakeet model"))?;
+        if let Some(callback) = &progress_callback {
+            callback(DownloadProgress::new(0, 0, 0.0));
+        }
         if let Some(model) = self.available_models.write().await.get_mut(model_name) {
             model.status = ModelStatus::Downloading { progress: 0 };
         }

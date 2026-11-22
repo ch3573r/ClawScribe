@@ -66,6 +66,21 @@ impl TranscriptionProvider for NemotronProvider {
         self.engine.get_current_model().await
     }
 
+    async fn live_backend(&self) -> Option<String> {
+        use crate::nemotron_engine::model::SessionBackend;
+        let label = |backend| match backend {
+            SessionBackend::DirectMl => "DirectML",
+            SessionBackend::CpuFallback => "CPU fallback",
+            SessionBackend::Cpu => "CPU",
+        };
+        let (encoder, decoder) = self.engine.session_backends().await?;
+        Some(format!(
+            "Nemotron · {} encoder, {} decoder",
+            label(encoder),
+            label(decoder)
+        ))
+    }
+
     fn provider_name(&self) -> &'static str {
         "Nemotron"
     }

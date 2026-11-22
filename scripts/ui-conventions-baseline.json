@@ -162,11 +162,6 @@
       "hexColors": 0,
       "nativeControls": 0
     },
-    "frontend/src/components/ModelSettingsModal.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
     "frontend/src/components/NemotronModelManager.tsx": {
       "paletteColors": 0,
       "hexColors": 0,

@@ -1,4 +1,5 @@
 import ICAL from "ical.js";
+import { teamsJoinLink } from "@/lib/teams-join-link";
 import type { CalendarAttendee, CalendarEvent } from "@/services/microsoftExportService";
 
 export interface ICalendarEvent extends CalendarEvent {
@@ -112,14 +113,17 @@ function attendee(property: ICAL.Property | null): CalendarAttendee | null {
 type MeetingFields = Pick<ICalendarEvent, "subject" | "organizer" | "attendees" | "isOnlineMeeting" | "joinUrl">;
 
 function fields(event: ICAL.Component, fallback?: MeetingFields): MeetingFields {
+  const explicitUrl = event.getFirstPropertyValue("url");
+  const joinUrl = teamsJoinLink(explicitUrl)
+    ?? (explicitUrl == null ? fallback?.joinUrl ?? null : null);
   return {
     subject: singleLine(event.getFirstPropertyValue("summary"), 1024) ?? fallback?.subject ?? null,
     organizer: attendee(event.getFirstProperty("organizer")) ?? fallback?.organizer ?? null,
     attendees: event.hasProperty("attendee")
       ? event.getAllProperties("attendee").map(attendee).filter((person): person is CalendarAttendee => person !== null)
       : fallback?.attendees ?? [],
-    isOnlineMeeting: false,
-    joinUrl: null,
+    isOnlineMeeting: joinUrl !== null,
+    joinUrl,
   };
 }
 

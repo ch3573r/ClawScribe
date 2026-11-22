@@ -68,7 +68,20 @@ test('release builds run packaged-binary acceptance after the native tests and b
   assert.match(step, /if: \$\{\{ !inputs\['check-only'\] \}\}/);
   assert.match(step, /EXPECTED_BUILD_RUNNER: \$\{\{ vars\.CLAWSCRIBE_BUILD_RUNNER \}\}/);
   assert.match(step, /test-packaged-acceptance\.ps1 -Installer/);
+  assert.match(step, /-MsiInstaller \$msiInstaller/);
   assert.ok(!step.includes('continue-on-error'));
+});
+
+test('both release build entry points stage and bundle the verified VC++ runtime', () => {
+  const start = releaseWorkflow.indexOf('- name: Build release installers');
+  const end = releaseWorkflow.indexOf('- name: Run native summary and resource regression tests');
+  for (const source of [buildScript, releaseWorkflow.slice(start, end)]) {
+    const stage = source.lastIndexOf('stage-vc-runtime.ps1');
+    const config = source.indexOf('tauri.windows-release.conf.json');
+    const build = source.indexOf('tauri build --config $releaseConfig');
+    assert.ok(stage >= 0 && config > stage && build > config);
+  }
+  assert.ok(acceptanceScript.indexOf('"verify-packaged-vc-runtime.mjs"') < acceptanceScript.indexOf('Invoke-Phase "run"'));
 });
 
 test('packaged acceptance unpacks instead of installing and stays on the runner', () => {

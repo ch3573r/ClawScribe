@@ -49,7 +49,6 @@ pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
 pub mod openai;
-pub mod openclaw;
 pub mod openrouter;
 pub mod parakeet_engine;
 pub mod power;
@@ -63,6 +62,7 @@ pub mod tray;
 pub(crate) mod trusted_roots;
 pub mod updates;
 pub mod utils;
+mod webhook;
 pub mod whisper_engine;
 #[cfg(windows)]
 mod windows_lifecycle;
@@ -269,7 +269,9 @@ fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, 
     if !trusted_roots::text_allowed(&path.to_string_lossy(), &roots) {
         return Ok(None);
     }
-    if !path.is_dir() {
+    if database::meeting_files::is_cleanup_path(path)
+        || database::meeting_files::directory_chain(path).is_err()
+    {
         return Ok(None);
     }
 
@@ -277,8 +279,9 @@ fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, 
         .canonicalize()
         .map_err(|_| "Failed to resolve the meeting folder".to_string())?;
     // A mapped network drive resolves to a UNC path: fine inside a trusted root.
-    Ok((local_path::is_local_canonical(&resolved)
-        || trusted_roots::canonical_inside(&resolved, &roots))
+    Ok((!database::meeting_files::is_cleanup_path(&resolved)
+        && (local_path::is_local_canonical(&resolved)
+            || trusted_roots::canonical_inside(&resolved, &roots)))
     .then_some(resolved))
 }
 
@@ -581,6 +584,8 @@ fn set_native_theme(app: AppHandle, theme: String, accent: Option<String>) -> Re
 pub fn run() {
     log::set_max_level(log::LevelFilter::Info);
 
+    let mut context = tauri::generate_context!();
+    database::recovery::configure(&mut context);
     let mut builder = tauri::Builder::default();
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
@@ -655,7 +660,7 @@ pub fn run() {
             // The database comes first. If it cannot be opened, nothing else is
             // set up: no tray, no global shortcuts and no engine start-up, so
             // nothing can show the window or start a recording behind the
-            // error dialog. Closing the dialog exits with code 1.
+            // recovery dialog.
             if let Err(error) = tauri::async_runtime::block_on(async {
                 database::setup::initialize_database_on_startup(&_app.handle()).await
             }) {
@@ -663,6 +668,7 @@ pub fn run() {
                 return Ok(());
             }
             log::info!("Application setup complete");
+            library::backup_schedule::start(_app.handle().clone());
             #[cfg(windows)]
             windows_lifecycle::install(_app.handle());
 
@@ -675,6 +681,7 @@ pub fn run() {
                 let _ = audio::recording_preferences::recording_roots(_app.handle()).await;
             });
             summary::codex_provider::mark_custom_home_once(_app.handle());
+            credentials::forget_retired_openclaw_credential(_app.handle());
 
             // Initialize system tray
             if let Err(e) = tray::create_tray(_app.handle()) {
@@ -769,13 +776,8 @@ pub fn run() {
             // }
 
             // Initialize bundled templates directory for dynamic template discovery
-            log::info!("Initializing bundled templates directory...");
             if let Ok(resource_path) = _app.handle().path().resource_dir() {
                 let templates_dir = resource_path.join("templates");
-                log::info!(
-                    "Setting bundled templates directory to: {:?}",
-                    templates_dir
-                );
                 summary::templates::set_bundled_templates_dir(templates_dir);
             } else {
                 log::warn!("Failed to resolve resource directory for templates");
@@ -817,9 +819,15 @@ pub fn run() {
         .invoke_handler(floating::restrict_commands(tauri::generate_handler![
             floating::open_floating_controls,
             floating::floating_status,
+            floating::recording_window_appearance,
+            floating::floating_set_paused,
+            floating::floating_reconnect,
             floating::floating_note,
             floating::floating_stop,
             floating::dismiss_floating_controls,
+            floating::floating_drag,
+            floating::floating_resize,
+            floating::floating_open_main,
             library::context::get_meeting_context,
             library::context::set_meeting_context,
             library::calendar::get_meeting_calendar,
@@ -827,6 +835,13 @@ pub fn run() {
             library::calendar::migrate_legacy_meeting_calendars,
             library::calendar::get_meeting_series_template,
             library::calendar::set_meeting_series_template,
+            library::follow_through::list_open_reviewed_actions,
+            library::follow_through::get_meeting_series_review,
+            library::follow_through::get_meeting_series_preferences,
+            library::follow_through::get_upcoming_series_brief,
+            library::follow_through::save_meeting_series_review,
+            library::follow_through::get_reviewed_follow_up_draft,
+            library::follow_through::open_reviewed_follow_up_draft,
             library::recording_calendar::get_active_recording_calendar,
             library::recording_calendar::set_active_recording_calendar,
             library::list_meeting_tags,
@@ -842,15 +857,25 @@ pub fn run() {
             library::summary_bookmarks::get_meeting_summary_bookmarks,
             library::summary_bookmarks::set_meeting_summary_bookmarks,
             library::export_local_word,
+            library::export_local_markdown,
             library::backup::backup_library,
             library::backup::restore_library,
+            library::backup_schedule::scheduled_backup_status,
+            library::backup_schedule::choose_scheduled_backup_folder,
+            library::backup_schedule::set_scheduled_backups,
+            database::recovery::startup_recovery_active,
+            database::recovery::return_to_original_library,
             library::archive::list_archive_rows,
             library::archive::storage::measure_archive_storage,
+            library::file_cleanup::list_pending_meeting_file_cleanup,
+            library::file_cleanup::retry_meeting_file_cleanup,
+            library::file_cleanup::keep_pending_meeting_files,
             library::archive::storage::inspect_archive_audio,
             library::archive::storage::remove_archive_audio,
             updates::get_update_channel,
             updates::download_app_update,
             updates::install_app_update,
+            updates::discard_app_update,
             updates::set_update_channel,
             updates::check_app_update,
             start_recording,
@@ -925,19 +950,21 @@ pub fn run() {
             audio::recording_commands::get_transcript_history,
             audio::recording_commands::get_recording_meeting_name,
             // Device monitoring commands (AirPods/Bluetooth disconnect/reconnect)
-            audio::recording_commands::poll_audio_device_events,
-            audio::recording_commands::get_reconnection_status,
+            audio::recording_commands::get_recording_health,
+            audio::recording_commands::get_live_conversation_metrics,
             audio::recording_commands::attempt_device_reconnect,
             // Playback device detection (Bluetooth warning)
-            // OpenClaw handoff commands
             diagnostics::get_diagnostics_snapshot,
             diagnostics::save_diagnostics_report,
             audio::pc_test::run_transcription_pc_test,
             mcp::settings::get_mcp_access,
             mcp::settings::set_mcp_access,
-            openclaw::get_openclaw_config_status,
-            openclaw::save_openclaw_config,
-            openclaw::clear_openclaw_bearer_token,
+            mcp::settings::set_mcp_follow_through_access,
+            webhook::get_webhook_settings,
+            webhook::save_webhook_settings,
+            webhook::remove_webhook_settings,
+            webhook::send_webhook_test,
+            webhook::send_meeting_webhook,
             // Teams meeting detection commands
             teams_detection::get_teams_detection_config,
             teams_detection::get_teams_detection_status,
@@ -962,6 +989,7 @@ pub fn run() {
             file_grants::pick_backup_save_path,
             file_grants::pick_backup_restore_path,
             file_grants::pick_word_save_path,
+            file_grants::pick_markdown_save_path,
             audio::interrupted::find_interrupted_recordings,
             audio::interrupted::preview_interrupted_recording,
             audio::interrupted::discard_interrupted_recording,
@@ -1008,10 +1036,13 @@ pub fn run() {
             api::api_get_meeting,
             api::api_get_meeting_metadata,
             api::api_get_meeting_transcripts,
+            api::api_get_meeting_transcript_timeline,
             api::api_update_transcript_speaker,
             api::api_update_transcript_speakers_matching,
             api::api_save_meeting_title,
             api::api_save_transcript,
+            api::save_offline_recording_transcript,
+            api::save_recovery_transcript_copy,
             api::open_meeting_folder,
             api::open_external_url,
             // Custom OpenAI commands
@@ -1048,6 +1079,7 @@ pub fn run() {
             summary::template_commands::api_save_default_template,
             summary::template_commands::api_get_template_editor,
             summary::template_commands::api_save_template,
+            summary::template_commands::api_remove_template,
             audio::recording_mode::get_recording_mode,
             audio::recording_mode::set_recording_mode,
             database::transcript_edits::api_update_transcript_text,
@@ -1071,6 +1103,7 @@ pub fn run() {
             openrouter::get_openrouter_models,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
+            audio::recording_preferences::set_recording_device_preferences,
             audio::vocabulary_settings::get_custom_vocabulary,
             audio::vocabulary_settings::set_custom_vocabulary,
             audio::recording_preferences::get_default_recordings_folder_path,
@@ -1084,6 +1117,7 @@ pub fn run() {
             behavior_settings::get_behavior_settings,
             behavior_settings::migrate_legacy_behavior_settings,
             behavior_settings::set_recording_notification_preference,
+            behavior_settings::set_conversation_metrics_preference,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,
@@ -1116,6 +1150,10 @@ pub fn run() {
             knowledge::commands::knowledge_cancel_request,
             knowledge::commands::knowledge_history,
             knowledge::commands::knowledge_resolve_evidence,
+            knowledge::live_notes::save_selected_live_answer,
+            knowledge::live_notes::list_saved_live_answers,
+            knowledge::live_notes::resolve_saved_live_answer_citation,
+            knowledge::live_notes::delete_saved_live_answer,
             knowledge::commands::knowledge_create_library_conversation,
             knowledge::commands::knowledge_list_library_conversations,
             knowledge::commands::knowledge_library_conversation_scope,
@@ -1150,8 +1188,12 @@ pub fn run() {
             audio::import::select_and_validate_audio_command,
             audio::import::select_audio_files_command,
             audio::import::validate_audio_file_command,
-            audio::import::start_import_audio_command,
-            audio::import::cancel_import_command,
+            audio::import::queue::import_queue_snapshot,
+            audio::import::queue::import_cloud_destination,
+            audio::import::queue::enqueue_imports,
+            audio::import::queue::cancel_import_item,
+            audio::import::queue::retry_import_item,
+            audio::import::queue::clear_finished_imports,
             // Microsoft Graph export commands
             exports::commands::microsoft_sign_in,
             exports::commands::microsoft_cancel_sign_in,
@@ -1163,6 +1205,8 @@ pub fn run() {
             exports::commands::export_meeting_to_onenote_section,
             exports::commands::list_onenote_resumes,
             exports::commands::get_meeting_export_history,
+            exports::commands::reconcile_meeting_export,
+            exports::commands::list_export_recovery_candidates,
             exports::commands::export_meeting_markdown_to_planner,
             exports::commands::summary_has_action_items,
             exports::commands::list_onenote_notebooks,
@@ -1186,6 +1230,8 @@ pub fn run() {
             exports::commands::preview_planner_tasks,
             exports::actions::get_reviewed_meeting_actions,
             exports::actions::suggest_meeting_actions,
+            exports::actions::resolve_reviewed_action_source,
+            exports::actions::get_reviewed_action_editor,
             exports::actions::save_reviewed_meeting_actions,
             exports::commands::export_selected_planner_tasks,
             exports::commands::preview_todo_tasks,
@@ -1196,7 +1242,7 @@ pub fn run() {
             exports::confluence::confluence_connection_status,
             exports::confluence::confluence_export_page,
         ]))
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             match event {

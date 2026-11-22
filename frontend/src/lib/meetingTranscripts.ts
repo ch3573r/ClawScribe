@@ -2,6 +2,13 @@ import type { PaginatedTranscriptsResponse, Transcript } from '@/types';
 
 type Invoke = <T>(command: string, args: Record<string, unknown>) => Promise<T>;
 
+export interface TranscriptTextPatch {
+  id: string;
+  text: string;
+  original_text?: string | null;
+  word_timestamps?: Transcript['word_timestamps'] | null;
+}
+
 export async function fetchAllMeetingTranscripts(invoke: Invoke, meetingId: string): Promise<Transcript[]> {
   const transcripts: Transcript[] = [];
   const seen = new Set<string>();

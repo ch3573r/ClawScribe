@@ -16,8 +16,8 @@ test('the install exclusion is a Rust-owned permit, never a webview resource', (
   assert.doesNotMatch(updates, /impl tauri::Resource for UpdateInstallPermit/);
   assert.doesNotMatch(updates, /resources_table\(\)\s*\.add\(\s*permit/);
   assert.doesNotMatch(updates, /reserve_update_install|check_update_install_ready/);
-  assert.match(updates, /pub async fn install_app_update\(rid: ResourceId\)/);
-  assert.match(updates, /let permit = UpdateInstallPermit::acquire\(\)\?;[\s\S]*spawn_blocking\(move \|\| \{\s*let _permit = permit;/);
+  assert.match(updates, /pub async fn install_app_update\(\s*rid: ResourceId,/);
+  assert.match(updates, /let permit = UpdateInstallPermit::acquire\(\)\?;\s*edits\.ensure_saved_for_update\(\)\?;\s*let staged = staged\(\)[\s\S]*?\.take_if[\s\S]*?spawn_blocking\(move \|\| \{\s*let _permit = permit;/);
   const lib = rust('lib.rs');
   assert.match(lib, /updates::download_app_update/);
   assert.match(lib, /updates::install_app_update/);
@@ -38,6 +38,8 @@ test('the page cannot reach the updater plugin and does not hold the installer',
 
 test('summaries, saved answers and every export write are admitted through the install gate', () => {
   assert.match(rust('summary/service.rs'), /crate::updates::admit_work\(\)\?/);
+  assert.match(rust('summary/commands.rs'), /pub async fn api_save_meeting_summary[\s\S]{0,350}crate::updates::admit_work\(\)\?/);
+  assert.match(rust('api/api.rs'), /pub async fn api_save_meeting_title[\s\S]{0,420}crate::updates::admit_work\(\)\?/);
   const answers = rust('knowledge/answers.rs');
   assert.match(answers, /crate::updates::admit_work\(\)\?/);
   // A dropped lease still owes the durable cancellation write, so it keeps the guard.
@@ -45,9 +47,11 @@ test('summaries, saved answers and every export write are admitted through the i
   const exports = rust('exports/commands.rs');
   const lockUses = exports.match(/EXPORT_LOCK/g) ?? [];
   assert.equal(lockUses.length, 2, 'only the definition and the single guard helper take the lock');
+  assert.match(exports, /fn export_guard\([\s\S]{0,300}crate::updates::admit_work\(\)\?/);
   assert.equal((exports.match(/let _export_guard = export_guard\(\)\?;/g) ?? []).length, 7);
-  assert.match(exports, /export_meeting_to_onedrive_files[\s\S]{0,300}crate::updates::admit_work\(\)\?/);
-  assert.match(rust('exports/confluence.rs'), /confluence_export_page[\s\S]{0,300}crate::updates::admit_work\(\)\?/);
+  assert.match(exports, /export_meeting_to_onedrive_files[\s\S]{0,300}export_guard\(\)\?/);
+  assert.match(exports, /fn reconcile_meeting_export[^{]*\{\s*let _guard = export_guard\(\)\?;/);
+  assert.match(rust('exports/confluence.rs'), /confluence_export_page[\s\S]{0,350}commands::export_guard\(\)\?/);
 });
 
 test('live context labels describe a fixed window of up to ten minutes', () => {

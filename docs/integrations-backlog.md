@@ -1,8 +1,8 @@
 # Integrations backlog
 
 ClawScribe supports Microsoft calendar lookup, OneNote, Planner, To Do,
-OneDrive or SharePoint file export, and Confluence drafts. Additional Graph
-permissions require a user-facing reason and a consent review.
+OneDrive or SharePoint file export, Confluence drafts, and outbound webhooks.
+Additional Graph permissions require a user-facing reason and a consent review.
 
 ## Microsoft 365 — shelved / not next
 - [ ] **Email recap to attendees (Outlook `Mail.Send`)** — shelved for now.
@@ -19,6 +19,8 @@ permissions require a user-facing reason and a consent review.
   — niche or API-immature.
 
 ## Shipped
+- [x] **Outbound webhook** — send saved meeting data to a user-configured
+  automation endpoint. [Webhook settings and payload](integrations/webhook.md)
 - [x] **OneDrive / SharePoint file export** — export reviewed meeting content as Word or PDF to a selected destination using `Files.ReadWrite`.
 - [x] **Microsoft To Do** — personal action items (counterpart to Planner's team
   tasks). Uses the existing `Tasks.ReadWrite` scope and the `/me/todo/...`

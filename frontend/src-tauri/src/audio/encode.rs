@@ -7,6 +7,8 @@ use std::{
     process::{Command, Stdio},
 };
 
+pub(super) const RECORDING_AAC_KBPS: u32 = 192;
+
 pub struct AudioInput {
     pub data: Arc<Vec<f32>>,
     pub sample_rate: u32,
@@ -117,6 +119,24 @@ pub(super) fn encode_pcm_stream(
     timeout: std::time::Duration,
     write: impl FnOnce(&mut std::process::ChildStdin) -> std::io::Result<()> + Send,
 ) -> anyhow::Result<()> {
+    encode_pcm_stream_at_bitrate(
+        sample_rate,
+        channels,
+        output_path,
+        timeout,
+        RECORDING_AAC_KBPS,
+        write,
+    )
+}
+
+pub(super) fn encode_pcm_stream_at_bitrate(
+    sample_rate: u32,
+    channels: u16,
+    output_path: &PathBuf,
+    timeout: std::time::Duration,
+    bitrate_kbps: u32,
+    write: impl FnOnce(&mut std::process::ChildStdin) -> std::io::Result<()> + Send,
+) -> anyhow::Result<()> {
     let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| {
         anyhow::anyhow!("FFmpeg not found. Please install FFmpeg to save recordings.")
     })?;
@@ -138,7 +158,7 @@ pub(super) fn encode_pcm_stream(
             "-c:a",
             "aac",
             "-b:a",
-            "192k",
+            &format!("{bitrate_kbps}k"),
             "-profile:a",
             "aac_low",
             "-movflags",

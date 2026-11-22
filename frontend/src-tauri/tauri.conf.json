@@ -1,7 +1,7 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "ClawScribe",
-    "version": "0.65.1",
+    "version": "0.67.0",
     "identifier": "net.rismondo.openclaw.clawscribe",
     "build": {
         "frontendDist": "../out",
@@ -77,8 +77,8 @@
         "publisher": "OpenClaw",
         "copyright": "Copyright (c) OpenClaw contributors",
         "category": "Productivity",
-        "shortDescription": "Windows meeting recorder with OpenClaw handoff.",
-        "longDescription": "ClawScribe records meetings from the Windows user session, produces local transcripts and summaries, and can hand completed meeting artifacts to OpenClaw.",
+        "shortDescription": "Local-first Windows meeting recorder.",
+        "longDescription": "ClawScribe records meetings from the Windows user session, produces local transcripts and summaries, and can send saved meeting data to a configured automation endpoint.",
         "icon": [
             "icons/icon.png",
             "icons/app_icon.icns",

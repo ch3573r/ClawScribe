@@ -94,6 +94,13 @@ this prebuilt helper; it does not compile it for you. It stages the sherpa
 runtime and, for installer builds, the pinned Codex runtime. See
 [codex-runtime.md](codex-runtime.md). The native build stages FFmpeg.
 
+Install the Visual Studio 2022 C++ toolset's x64 redistributable files on the
+build machine. The staging script resolves the installed toolset's
+`VCToolsRedistDir` or uses `vswhere` to find Visual Studio 2022 and its versioned
+`VC/Redist/MSVC` folders. A missing directory or DLL fails preflight and
+packaging. The script checks each file's Microsoft Authenticode signature and
+records its file version.
+
 ## Local Validation And Packaging
 
 From `frontend/`:
@@ -119,7 +126,25 @@ its bundle root is `<cargo-target-directory>/release/bundle`. Do not assume the
 member crate has its own target directory. The GitHub workflow normalizes its
 artifacts into `frontend/src-tauri/target/release/bundle` before upload.
 
+Use this release script for standalone Windows installers. It and the release
+workflow apply the same Tauri config overlay, which maps the staged VC++ DLLs
+to the installation root in both formats.
+
 ## Windows Runtime Prerequisite
+
+### Microsoft Visual C++
+
+Releases through 0.66.1 required the Microsoft Visual C++ 2015–2022 x64
+Redistributable to be installed. Starting with 0.67.0, NSIS and MSI install
+`msvcp140.dll`, `msvcp140_1.dll`, `vcruntime140.dll`,
+`vcruntime140_1.dll`, and `vcomp140.dll` beside the ClawScribe executable and
+its top-level sidecars. The first four come from `x64/Microsoft.VC143.CRT`.
+OpenMP's `vcomp140.dll`, required by the local summary helper, comes from
+`x64/Microsoft.VC143.OpenMP`. Windows 10 and 11 supply the Universal CRT.
+Both installers ship the signed DLLs directly, so VC++ setup needs no download
+or elevation.
+
+### Vulkan
 
 The `windows-gpu` and `vulkan` builds have a load-time dependency on
 `vulkan-1.dll`. A machine without the loader can fail before the app opens or
@@ -223,9 +248,12 @@ builds therefore also run `frontend/scripts/test-packaged-acceptance.ps1` after
 the installers and native tests, before build metadata is written. It runs only
 on the designated runner (it checks `CLAWSCRIBE_BUILD_RUNNER` first) and:
 
-1. unpacks the NSIS installer just built into a new temporary folder with
-   7-Zip. Nothing is installed: no registry entry, shortcut or existing
-   installation is touched;
+1. unpacks the NSIS and MSI payloads into new temporary folders with 7-Zip.
+   Before running ClawScribe, it checks that the five x64 VC++ DLLs are beside
+   the application in both packages and audits normal and delay-loaded VC++
+   imports across every native payload file, including the runtime DLLs.
+   The MSI check reads the cabinet file names and install directories from the
+   Windows Installer database. No installer is run;
 2. runs the packaged executable twice, in two separate processes, as
    `--self-test run <profile>` and `--self-test verify <profile>`. The profile is
    a new folder inside the temporary folder. The run phase refuses a profile that
@@ -248,10 +276,11 @@ on the designated runner (it checks `CLAWSCRIBE_BUILD_RUNNER` first) and:
    holds no links. `-KeepWork` keeps it for inspection. A cleanup failure is
    reported after, and never replaces, the first failure.
 
-The Actions log and summary hold only fixed check names, pass or fail, exit codes
-(a crash such as a missing runtime library shows its hexadecimal code, even with
-no report) and a few counts. Error text, paths and the application's own output
-are never printed. The work folder must be on a fixed local drive with 3 GiB free.
+The Actions log and summary hold fixed check names, pass or fail, exit codes
+(a crash shows its hexadecimal code even with no report), counts, and the
+packaged filenames involved in missing VC++ imports. Absolute paths and the
+application's output stay out of the log. The work folder must be on a fixed
+local drive with 3 GiB free.
 
 The self-test is a headless mode of the shipped executable (`self_test.rs`). It
 starts before any window, plugin, single-instance guard or logger, so it never
@@ -281,11 +310,11 @@ the graphical interface and keyboard behaviour, running the installer
 the updater, and long sessions on the target notebook. Passing it does not
 establish stable readiness.
 
-To rerun it against an existing installer on the runner (set
+To rerun it against existing installers on the runner (set
 `EXPECTED_BUILD_RUNNER` to the configured name first):
 
 ```powershell
-.\frontend\scripts\test-packaged-acceptance.ps1 -Installer <path to ClawScribe_<version>_x64-setup.exe>
+.\frontend\scripts\test-packaged-acceptance.ps1 -Installer "<NSIS setup path>" -MsiInstaller "<MSI path>"
 ```
 
 ## GitHub Actions
@@ -417,11 +446,11 @@ commit separately instead of relabeling the binaries.
 
 ## Artifacts And Signing
 
-For source version 0.65.1, installer filenames are:
+For source version 0.67.0, installer filenames are:
 
 ```text
-ClawScribe_0.65.1_x64-setup.exe
-ClawScribe_0.65.1_x64_en-US.msi
+ClawScribe_0.67.0_x64-setup.exe
+ClawScribe_0.67.0_x64_en-US.msi
 ```
 
 Published installers include detached Tauri updater signatures (`.sig`).
@@ -431,6 +460,9 @@ the NSIS URL and its Tauri signature. Verify that the assets exist and are
 nonempty, their checksums match, and metadata identifies the expected commit
 and version before publication. A workflow status is not a substitute for
 checking the uploaded assets.
+
+`BUILD-METADATA.txt` records the file version of each staged VC++ DLL. The DLLs
+retain their Microsoft Authenticode signatures.
 
 Both the local script and workflow write bundle-relative checksum paths,
 including `nsis/` and `msi/` directory prefixes. For a flat download from GitHub,
@@ -485,10 +517,12 @@ missing. Do not publish an empty signature to work around that failure.
 
 Stable releases are the default. The app checks the latest non-draft,
 non-prerelease release's `latest.json`. Users can enable **Include prereleases**
-in Settings > Preferences > Updates or About. This choice persists locally in
-the Tauri-owned `updater.json` store and applies to startup checks, manual checks,
-and the tray. Checking at launch is a separate preference; opting into previews
-does not turn on automatic checks or install anything automatically.
+in Settings > General > Updates or About. The Tauri-owned `updater.json` store
+persists the channel for both manual and automatic checks. When automatic
+checks are enabled, the main webview checks shortly after launch and retries
+hourly while the app is running, including while hidden in the tray. Successful
+checks are cached for 24 hours and concurrent requests share one check per
+channel. Installation requires a user action.
 
 The preview channel considers the stable update and the newest eligible Windows
 x64 release in GitHub's 100 most recent release entries. It compares numeric
@@ -509,8 +543,11 @@ held in memory, never handed to the page) and keeps the verified bytes until the
 install step, so a page reload cannot change what is installed. An update can
 install once recording, transcription, speaker detection, indexing, summaries,
 saved answers and Microsoft 365 or Confluence exports finish. Work can start
-during the download. If it does, the install step stops without losing that work;
-try the update again after it finishes. The exclusion is held by the native
+during the download. ClawScribe flushes pending meeting title and summary edits
+after the download and waits for the core to acknowledge them. A failed save or
+newly active job stops installation. The native hand-off checks for pending
+drafts again while holding the same exclusion as meeting writes.
+The exclusion is held by the native
 application for the whole installer hand-off and released if the installer
 fails, so it cannot be stranded by a reload. Device security policy still applies
 to the installer; selecting a channel does not bypass Windows security blocks.
@@ -545,6 +582,11 @@ Use a separate test profile or a backed-up installation; do not delete meeting
 data to test installation. Record the application commit, engine/model, Windows
 version, audio devices, and result without publishing private meeting content.
 
+For a VC++ packaging change, install and launch each format on a clean Windows
+machine or VM without the system-wide VC++ Redistributable. Keep the normal
+WebView2 and GPU loader prerequisites available. Exercise the local summary
+helper as well as the main app.
+
 1. Install the candidate. Start a recording that captures microphone and remote
    system audio. Verify both sources in the saved playback, stop cleanly, and
    start a second recording. The publication confirmation must cover the active
@@ -562,6 +604,8 @@ version, audio devices, and result without publishing private meeting content.
 4. Run a sustained Teams/Webex session on the target notebook with its normal
    workload. Observe RAM, transcription backlog, CPU contention, and stop time;
    include device changes, sleep/wake, and failure recovery in acceptance testing.
+   Run the [capture health and call ownership scenarios](installed-capture-smoke.md#capture-health-and-call-ownership)
+   on that exact candidate.
 5. For the meeting-memory preview, use an isolated profile with invented English
    and German meetings. Check keyword retrieval offline before any model
    download, semantic fallback and downloaded-model retrieval, and visible
@@ -588,6 +632,4 @@ version, audio devices, and result without publishing private meeting content.
    without real-device acceptance; that exception does not change this policy.
 
 Optional hosted-provider verification is documented in
-[hosted-transcription-smoke.md](hosted-transcription-smoke.md). OpenClaw handoff
-verification is in [openclaw-handoff.md](openclaw-handoff.md); it is not required
-for standalone local recording.
+[hosted-transcription-smoke.md](hosted-transcription-smoke.md).

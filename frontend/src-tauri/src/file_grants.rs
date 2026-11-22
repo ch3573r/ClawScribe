@@ -35,6 +35,8 @@ pub(crate) enum Purpose {
     BackupOpen,
     /// Where to write a Word export (`.docx`).
     WordSave,
+    /// Where to write a Markdown export (`.md`).
+    MarkdownSave,
     /// The folder recordings are saved in.
     RecordingsFolder,
     /// A reference document to attach to a meeting.
@@ -308,12 +310,28 @@ pub async fn pick_word_save_path<R: Runtime>(
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
+/// Opens the save dialog for a Markdown export.
+#[tauri::command]
+pub async fn pick_markdown_save_path<R: Runtime>(
+    app: AppHandle<R>,
+    suggested_name: String,
+) -> Result<Option<String>, String> {
+    let Some(chosen) = pick_save(app, "Markdown", "md", suggested_name).await? else {
+        return Ok(None);
+    };
+    let path = with_extension(chosen, "md")?;
+    save_target_parent_exists(&path)?;
+    grant(Purpose::MarkdownSave, &path)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
 /// Grants the audio files of a drop on the window. The core saw the drop, so it
 /// is a user choice; the paths are never taken from a webview argument.
 pub(crate) fn grant_dropped_audio(paths: &[PathBuf]) -> Vec<String> {
     paths
         .iter()
-        .filter(|path| has_extension(path, AUDIO_EXTENSIONS))
+        .filter(|path| has_extension(path, crate::audio::constants::AUDIO_EXTENSIONS))
+        .take(MAX_GRANTS)
         .filter(|path| grant(Purpose::AudioImport, path).is_ok())
         .map(|path| path.to_string_lossy().into_owned())
         .collect()
@@ -336,6 +354,7 @@ mod tests {
         grant(Purpose::BackupSave, &path).unwrap();
         assert!(take(Purpose::BackupOpen, &path.to_string_lossy()).is_err());
         assert!(take(Purpose::WordSave, &path.to_string_lossy()).is_err());
+        assert!(take(Purpose::MarkdownSave, &path.to_string_lossy()).is_err());
         assert!(
             peek(Purpose::BackupSave, &path.to_string_lossy()).is_ok(),
             "a peek does not use it up"

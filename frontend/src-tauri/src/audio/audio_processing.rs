@@ -10,6 +10,12 @@ use rubato::{
 use std::path::PathBuf;
 
 use super::encode::encode_single_audio; // Correct path to encode module
+use crate::database::meeting_files;
+
+const RECORDINGS_FOLDER_UNAVAILABLE: &str =
+    "The recordings folder is unavailable. Reconnect it or choose another folder in Settings → Recording.";
+const RECORDINGS_FOLDER_UNSAFE: &str =
+    "The recordings folder uses a link, a junction, or an unsupported location. Choose the actual folder in Settings → Recording.";
 
 /// Sanitize a filename to be safe for filesystem use
 pub fn sanitize_filename(name: &str) -> String {
@@ -33,8 +39,30 @@ pub fn sanitize_filename(name: &str) -> String {
 pub fn create_meeting_folder(base_path: &PathBuf, meeting_name: &str) -> Result<PathBuf> {
     let timestamp = Utc::now().format("%Y-%m-%d_%H-%M").to_string();
     let sanitized_name = sanitize_filename(meeting_name);
-    let folder_name = format!("{}_{}", sanitized_name, timestamp);
-    std::fs::create_dir_all(base_path)?;
+    let mut folder_name = format!("{}_{}", sanitized_name, timestamp);
+    if meeting_files::is_cleanup_path(std::path::Path::new(&folder_name)) {
+        folder_name.insert_str(0, "Meeting_");
+    }
+    let folder_error = |error: std::io::Error| {
+        anyhow::Error::msg(if error.kind() == std::io::ErrorKind::InvalidInput {
+            RECORDINGS_FOLDER_UNSAFE
+        } else {
+            RECORDINGS_FOLDER_UNAVAILABLE
+        })
+    };
+    if meeting_files::is_cleanup_path(base_path) {
+        anyhow::bail!(RECORDINGS_FOLDER_UNSAFE);
+    }
+    match meeting_files::directory_chain(base_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(base_path).map_err(folder_error)?;
+            meeting_files::directory_chain(base_path).map_err(folder_error)?;
+        }
+        Err(error) => return Err(folder_error(error)),
+    }
+    #[cfg(windows)]
+    let _base = meeting_files::pin_directory_chain(base_path).map_err(folder_error)?;
     let mut meeting_folder = base_path.join(&folder_name);
     // A restart within the same minute must not reuse or clean up a previous
     // session's folder. Successfully creating the directory establishes ownership.
@@ -42,10 +70,12 @@ pub fn create_meeting_folder(base_path: &PathBuf, meeting_name: &str) -> Result<
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             meeting_folder = base_path.join(format!("{folder_name}_{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir(&meeting_folder)?;
+            std::fs::create_dir(&meeting_folder).map_err(folder_error)?;
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(folder_error(error)),
     }
+    meeting_files::resolve_recording_folder(&meeting_folder, std::slice::from_ref(base_path))
+        .map_err(|_| anyhow::Error::msg(RECORDINGS_FOLDER_UNSAFE))?;
 
     log::info!("Created meeting folder");
     // The core made this folder: a later save may attach it to a meeting.
@@ -168,6 +198,7 @@ pub struct LoudnessNormalizer {
     gain_linear: f32,
     loudness_buffer: Vec<f32>,
     true_peak_limit: f32,
+    max_gain: f32,
 }
 
 impl LoudnessNormalizer {
@@ -195,7 +226,15 @@ impl LoudnessNormalizer {
             gain_linear: 1.0,
             loudness_buffer: Vec::with_capacity(ANALYZE_CHUNK_SIZE),
             true_peak_limit,
+            // Bound amplification to about +18 dB. Integrated loudness can
+            // include a quiet microphone's background and far-end bleed.
+            max_gain: 8.0,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn use_uncapped_gain_for_benchmark(&mut self) {
+        self.max_gain = f32::INFINITY;
     }
 
     /// Normalize loudness using EBU R128 standard with true peak limiting
@@ -228,7 +267,8 @@ impl LoudnessNormalizer {
                     if let Ok(current_lufs) = self.ebur128.loudness_global() {
                         if current_lufs.is_finite() && current_lufs < 0.0 {
                             let gain_db = TARGET_LUFS - current_lufs;
-                            self.gain_linear = 10_f32.powf(gain_db as f32 / 20.0);
+                            self.gain_linear =
+                                10_f32.powf(gain_db as f32 / 20.0).min(self.max_gain);
                         }
                     }
                 }
@@ -243,6 +283,50 @@ impl LoudnessNormalizer {
         }
 
         normalized_samples
+    }
+}
+
+#[cfg(test)]
+mod loudness_tests {
+    use super::LoudnessNormalizer;
+
+    #[test]
+    fn normalizer_boosts_quiet_speech_and_attenuates_loud_speech() {
+        let speech = include_bytes!("pc_test_samples/de.s16le");
+        for (level, quiet) in [(0.015, true), (3.0, false)] {
+            let input: Vec<f32> = speech
+                .chunks_exact(2)
+                .map(|bytes| {
+                    let sample = i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0;
+                    (sample * level).clamp(-1.0, 1.0)
+                })
+                .collect();
+            let mut normalizer = LoudnessNormalizer::new(1, 16_000).unwrap();
+            normalizer.normalize_loudness(&input);
+            if quiet {
+                assert!((normalizer.gain_linear - 8.0).abs() < 0.01);
+            } else {
+                assert!(normalizer.gain_linear > 0.0 && normalizer.gain_linear < 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn faint_background_does_not_drive_unbounded_microphone_gain() {
+        let rate = 48_000;
+        let amplitude = 0.002;
+        let background: Vec<_> = (0..rate * 2)
+            .map(|index| {
+                amplitude * (std::f32::consts::TAU * 1_000.0 * index as f32 / rate as f32).sin()
+            })
+            .collect();
+        let mut normalizer = LoudnessNormalizer::new(1, rate).unwrap();
+        let output = normalizer.normalize_loudness(&background);
+        let peak = output[rate as usize..]
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0, f32::max);
+        assert!(peak <= amplitude * 8.0, "quiet input peak grew to {peak}");
     }
 }
 

@@ -40,6 +40,34 @@ recording-folder support files, and existing backups remain available.
 Imported originals outside the meeting folder remain where they were.
 ClawScribe only removes audio after confirmation.
 
+## Open actions and saved live answers
+
+In **Meetings → Open actions**, filter unfinished reviewed actions by owner
+text, inclusive due dates, or a reviewed recurring series. Due-date filters
+hide actions without a date. **Review action** opens its saved meeting and
+focuses its **Done** control. Choose **Save actions** to commit an edit or
+completion. Open the meeting's **Export** menu to review selected tasks for
+Planner or Microsoft To Do. The action source is available when the reviewed
+action was saved with a citation.
+
+During live assistance, choose **Save answer to meeting notes** on a completed
+reply. **Saved live answers** in the saved meeting shows the provider, the
+finalized-through time, and the original excerpts from the recording. Citations
+to other saved meetings or documents display only while the original references
+still verify. Deleting a source meeting or reference document also removes any
+saved live answer that used it, including answers without a citation. Detaching
+a shared document from a meeting removes answers that used it through that meeting.
+Early development builds saved answers without a complete record of their
+sources. Deleting any source meeting or document, or detaching any document,
+removes all of those older answers. Editing or retranscribing a source keeps
+the saved answer, but citations to changed passages may no longer display.
+Choose **Remove** to delete a saved answer from the meeting.
+Unselected live chat clears at Stop. Saved answers attach to that specific
+recording at Stop or during local recovery and can be removed from **Manage
+pending notes** if the recording was never saved. Portable archives
+include explicitly saved answers whose only sources were finalized excerpts
+from that recording.
+
 ## Local assistant access
 
 Open **Settings → Assistant access** and enable **Allow
@@ -61,30 +89,49 @@ and [Codex MCP configuration](https://developers.openai.com/codex/mcp).
 | `get_transcript` | Current transcript text in recording order with available speaker labels and timestamps. |
 | `get_audio` | A local path for a verified saved audio file, or null when unavailable. |
 
+Enable **Allow read-only follow-through** for two narrower tools. You can enable
+this scope by itself. In a saved meeting, choose **Copy meeting reference** in
+the meeting menu and provide that value as `meeting_id` to the client.
+
+| Tool | Result |
+| --- | --- |
+| `get_meeting_metadata` | Created date, recording duration when known, and title when permitted by the calendar review rules. |
+| `list_reviewed_actions` | Open reviewed action IDs, titles, user-entered owners, and due dates for that meeting. Use the returned offset to continue. |
+
+The follow-through scope omits attendee records, calendar identifiers,
+transcripts, recordings, notes, citations, and export history.
+
 Use the meeting ID from a list or search result. For passage matches, use
 the segment ID when reading the transcript. If passage search reports
 `limited`, narrow the query or date and project filters. Follow the returned
 offsets for long transcripts and notes. Calendar invitations stored in the desktop
 calendar picker and attached reference documents are outside this interface.
 
-Enabling this setting grants access to local clients running under your user
-account. A client may send retrieved content to its own provider. Turning the
-switch off blocks new reads, including from clients already connected. Copies
-already read are under the client's control.
+Each permission grants its scope to local clients running under your user
+account. A client may send retrieved content to its own provider. Turning a
+switch off blocks delivery for that scope, including from clients already
+connected. Copies already read are under the client's control.
 
 ## Archive search
 
 Open **Meetings → Archive** to search saved titles, current transcript
 passages, visible saved summaries, personal notes and timestamped bookmarks.
-Search ignores letter case, including German umlauts, and treats punctuation
-such as `%` and `_` literally. Projects, inclusive dates and **Needs attention**
-apply to every source. The sidebar shows a preview for each matching source
-type in a meeting.
+All unquoted terms must appear in the same title or text entry, in any order.
+Put an exact phrase in double quotes, for example `"offene Punkte" Budget`.
+An opening quote without a closing quote is ignored, so the words match as
+separate terms.
+Search ignores letter case, including German umlauts and capital sharp S, and
+treats punctuation such as `%` and `_` literally. Projects, inclusive dates and **Needs attention**
+apply to every source. Archive and Meeting memory date filters use the day shown
+in your local time zone. Older entries that store only a calendar date keep that
+day. Archive results are grouped by meeting. The sidebar shows one preview per
+matching source type in a meeting. Highlights mark the matches in each excerpt.
 
 Open a match to see its source. Transcript passages open at their verified
-position, including later pages. Summary and note matches show a verified
+position, including later pages. **Play passage** opens the transcript and
+plays from that position when saved audio is ready. Summary and note matches show a verified
 excerpt. Saved notes open with their surrounding text, and bookmark matches
-open the marker in the meeting. A changed or
+open the marker in the meeting, where you can play from its recording time. A changed or
 deleted source prompts a new search. **Back to archive** restores your search,
 filters and sort order for the current app session.
 
@@ -98,8 +145,8 @@ an indexable substring use a bounded scan. No download or answer provider is req
 
 **Ask about these results** opens a fresh Meeting memory conversation scoped
 to the displayed matching meetings, including when results are limited.
-The Archive also carries over project and date filters. Review the selected
-meetings, compose a question, and choose **Ask** to use the configured summary
+The Archive carries over project and date filters and fills an editable draft
+with the search text. Review the selected meetings and draft, then choose **Ask** to use the configured summary
 provider. Answers use the existing transcript evidence and eligible saved
 summary overviews. Personal notes and bookmarks stay local by default. Check
 **Review excerpt with a question** on individual results to bring up to eight
@@ -115,9 +162,22 @@ Reviewed requests send the displayed snippets as personal context alongside
 the usual meeting evidence. They omit prior conversation. Their saved questions
 and answers remain visible locally and are excluded from future provider
 history. The built-in model and providers with an identifiable HTTP endpoint
-support this review. Codex and Claude Code manage their own connections, so
-use them with personal excerpts deselected. The local assistant's `search_meetings` tool continues
+support this review. Codex and Claude Code manage their own connections and
+hide personal-excerpt choices. The local assistant's `search_meetings` tool continues
 to match only titles and current transcripts.
+
+## Transcript review
+
+The first transcript page can be read, searched and corrected while the full
+timeline loads. When the timeline arrives, Find and playback can follow the
+whole meeting. If audio is unavailable, the transcript still supports reading,
+copying and corrections. Choose **Check again** to retry an attached folder.
+
+Open **Replace…** from Find to use the current search text in the meeting-wide
+replacement dialog. **Whole words only** helps replace names that are also
+part of longer words. Review the examples and affected passage count before
+choosing **Replace all**. Text corrections and Undo update the existing list
+in place. A verified citation to an unchanged passage can still open it.
 
 ## Meeting memory
 
@@ -223,7 +283,7 @@ meeting are kept. Permanent deletion removes the reference from all attached
 meetings and invalidates dependent answers.
 Indexing status remains visible; retry a failed index from the reference actions.
 
-## Word documents
+## Local documents
 
 Open a saved meeting and select **Export → Word document (.docx)**. Choose the summary, the full
 transcript, or both, then save a `.docx` file. Speaker labels and timestamps are
@@ -234,31 +294,32 @@ connection. The summary uses the current editor contents; transcripts use the
 complete saved database snapshot rather than the visible page. Headings, bullets,
 paragraphs, and Markdown tables are supported; advanced editor formatting is not retained.
 
-The local main window's Tauri capability grants `dialog:allow-save` for Word
-export and backup destinations, and `dialog:allow-open` for restore archives.
-These permissions are required in the packaged app even though the dialog plugin
-is registered in Rust. The frontend regression suite checks the shipped capability;
-browser tests with mocked native calls cannot verify dialog access.
+Choose **Export → Markdown (.md)** to save the same selection as UTF-8 Markdown.
+The file also includes timestamped notes and bookmarks, plus saved duration,
+confirmed attendee names, and project tags when available.
+
+ClawScribe opens the native save dialog and authorizes the chosen path for that
+export. Local document exports require no Microsoft connection.
 
 ## Shared document export options
 
-The **Export** menu groups local Word, Confluence, OneNote, and OneDrive DOCX/PDF.
+The **Export** menu groups local Word and Markdown, Confluence, OneNote, and OneDrive DOCX/PDF.
 Each destination lets you choose **Summary only**, **Transcript only**, or
 **Summary and transcript**, with optional speaker labels and timestamps.
 **Timestamps** covers source times in the summary and line times in the transcript;
 turn it off to export a summary without them. **Speaker labels** applies only to
 transcript lines and is hidden for summary-only exports. Tables in the summary are
-exported as tables to Word, OneDrive DOCX, OneNote, and Confluence. The menu remains
+exported as tables to Word, Markdown, OneDrive DOCX, OneNote, and Confluence. The menu remains
 available without a summary so saved transcripts can be exported on their own.
 
-Local Word starts with both summary and transcript selected. Remote document
+Local Word and Markdown start with both summary and transcript selected. Remote document
 destinations start with summary only; select a transcript explicitly before
 copying or uploading it. Confluence and OneDrive show the options before export;
 OneNote includes them alongside the notebook and section fields. Planner and
 Microsoft To Do keep their action-item selection and editing previews.
 
 All document destinations use recording-relative transcript timestamps when
-available. The Word document date uses local date and time.
+available. Local document exports display the meeting date and time in the local time zone.
 Exports use current editor notes and the full saved transcript, independent of
 the visible transcript page. A transcript read failure stops the export instead
 of silently sending incomplete content. Confluence browser drafts, REST pages,
@@ -313,9 +374,8 @@ the summary provider for that run. The switch applies to the whole meeting.
 ## Backup and restore
 
 Open **Meetings → Backup and restore** to save or restore a ZIP archive. Finish
-active recording, import, retranscription, and Microsoft export work first. The
-app prevents these operations from overlapping an archive operation. Keep the
-app open until it completes.
+active recording, import, retranscription, and Microsoft export work before
+starting a manual backup or restore. Keep the app open until it completes.
 
 Backups contain saved meetings, transcripts and correction history, notes,
 summaries, per-meeting summary context, linked calendar events and attendance,
@@ -327,10 +387,21 @@ saved OneNote sections in the new profile. Existing meetings keep their own
 history. Older archives restore the export history they contain.
 If an archived calendar link cannot be read, restore keeps the meeting and
 reports how many links it left unset.
-Provider settings, credentials, model downloads, UI preferences, and unfinished
-recording recovery spools are excluded. Missing
-recording folders are reported by meeting title without blocking the backup;
-their meeting data is included, and restore leaves their recording folder unset.
+Backups also carry custom summary templates and vocabulary. For calendar series
+linked to an archived meeting, they carry template and summary language choices,
+the setting for including approved notes, and the preferred follow-up
+destination. Restore adds missing
+custom templates by ID and installs the vocabulary only if the destination has
+no vocabulary file. It adds a missing series preference when restoring a meeting
+linked to that series. An existing template, vocabulary list, or series
+preference takes precedence. An approved note travels only with the archived
+meeting whose reviewed event and series still match the note. Restored iCalendar
+series still use their original source IDs. Calendar subscriptions, account and
+provider approvals, provider settings, credentials, models, UI preferences,
+backup schedules, and unfinished recording recovery spools stay with the source
+profile. Missing recording folders are reported by meeting title without
+blocking the backup. The archive includes their meeting data, and restore
+leaves their recording folder unset.
 Unreadable folders and folder links still stop backup with a named error.
 Nonempty `.audio-spool` and `.checkpoints` directories
 remain on the source computer. They do not block backup: available saved audio,
@@ -342,6 +413,15 @@ cancelling the file picker keeps it. Preserve a separate copy of source recordin
 folders, including hidden files, if you need the recovery originals. Backup never
 removes them.
 Archives are not encrypted; keep them in trusted storage.
+
+Version 3 backups include explicitly saved live answers attached to an archived
+recording when ClawScribe can verify that every source came from that recording.
+These answers retain their provider, model, finalized-through time, and original
+cited recording excerpts even when audio is unavailable. Answers with incomplete
+source records or any dependency on another meeting or reference document are
+excluded. The backup reports their count, and restore reports omissions for
+meetings it adds. Unsaved live chat, pending answers from unfinished recordings,
+connection settings, and sharing approvals stay out of the archive.
 
 Restore adds meetings whose IDs are absent from the library and skips existing
 IDs without overwriting them. Restore validates the archive structure and checks
@@ -363,30 +443,80 @@ Archives also retain saved knowledge conversations, including independent
 library threads and the original citation labels. Existing conversation-owner
 IDs are skipped without overwriting their history. A dependent turn is redacted
 when an archived source is unavailable or conflicts with a skipped destination
-meeting. Interrupted answer requests remain interrupted and require an explicit
-retry. Restored citations are historical and cannot navigate as current evidence
+meeting. Restore compares the archived and saved current transcripts even when
+the archive stores them as separate streams. A matching source keeps the saved
+question, answer, and citation labels. Interrupted answer requests remain
+interrupted and require an explicit retry. Restored citations are historical and cannot navigate as current evidence
 or enter a future answer prompt, even when a destination revision number happens
 to match. New questions establish fresh canonical evidence. Semantic indexes
 and model downloads are excluded; restored sources are queued for indexing.
+
+Version 3 archives put transcript segments, chunks, revisions and correction
+batches in separate streams of newline-delimited JSON records. Each record is
+limited to 128 MiB. The manifest holds the record counts, meeting roster,
+remaining metadata, optional follow-through records, and file references. This
+lets accumulated transcript history exceed the 128 MiB manifest limit while
+export and restore process one record at a time. Archives still have a 100 GiB
+total data limit and can contain up to 100,000 recording and reference files.
 
 Version 2 archives add reference metadata, extracted blocks, attachment relations
 and original files with verified hashes. Reference sharing permissions are not
 included and remain off after restore. Original conflicts are remapped without
 overwriting existing files. The same hash/format with differing extracted content
 requires restoration into a separate library, preserving existing canonical text.
-Version 1 archives with a JSON manifest and explicitly listed recording files
-remain readable.
+Versions 1 and 2 remain readable.
 Only saved-library database tables and known media/metadata files are included.
 The meetings table is required; missing known child tables are treated as empty
 so adding optional tables does not invalidate older version-1 backups.
 The optional `incomplete_audio` manifest field records omissions by meeting index;
 older archives without it remain readable.
 Restore rejects unknown tables/columns, unsafe paths, duplicate files, links,
-unsupported versions, and missing or extra archive entries. Limits are 128 MiB of
-manifest data, 100 GiB of file data, and 100,000 recording files. File copying runs
-on a blocking worker and streams audio instead of loading recordings into RAM.
+unsupported versions, invalid record counts, and missing or extra archive
+entries. The manifest remains limited to 128 MiB. File copying runs on a blocking
+worker and streams audio. Transcript records are staged on disk, so the app data
+volume needs temporary space for those records during backup and restore.
 This is a saved-library archive, not a replacement for crash recovery or a system
 backup. Test restoring a backup before relying on it as your only copy.
+
+Invalid, oversized, and unavailable local template files or locations are skipped.
+The operation reports the number of skipped template items. Restore preserves
+local templates and deletions. An archive that contains an invalid template is rejected.
+
+### Scheduled backups
+
+In **Backup and restore**, choose a local folder to enable daily backups. The
+first backup runs when the app is open and the library is idle. Later backups
+run at least 24 hours after the last successful one. ClawScribe checks once a
+minute and defers while recording, transcription, Built-in AI notes, an export,
+or an archive operation is active. Starting a recording interrupts a scheduled backup that
+is still reading the library. ClawScribe discards the partial ZIP and retries
+when the library is idle. A completed ZIP can finish saving during recording.
+If ClawScribe can measure free space, it budgets the ZIP and temporary
+transcript records to leave room for recording. The dialog shows the current
+destination, last successful backup, incomplete audio, skipped template and
+excluded saved answer counts, and any recent error.
+
+ClawScribe creates a dedicated folder in the location you choose. After a new
+backup is saved, retention keeps the three newest tracked archives. It removes
+an older ZIP only when its file identity still matches the saved copy. Manual
+copies, unrelated or replaced files, and archives in earlier destinations
+remain on disk. Turning off daily backups leaves your archives available.
+After an interruption such as a crash, ClawScribe cleans up the recorded
+partial ZIP when its identity still matches.
+
+### If the library fails to open
+
+At the startup error dialog, choose **Open recovery library** to open a separate
+app data folder. ClawScribe restarts and shows the active recovery library.
+Open **Meetings → Backup and restore** to import a ZIP.
+The original database, WAL, and recordings remain in their original locations.
+The recovery profile has its own recording and reference folders, settings,
+and sign-ins.
+
+The recovery choice persists between restarts. After repairing the original
+library, choose **Return to original library**, then quit and reopen ClawScribe.
+The recovery workspace stays on disk. If the original library still fails to
+open, **Open recovery library** reopens the previous workspace when available.
 
 ## Deleting meetings
 
@@ -397,12 +527,12 @@ remove its recording files.
 Deletion removes the meeting's database records, including transcript revisions,
 previous summaries, context, notes, chat, tags, and bookmarks. App-managed export
 history, Codex scratch runs, outputs under app data, and cached transcript recovery
-copies are also removed where possible; cleanup failures are reported separately.
+copies are also removed where possible. Unsaved title and summary edits for the
+deleted meeting are discarded.
 References used only by this meeting are deleted, including extracted text and
 original files, even when recording files are kept. References shared with another
 meeting remain available there. Answers that depended on a deleted reference are
-invalidated and their saved content is cleared. File cleanup failures appear in the
-deletion warnings. Startup also cleans abandoned references from earlier installs
+invalidated and their saved content is cleared. Startup also cleans abandoned references from earlier installs
 when recording and imports are idle; unknown reference files are kept for at least
 24 hours before cleanup. Portable backups include only attached references.
 
@@ -412,9 +542,49 @@ and generated documents. The folder must be inside the configured save location,
 a supported default recording location, or app-data `restored-recordings`; it must
 contain an app recording marker, have no links or junctions in its path, and not
 overlap another meeting's folder. Folders failing these checks or file deletion
-are kept and reported after the database deletion. Uncheck the option to keep
+are kept. Uncheck the option to keep
 the folder and its contents. While recording or transcription is running, only
 deletion with this option off is allowed.
+
+If file cleanup could not finish, open **Meetings → Archive → Storage**. Under
+**Pending file cleanup**, review the item and the reason it was kept. Close apps
+using the files or reconnect an unavailable recording location before retrying.
+ClawScribe verifies ownership before moving files to a temporary location beside
+the original, then removes the moved files. If removal stops partway through,
+the cleanup list shows the temporary location for the next retry. An unavailable
+drive, share, or parent folder keeps staged cleanup pending until the location can
+be verified again. ClawScribe can clear an empty staging folder when the original
+is verified absent, or retry the move after checking it still belongs to the
+cleanup entry. For recordings, this requires a matching marker. Review other
+unfinished staging locations before removing files manually. A new meeting
+using the original path can keep using it. A recording-folder retry before the
+files have moved requires a marker that identifies that meeting. If an older
+folder has no marker or its marker has no meeting ID, use **Keep files** and review
+the folder before removing it manually. **Keep files** clears the item from the
+cleanup list and preserves the files at the displayed location. Pending entries
+are stored on this device and survive app restarts.
+
+On Windows, a OneDrive Cloud Files placeholder can be part of a configured
+recording location. Opening or recovering its contents may require OneDrive to
+download them. When you pick a recording location through a link or junction,
+ClawScribe saves its verified target and checks the new recording folder before
+capture. For an older setting that still points through a link, choose the actual
+folder again in **Settings → Recording**. This also makes earlier interrupted
+recordings in that target available to the disk scan. Folder deletion continues
+to require an unlinked path and verified ownership.
+
+If a recovery scan cannot verify a draft's folder or read its recording marker,
+**Interrupted recordings** shows **Folder unverified** and lets you preview the
+cached transcript. Reconnect the location or let OneDrive finish downloading,
+then choose **Retry scan** in the recovery dialog or under **Settings → General**.
+For a draft with a stable recording ID, **Save transcript to library** saves the
+full cached transcript. When the audio returns, retry the scan and recover it
+into the same meeting. For any unverified draft, **Save transcript copy** saves a local
+text file and keeps the draft linked to its original folder. Both options keep
+the original recovery data. A scan that confirms the original folder is absent
+or belongs to a different recording can offer transcript-only recovery.
+ClawScribe checks recording identity and library deletion history before
+offering recovery.
 
 Pre-migration database snapshots in app-data `backups` can contain deleted
 meetings. Each new snapshot keeps the newest two, and startup cleanup removes

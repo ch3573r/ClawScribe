@@ -1,23 +1,50 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::{sqlite::SqliteRow, FromRow, Row};
 
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeetingModel {
     pub id: String,
     pub title: String,
-    pub created_at: DateTimeUtc,
-    pub updated_at: DateTimeUtc,
+    pub created_at: String,
+    pub updated_at: String,
     pub folder_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(transparent)]
-pub struct DateTimeUtc(pub DateTime<Utc>);
+impl FromRow<'_, SqliteRow> for MeetingModel {
+    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            title: row.try_get("title")?,
+            created_at: meeting_timestamp(row, "created_at")?,
+            updated_at: meeting_timestamp(row, "updated_at")?,
+            folder_path: row.try_get("folder_path")?,
+        })
+    }
+}
 
-impl From<NaiveDateTime> for DateTimeUtc {
-    fn from(naive: NaiveDateTime) -> Self {
-        DateTimeUtc(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+pub(crate) fn calendar_date(value: &str) -> Option<NaiveDate> {
+    if value.len() != 10 {
+        return None;
+    }
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    (date.format("%Y-%m-%d").to_string() == value).then_some(date)
+}
+
+pub(crate) fn local_meeting_date(row: &SqliteRow, column: &str) -> Option<NaiveDate> {
+    row.try_get::<DateTime<Utc>, _>(column)
+        .map(|date| date.with_timezone(&Local).date_naive())
+        .ok()
+        .or_else(|| calendar_date(row.try_get::<&str, _>(column).ok()?))
+}
+
+pub(crate) fn meeting_timestamp(row: &SqliteRow, column: &str) -> Result<String, sqlx::Error> {
+    match row.try_get::<DateTime<Utc>, _>(column) {
+        Ok(date) => Ok(date.to_rfc3339()),
+        Err(error) => match row.try_get::<String, _>(column) {
+            Ok(value) if calendar_date(&value).is_some() => Ok(value),
+            _ => Err(error),
+        },
     }
 }
 
@@ -41,6 +68,20 @@ pub struct Transcript {
     // Audio source label: "Me" (microphone) or "Participants" (system audio).
     pub speaker: Option<String>,
     pub word_timestamps_json: Option<String>,
+}
+
+#[derive(Debug, FromRow, Serialize)]
+pub struct TranscriptTimelineRow {
+    pub id: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_start_time: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_end_time: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

@@ -20,6 +20,7 @@ export interface BehaviorSettings {
   language: string;
   /** Whether the "recording started" notice is shown (the core's value; default yes). */
   showRecordingNotification: boolean;
+  showConversationMetrics: boolean;
   /** Whether the old `localStorage` values were already handed to the core. */
   legacyMigrated: boolean;
 }
@@ -31,6 +32,7 @@ export const DEFAULT_BEHAVIOR_SETTINGS: BehaviorSettings = {
   sourceAttribution: false,
   language: "auto",
   showRecordingNotification: true,
+  showConversationMetrics: true,
   legacyMigrated: false,
 };
 
@@ -111,6 +113,7 @@ export function readBehaviorSettings(value: unknown): BehaviorSettings {
     language,
     // Only an explicit false switches the notice off.
     showRecordingNotification: source.showRecordingNotification !== false,
+    showConversationMetrics: source.showConversationMetrics !== false,
     legacyMigrated: flag("legacyMigrated"),
   };
 }

@@ -1,9 +1,18 @@
+export interface CaptureDetails {
+  dropped_samples: number;
+  system_silence_periods: number;
+  backend: string | null;
+  unfinished_segments: number;
+  empty_live_transcript: 'no_speech_detected' | 'no_text_recognized' | 'incomplete' | null;
+}
+
 export interface RecordingOutcome {
   audio_save_failed: boolean;
   transcription_incomplete: boolean;
   capture_incomplete?: boolean;
   recording_files_incomplete?: boolean;
   recovery_files_elsewhere?: boolean;
+  capture_details?: CaptureDetails | null;
 }
 
 export function recordingOutcome(value?: Partial<RecordingOutcome> | null): RecordingOutcome {
@@ -13,7 +22,21 @@ export function recordingOutcome(value?: Partial<RecordingOutcome> | null): Reco
     capture_incomplete: value?.capture_incomplete === true,
     recording_files_incomplete: value?.recording_files_incomplete === true,
     recovery_files_elsewhere: value?.recovery_files_elsewhere === true,
+    ...(value?.capture_details ? { capture_details: value.capture_details } : {}),
   };
+}
+
+export function emptyLiveTranscriptMessage(reason: CaptureDetails['empty_live_transcript']) {
+  switch (reason) {
+    case 'no_speech_detected':
+      return 'Live transcription detected no speech. Play the recording to check what was captured.';
+    case 'no_text_recognized':
+      return 'Live transcription processed speech but returned no text. Check the recording and try retranscribing.';
+    case 'incomplete':
+      return 'The live transcript ended empty after a capture or transcription problem. Check the audio before retranscribing.';
+    default:
+      return null;
+  }
 }
 
 export function recordingBlocksAutoSummary(value?: Partial<RecordingOutcome> | null): boolean {
@@ -31,7 +54,10 @@ export function recordingRecoveryMessage(value: RecordingOutcome): string | null
     messages.push('Some audio was lost during capture. Notes can cover only the saved transcript. Retranscription cannot restore missing sound.');
   }
   if (value.transcription_incomplete && !value.recovery_files_elsewhere) {
-    messages.push('The live transcript is incomplete. Use Retranscribe to process the saved audio before relying on notes or exports.');
+    const remaining = value.capture_details?.unfinished_segments ?? 0;
+    messages.push(remaining > 0
+      ? `The live transcript is incomplete. Stop left ${remaining} speech ${remaining === 1 ? 'segment' : 'segments'} unfinished. Use Retranscribe to process the saved audio.`
+      : 'The live transcript is incomplete. Use Retranscribe to process the saved audio before relying on notes or exports.');
   }
   if (value.recording_files_incomplete && !value.recovery_files_elsewhere) {
     messages.push('Some recording details or transcript backup files could not be saved. Review the library transcript and keep the meeting folder.');

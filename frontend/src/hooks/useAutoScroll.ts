@@ -1,155 +1,101 @@
-import { useRef, useState, useEffect, useCallback, type RefObject } from "react";
-import type { Virtualizer } from "@tanstack/react-virtual";
+import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from "react";
 
 interface UseAutoScrollProps {
     scrollRef: RefObject<HTMLDivElement | null>;
-    segments: readonly { id: string }[];
-    isRecording: boolean;
+    contentRef: RefObject<HTMLDivElement | null>;
+    segmentCount: number;
+    enabled: boolean;
     isPaused: boolean;
-    activeSegmentId?: string;
-    virtualizer?: Virtualizer<HTMLDivElement, Element>;
-    virtualizationThreshold?: number;
-    disableAutoScroll?: boolean;
 }
 
-interface UseAutoScrollReturn {
-    autoScroll: boolean;
-    setAutoScroll: (value: boolean) => void;
-    scrollToBottom: () => void;
-}
+// Scroll offsets can be fractional even though scrollHeight and clientHeight are integers.
+const SCROLL_TOLERANCE = 1;
 
-const SCROLL_THRESHOLD = 100;
+/** Keep the live tail in view until the reader scrolls back. */
+export function useAutoScroll({ scrollRef, contentRef, segmentCount, enabled, isPaused }: UseAutoScrollProps) {
+    const [autoScroll, setAutoScroll] = useState(true);
+    const following = useRef(true);
+    const previousTop = useRef(0);
+    const hasSegments = segmentCount > 0;
 
-/** Follow live speech without pulling the user away from earlier transcript text. */
-export function useAutoScroll({
-    scrollRef,
-    segments,
-    isRecording,
-    isPaused,
-    activeSegmentId,
-    virtualizer,
-    virtualizationThreshold = 10,
-    disableAutoScroll = false,
-}: UseAutoScrollProps): UseAutoScrollReturn {
-    const useVirtualization = Boolean(virtualizer && segments.length >= virtualizationThreshold);
-    const [autoScroll, setAutoScrollState] = useState(true);
-    const autoScrollRef = useRef(true);
-    const isProgrammaticScrollRef = useRef(false);
-    const prevSegmentCountRef = useRef(segments.length);
-    // These are browser timers; Node's ambient overload can mislead ReturnType.
-    const resetTimerRef = useRef<number | null>(null);
-    const settleTimerRef = useRef<number | null>(null);
-
-    const setAutoScroll = useCallback((value: boolean) => {
-        // Update immediately: another transcript event can arrive before React renders.
-        autoScrollRef.current = value;
-        setAutoScrollState(value);
-    }, []);
-
-    const clearPendingScroll = useCallback(() => {
-        if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
-        if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
-        resetTimerRef.current = null;
-        settleTimerRef.current = null;
-        isProgrammaticScrollRef.current = false;
-    }, []);
-
-    const finishProgrammaticScroll = useCallback((delay: number) => {
-        if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
-        resetTimerRef.current = window.setTimeout(() => {
-            resetTimerRef.current = null;
-            isProgrammaticScrollRef.current = false;
-        }, delay);
-    }, []);
+    const pinToTail = useCallback(() => {
+        const container = scrollRef.current;
+        if (!container) return;
+        container.scrollTop = container.scrollHeight;
+        previousTop.current = container.scrollTop;
+    }, [scrollRef]);
 
     const scrollToBottom = useCallback(() => {
-        const container = scrollRef.current;
-        if (!container) return;
-        clearPendingScroll();
-        isProgrammaticScrollRef.current = true;
-        container.scrollTop = container.scrollHeight;
+        following.current = true;
         setAutoScroll(true);
-        finishProgrammaticScroll(50);
-    }, [scrollRef, clearPendingScroll, setAutoScroll, finishProgrammaticScroll]);
+        pinToTail();
+        scrollRef.current?.focus({ preventScroll: true });
+    }, [pinToTail, scrollRef]);
 
-    useEffect(() => clearPendingScroll, [clearPendingScroll]);
-
-    useEffect(() => {
+    useLayoutEffect(() => {
+        if (!enabled) {
+            following.current = true;
+            setAutoScroll(true);
+            return;
+        }
         const container = scrollRef.current;
         if (!container) return;
+        previousTop.current = container.scrollTop;
 
-        const handleScroll = () => {
-            if (isProgrammaticScrollRef.current) return;
-            const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight <= SCROLL_THRESHOLD;
-            if (nearBottom !== autoScrollRef.current) setAutoScroll(nearBottom);
+        const detach = () => {
+            if (!following.current) return;
+            following.current = false;
+            setAutoScroll(false);
         };
-        // A user gesture must interrupt even the virtualizer's deferred follow-up.
-        const handleUserInput = () => clearPendingScroll();
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
-                handleUserInput();
+        const handleScroll = () => {
+            const { scrollTop, scrollHeight, clientHeight } = container;
+            const atTail = scrollHeight - clientHeight - scrollTop <= SCROLL_TOLERANCE;
+            if (!following.current && scrollTop > previousTop.current && atTail) {
+                following.current = true;
+                setAutoScroll(true);
+            } else if (!atTail && scrollTop < previousTop.current - SCROLL_TOLERANCE) {
+                detach();
             }
+            previousTop.current = scrollTop;
+        };
+        // Wheel and keyboard intent can arrive before the browser delivers its
+        // scroll event. A transcript commit in that gap must yield to the reader.
+        const handleWheel = (event: WheelEvent) => {
+            if (!event.ctrlKey && event.deltaY < 0 && container.scrollTop > 0) detach();
+        };
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.defaultPrevented || event.target !== container || container.scrollTop <= 0) return;
+            if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) detach();
         };
 
         container.addEventListener("scroll", handleScroll, { passive: true });
-        container.addEventListener("wheel", handleUserInput, { passive: true });
-        container.addEventListener("touchstart", handleUserInput, { passive: true });
-        container.addEventListener("pointerdown", handleUserInput, { passive: true });
+        container.addEventListener("wheel", handleWheel, { passive: true });
         container.addEventListener("keydown", handleKeyDown);
         return () => {
             container.removeEventListener("scroll", handleScroll);
-            container.removeEventListener("wheel", handleUserInput);
-            container.removeEventListener("touchstart", handleUserInput);
-            container.removeEventListener("pointerdown", handleUserInput);
+            container.removeEventListener("wheel", handleWheel);
             container.removeEventListener("keydown", handleKeyDown);
-            clearPendingScroll();
         };
-    }, [scrollRef, setAutoScroll, clearPendingScroll]);
+    }, [enabled, scrollRef]);
 
-    useEffect(() => {
-        const hasNewSegments = segments.length > prevSegmentCountRef.current;
-        prevSegmentCountRef.current = segments.length;
-        clearPendingScroll();
-        if (disableAutoScroll || !hasNewSegments || !autoScrollRef.current || !isRecording || isPaused) return;
+    useLayoutEffect(() => {
+        if (enabled && !isPaused && segmentCount > 0 && following.current) pinToTail();
+    }, [enabled, isPaused, segmentCount, pinToTail]);
+
+    useLayoutEffect(() => {
         const container = scrollRef.current;
-        if (!container) return;
+        const content = contentRef.current;
+        if (!enabled || isPaused || !container || !content || !hasSegments) return;
 
-        // Use the position remembered BEFORE this render. Rechecking scrollHeight
-        // after a tall row is appended falsely treats it as the user scrolling up.
-        isProgrammaticScrollRef.current = true;
-        if (useVirtualization && virtualizer) {
-            virtualizer.scrollToOffset(virtualizer.getTotalSize(), { align: "end" });
-            settleTimerRef.current = window.setTimeout(() => {
-                settleTimerRef.current = null;
-                if (autoScrollRef.current && scrollRef.current === container) {
-                    container.scrollTop = container.scrollHeight;
-                }
-            }, 50);
-        } else {
-            container.scrollTop = container.scrollHeight;
-        }
-        finishProgrammaticScroll(150);
-        return clearPendingScroll;
-    }, [segments.length, isRecording, isPaused, useVirtualization, virtualizer, scrollRef, disableAutoScroll, clearPendingScroll, finishProgrammaticScroll]);
+        // Wrapped streaming text and virtual row measurements can change the
+        // tail after the transcript commit, including when the window is resized.
+        const observer = new window.ResizeObserver(() => {
+            if (following.current) pinToTail();
+        });
+        observer.observe(container);
+        observer.observe(content);
+        return () => observer.disconnect();
+    }, [enabled, isPaused, hasSegments, scrollRef, contentRef, pinToTail]);
 
-    // Explicit search-result navigation remains available when live following is disabled.
-    // Depending on the index rather than the array avoids re-scrolling on every append.
-    const activeIndex = activeSegmentId ? segments.findIndex(segment => segment.id === activeSegmentId) : -1;
-    useEffect(() => {
-        if (!activeSegmentId || activeIndex < 0) return;
-        clearPendingScroll();
-        isProgrammaticScrollRef.current = true;
-        if (useVirtualization && virtualizer) {
-            // Smooth scrolling is unreliable while variable-height rows are measured.
-            virtualizer.scrollToIndex(activeIndex, { align: "center", behavior: "auto" });
-        } else {
-            const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-            const element = scrollRef.current?.ownerDocument.getElementById(`segment-${activeSegmentId}`);
-            element?.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
-        }
-        finishProgrammaticScroll(500);
-        return clearPendingScroll;
-    }, [activeSegmentId, activeIndex, useVirtualization, virtualizer, scrollRef, clearPendingScroll, finishProgrammaticScroll]);
-
-    return { autoScroll, setAutoScroll, scrollToBottom };
+    return { autoScroll, scrollToBottom };
 }

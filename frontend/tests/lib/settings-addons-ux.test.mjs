@@ -225,7 +225,6 @@ function diagnostics(options={}) {
   };
   const invoke=async name=>{
     if(name==='get_diagnostics_snapshot') return snapshot;
-    if(name==='get_openclaw_config_status') return {enabled:false,configured:false,ready:false,bearer_token_configured:false,endpoint:'',source:'',status_message:'Not configured',config_path:'',include_audio_path:false};
     if(name==='codex_check_installation') return {found:true,authStatus:'authenticated',message:'ok'};
   };
   const mod=loadTsModule('src/components/settings/DiagnosticsSettings.tsx',baseMocks(hooks,{
@@ -245,7 +244,7 @@ test('diagnostics lists problems first, keeps healthy rows quiet and shows the c
   assert.equal(rows[0].id,'calendars');assert.equal(rows[0].tone,'warning');
   assert.ok(rows.slice(1).every(row=>row.tone==='ok'),'only the calendar problem is coloured');
   assert.deepEqual(rows.map(row=>row.name).slice(0,2),['Calendars','Transcription backend']);
-  assert.ok(rows.some(row=>row.name==='OpenClaw handoff')&&rows.some(row=>row.name==='Codex app-server'));
+  assert.ok(rows.some(row=>row.name==='Codex app-server'));
   assert.match(text(tree),/ClawScribe 0\.5\.60 · windows x64 · release/);
   const call=nodes(tree).find(node=>node.type?.name==='CallDetectionCard');
   assert.ok(call);
@@ -259,14 +258,14 @@ test('sorting puts errors, then warnings first and is stable',()=>{
   assert.deepEqual(sorted.map(item=>item.id),['c','b','e','a','d']);app.unmount();
 });
 
-test('copied diagnostics redact emails, home paths and endpoints',()=>{
+test('copied diagnostics redact emails and home paths',()=>{
   const app=diagnostics();
   const copy=app.mod.sanitizeDiagnosticsForCopy({
     app:{appDataDir:homePath},transcription:{},audio:{deviceNames:[]},recording:{},diarization:{},
-    integrations:{openclaw:{endpoint:'https://private.example.com/hook'},codex:{accountEmail:'person@example.com'}},errors:['failed for person@example.com'],
+    integrations:{codex:{accountEmail:'person@example.com'}},errors:['failed for person@example.com'],
   });
   const json=JSON.stringify(copy);
-  assert.doesNotMatch(json,/someone|person@example|private\.example/);
+  assert.doesNotMatch(json,/someone|person@example/);
   assert.match(json,/%APPDATA%/);app.unmount();
 });
 
@@ -277,5 +276,5 @@ test('settings tabs keep deep links working and resolve the old names',()=>{
   assert.equal(resolveSettingsTab('beta'),'transcription');
   assert.equal(resolveSettingsTab('nope'),null);
   assert.equal(resolveSettingsTab(null),null);
-  assert.deepEqual([...SETTINGS_TABS],['general','privacy','appearance','recording','shortcuts','transcription','summary','memory','ms365','calendars','confluence','assistant','diagnostics']);
+  assert.deepEqual([...SETTINGS_TABS],['general','privacy','appearance','recording','shortcuts','transcription','summary','memory','ms365','calendars','confluence','webhook','assistant','diagnostics']);
 });

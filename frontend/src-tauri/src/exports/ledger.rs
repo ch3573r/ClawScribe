@@ -2,8 +2,8 @@
 //!
 //! Lives in app data and records, per dedupe key, what has already
 //! been exported so a succeeded page/task is never created twice. It contains
-//! only destination IDs, dedupe keys, Graph resource IDs, URLs, timestamps,
-//! statuses, and sanitized error codes — never tokens. See the idempotency
+//! destination and resource IDs, display names, URLs, timestamps, statuses,
+//! and sanitized error codes. It contains no tokens. See the idempotency
 //! sections of the OneNote/Planner design docs.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -68,6 +68,17 @@ pub(crate) fn task_key(scope: &str, meeting_id: &str, action_id: &str, title_has
     }
 }
 
+/// Hash composite destinations without storing server origins or folder names.
+pub(super) fn artifact_key_hash(parts: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for part in parts {
+        hash.update((part.len() as u64).to_le_bytes());
+        hash.update(part.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
 pub(super) fn task_key_for_action(
     scope: &str,
     meeting_id: &str,
@@ -97,6 +108,43 @@ pub struct LedgerEntry {
     pub attempts: u32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_attempt_at: Option<String>,
+    /// Absent in older task entries. Read the saved remote task before repairing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_enrichment: Option<TaskEnrichment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confluence: Option<ConfluenceBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<DriveBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfluenceBinding {
+    pub account_hash: String,
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DriveBinding {
+    pub account_hash: String,
+    pub drive_id: String,
+    pub parent_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskEnrichment {
+    pub notes_pending: bool,
+    pub due_date_pending: bool,
+}
+
+impl TaskEnrichment {
+    pub fn is_pending(self) -> bool {
+        self.notes_pending || self.due_date_pending
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,9 +175,15 @@ pub struct OneNoteSection {
     pub content_hash: String,
     pub options: Option<OneNoteOptions>,
     pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_page_id: Option<String>,
 }
 
 impl LedgerEntry {
+    pub(super) fn can_resolve(&self) -> bool {
+        self.status == ExportStatus::UnknownAfterSubmit || self.resource_id.is_some()
+    }
+
     fn new_pending(now: Option<String>) -> Self {
         LedgerEntry {
             status: ExportStatus::Pending,
@@ -138,6 +192,10 @@ impl LedgerEntry {
             code: None,
             attempts: 1,
             last_attempt_at: now,
+            task_enrichment: None,
+            display_name: None,
+            confluence: None,
+            drive: None,
         }
     }
 }
@@ -199,10 +257,25 @@ impl ExportLedger {
             return Err("Export history does not match this meeting or supported format.".into());
         }
         // A crash after submission can leave a pending create. Never replay it.
-        for entry in ledger.entries.values_mut() {
-            if entry.status == ExportStatus::Pending {
+        for (key, entry) in &mut ledger.entries {
+            if matches!(key.split(':').next(), Some("planner" | "todo"))
+                && entry.resource_id.is_some()
+                && entry.status.allows_automatic_retry()
+            {
+                // Older writers could record a failed follow-up with a known task ID.
+                entry.status = ExportStatus::Succeeded;
+            } else if entry.status == ExportStatus::Pending {
                 entry.status = ExportStatus::UnknownAfterSubmit;
                 entry.code = Some("interrupted_export_review_required".into());
+            } else if entry.status == ExportStatus::Succeeded
+                && entry.resource_id.is_none()
+                && matches!(
+                    key.split(':').next(),
+                    Some("onenote" | "planner" | "todo" | "onedrive" | "confluence")
+                )
+            {
+                entry.status = ExportStatus::UnknownAfterSubmit;
+                entry.code = Some("remote_id_unconfirmed".into());
             }
         }
         ledger.storage_dir = Some(folder.to_path_buf());
@@ -266,9 +339,13 @@ impl ExportLedger {
                     [tenant, user, section, kind]
                         .into_iter()
                         .all(|value| !value.is_empty())
-                        && hash(artifact, 16)
+                        && (hash(artifact, 16) || hash(artifact, 64))
                         && index.parse::<usize>().is_ok()
                 }
+                ["onedrive", destination, revision, "folder" | "docx" | "pdf" | "docx-link" | "pdf-link"] => {
+                    hash(destination, 64) && hash(revision, 64)
+                }
+                ["confluence", destination] => hash(destination, 64),
                 ["planner", _, _, _, _, tail @ ..] | ["todo", _, _, _, tail @ ..] => match tail {
                     ["v2", meeting_hash, action_id] => {
                         *meeting_hash == expected_meeting
@@ -297,6 +374,21 @@ impl ExportLedger {
                         .as_deref()
                         .is_some_and(|id| !text(id, 2048))
                     || entry.code.as_deref().is_some_and(|code| !text(code, 128))
+                    || entry.confluence.as_ref().is_some_and(|binding| {
+                        !key.starts_with("confluence:")
+                            || !hash(&binding.account_hash, 64)
+                            || binding.revision.as_deref().is_some_and(|id| !hash(id, 64))
+                    })
+                    || entry.drive.as_ref().is_some_and(|binding| {
+                        !key.starts_with("onedrive:")
+                            || !hash(&binding.account_hash, 64)
+                            || !valid_remote_id(&binding.drive_id)
+                            || !valid_remote_id(&binding.parent_id)
+                    })
+                    || entry
+                        .display_name
+                        .as_deref()
+                        .is_some_and(|name| !text(name, 1024))
                     || entry
                         .last_attempt_at
                         .as_deref()
@@ -317,6 +409,10 @@ impl ExportLedger {
                         .is_some_and(|id| !valid_remote_id(id))
                     || !text(&section.section_name, 256)
                     || !text(&section.page_title, 4096)
+                    || section
+                        .notes_page_id
+                        .as_deref()
+                        .is_some_and(|id| !valid_remote_id(id))
                     || !hash(&section.content_hash, 64)
                     || !date(&section.started_at)
             });
@@ -417,7 +513,19 @@ impl ExportLedger {
                         && ex.resource_id != inc.resource_id
                         && ex.status.is_terminal_success()
                         && inc_status.is_terminal_success();
-                    if resource_conflict {
+                    let binding_conflict = ex
+                        .confluence
+                        .as_ref()
+                        .zip(inc.confluence.as_ref())
+                        .is_some_and(|(local, incoming)| {
+                            local.account_hash != incoming.account_hash
+                        })
+                        || ex
+                            .drive
+                            .as_ref()
+                            .zip(inc.drive.as_ref())
+                            .is_some_and(|(local, incoming)| local != incoming);
+                    if resource_conflict || binding_conflict {
                         ex.code =
                             Some("merge_conflict_check_for_duplicates_in_microsoft_365".into());
                         ex.attempts = ex.attempts.max(inc.attempts);
@@ -441,6 +549,24 @@ impl ExportLedger {
                         ex.resource_id.clone().or_else(|| inc.resource_id.clone())
                     };
 
+                    if ex.resource_id == inc.resource_id && !resource_conflict {
+                        // A completed step stays completed when an older snapshot is restored.
+                        ex.task_enrichment = match (ex.task_enrichment, inc.task_enrichment) {
+                            (Some(local), Some(incoming)) => Some(TaskEnrichment {
+                                notes_pending: local.notes_pending && incoming.notes_pending,
+                                due_date_pending: local.due_date_pending
+                                    && incoming.due_date_pending,
+                            }),
+                            (local, incoming) => local.or(incoming),
+                        };
+                    } else if ex.resource_id.is_none() && inc.resource_id.is_some() {
+                        ex.task_enrichment = inc.task_enrichment;
+                        // The incoming ID and its binding were recorded together.
+                        // A legacy ID must go through review before it gains a binding.
+                        ex.confluence.clone_from(&inc.confluence);
+                        ex.drive.clone_from(&inc.drive);
+                    }
+
                     if prefer_incoming {
                         ex.status = inc_status;
                         ex.code = inc.code.clone();
@@ -453,6 +579,9 @@ impl ExportLedger {
                         ex.web_url = ex.web_url.clone().or_else(|| inc.web_url.clone());
                     }
                     ex.resource_id = new_resource_id;
+                    if ex.display_name.is_none() {
+                        ex.display_name.clone_from(&inc.display_name);
+                    }
                     ex.attempts = ex.attempts.max(inc.attempts);
                 }
             }
@@ -473,6 +602,15 @@ impl ExportLedger {
                         && saved.options == section.options
                     {
                         saved.section_id.clone_from(&section.section_id);
+                    }
+                    if saved.notes_page_id.is_none()
+                        && saved.section_id.is_some()
+                        && saved.section_id == section.section_id
+                        && saved.tenant_id == section.tenant_id
+                        && saved.user_id == section.user_id
+                        && saved.content_hash == section.content_hash
+                    {
+                        saved.notes_page_id.clone_from(&section.notes_page_id);
                     }
                 })
                 .or_insert_with(|| section.clone());
@@ -496,7 +634,9 @@ impl ExportLedger {
         let current = task_key(scope, meeting_id, action_id, title_hash);
         let stable_id = uuid::Uuid::parse_str(action_id).is_ok();
         let mut exact_uuid = self.entries.get_key_value(&current).filter(|_| stable_id);
-        if exact_uuid.is_some_and(|(_, entry)| !entry.status.allows_automatic_retry()) {
+        if exact_uuid.is_some_and(|(_, entry)| {
+            entry.resource_id.is_some() || !entry.status.allows_automatic_retry()
+        }) {
             return Ok(Some(current));
         }
 
@@ -523,7 +663,7 @@ impl ExportLedger {
         });
         fn priority(entry: &LedgerEntry) -> (bool, bool, Option<&str>) {
             (
-                entry.status.is_terminal_success(),
+                entry.status.is_terminal_success() || entry.resource_id.is_some(),
                 !entry.status.allows_automatic_retry(),
                 entry.last_attempt_at.as_deref(),
             )
@@ -558,10 +698,12 @@ impl ExportLedger {
         // A retryable UUID can coexist with older protected history after a
         // restore. Keep that protection for suggested actions linked to it.
         if let Some((key, entry)) = exact_uuid {
-            if !entry.status.allows_automatic_retry()
+            if entry.resource_id.is_some()
+                || !entry.status.allows_automatic_retry()
                 || (!ambiguous
-                    && legacy_match
-                        .is_none_or(|(_, _, _, old)| old.status.allows_automatic_retry()))
+                    && legacy_match.is_none_or(|(_, _, _, old)| {
+                        old.resource_id.is_none() && old.status.allows_automatic_retry()
+                    }))
             {
                 return Ok(Some(key.clone()));
             }
@@ -588,7 +730,7 @@ impl ExportLedger {
     pub fn may_attempt(&self, dedupe_key: &str) -> bool {
         match self.entry(dedupe_key) {
             None => true,
-            Some(e) if e.status.is_terminal_success() => false,
+            Some(e) if e.status.is_terminal_success() || e.resource_id.is_some() => false,
             Some(e) => e.status.allows_automatic_retry(),
         }
     }
@@ -603,6 +745,18 @@ impl ExportLedger {
                 e.last_attempt_at = now.clone();
             })
             .or_insert_with(|| LedgerEntry::new_pending(now));
+    }
+
+    pub(super) fn label_attempt(&mut self, dedupe_key: &str, name: &str) {
+        if let Some(entry) = self.entries.get_mut(dedupe_key) {
+            let label: String = name
+                .trim()
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(240)
+                .collect();
+            entry.display_name = (!label.is_empty()).then_some(label);
+        }
     }
 
     pub fn record_success(
@@ -621,6 +775,137 @@ impl ExportLedger {
         entry.web_url = web_url;
         entry.code = None;
         entry.last_attempt_at = now;
+    }
+
+    pub(super) fn record_task_enrichment(
+        &mut self,
+        dedupe_key: &str,
+        enrichment: TaskEnrichment,
+        code: Option<String>,
+    ) {
+        if let Some(entry) = self.entries.get_mut(dedupe_key) {
+            entry.task_enrichment = Some(enrichment);
+            entry.code = code;
+        }
+    }
+
+    /// Apply a user's explicit destination check. No remote write happens here.
+    pub(super) fn reconcile(
+        &mut self,
+        key: &str,
+        resource_id: Option<String>,
+        now: Option<String>,
+    ) -> Result<(), String> {
+        if let Some(id) = &resource_id {
+            if !valid_remote_id(id) {
+                return Err("Enter a valid ID for the existing item.".into());
+            }
+        }
+        if let Some(section) = key.strip_prefix("onenote-section:") {
+            let entry = self
+                .onenote_sections
+                .get_mut(section)
+                .filter(|entry| entry.section_id.is_none())
+                .ok_or("This section no longer needs reconciliation.")?;
+            if resource_id.is_none() {
+                self.onenote_sections.remove(section);
+            } else {
+                entry.section_id = resource_id;
+            }
+            return Ok(());
+        }
+        let entry = self
+            .entries
+            .get_mut(key)
+            .filter(|entry| entry.status == ExportStatus::UnknownAfterSubmit)
+            .ok_or("This export no longer needs reconciliation.")?;
+        if resource_id.is_some() {
+            if entry.resource_id != resource_id {
+                entry.task_enrichment = None;
+                entry.web_url = None;
+            }
+            entry.status = ExportStatus::Succeeded;
+            entry.resource_id = resource_id;
+            entry.code = None;
+        } else {
+            entry.status = ExportStatus::Failed;
+            entry.resource_id = None;
+            entry.web_url = None;
+            entry.task_enrichment = None;
+            entry.code = Some("absence_confirmed".into());
+        }
+        entry.last_attempt_at = now;
+        Ok(())
+    }
+
+    /// Record the result of a provider-scoped GET and explicit user review.
+    pub(super) fn apply_resolution(
+        &mut self,
+        key: &str,
+        previous: Option<&str>,
+        replacement: Option<&str>,
+        url: Option<String>,
+        now: Option<String>,
+    ) -> Result<(), String> {
+        if let Some(section_id) = key.strip_prefix("onenote-section:") {
+            let section = self
+                .onenote_sections
+                .get_mut(section_id)
+                .filter(|section| section.section_id.as_deref() == previous)
+                .ok_or("The saved section changed. Reload export history.")?;
+            if let Some(replacement) = replacement {
+                if previous != Some(replacement) {
+                    section.notes_page_id = None;
+                }
+                section.section_id = Some(replacement.into());
+            } else {
+                self.onenote_sections.remove(section_id);
+            }
+            return Ok(());
+        }
+        let entry = self
+            .entries
+            .get_mut(key)
+            .filter(|entry| entry.can_resolve() && entry.resource_id.as_deref() == previous)
+            .ok_or("The saved item changed. Reload export history.")?;
+        entry.status = ExportStatus::UnknownAfterSubmit;
+        self.reconcile(key, replacement.map(str::to_owned), now.clone())?;
+        self.entries.get_mut(key).expect("resolved item").web_url = url.clone();
+        if previous != replacement {
+            if key.starts_with("onedrive:")
+                && matches!(key.rsplit(':').next(), Some("docx" | "pdf"))
+            {
+                self.entries.remove(&format!("{key}-link"));
+            }
+            if let (Some(previous), Some(scope)) = (previous, key.strip_prefix("onenote:")) {
+                let fields: Vec<_> = scope.split(':').collect();
+                if let [tenant, user, section, ..] = fields.as_slice() {
+                    let prefix = format!("onenote:{tenant}:{user}:{section}:");
+                    for (other_key, entry) in &mut self.entries {
+                        if other_key.starts_with(&prefix)
+                            && entry.resource_id.as_deref() == Some(previous)
+                        {
+                            entry.resource_id = replacement.map(str::to_owned);
+                            entry.web_url.clone_from(&url);
+                            if replacement.is_none() {
+                                entry.status = ExportStatus::Failed;
+                                entry.code = Some("absence_confirmed".into());
+                            }
+                            entry.last_attempt_at.clone_from(&now);
+                        }
+                    }
+                    for saved in self.onenote_sections.values_mut().filter(|saved| {
+                        saved.tenant_id == *tenant
+                            && saved.user_id == *user
+                            && saved.section_id.as_deref() == Some(*section)
+                            && saved.notes_page_id.as_deref() == Some(previous)
+                    }) {
+                        saved.notes_page_id = replacement.map(str::to_owned);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn record_failure(
@@ -696,6 +981,44 @@ pub(crate) fn microsoft_web_url(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unknown_outcomes_stay_blocked_until_reconciled_and_survive_restart() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        let page = format!("confluence:{}", artifact_key_hash(&["example.com", "TEST"]));
+        let absent = format!(
+            "confluence:{}",
+            artifact_key_hash(&["example.com", "OTHER"])
+        );
+        for key in [&page, &absent] {
+            ledger.begin_attempt(key, None);
+        }
+        ledger.checkpoint().await.unwrap();
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        assert!(!ledger.may_attempt(&page));
+        assert!(!ledger.may_attempt(&absent));
+        assert!(ledger
+            .reconcile(&page, Some("../bad".into()), None)
+            .is_err());
+        ledger
+            .reconcile(&page, Some("239812".into()), None)
+            .unwrap();
+        ledger.reconcile(&absent, None, None).unwrap();
+        ledger.checkpoint().await.unwrap();
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        assert_eq!(
+            ledger
+                .already_succeeded(&page)
+                .unwrap()
+                .resource_id
+                .as_deref(),
+            Some("239812")
+        );
+        assert!(!ledger.may_attempt(&page));
+        assert!(ledger.may_attempt(&absent));
+        assert!(ledger.reconcile(&page, None, None).is_err());
+    }
 
     #[test]
     fn portable_links_drop_auth_parameters_and_keep_page_anchors() {
@@ -961,6 +1284,7 @@ mod tests {
             content_hash: "a".repeat(64),
             options: None,
             started_at: "2026-11-01T00:00:00Z".into(),
+            notes_page_id: None,
         };
         let section_b = OneNoteSection {
             section_name: "Incoming".into(),

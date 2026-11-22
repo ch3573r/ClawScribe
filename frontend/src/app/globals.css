@@ -309,6 +309,11 @@
     height: 100%;
   }
 
+  body:has(.floating-controls) {
+    @apply bg-transparent;
+    font-family: var(--font-app-sans, system-ui, sans-serif);
+  }
+
   /* Make the window draggable */
   .titlebar {
     -webkit-app-region: drag;
@@ -374,6 +379,57 @@
   /* Disable scrolling on any BlockNote wrapper elements */
   [data-node-type] {
     overflow: visible !important;
+  }
+}
+
+/* App banners can leave too little room for both a fixed composer and the
+   conversation. Use the card's height so the entire card can scroll together. */
+@container meeting-memory (max-height: 22rem) {
+  .meeting-memory-chat {
+    overflow-y: auto;
+  }
+
+  .meeting-memory-conversation {
+    flex: none;
+    overflow: visible;
+  }
+
+  .meeting-memory-conversation > [data-radix-scroll-area-viewport] {
+    height: auto;
+    overflow: visible !important; /* Radix sets overflow inline. */
+  }
+
+  .meeting-memory-conversation > [data-radix-scroll-area-viewport] > div {
+    height: auto;
+  }
+
+  .meeting-memory-conversation > [data-orientation="vertical"] {
+    display: none;
+  }
+}
+
+/* Keep each review pane within reach of the outer scrollport when the header
+   and playback strip leave less room than the panes need. */
+@container meeting-details (max-height: 30rem) {
+  .meeting-details-review {
+    overflow-y: auto;
+  }
+
+  .meeting-details-panes {
+    flex: none;
+    overflow: visible;
+  }
+
+  .meeting-details-panes > [data-transcript-panel],
+  .meeting-details-panes > #meeting-summary-panel {
+    min-height: min(18rem, 100cqh);
+    max-height: 100cqh;
+  }
+
+  @media (min-width: 768px) {
+    .meeting-details-panes {
+      height: 100cqh;
+    }
   }
 }
 
@@ -511,8 +567,9 @@
   --normal-bg-hover: hsl(var(--muted));
   --normal-border-hover: hsl(var(--border));
 
-  --info-bg: hsl(var(--primary) / 0.12);
-  --info-border: hsl(var(--primary) / 0.32);
+  /* Opaque, so a toast stacked behind another never shows through it. */
+  --info-bg: color-mix(in oklab, hsl(var(--primary)) 12%, hsl(var(--popover)));
+  --info-border: color-mix(in oklab, hsl(var(--primary)) 32%, hsl(var(--popover)));
   --info-text: hsl(var(--foreground));
 
   --success-bg: hsl(var(--theme-success-bg));

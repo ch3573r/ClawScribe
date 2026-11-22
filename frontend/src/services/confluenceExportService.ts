@@ -16,6 +16,7 @@ export interface ConfluenceExportResponse {
   pageId: string;
   title: string;
   webUrl: string | null;
+  outcome: "published" | "alreadyPublished" | "draftChanged";
 }
 
 export const confluenceExportService = {
@@ -36,6 +37,7 @@ export const confluenceExportService = {
   },
 
   exportPage(args: {
+    meetingId: string;
     baseUrl: string;
     spaceKey: string;
     parentId?: string | null;

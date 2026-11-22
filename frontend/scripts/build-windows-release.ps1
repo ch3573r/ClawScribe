@@ -84,6 +84,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & (Join-Path $PSScriptRoot "verify-brand-icons.ps1") -FrontendRoot $frontendRoot
+& (Join-Path $PSScriptRoot "stage-vc-runtime.ps1") -TauriRoot $tauriRoot -VerifyOnly:$CheckOnly
 $sherpaRuntime = if ($Feature -in @("directml", "windows-gpu")) { "directml" } else { "cpu" }
 & (Join-Path $PSScriptRoot "stage-sherpa-runtime.ps1") -TauriRoot $tauriRoot -Runtime $sherpaRuntime
 
@@ -179,13 +180,14 @@ if ($LASTEXITCODE -ne 0 -or -not $cargoMetadata.target_directory) {
     throw "Failed to resolve the Cargo workspace target directory."
 }
 $bundleRoot = Join-Path $cargoMetadata.target_directory "release\bundle"
+$releaseConfig = Join-Path $tauriRoot "tauri.windows-release.conf.json"
 Remove-Item -LiteralPath (Join-Path $bundleRoot "msi") -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $bundleRoot "nsis") -Recurse -Force -ErrorAction SilentlyContinue
 
 if ($Feature -eq "cpu") {
-    pnpm exec tauri build -- --locked
+    pnpm exec tauri build --config $releaseConfig -- --locked
 } else {
-    pnpm exec tauri build -- @featureArgs --locked
+    pnpm exec tauri build --config $releaseConfig -- @featureArgs --locked
 }
 
 if ($LASTEXITCODE -ne 0) { throw "Windows installer build failed." }
@@ -241,6 +243,7 @@ $metadata = @(
     "codex_runtime_sha256=ce1945eb440b5481ed1233ebaf32b7056ee7e4e452fa62ffe1cbfb26103cdee0",
     "codex_runtime_license=Apache-2.0"
 )
+$metadata += Get-Content -LiteralPath (Join-Path $tauriRoot "binaries/vc-runtime/versions.txt")
 $metadata | Set-Content -LiteralPath $metadataPath -Encoding ascii
 
 Write-Host ""

@@ -22,26 +22,6 @@ import {
 } from "@/services/icalService";
 import type { TeamsDetectionStatus } from "@/services/teamsDetectionService";
 
-type OpenClawSubmissionStatus = {
-  state: string;
-  updated_at: string;
-  status_code?: number | null;
-  message: string;
-};
-
-type OpenClawConfigStatus = {
-  enabled: boolean;
-  configured: boolean;
-  ready: boolean;
-  bearer_token_configured: boolean;
-  endpoint: string;
-  source: string;
-  status_message: string;
-  config_path: string;
-  include_audio_path: boolean;
-  last_submission?: OpenClawSubmissionStatus | null;
-};
-
 interface CodexStatus {
   found: boolean;
   authStatus?: string | null;
@@ -138,7 +118,6 @@ export interface DiagnosticsSnapshot {
   diarization: DiarizationRuntimeDiagnostic;
   integrations: {
     teams?: TeamsDetectionStatus | null;
-    openclaw?: OpenClawConfigStatus | null;
     codex?: CodexStatus | null;
   };
   errors: string[];
@@ -271,7 +250,6 @@ export function sanitizeDiagnosticsForCopy(snapshot: DiagnosticsSnapshot) {
     diarization: snapshot.diarization,
     integrations: {
       teams: snapshot.integrations.teams,
-      openclaw: snapshot.integrations.openclaw,
       codex: snapshot.integrations.codex,
     },
     errors: snapshot.errors,
@@ -322,25 +300,6 @@ function HealthRow({ item }: { item: HealthItem }) {
   );
 }
 
-function useOpenClawStatus() {
-  const [status, setStatus] = useState<OpenClawConfigStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setStatus(await invoke<OpenClawConfigStatus>("get_openclaw_config_status"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-  useEffect(() => { void load(); }, [load]);
-  return { status, error, loading, load };
-}
-
 function useCodexStatus() {
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -369,65 +328,45 @@ function DetailBlock({ title, children }: { title: string; children: ReactNode }
   );
 }
 
-function DiagnosticsDetails({ snapshot, openclaw }: { snapshot: DiagnosticsSnapshot | null; openclaw: OpenClawConfigStatus | null }) {
-  if (!snapshot && !openclaw) return null;
+function DiagnosticsDetails({ snapshot }: { snapshot: DiagnosticsSnapshot | null }) {
+  if (!snapshot) return null;
   return (
     <Accordion type="single" collapsible className="px-5">
       <AccordionItem value="details" className="border-0">
         <AccordionTrigger className="py-3 text-[13px] font-normal text-muted-foreground hover:no-underline">Details</AccordionTrigger>
         <AccordionContent>
           <div className="grid gap-4 pb-2 lg:grid-cols-2">
-            {snapshot && (
-              <>
-                <DetailBlock title="System load">
-                  <span>
-                    CPU {formatPercent(snapshot.systemResources?.cpu_usage_percent)} · Memory{" "}
-                    {formatPercent(snapshot.systemResources?.memory_used_percent)} ·{" "}
-                    {snapshot.systemResources?.cpu_cores ?? snapshot.acceleration?.cpuCores ?? "—"} cores
+            <DetailBlock title="System load">
+              <span>
+                CPU {formatPercent(snapshot.systemResources?.cpu_usage_percent)} · Memory{" "}
+                {formatPercent(snapshot.systemResources?.memory_used_percent)} ·{" "}
+                {snapshot.systemResources?.cpu_cores ?? snapshot.acceleration?.cpuCores ?? "—"} cores
+              </span>
+            </DetailBlock>
+            <DetailBlock title="Recording">
+              <span>
+                {snapshot.recording.is_recording ? "Recording" : "Idle"} ·{" "}
+                {snapshot.recording.is_paused ? "Paused" : "Active-ready"} · active{" "}
+                {formatSeconds(snapshot.recording.active_duration)}
+              </span>
+            </DetailBlock>
+            <DetailBlock title="Models">
+              {snapshot.transcription.engines.map((engine) => (
+                <div key={engine.provider} className="flex justify-between gap-3">
+                  <span>{providerLabel(engine.provider)}</span>
+                  <span className="text-muted-foreground">
+                    {engine.downloadedModels}/{engine.totalModels} downloaded{engine.loaded ? " · loaded" : ""}
                   </span>
-                </DetailBlock>
-                <DetailBlock title="Recording">
-                  <span>
-                    {snapshot.recording.is_recording ? "Recording" : "Idle"} ·{" "}
-                    {snapshot.recording.is_paused ? "Paused" : "Active-ready"} · active{" "}
-                    {formatSeconds(snapshot.recording.active_duration)}
-                  </span>
-                </DetailBlock>
-                <DetailBlock title="Models">
-                  {snapshot.transcription.engines.map((engine) => (
-                    <div key={engine.provider} className="flex justify-between gap-3">
-                      <span>{providerLabel(engine.provider)}</span>
-                      <span className="text-muted-foreground">
-                        {engine.downloadedModels}/{engine.totalModels} downloaded{engine.loaded ? " · loaded" : ""}
-                      </span>
-                    </div>
-                  ))}
-                </DetailBlock>
-                <DetailBlock title="Runtime paths">
-                  <span className="break-all font-mono text-xs">Data: {snapshot.app.appDataDir ?? "—"}</span>
-                  <span className="break-all font-mono text-xs">Logs: {snapshot.app.logsDir ?? "—"}</span>
-                </DetailBlock>
-                {snapshot.errors.length > 0 && (
-                  <DetailBlock title="Collection errors">
-                    {snapshot.errors.map((item) => <span key={item} className="text-warning-foreground">{item}</span>)}
-                  </DetailBlock>
-                )}
-              </>
-            )}
-            {openclaw && (
-              <DetailBlock title="OpenClaw handoff">
-                <span className="break-all font-mono text-xs">Endpoint: {openclaw.endpoint || "—"}</span>
-                <span>Bearer token: {openclaw.bearer_token_configured ? "Configured" : "Missing"}</span>
-                <span>Audio path: {openclaw.include_audio_path ? "Included" : "Not included"}</span>
-                <span className="font-mono text-xs">Source: {openclaw.source || "—"}</span>
-                {openclaw.last_submission && (
-                  <span>
-                    Last handoff: {openclaw.last_submission.state}
-                    {openclaw.last_submission.status_code ? ` · HTTP ${openclaw.last_submission.status_code}` : ""}
-                    {" · "}{openclaw.last_submission.message}
-                    {" · "}{openclaw.last_submission.updated_at}
-                  </span>
-                )}
+                </div>
+              ))}
+            </DetailBlock>
+            <DetailBlock title="Runtime paths">
+              <span className="break-all font-mono text-xs">Data: {snapshot.app.appDataDir ?? "—"}</span>
+              <span className="break-all font-mono text-xs">Logs: {snapshot.app.logsDir ?? "—"}</span>
+            </DetailBlock>
+            {snapshot.errors.length > 0 && (
+              <DetailBlock title="Collection errors">
+                {snapshot.errors.map((item) => <span key={item} className="text-warning-foreground">{item}</span>)}
               </DetailBlock>
             )}
           </div>
@@ -488,7 +427,6 @@ export function DiagnosticsSettings() {
   const [loading, setLoading] = useState(false);
   const [savingReport, setSavingReport] = useState(false);
   const saveInProgress = useRef(false);
-  const openclaw = useOpenClawStatus();
   const codex = useCodexStatus();
   const calendars = useSyncExternalStore(subscribeToICalendars, getICalendarSnapshot, getICalendarServerSnapshot);
 
@@ -510,7 +448,6 @@ export function DiagnosticsSettings() {
 
   const refreshAll = () => {
     void loadSnapshot();
-    void openclaw.load();
     void codex.load();
   };
 
@@ -620,15 +557,6 @@ export function DiagnosticsSettings() {
       }
     }
 
-    const claw = openclaw.status;
-    list.push({
-      id: "openclaw", name: "OpenClaw handoff",
-      value: openclaw.error ? "Status unavailable" : claw ? claw.status_message : "Loading status…",
-      tone: openclaw.error ? "warning" : claw && claw.enabled && !claw.ready ? "warning" : "ok",
-      status: openclaw.error ? "Unavailable" : !claw ? "Checking" : claw.ready ? "Ready" : claw.enabled ? "Not ready" : "Off",
-      action: <IconAction label="Refresh OpenClaw handoff status" onClick={openclaw.load} loading={openclaw.loading} />,
-    });
-
     const cx = codex.status;
     list.push({
       id: "codex", name: "Codex app-server",
@@ -640,7 +568,7 @@ export function DiagnosticsSettings() {
     });
 
     return sortHealthItems(list);
-  }, [snapshot, calendars, openclaw.status, openclaw.error, openclaw.loading, openclaw.load, codex.status, codex.error, codex.loading, codex.load]);
+  }, [snapshot, calendars, codex.status, codex.error, codex.loading, codex.load]);
 
   const buildLine = snapshot
     ? `ClawScribe ${snapshot.app.version} · ${snapshot.app.os} ${snapshot.app.arch} · ${snapshot.app.buildProfile}`
@@ -663,7 +591,7 @@ export function DiagnosticsSettings() {
     >
       {error && <NoteRow tone="error">{error}</NoteRow>}
       {items.map((item) => <HealthRow key={item.id} item={item} />)}
-      <DiagnosticsDetails snapshot={snapshot} openclaw={openclaw.status} />
+      <DiagnosticsDetails snapshot={snapshot} />
       <SettingsFooter
         actions={
           <Button type="button" variant="outline" size="sm" onClick={saveDiagnosticsReport} disabled={!snapshot || loading || savingReport}>

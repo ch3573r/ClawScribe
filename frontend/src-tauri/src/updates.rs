@@ -12,13 +12,13 @@ const DOWNLOAD_ROOT: &str = "https://github.com/ch3573r/ClawScribe/releases/down
 const MAX_RELEASE_BYTES: usize = 4 * 1024 * 1024;
 static PREFERENCE_LOCK: Mutex<()> = Mutex::new(());
 
-// Summaries, saved answers and Microsoft or Confluence exports can run beside
+// Queued imports, summaries, saved answers and outbound deliveries can run beside
 // each other and beside audio work. They share this gate; installation needs
 // the exclusive side plus the native job slot (recording, transcription, import,
 // library backup). Rust owns every permit below. Nothing is parked in a
 // webview resource, so a page reload can neither strand nor release one.
 static WORK_INSTALL_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
-const BUSY_MESSAGE: &str = "Wait for recording, transcription, summaries, answers, or exports to finish before installing.";
+const BUSY_MESSAGE: &str = "Wait for recording, transcription, imports, summaries, answers, or exports to finish before installing.";
 
 /// Admission for durable or outbound work that an installer restart would cut off.
 pub(crate) fn admit_work() -> Result<tokio::sync::RwLockReadGuard<'static, ()>, String> {
@@ -148,7 +148,14 @@ pub async fn download_app_update<R: Runtime>(
     let _flight = DOWNLOAD_FLIGHT
         .try_lock()
         .map_err(|_| "An update download is already running. Wait for it to finish.")?;
-    let generation = staged().invalidate();
+    // A temporarily busy install can be retried against the same checked release.
+    let generation = {
+        let mut stage = staged();
+        if stage.installer.as_ref().is_some_and(|item| item.rid == rid) {
+            return Ok(());
+        }
+        stage.invalidate()
+    };
     // Fail early instead of downloading a large installer that cannot be used.
     drop(UpdateInstallPermit::acquire()?);
     let update = webview
@@ -202,12 +209,16 @@ pub async fn download_app_update<R: Runtime>(
 /// it covers the whole installer hand-off, survives a page reload, and is
 /// released when the installer fails; on success the installer ends the process.
 #[tauri::command]
-pub async fn install_app_update(rid: ResourceId) -> Result<(), String> {
+pub async fn install_app_update(
+    rid: ResourceId,
+    edits: tauri::State<'_, crate::summary::edit_exit::SummaryEditsState>,
+) -> Result<(), String> {
+    let permit = UpdateInstallPermit::acquire()?;
+    edits.ensure_saved_for_update()?;
     let staged = staged()
         .installer
         .take_if(|installer| installer.rid == rid)
         .ok_or("The downloaded update is no longer available. Check for updates again.")?;
-    let permit = UpdateInstallPermit::acquire()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
         staged
@@ -217,6 +228,12 @@ pub async fn install_app_update(rid: ResourceId) -> Result<(), String> {
     })
     .await
     .map_err(|_| "The installer stopped unexpectedly. Try again.".to_string())?
+}
+
+#[tauri::command]
+pub fn discard_app_update(rid: ResourceId) {
+    // The webview may stop before hand-off if saving meeting edits fails.
+    let _ = staged().installer.take_if(|installer| installer.rid == rid);
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

@@ -18,3 +18,8 @@ test('a native summary remains active until a terminal status arrives', () => {
 test('a status transport error does not terminate the native job', () => {
   assert.equal(isTerminalSummary('unavailable'), false);
 });
+
+test('paused automatic notes remain attached and can be stopped', () => {
+  assert.equal(isActiveSummary('deferred'), true);
+  assert.equal(isTerminalSummary('deferred'), false);
+});

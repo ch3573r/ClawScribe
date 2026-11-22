@@ -53,7 +53,10 @@ const SUPPORTED_CODES: ReadonlySet<string> = new Set(LANGUAGE_OPTIONS.map((o) =>
  */
 export function normaliseLanguageCode(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const lower = raw.toLowerCase().replace(/_/g, '-');
+  const lower = raw.trim().toLowerCase().replace(/_/g, '-');
+  const named = LANGUAGE_OPTIONS.find(option => option.label.toLowerCase() === lower);
+  if (named) return named.code;
+  if (lower === 'zh-hant' || lower.startsWith('zh-hant-') || ['zh-hk', 'zh-mo'].includes(lower)) return 'zh-tw';
   if (SUPPORTED_CODES.has(lower)) return lower;
   const base = lower.split('-')[0];
   if (SUPPORTED_CODES.has(base)) return base;

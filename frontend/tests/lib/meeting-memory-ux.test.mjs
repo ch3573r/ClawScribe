@@ -3,7 +3,7 @@ import test from 'node:test';
 import {loadTsModule} from './load-ts-module.mjs';
 import {createHookHarness,flush} from './hook-harness.mjs';
 const jsx=(type,props)=>({type,props});
-const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children)]:[];
+const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children),...nodes(node.props?.secondary)]:[];
 const text=node=>Array.isArray(node)?node.map(text).join(''):typeof node==='string'||typeof node==='number'?String(node):node?text(node.props?.children):'';
 const meetings=[{id:'a',title:'Launch review'},{id:'b',title:'Budget planning'}];
 function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic_ready:0},sidebar={}) {
@@ -17,6 +17,7 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
     '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'fixture',model:'fixture'}})},
     '@/components/LibraryBackup':{LibraryBackup:'backup'},'@/components/Knowledge/KnowledgeArchive':{KnowledgeArchive:'memory'},
     '@/components/Archive/ArchiveMeetingRows':{ArchiveMeetingRows:'archive-rows',useArchiveMetadata:()=>({metadata:sidebar.metadata??null,error:false,refresh:async()=>{}})},'@/components/Archive/ArchiveStorageButton':{ArchiveStorageButton:'storage'},
+    '@/components/Archive/OpenMeetingActions':{OpenMeetingActions:'open-actions'},
     '@/components/MeetingDetails/ProjectTags':{ProjectTags:'project-tags'},
     './ArchiveAudioRemoval':{ArchiveAudioRemoval:'audio-removal'},
     '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
@@ -99,25 +100,27 @@ test('archive shows titles and passages and restores date and query when returni
     meetings:[{...meetings[0],created_at:'2026-01-01'},{...meetings[1],created_at:'2026-02-01'}],
     search:(query,scope)=>{
       observed.push([query,scope?.filter.from]);
-      return {titles:[{id:'a'}],passages:[{meeting_id:'b',title:'Budget planning',text:'Fixture passage 50% 📘',speaker:'Fixture speaker',evidence}],limited:false};
+      return {titles:[{id:'a'}],passages:[{meeting_id:'b',title:'Budget planning',text:'Fixture passage 50% 📘',speaker:'Fixture speaker',start_seconds:12,evidence}],limited:false};
     },
   };
   const app=surface('src/app/meetings/page.tsx','default',{},undefined,sidebar);
   let tree=app.render();
   nodes(tree).find(node=>node.type==='title-filter').props.onChange({target:{value:'50%'}});
   tree=app.render();
-  assert.match(text(tree),/Matching titles/);
-  assert.match(text(tree),/Fixture passage 50% 📘/);
+  assert.match(text(tree),/Matching meetings/);
   const matchingRows=nodes(tree).find(node=>node.type==='archive-rows').props;
-  assert.deepEqual(Array.from(matchingRows.meetings,meeting=>meeting.id),['a']);
+  assert.deepEqual(Array.from(matchingRows.meetings,meeting=>meeting.id),['b','a']);
+  assert.equal(matchingRows.renderExcerpts({id:'a'}),null);
+  assert.equal(nodes(matchingRows.renderExcerpts({id:'b'})).find(node=>node.type==='blockquote').props.children.props.text,'Fixture passage 50% 📘');
   const rows=surface('src/components/Archive/ArchiveMeetingRows.tsx','ArchiveMeetingRows',{...matchingRows,active:false});
-  const titleLink=nodes(rows.render()).find(node=>node.type==='link'&&text(node)==='Launch review');
+  const titleLink=nodes(rows.render()).find(node=>node.type==='link'&&node.props.href==='/meeting-details?id=a&from=archive');
   assert.equal(titleLink.props.href,'/meeting-details?id=a&from=archive');
   rows.unmount();
   nodes(tree).find(node=>node.type==='input'&&node.props.type==='date').props.onChange({target:{value:'2026-02-01'}});
   tree=app.render();
-  assert.doesNotMatch(text(tree),/Launch review/);
-  nodes(tree).find(node=>node.props?.['aria-label']==='Show passage in Budget planning').props.onClick();
+  const filteredRows=nodes(tree).find(node=>node.type==='archive-rows').props;
+  assert.deepEqual(Array.from(filteredRows.meetings,meeting=>meeting.id),['b']);
+  nodes(filteredRows.renderExcerpts({id:'b'})).find(node=>node.type==='button'&&text(node)==='Play passage').props.onClick();
   assert.match(navigated[0],/^\/meeting-details\?id=b&evidence=[\w-]+&from=archive$/);
   app.reset();
   tree=app.render(); // Same module and a simulated route remount.
@@ -135,10 +138,10 @@ test('memory empty-state action opens the existing chooser without expanding the
   assert.equal(nodes(tree).find(node=>node.type==='chat').props.state.scope.filter.all_meetings,false);app.unmount();
 });
 
-test('asking from filtered summary, note and bookmark hits opens a fresh composer with IDs only',()=>{
+test('asking from filtered saved hits prefills the question without including personal excerpts',()=>{
   const navigated=[];
   const sources=['summary','note','bookmark'].map(source=>({
-    reference:{meeting_id:'b',source,id:source==='bookmark'?'mark':'b',start:0,end:12,fingerprint:'fixture'},
+    reference:{meeting_id:'b',source,id:source==='bookmark'?'mark':'b',start:0,end:12,fingerprint:`fixture-${source}`},
     title:'Budget planning',date:'2026-02-01',text:'Private fixture words',seconds:source==='bookmark'?12:null,
   }));
   const sidebar={
@@ -153,8 +156,10 @@ test('asking from filtered summary, note and bookmark hits opens a fresh compose
   nodes(tree).find(n=>n.type==='button'&&text(n)==='Needs attention').props.onClick();
   nodes(tree).find(n=>n.type==='input'&&n.props.type==='date').props.onChange({target:{value:'2026-02-01'}});
   tree=archive.render();
+  const matchingRows=nodes(tree).find(node=>node.type==='archive-rows').props;
+  const excerpts=matchingRows.renderExcerpts({id:'b'});
   for(const label of ['Show summary','Show saved note','Show bookmark']) {
-    nodes(tree).find(n=>n.type==='button'&&text(n)===label).props.onClick();
+    nodes(excerpts).find(n=>n.type==='button'&&text(n)===label).props.onClick();
   }
   assert.equal(navigated.length,3);
   assert.ok(navigated.every(url=>/^\/meeting-details\?id=b&savedSource=[\w-]+&from=archive$/.test(url)));
@@ -163,7 +168,7 @@ test('asking from filtered summary, note and bookmark hits opens a fresh compose
   const memory=nodes(archive.render()).find(n=>n.type==='memory');
   assert.equal(memory.props.active,true);
   assert.deepEqual([...memory.props.initialMatches.ids],['b']);
-  assert.doesNotMatch(JSON.stringify(memory.props.initialMatches),/Private fixture|private phrase|fingerprint|mark/);
+  assert.doesNotMatch(JSON.stringify(memory.props.initialMatches),/Private fixture|fingerprint|mark/);
   const actual=surface('src/components/Knowledge/KnowledgeArchive.tsx','KnowledgeArchive',memory.props);
   tree=actual.render();
   const chat=nodes(tree).find(n=>n.type==='chat');
@@ -171,7 +176,8 @@ test('asking from filtered summary, note and bookmark hits opens a fresh compose
   assert.deepEqual([...chat.props.state.scope.filter.meeting_ids],['b']);
   assert.equal(chat.props.state.scope.filter.from,'2026-02-01');
   assert.equal(chat.props.state.owner,undefined);
-  assert.match(text(tree),/Personal notes and bookmarks stay on this device/);
+  assert.equal(chat.props.initialQuestion,'private phrase');
+  assert.match(text(chat.props.secondary),/Personal notes and bookmarks stay on this device/);
   actual.unmount();archive.unmount();
 });
 

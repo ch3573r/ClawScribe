@@ -13,6 +13,7 @@ interface UpdateCheckContextType extends UpdateSnapshot {
   showUpdateDialog: () => void;
 }
 const UpdateCheckContext = createContext<UpdateCheckContextType | undefined>(undefined);
+const AUTOMATIC_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 export function UpdateCheckProvider({ children }: { children: React.ReactNode }) {
   const snapshot = useSyncExternalStore(updateService.subscribe, updateService.getSnapshot, updateService.getServerSnapshot);
@@ -38,17 +39,34 @@ export function UpdateCheckProvider({ children }: { children: React.ReactNode })
 
   const checkForUpdates = useCallback(async (force = true) => {
     if (force) setShowDialog(true);
-    try {
-      const info = await updateService.checkForUpdates(force);
-      if (info?.available && !force) showUpdateNotification(info, handleShowDialog);
-    } catch { /* Manual checks show the shared error; startup stays quiet. */ }
-  }, [handleShowDialog]);
+    try { await updateService.checkForUpdates(force); }
+    catch { /* Manual checks show the shared error. */ }
+  }, []);
 
   useEffect(() => {
-    if (!autoCheck || !snapshot.ready) return;
-    const timer = setTimeout(() => void checkForUpdates(false), 2000);
-    return () => clearTimeout(timer);
-  }, [autoCheck, snapshot.ready, snapshot.channel, checkForUpdates]);
+    if (!autoCheck) return;
+    let active = true;
+    let notifiedVersion: string | undefined;
+    const check = async () => {
+      try {
+        const info = await updateService.checkForUpdates(false);
+        if (active && info?.available && info.version !== notifiedVersion
+            && info === updateService.getSnapshot().updateInfo) {
+          notifiedVersion = info.version;
+          showUpdateNotification(info, handleShowDialog);
+        }
+      } catch { /* Keep automatic checks quiet and retry on the next tick. */ }
+    };
+    // The main webview stays mounted while the window is hidden in the tray.
+    // The service shares in-flight checks and limits successful checks to daily.
+    const startup = setTimeout(() => void check(), 2000);
+    const periodic = setInterval(() => void check(), AUTOMATIC_CHECK_INTERVAL_MS);
+    return () => {
+      active = false;
+      clearTimeout(startup);
+      clearInterval(periodic);
+    };
+  }, [autoCheck, snapshot.channel, handleShowDialog]);
 
   useEffect(() => {
     const handleTrayCheck = () => void checkForUpdates(true);

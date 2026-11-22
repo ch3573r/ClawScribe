@@ -18,6 +18,9 @@
     verify  reopens the same profile in a fresh process and checks that the
             data survived
 
+  Before starting the executable, checks app-local VC++ runtime files and
+  import tables across the unpacked native payloads.
+
   It also runs the executable against unsafe input and checks the exact refusal
   and that nothing was touched: a malformed command line, a relative path, a
   non-empty folder, a folder with only a stale marker, an unmarked folder for
@@ -28,9 +31,9 @@
   load a speech model, drive the interface or run the installer. Those checks
   stay manual; see docs/windows-release.md.
 
-  What reaches the Actions log is limited to fixed check names, pass or fail,
-  exit codes and a few counts. Paths, error text and the application's own output
-  are never printed. If the work folder cannot be removed, that is reported after
+  The Actions log reports fixed check names, pass or fail, exit codes, counts
+  and filenames implicated by missing VC++ imports. Absolute paths and the
+  application's own output stay private. A cleanup failure is reported after
   the first failure and never replaces it.
 
 .PARAMETER Installer
@@ -39,6 +42,10 @@
 
 .PARAMETER BundleRoot
   Extra bundle folder to search when -Installer is not given.
+
+.PARAMETER MsiInstaller
+  Path to the matching MSI. Its cabinet and read-only File table are used to
+  verify VC++ dependencies and the installed directory of each DLL.
 
 .PARAMETER WorkRoot
   Folder that receives the temporary work folder. Defaults to RUNNER_TEMP, then
@@ -53,6 +60,7 @@
 #>
 param(
     [string]$Installer = "",
+    [string]$MsiInstaller = "",
     [string]$BundleRoot = "",
     [string]$WorkRoot = "",
     [int]$StepTimeoutSeconds = 300,
@@ -251,6 +259,21 @@ try {
         Where-Object { $_.Name -notin $sidecars -and $_.Name -notlike "uninstall*" })
     if ($executables.Count -ne 1) { Stop-Acceptance "Expected exactly one application executable beside the packaged encoder, found $($executables.Count)." }
     $application = $executables[0].FullName
+    & node (Join-Path $PSScriptRoot "verify-packaged-vc-runtime.mjs") $extract $applicationFolder
+    if ($LASTEXITCODE -ne 0) { Stop-Acceptance "App-local VC++ runtime dependency check failed." }
+    if ($MsiInstaller) {
+        $msiPath = (Resolve-Path -LiteralPath $MsiInstaller).Path
+        $msiFiles = @(& (Join-Path $PSScriptRoot "read-msi-file-table.ps1") -Installer $msiPath)
+        $msiApplication = @($msiFiles | Where-Object { $_.name -eq $executables[0].Name })
+        if ($msiApplication.Count -ne 1) { Stop-Acceptance "Expected one matching application executable in the MSI file table." }
+        $msiTable = Join-Path $work "msi-file-table.json"
+        ConvertTo-Json -InputObject $msiFiles | Set-Content -LiteralPath $msiTable -Encoding utf8NoBOM
+        $msiExtract = Join-Path $work "msi"
+        & $sevenZip x -y "-o$msiExtract" -- $msiPath | Out-Null
+        if ($LASTEXITCODE -ne 0) { Stop-Acceptance "7-Zip could not unpack the MSI installer." }
+        & node (Join-Path $PSScriptRoot "verify-packaged-vc-runtime.mjs") $msiExtract $msiApplication[0].directory $msiTable
+        if ($LASTEXITCODE -ne 0) { Stop-Acceptance "MSI app-local VC++ runtime dependency check failed." }
+    }
     $applicationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $application).Hash.ToLowerInvariant()
     Write-Host "Application executable: $($executables[0].Name) sha256=$applicationHash"
 

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfig } from "@/contexts/ConfigContext";
 import { useCloudTranscription } from "@/hooks/useCloudTranscription";
+import { useWebhookSettings } from "@/hooks/useWebhookSettings";
 import { getExportDestinations } from "@/lib/exportDestinations";
 import type { Loadable, PrivacyInput } from "@/lib/privacy";
 import { AUTO_UPDATE_CHECK_CHANGED_EVENT, getAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
@@ -32,6 +33,7 @@ function useLoadable<T>(load: () => Promise<T>, tick: number): Loadable<T> {
 export function usePrivacyInput(): PrivacyInput {
   const { isAutoSummary } = useConfig();
   const cloud = useCloudTranscription();
+  const webhook = useWebhookSettings();
   const [tick, setTick] = useState(0);
   const [updateCheck, setUpdateCheck] = useState(true);
   const [confluenceRest, setConfluenceRest] = useState(false);
@@ -99,14 +101,11 @@ export function usePrivacyInput(): PrivacyInput {
     };
   }, tick);
 
-  const assistant = useLoadable(async () => (await invoke<{ enabled: boolean }>("get_mcp_access")).enabled, tick);
-  const semanticSearch = useLoadable(async () => (await knowledgeService.modelStatus()).enabled, tick);
-  // Only whether handoff is on and where it points; the token never leaves the backend.
-  const handoff = useLoadable(async () => {
-    const status = await invoke<{ enabled?: boolean; endpoint?: string | null }>("get_openclaw_config_status");
-    return { enabled: status?.enabled === true, endpoint: status?.endpoint ?? null };
+  const assistant = useLoadable(async () => {
+    const access = await invoke<{ enabled: boolean; follow_through: boolean }>("get_mcp_access");
+    return access.enabled === true || access.follow_through === true;
   }, tick);
-
+  const semanticSearch = useLoadable(async () => (await knowledgeService.modelStatus()).enabled, tick);
   return {
     recording,
     transcription: cloud.loaded ? transcription : { status: "loading" },
@@ -120,6 +119,6 @@ export function usePrivacyInput(): PrivacyInput {
     assistant,
     updateCheck,
     semanticSearch,
-    handoff,
+    webhook,
   };
 }

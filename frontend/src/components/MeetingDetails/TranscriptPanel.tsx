@@ -12,6 +12,7 @@ import { TranscriptCorrections } from './TranscriptCorrections';
 import { MeetingBookmarks } from './MeetingBookmarks';
 import { Button } from '@/components/ui/button';
 import type { PlayerBindings } from '@/lib/player-bindings';
+import type { TranscriptTextPatch } from '@/lib/meetingTranscripts';
 
 interface TranscriptPanelProps {
   bindings?: PlayerBindings;
@@ -32,7 +33,9 @@ interface TranscriptPanelProps {
   segments?: TranscriptSegmentData[];
   hasMore?: boolean;
   isLoadingMore?: boolean;
+  isLoadingTranscript?: boolean;
   totalCount?: number;
+  emptyLiveMessage?: string | null;
   loadedCount?: number;
   onLoadMore?: () => void;
 
@@ -40,10 +43,13 @@ interface TranscriptPanelProps {
   meetingId?: string;
   meetingFolderPath?: string | null;
   audioStatus: 'loading' | 'found' | 'missing';
+  audioError?: string | null;
+  onRetryAudio?: () => void;
   showSpeakerAttribution?: boolean;
   activeTime?: number;
   onSeekToTime?: (seconds: number) => void;
   onRefetchTranscripts?: () => Promise<void>;
+  onPatchTranscriptText?: (patches: TranscriptTextPatch[]) => void;
   onUpdateTranscriptSpeaker?: (transcriptId: string, speaker: string | null) => Promise<void>;
   onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
 
@@ -74,16 +80,21 @@ export function TranscriptPanel({
   segments,
   hasMore,
   isLoadingMore,
+  isLoadingTranscript,
   totalCount,
+  emptyLiveMessage,
   loadedCount,
   onLoadMore,
   meetingId,
   meetingFolderPath,
   audioStatus,
+  audioError,
+  onRetryAudio,
   showSpeakerAttribution = true,
   activeTime,
   onSeekToTime,
   onRefetchTranscripts,
+  onPatchTranscriptText,
   onUpdateTranscriptSpeaker,
   onApplySpeakerToMatching,
   onRevealSegment,
@@ -106,11 +117,12 @@ export function TranscriptPanel({
   useEffect(() => { setFindOpen(false); setFindQuery(''); setFindIndex(-1); }, [meetingId]);
   const [editing, setEditing] = useState<TranscriptSegmentData | null>(null);
   const [replaceOpen, setReplaceOpen] = useState(false);
+  const openReplace = () => setReplaceOpen(true);
   const [transcribeOpen, setTranscribeOpen] = useState(false);
   useEffect(() => { setEditing(null); setReplaceOpen(false); setTranscribeOpen(false); }, [meetingId]);
   useEffect(() => {
-    if (openTranscription && meetingFolderPath) setTranscribeOpen(true);
-  }, [meetingId, openTranscription, meetingFolderPath]);
+    if (openTranscription && meetingFolderPath && audioStatus === 'found') setTranscribeOpen(true);
+  }, [meetingId, openTranscription, meetingFolderPath, audioStatus]);
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
@@ -119,7 +131,7 @@ export function TranscriptPanel({
     // Convert transcripts to segments for virtualization
     return transcripts.map(t => ({
       id: t.id,
-      timestamp: t.audio_start_time ?? 0,
+      timestamp: t.audio_start_time ?? Number.NaN,
       endTime: t.audio_end_time,
       text: t.text,
       original_text: t.original_text,
@@ -131,7 +143,11 @@ export function TranscriptPanel({
   // The speaker timeline contains the same saved rows as the paged transcript.
   // Once it is complete, playhead seeks can reach every row in the virtual list.
   const completeTimeline = timelineComplete ? speakerSegments : undefined;
-  const displayedSegments = completeTimeline ?? convertedSegments;
+  const displayedSegments = useMemo(() => {
+    if (!completeTimeline) return convertedSegments;
+    const hydrated = new Map(convertedSegments.map(row => [row.id, row]));
+    return completeTimeline.map(row => hydrated.get(row.id) ?? row);
+  }, [completeTimeline, convertedSegments]);
   const searchable = completeTimeline ?? (speakerSegments?.length ? speakerSegments : convertedSegments);
   const searchComplete = !usePagination || timelineComplete === true ||
     (totalCount !== undefined && searchable.length === totalCount);
@@ -175,19 +191,20 @@ export function TranscriptPanel({
   const transcriptCount = usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0);
   const emptyState = transcriptCount === 0 ? (
     <div className="space-y-3 text-sm">
-      {audioStatus === 'loading' ? (
-        <p>Loading meeting…</p>
+      {isLoadingTranscript || audioStatus === 'loading' ? (
+        <p role="status">Loading meeting…</p>
       ) : !meetingFolderPath ? (
         <p>No transcript or recording is attached to this meeting.</p>
       ) : audioStatus === 'found' ? (
         <>
           <h3 className="text-lg font-semibold text-foreground">No transcript yet</h3>
-          <p>This meeting&apos;s audio is saved but hasn&apos;t been transcribed.</p>
-          <Button onClick={() => setTranscribeOpen(true)}>Transcribe now</Button>
+          <p>{emptyLiveMessage ?? "This meeting's audio is saved but hasn't been transcribed."}</p>
+          <Button onClick={() => setTranscribeOpen(true)}>{emptyLiveMessage ? 'Retranscribe' : 'Transcribe now'}</Button>
         </>
       ) : (
         <>
-          <p>No transcript yet, and no audio file was found in this meeting&apos;s folder.</p>
+          <p>{emptyLiveMessage ? `${emptyLiveMessage} No audio file was found in this meeting's folder.`
+            : "No transcript yet, and no audio file was found in this meeting's folder."}</p>
           <Button variant="outline" onClick={onOpenMeetingFolder}>Open recording folder</Button>
         </>
       )}
@@ -199,7 +216,8 @@ export function TranscriptPanel({
         <h2 className="text-sm font-semibold text-foreground">Transcript</h2>
         <TranscriptButtonGroup bindings={bindings} transcriptCount={transcriptCount} transcribeOpen={transcribeOpen} onTranscribeOpenChange={setTranscribeOpen}
           onCopyTranscript={onCopyTranscript} onOpenMeetingFolder={onOpenMeetingFolder} meetingId={meetingId} meetingFolderPath={meetingFolderPath}
-          onRefetchTranscripts={onRefetchTranscripts} onFindReplace={meetingId ? () => setReplaceOpen(true) : undefined}
+          audioAvailable={audioStatus === 'found'}
+          onRefetchTranscripts={onRefetchTranscripts} onFindReplace={meetingId ? openReplace : undefined}
           onFind={meetingId ? openFind : undefined}
           onAddBookmark={meetingId ? () => setBookmarkOpen(true) : undefined} correctionActions={actions} />
       </div>
@@ -207,13 +225,19 @@ export function TranscriptPanel({
 
   return (
     <div data-transcript-panel tabIndex={0} onKeyDown={event => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h') { event.preventDefault(); event.stopPropagation(); setReplaceOpen(true); }
+      if (meetingId && transcriptCount > 0 && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h') { event.preventDefault(); event.stopPropagation(); openReplace(); }
     }} className="flex h-[26rem] min-h-[18rem] min-w-0 md:h-auto shrink-0 flex-col border-r border-border bg-card md:w-[38%] md:min-w-[18rem] md:max-w-[30rem] xl:w-[clamp(420px,36%,560px)] xl:min-w-[420px] xl:max-w-[560px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
       {meetingId ? <TranscriptCorrections key={meetingId} meetingId={meetingId} editing={editing} onClose={() => setEditing(null)}
-        onChanged={onRefetchTranscripts} replaceOpen={replaceOpen} onReplaceOpenChange={setReplaceOpen}
+        onChanged={patches => patches && onPatchTranscriptText ? onPatchTranscriptText(patches) : onRefetchTranscripts?.()}
+        replaceOpen={replaceOpen} replaceQuery={findQuery} onReplaceOpenChange={setReplaceOpen}
         renderActions={renderToolbar} /> : renderToolbar()}
       {findOpen && <TranscriptFind bindings={bindings} query={findQuery} onQueryChange={setFindQuery} current={findIndex} total={findMatches.length} complete={searchComplete} focusRequest={findFocus}
-        onStep={direction => void goToMatch(stepMatch(findIndex, findMatches.length, direction))} onClose={closeFind} />}
+        onStep={direction => void goToMatch(stepMatch(findIndex, findMatches.length, direction))} onClose={closeFind}
+        onReplace={meetingId && transcriptCount > 0 ? openReplace : undefined} />}
+      {transcriptCount > 0 && (audioStatus === 'missing' || audioError) && <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2 text-xs text-muted-foreground">
+        <p role="status">{audioError ? 'Saved audio could not be played.' : 'Saved audio is unavailable.'} You can still read and correct the transcript.</p>
+        {onRetryAudio && <Button variant="outline" size="sm" onClick={onRetryAudio}>Check again</Button>}
+      </div>}
       {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} focusedBookmark={focusedBookmark} currentTime={activeTime} onSeek={onSeekToTime} addOpen={bookmarkOpen} onAddOpenChange={setBookmarkOpen} onBookmarksChange={onBookmarksChange} />}
       {/* Transcript content - use virtualized view for better performance */}
       <div className="flex-1 overflow-hidden pb-4">

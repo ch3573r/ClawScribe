@@ -1,7 +1,7 @@
 [package]
 name = "clawscribe"
-version = "0.65.1"
-description = "Windows meeting recorder with OpenClaw handoff"
+version = "0.67.0"
+description = "Local-first Windows meeting recorder"
 authors = ["OpenClaw"]
 license = "MIT"
 repository = "https://github.com/ch3573r/ClawScribe"
@@ -143,6 +143,7 @@ rayon = "1.10"
 rubato = "0.15.0"
 ringbuf = "0.4.8"
 sha2 = "0.10"
+hmac = "0.12"
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 tempfile = "3.3.0"
 whatlang = "0.16.4"
@@ -211,6 +212,9 @@ sherpa-onnx = { version = "1.13.3", default-features = false, features = ["share
 whisper-rs = { version = "0.13.2", features = ["raw-api"] }
 futures-channel = "0.3.31"
 sherpa-onnx = "1.13.3"
+
+[target.'cfg(unix)'.dependencies]
+xattr = "1.6"
 
 [dev-dependencies]
 tempfile = "3.3.0"

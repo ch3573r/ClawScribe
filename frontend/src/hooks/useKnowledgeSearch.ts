@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { createKnowledgeController, scopeReady } from "@/lib/knowledge-state";
 import type { SavedReference } from "@/lib/archive-search";
@@ -90,6 +90,7 @@ export function useKnowledgeSearch(
     contextReference?: EvidenceRef;
   } | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
+  const previewTrigger = useRef<HTMLElement | null>(null);
   const identity = JSON.stringify({
     scope,
     owner,
@@ -483,11 +484,15 @@ export function useKnowledgeSearch(
       if (current()) setError(errorText(e));
     }
   }
-  async function inspect(
+  const inspect = useCallback(async (
     reference: EvidenceRef,
     metadata: EvidenceDisplay,
     contextReference?: EvidenceRef,
-  ) {
+    trigger?: HTMLElement,
+  ) => {
+    // Retry keeps the original trigger. A stable callback also keeps the
+    // memoized Markdown from remounting the citation during verification.
+    if (trigger) previewTrigger.current = trigger;
     setPreview({ reference, metadata, resolved: null, contextReference });
     setPreviewBusy(true);
     setError("");
@@ -518,7 +523,7 @@ export function useKnowledgeSearch(
     } finally {
       if (current()) setPreviewBusy(false);
     }
-  }
+  }, [controller]);
   async function selectConversation({kind, id}: ConversationOwner) {
     const value = {kind, id};
     if (!surfaceActive || scopeSwitchPending.current || owner?.id === value.id) return;
@@ -581,6 +586,7 @@ export function useKnowledgeSearch(
     error: visible ? error : "",
     preview: visible ? preview : null,
     previewBusy: visible && previewBusy,
+    previewTrigger,
     controller,
     search,
     ask,

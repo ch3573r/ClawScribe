@@ -58,7 +58,7 @@ describe("blocksToMarkdownSafely", () => {
     );
     assert.equal(consoleError.mock.calls[0].arguments[1].source, "test-fallback");
     assert.equal(consoleError.mock.calls[0].arguments[1].blocksCount, 1);
-    assert.equal(consoleError.mock.calls[0].arguments[1].error, error);
+    assert.equal(consoleError.mock.calls[0].arguments[1].error, undefined, 'conversion errors may contain note text');
   });
 
   test("omits markdown when conversion throws without fallback", async () => {

@@ -13,6 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 
 interface Access {
   enabled: boolean;
+  follow_through: boolean;
   command: string;
 }
 
@@ -25,7 +26,7 @@ export function LocalMcpSettings() {
   const request = useRef(0);
   const pending = useRef(false);
 
-  async function refresh(enabled?: boolean) {
+  async function refresh(enabled?: boolean, followThrough = false) {
     if (pending.current) return;
     pending.current = true;
     const id = ++request.current;
@@ -35,7 +36,7 @@ export function LocalMcpSettings() {
     try {
       const result = enabled === undefined
         ? await invoke<Access>("get_mcp_access")
-        : await invoke<Access>("set_mcp_access", { enabled });
+        : await invoke<Access>(followThrough ? "set_mcp_follow_through_access" : "set_mcp_access", { enabled });
       if (id === request.current) setAccess(result);
     } catch {
       if (id === request.current) {
@@ -56,7 +57,7 @@ export function LocalMcpSettings() {
   }, []);
 
   let config = "";
-  if (access?.enabled) {
+  if (access?.enabled || access?.follow_through) {
     const server = { command: access.command, args: ["--mcp-stdio"] };
     config = client === "codex"
       ? `[mcp_servers.clawscribe]\ncommand = ${JSON.stringify(server.command).replace(/\u007f/g, "\\u007f")}\nargs = ${JSON.stringify(server.args)}`
@@ -86,6 +87,14 @@ export function LocalMcpSettings() {
           <Switch id="mcp-access" checked={access?.enabled ?? false} disabled={busy || !access}
             onCheckedChange={value => void refresh(value)} />
         </SettingsRow>
+        <SettingsRow
+          title="Allow read-only follow-through"
+          htmlFor="mcp-follow-through"
+          description="A local assistant can read open reviewed actions and basic metadata for a meeting only when it has that meeting’s reference"
+        >
+          <Switch id="mcp-follow-through" checked={access?.follow_through ?? false} disabled={busy || !access}
+            onCheckedChange={value => void refresh(value, true)} />
+        </SettingsRow>
         {config && <div className="grid gap-2 px-5 py-4">
           <Label htmlFor="mcp-client">Client format</Label>
           <Select value={client} onValueChange={value => { setClient(value); setCopied(false); }}>
@@ -108,7 +117,7 @@ export function LocalMcpSettings() {
       </SettingsCard>
       <div className="flex items-start gap-3 rounded-lg bg-warning px-4 py-3.5 text-[13px] leading-5 text-warning-foreground">
         <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
-        <span>A connected assistant may send what it reads to its own provider. This is the only setting that lets other apps read your library.</span>
+        <span>A connected assistant may send what it reads to its own provider. Give it only the access and meeting references it needs.</span>
       </div>
     </>
   );

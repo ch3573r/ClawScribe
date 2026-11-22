@@ -12,6 +12,8 @@ tasks only in the signed-in user's selected To Do list.
 4. ClawScribe loads open reviewed meeting actions or suggests tasks from the summary.
    **Review suggestions** opens the action list when the summary contains
    additional suggestions. Review and save any additions before reopening the export.
+   Structured suggestions can be added here. Checked-off fallback actions are
+   excluded from the export preview.
 5. User edits titles/notes and deselects anything that should not be created.
 6. ClawScribe creates the selected tasks through Microsoft Graph.
 
@@ -45,12 +47,15 @@ owners to Azure AD users or assign tasks to other people.
 
 Microsoft To Do task creation is not naturally idempotent. ClawScribe keeps a
 local history keyed by account, list, meeting, and saved action ID. Re-exporting
-the same saved action skips the existing task even when its title or the selected
-batch changes. Ambiguous matches with older suggestions are held for review.
+the same saved action reuses that task ID even when its title or the selected
+batch changes. Notes and due dates are checkpointed individually. If a field
+still needs repair, the app reads the task and fills the missing value. Any
+value on the task is preserved. Older confirmed tasks get the same check.
+Ambiguous matches with older suggestions are held for review.
 
 The ledger saves each pending attempt before contacting Graph and each result
-afterwards. Unreadable history or a failed write stops export. Interrupted or
-uncertain submissions are not automatically repeated; inspect the To Do list
-before creating another task. A title change must not be used to bypass an
-unknown outcome. See
+afterwards. Unreadable history or a failed write stops export. If a submission
+has an unknown outcome, inspect the To Do list and record the result in
+**Export history** before retrying. The history includes task titles, list and
+task IDs, and completion state for tasks and their fields. See
 [export history and recovery](microsoft-graph.md#export-history-and-recovery).

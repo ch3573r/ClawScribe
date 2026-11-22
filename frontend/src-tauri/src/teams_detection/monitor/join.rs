@@ -192,6 +192,17 @@ pub(crate) fn cancel_pending<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+pub(crate) fn cancel_microsoft_pending<R: Runtime>(app: &AppHandle<R>) {
+    let id = tracker()
+        .join
+        .as_ref()
+        .filter(|join| join.link.source() == CalendarSource::Microsoft)
+        .map(|join| join.id.clone());
+    if let Some(id) = id {
+        cancel(app, &id);
+    }
+}
+
 #[tauri::command]
 pub async fn join_and_record<R: Runtime>(
     app: AppHandle<R>,
@@ -211,10 +222,15 @@ pub async fn join_and_record<R: Runtime>(
     }
     let before = {
         let auth = app.state::<MicrosoftAuthState>();
-        let session = auth.inner.read().await;
-        if session.current_token.is_none() {
-            return Err("Microsoft calendar is disconnected.".into());
-        }
+        let _session = if join.link.source() == CalendarSource::Microsoft {
+            let session = auth.inner.read().await;
+            if session.current_token.is_none() {
+                return Err("Microsoft calendar is disconnected.".into());
+            }
+            Some(session)
+        } else {
+            None
+        };
         let mut tracker = tracker();
         if capture_active() || is_starting() || crate::start_request::is_pending() {
             return Err("Join and record requires an idle recorder.".into());
@@ -294,6 +310,7 @@ mod tests {
             key: window.into(),
             window: window.into(),
             teams_room: room,
+            desktop_teams: room.is_none(),
         }
     }
 

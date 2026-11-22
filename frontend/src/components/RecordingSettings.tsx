@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -13,15 +13,16 @@ import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { setSourceAttribution } from '@/lib/sourceAttribution';
 import { useConfig } from '@/contexts/ConfigContext';
-import { canEditLiveAudioSaving, selectedDevicesFromPreferences, type SelectedDevices } from '@/lib/audioDevicePreferences';
+import { canEditLiveAudioSaving } from '@/lib/audioDevicePreferences';
 import { RecordingMode, useRecordingState } from '@/contexts/RecordingStateContext';
 import { errorText } from '@/lib/errorText';
-import { loadBehaviorSettings, refreshBehaviorSettings } from '@/lib/behaviorSettings';
+import { getBehaviorSettings, loadBehaviorSettings, refreshBehaviorSettings, subscribeBehaviorSettings } from '@/lib/behaviorSettings';
 
 export interface RecordingPreferences {
   save_folder: string;
   auto_save: boolean;
   auto_open_floating_controls: boolean;
+  remember_floating_position: boolean;
   file_format: string;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
@@ -36,15 +37,16 @@ interface RecordingSettingsProps {
 const UNSELECTED_RECORDING_MODE = '__unset_recording_mode__';
 
 export function RecordingSettings({ onSave }: RecordingSettingsProps) {
-  const { selectedDevices, setSelectedDevices } = useConfig();
+  const { selectedDevices, saveSelectedDevices, devicePreferencesStatus, isSavingDevicePreferences } = useConfig();
   const recording = useRecordingState();
   const { recordingMode } = recording;
   const audioOnly = recordingMode === 'audio_only';
-  const recordingBusy = recording.isRecording || recording.isStarting || recording.isStopping;
+  const recordingBusy = recording.isRecording || recording.isStarting || recording.isStopping || recording.isSaving || recording.isProcessing;
   const [preferences, setPreferences] = useState<RecordingPreferences>({
     save_folder: '',
     auto_save: true,
     auto_open_floating_controls: true,
+    remember_floating_position: true,
     file_format: 'mp4',
     preferred_mic_device: null,
     preferred_system_device: null
@@ -55,10 +57,25 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [preferencesFailed, setPreferencesFailed] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
 
+  const { showConversationMetrics } = useSyncExternalStore(subscribeBehaviorSettings, getBehaviorSettings, getBehaviorSettings);
+  const [savingMetrics, setSavingMetrics] = useState(false);
+
+  async function handleMetricsToggle(enabled: boolean) {
+    setSavingMetrics(true);
+    try {
+      await invoke('set_conversation_metrics_preference', { enabled });
+      await refreshBehaviorSettings();
+    } catch {
+      toast.error('Could not update conversation metrics');
+    } finally {
+      setSavingMetrics(false);
+    }
+  }
+
   // The signal check runs only while this page is open and nothing is being
   // recorded. The hook stops the native monitor when the page is left.
   const levelFeed = useAudioLevelFeed({
-    enabled: !loading && !preferencesFailed && !recordingBusy,
+    enabled: !loading && !preferencesFailed && !recordingBusy && devicePreferencesStatus === 'ready',
     micDevice: selectedDevices.micDevice,
   });
 
@@ -68,9 +85,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       try {
         const prefs = await invoke<RecordingPreferences>('get_recording_preferences');
         setPreferences(prefs);
-        setSelectedDevices(selectedDevicesFromPreferences(prefs));
-      } catch (error) {
-        console.error('Failed to load recording preferences:', error);
+      } catch {
         setPreferencesFailed(true);
       } finally {
         setLoading(false);
@@ -78,7 +93,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     };
 
     loadPreferences();
-  }, [setSelectedDevices]);
+  }, []);
 
   // Load recording notification preference
   useEffect(() => {
@@ -110,29 +125,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     // Track auto-save setting change
     await Analytics.track('auto_save_recording_toggled', {
       enabled: enabled.toString()
-    });
-  };
-
-  const handleDeviceChange = async (devices: SelectedDevices) => {
-    const newPreferences = {
-      ...preferences,
-      preferred_mic_device: devices.micDevice,
-      preferred_system_device: devices.systemDevice
-    };
-    const micDevice = newPreferences.preferred_mic_device || 'Default';
-    const systemDevice = newPreferences.preferred_system_device || 'Default';
-    const saved = await savePreferences(newPreferences, {
-      successTitle: 'Device preferences saved',
-      successDescription: `Microphone: ${micDevice}, System audio: ${systemDevice}`
-    });
-
-    if (!saved) return;
-
-    // Track default device preference changes
-    // Note: Individual device selection analytics are tracked in the device selects
-    await Analytics.track('default_devices_changed', {
-      has_preferred_microphone: (!!devices.micDevice).toString(),
-      has_preferred_system_audio: (!!devices.systemDevice).toString()
     });
   };
 
@@ -195,11 +187,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     savingRef.current = true;
     setSaving(true);
     try {
-      await invoke('set_recording_preferences', { preferences: prefs });
+      await invoke('set_recording_preferences', { preferences: prefs, preserveDevicePreferences: true });
       setPreferences(prefs);
-      // Home, recording start, and Settings all consume the same device state.
-      // Keep it in sync only after the backend accepted the preference update.
-      setSelectedDevices(selectedDevicesFromPreferences(prefs));
       onSave?.(prefs);
 
       toast.success(toastOptions?.successTitle || "Recording preferences saved", {
@@ -207,7 +196,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       });
       return true;
     } catch (error) {
-      console.error('Failed to save recording preferences:', error);
       toast.error(toastOptions?.errorTitle || "Failed to save recording preferences", {
         description: errorText(error)
       });
@@ -307,6 +295,19 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           />
         </SettingsRow>
 
+        <SettingsRow title="Remember floating controls position" htmlFor="remember-floating-position">
+          <Switch id="remember-floating-position" checked={preferences.remember_floating_position} disabled={saving}
+            onCheckedChange={enabled => void savePreferences({ ...preferences, remember_floating_position: enabled })} />
+        </SettingsRow>
+
+        <SettingsRow
+          title="Show conversation metrics"
+          htmlFor="show-conversation-metrics"
+          description="Show talk time, pace and questions during live transcription"
+        >
+          <Switch id="show-conversation-metrics" checked={showConversationMetrics} disabled={savingMetrics} onCheckedChange={handleMetricsToggle} />
+        </SettingsRow>
+
         <SettingsRow
           title="Recording start reminder"
           htmlFor="recording-start-reminder"
@@ -318,8 +319,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
 
       <AudioDevicesCard
         selectedDevices={selectedDevices}
-        onDeviceChange={handleDeviceChange}
-        disabled={saving || recordingBusy}
+          onDeviceChange={saveSelectedDevices}
+          disabled={saving || isSavingDevicePreferences || recordingBusy}
         feed={levelFeed}
         meterPaused={recordingBusy}
       />

@@ -509,6 +509,37 @@ impl TranscriptsRepository {
         .await
     }
 
+    /// The native recording ID is sufficient to save the text without
+    /// attaching an unverified path. Audio repair can later bind a trusted
+    /// folder whose recording marker carries this same ID.
+    pub(crate) async fn save_offline_recording_transcript(
+        pool: &SqlitePool,
+        recording_id: &str,
+        meeting_title: &str,
+        transcripts: &[TranscriptSegment],
+        started_at_ms: i64,
+    ) -> Result<String, SqlxError> {
+        Self::save_with_id(
+            pool,
+            recording_id.to_owned(),
+            meeting_title,
+            transcripts,
+            None,
+            Some(&crate::audio::outcome::RecordingOutcome {
+                audio_save_failed: true,
+                transcription_incomplete: true,
+                ..Default::default()
+            }),
+            None,
+            true,
+            RecordingProvenance {
+                started_at: chrono::DateTime::from_timestamp_millis(started_at_ms),
+                ..RecordingProvenance::recording(None, None)
+            },
+        )
+        .await
+    }
+
     async fn save_with_id(
         pool: &SqlitePool,
         meeting_id: String,
@@ -530,6 +561,41 @@ impl TranscriptsRepository {
                 .fetch_one(&mut *transaction)
                 .await?;
         if existing {
+            if has_recording_id && folder_path.is_none() {
+                use futures_util::TryStreamExt;
+                let mut saved = sqlx::query_as::<_, (String, String, Option<f64>, Option<f64>, Option<f64>, Option<String>, Option<String>)>(
+                    "SELECT t.transcript,t.timestamp,t.audio_start_time,t.audio_end_time,t.duration,t.speaker,t.word_timestamps_json
+                     FROM transcripts t JOIN meetings m ON m.id=t.meeting_id
+                     JOIN recording_outcomes o ON o.meeting_id=m.id
+                     WHERE m.id=? AND m.folder_path IS NULL AND m.recording_source='recording'
+                       AND o.audio_save_failed=1 ORDER BY t.rowid",
+                ).bind(&meeting_id).fetch(&mut *transaction);
+                let conflict =
+                    || SqlxError::Protocol("The saved meeting differs from this draft".into());
+                for segment in transcripts {
+                    let (text, time, start, end, duration, speaker, words) =
+                        saved.try_next().await?.ok_or_else(conflict)?;
+                    let word_json = segment
+                        .word_timestamps
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|_| conflict())?;
+                    if text != segment.text
+                        || time != segment.timestamp
+                        || start != segment.audio_start_time
+                        || end != segment.audio_end_time
+                        || duration != segment.duration
+                        || speaker != segment.speaker
+                        || words != word_json
+                    {
+                        return Err(conflict());
+                    }
+                }
+                if saved.try_next().await?.is_some() {
+                    return Err(conflict());
+                }
+            }
             transaction.commit().await?;
             return Ok(meeting_id);
         }
@@ -599,8 +665,15 @@ impl TranscriptsRepository {
             transaction.rollback().await?;
             return Err(e);
         }
-
-        info!("Successfully created meeting with id: {}", meeting_id);
+        if has_recording_id {
+            sqlx::query(
+                "UPDATE saved_live_answers SET meeting_id = ?1
+                WHERE recording_id = ?1 AND meeting_id IS NULL",
+            )
+            .bind(&meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
 
         // 2. Save each transcript segment with audio timing fields
         for segment in transcripts {
@@ -634,16 +707,13 @@ impl TranscriptsRepository {
             }
         }
 
-        info!(
-            "Successfully saved {} transcript segments for meeting {}",
-            transcripts.len(),
-            meeting_id
-        );
+        info!("Saved {} transcript segments", transcripts.len());
 
         if let Some(outcome) = outcome {
-            sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete, capture_incomplete, recording_files_incomplete) VALUES (?, ?, ?, ?, ?)")
+            sqlx::query("INSERT INTO recording_outcomes (meeting_id, audio_save_failed, transcription_incomplete, capture_incomplete, recording_files_incomplete, capture_details) VALUES (?, ?, ?, ?, ?, ?)")
                 .bind(&meeting_id).bind(outcome.audio_save_failed).bind(outcome.transcription_incomplete)
                 .bind(outcome.capture_incomplete).bind(outcome.recording_files_incomplete)
+                .bind(outcome.capture_details.as_ref().map(sqlx::types::Json))
                 .execute(&mut *transaction).await?;
         }
         // Commit the meeting, transcript and recovery status together.

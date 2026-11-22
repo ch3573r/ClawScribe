@@ -98,9 +98,9 @@ test('the manual start sends the title and both device choices by camelCase name
     '@tauri-apps/api/event': { listen: async () => () => {} },
   });
   await recordingService.startRecordingWithDevices('Synthetic mic', 'Synthetic speakers', 'Synthetic meeting', null, undefined, 'de');
-  await recordingService.attemptDeviceReconnect('Synthetic mic', 'Microphone');
+  await recordingService.attemptDeviceReconnect('Synthetic mic', 'Microphone', 'synthetic-session');
   assert.deepEqual(JSON.parse(JSON.stringify(sent)), [
     ['start_recording_with_devices_and_meeting', { micDeviceName: 'Synthetic mic', systemDeviceName: 'Synthetic speakers', meetingName: 'Synthetic meeting', useDefaultMicrophone: true, calendarLink: null, summaryLanguage: 'de' }],
-    ['attempt_device_reconnect', { deviceName: 'Synthetic mic', deviceType: 'Microphone' }],
+    ['attempt_device_reconnect', { deviceName: 'Synthetic mic', deviceType: 'Microphone', sessionId: 'synthetic-session' }],
   ]);
 });

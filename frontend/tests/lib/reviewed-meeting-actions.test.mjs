@@ -28,9 +28,12 @@ test('reviewed actions edit and save offline with stable IDs and provenance', as
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push([command, args]);
       if (command === 'get_meeting_export_history') return [{ actionId: 'saved-id', destination: 'Planner', status: 'succeeded' }];
-      if (command === 'get_reviewed_meeting_actions') return persisted;
+      if (command === 'get_reviewed_action_editor') return { actions: persisted, revision: 'reviewed-revision' };
       if (command === 'suggest_meeting_actions') return [{ ...suggested, legacyAction: { id: 'action-1', titleHash: '0'.repeat(16) } }];
-      if (command === 'save_reviewed_meeting_actions') persisted = args.actions;
+      if (command === 'save_reviewed_meeting_actions') {
+        assert.equal(args.expectedRevision, 'reviewed-revision');
+        persisted = args.actions;
+      }
     } },
   });
   const render = () => nodes(harness.render(() => ReviewedActions({ open, onOpenChange: value => { open = value; }, meetingId: 'meeting', getMarkdown: async () => '## Aufgaben\n- Bericht senden' })));
@@ -65,5 +68,5 @@ test('reviewed actions edit and save offline with stable IDs and provenance', as
   assert.equal(item('Input', 'action-title-saved-id').props.value, 'Bericht morgen senden');
   assert.equal(calls.filter(([command]) => command === 'get_meeting_export_history').length, 2);
   assert.ok(render().some(node => node.type === 'p' && node.props.children?.includes('Planner')));
-  assert.deepEqual(calls.filter(([command]) => command !== 'get_meeting_export_history').map(([command]) => command), ['get_reviewed_meeting_actions', 'suggest_meeting_actions', 'save_reviewed_meeting_actions', 'get_reviewed_meeting_actions']);
+  assert.deepEqual(calls.filter(([command]) => command !== 'get_meeting_export_history').map(([command]) => command), ['get_reviewed_action_editor', 'suggest_meeting_actions', 'save_reviewed_meeting_actions', 'get_reviewed_action_editor']);
 });

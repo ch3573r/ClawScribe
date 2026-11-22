@@ -27,17 +27,39 @@ an unavailable preferred microphone falls back to the current default, with the
 actual tested device and fallback shown beside its levels. Saved preferences
 remain unchanged.
 
-The system-audio warning checks captured system samples, independently of the
-microphone test. It appears once after 15 seconds without a non-silent system
-sample when an output device is selected. If system sound starts later, its
-warning clears without hiding a newer capture or transcription warning. Silence
-at startup alone does not establish that the selected output cannot be captured;
-confirm microphone and meeting audio in saved playback.
+The recorder counts each stretch of at least 15 seconds without audible
+system samples while the selected output is connected. Pausing resets the timer.
+The saved meeting shows these stretches as quiet periods. Capture warnings
+track separate evidence such as device failures, stalls in a previously
+responsive microphone stream, and dropped samples. Confirm microphone and
+meeting audio in saved playback.
+
+The recorder watches the selected input and output during capture, including
+while the main window is hidden or reloading. It tries to restore the same
+missing source while the other stream continues. Automatic checks begin after
+12 seconds and back off to at most one minute between failed checks. A device
+returning can trigger an earlier check, and **Retry** requests an immediate one.
+Pause, bookmarks, notes and calendar review remain available during a check.
+The live health display shows speech waiting or processing, free space for the
+recording and transcription scratch volumes when known, and the backend observed
+during inference. Whisper reports its runtime backend. Parakeet reports its
+loaded CPU or DirectML/CPU session. Nemotron reports its encoder and decoder
+backends. CPU fallback is shown when reported by the engine. Mixer overflow,
+capture-queue loss and source disconnects can leave gaps. The saved meeting
+flags those gaps even after capture reconnects successfully.
 
 Speak with the microphone at a usable level, avoid clipping, and use the intended
 language/model selection. Playback is the reference when a name, number, short
 answer, or overlapping utterance needs review. A confidence value is not proof
 that a segment is correct or incorrect.
+
+Microphone loudness normalization limits positive gain to about 18 dB so quiet
+room noise or far-end bleed cannot drive large amplification. During long quiet
+periods, speech detection retains only the recent audio needed to recognize the
+next voice and include its pre-roll. During uninterrupted speech, it releases
+PCM as each forced segment is emitted and preserves the model's state across
+the cut. Recording, import, and retranscription use the same sample clock for
+the cut and its remaining audio.
 
 ## Testing local transcription speed
 
@@ -60,6 +82,29 @@ also identifies samples that produced no text. For slow results, try a
 smaller installed model or select **Record now, transcribe later**. Short
 sample timing measures model speed. Meeting duration, other apps, audio
 capture, language and overlapping speakers affect live performance.
+
+For development, the [two-source capture benchmark](local-capture-benchmark.md)
+measures capture processing, transcript quality and saved audio on the same
+fictional meeting timeline.
+
+## Conversation metrics
+
+During live transcription, **Conversation** uses finalized speech to show talk time,
+speaking pace, questions and uninterrupted stretches on this PC. You can hide it
+in **Settings → Recording**. Metrics clear when the recording ends.
+
+The split between you and others requires **Label lines as Me or Participants**
+in **Settings → Transcription** and clear microphone or system audio for most of
+the speech so far. Speech without a clear source, such as crosstalk, is left out
+of the split. When it passes a quarter of the speech time, the panel shows only
+overall speech time and questions. Talk time uses the union of speech intervals for each
+source. Questions are estimated from closing punctuation. Pace uses words separated
+by spaces and is unavailable for scripts such as Chinese, Japanese and Thai.
+The overall word estimate counts space-separated tokens.
+The recent pace covers two minutes of recorded audio and estimates the words in a
+segment that crosses the window boundary. Your monologue ends when others speak
+or after a gap longer than two seconds of recorded audio. This readout can lag
+behind the conversation while speech is being transcribed. Time spent paused is excluded.
 
 ## Live Transcript Behavior
 
@@ -87,11 +132,21 @@ or an actual mention of applause. Its final text normalization only collapses
 whitespace. This avoids deleting legitimate speech; it does not prove a model's
 output is correct. Check suspected hallucinations against the saved audio.
 
-Use a timestamp button to play the associated audio. Scroll back to review
-previous text without being pulled to the newest segment; **Jump to live
-transcript** resumes following during recording. Speaker-name edits report
-failures visibly and retain custom input for retry. A manually assigned speaker
-label is not independently verified speaker identity.
+Use a timestamp button to play the associated audio in a saved meeting.
+During recording, scrolling back holds your place while speech arrives.
+Scroll back to the bottom or select **Jump to live transcript** to resume following.
+Reloading during active capture opens the restored transcript at the tail.
+Speaker-name edits report failures visibly and retain custom input for retry.
+A manually assigned speaker label is not independently verified speaker identity.
+
+Home uses one scroll area for the transcript and its controls. The list measures
+wrapped text and the space above its first row in that scroll area. Pause
+preserves your follow choice, and Stop ends live following.
+
+From `frontend`, run `node tests/browser/live-transcript-follow.mjs` to check
+scroll-back, jump, Stop, reload and saved playback navigation in headless Chromium
+with generated passages. It uses Microsoft Edge by default on Windows.
+Set `CLAWSCRIBE_TEST_BROWSER` to use another Chromium executable.
 
 Refreshing transcript rows does not interrupt the display of an arriving
 utterance; stopping shows its complete text. Reloading the interface restores an
@@ -162,6 +217,10 @@ save deadline allows two additional minutes for publication and fallback work.
 If raw encoding fails, existing legacy checkpoints are tried and originals are
 retained. New sessions rely on their raw spool for recovery.
 
+Older unsaved transcripts remain available in **Interrupted recordings**, including
+transcripts held only in the app's local recovery cache. A recording already
+saved to the library or currently being captured is excluded from cache recovery.
+
 Recovery accepts recordings without a transcript: recover the saved audio first,
 then use Transcribe in the saved meeting. If audio recovery fails and there is no
 transcript, the recovery entry and originals remain available for retry. Recovered
@@ -187,6 +246,18 @@ is frozen before transcription drain, and device-error limits apply to a recent
 and once more before audio finalization. The core saves the finalized transcript
 and outcome directly to the library. If the library write fails after the files
 are saved, open **Interrupted recordings** to finish saving the meeting.
+Stop gives the capture pipeline up to 45 seconds to flush, then allows up to
+five more seconds for stream release. If the pipeline flush completes, a slow
+driver release is recorded in diagnostics. A driver busy reconnecting has a
+separate 20-second wait when Stop is requested. Live transcription gets up to
+two minutes to drain and five
+seconds to cancel. Saved audio remains available for manual retranscription
+when speech segments are unfinished. Live capture and Stop use local
+transcription even when a hosted file provider is configured.
+
+An empty live transcript reports whether the speech detector produced no
+segments, the engine returned no text, or the session was incomplete. The
+audio-only recording flow still offers **Transcribe now**.
 Transcript, audio and metadata writes each get an independent attempt; failures
 are reported together. Each recording has a stable library ID. Retries reuse it,
 and library deletion leaves retained recording files out of recovery. A failed
@@ -405,6 +476,14 @@ discards old summary and transcript loading results. Title-only saves leave note
 unchanged, and save failures retain drafts for retry; edits made during a write
 remain available for the next save.
 
+Manual edits keep structured follow-ups supplied by the summary provider and
+remove any corresponding actions deleted from the notes. **Add summary
+suggestions** brings the remaining follow-ups into **Meeting actions** for review.
+Removing a suggestion and saving the actions keeps it dismissed. Saving an
+action with an available transcript reference keeps that passage reference with
+the action, including after summary regeneration. The
+app flags passages that changed and reports when their transcript was replaced.
+
 The shared summary processor now advances chunks from their actual emitted
 boundaries, rejects failed or empty chunk results, and stops rather than presenting
 an incomplete multi-chunk result as successful. It rejects empty transcript input.
@@ -415,14 +494,11 @@ The shared, compatible-API, and bundled Codex routes all reduce long inputs
 before their final prompt and reject incomplete reductions. Budgets reserve
 output and prompt overhead, use UTF-8 bytes conservatively, and limit reduction
 to eight passes. Built-in AI and Ollama context is capped at 16,384 tokens.
-Cloud limits depend on the model; unknown cloud models use 32,768. Custom and
-OpenClaw endpoints use their configured context, or 8,192 when unspecified;
-GPT-5/6 and o1/o3/o4 names instead default to 128,000. Those reasoning names use
-16,000 output tokens and up to 8,000 extraction tokens before context-based
-limits. Codex keeps its separate 32,768-token context budget.
-Default output is capped at one quarter of context for contexts of at least
-4,096 tokens; smaller contexts use a 1,024-token cap. An explicitly configured
-output limit overrides that default. See the [budget table](architecture.md#summary-context-budgets).
+Direct cloud providers use model-specific budgets. Unknown cloud models default
+to 32,768 tokens. OpenAI-compatible endpoints default to 8,192 and honor
+a configured context size. The bundled Codex route uses 500,000 tokens for
+GPT-6.1 Sol and 32,768 for other models. The architecture guide lists default
+output budgets and how much input each stage can use. [Summary context budgets](architecture.md#summary-context-budgets).
 These limits may increase reduction requests; they do not prove factual accuracy.
 
 Summary HTTP providers make at most three attempts for transient connection or

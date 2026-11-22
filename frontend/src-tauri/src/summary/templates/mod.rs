@@ -45,11 +45,13 @@ mod storage;
 mod types;
 
 // Re-export public API
+pub(crate) use loader::custom_template_dirs;
 pub use loader::{
-    get_template, list_template_ids, list_templates, set_bundled_templates_dir,
-    validate_and_parse_template,
+    get_template, list_templates, set_bundled_templates_dir, validate_and_parse_template,
+    TemplateInfo,
 };
-pub use storage::{resolve_default, save_template};
+pub use storage::{remove_template, resolve_default, save_template};
+pub(crate) use storage::{validate_id, REMOVED_TEMPLATE};
 pub use types::{Template, TemplateSection};
 
 #[cfg(test)]
@@ -59,15 +61,15 @@ mod tests {
     #[test]
     fn test_module_integration() {
         // Test that we can load all built-in templates
-        let ids = list_template_ids();
-        assert!(!ids.is_empty());
+        let templates = list_templates();
+        assert!(!templates.is_empty());
 
-        for id in ids {
-            let result = get_template(&id);
+        for template in templates {
+            let result = get_template(&template.id);
             assert!(
                 result.is_ok(),
                 "Failed to load template '{}': {:?}",
-                id,
+                template.id,
                 result.err()
             );
         }
@@ -78,10 +80,10 @@ mod tests {
         let templates = list_templates();
         assert!(!templates.is_empty());
 
-        for (id, name, description) in templates {
-            assert!(!id.is_empty());
-            assert!(!name.is_empty());
-            assert!(!description.is_empty());
+        for template in templates {
+            assert!(!template.id.is_empty());
+            assert!(!template.name.is_empty());
+            assert!(!template.description.is_empty());
         }
     }
 }

@@ -29,6 +29,7 @@ const CLOUD_TRANSCRIPTION: &str = "cloud_transcription";
 const SOURCE_ATTRIBUTION: &str = "source_attribution";
 const LANGUAGE: &str = "language";
 const LEGACY_MIGRATED: &str = "legacy_migrated";
+const SHOW_CONVERSATION_METRICS: &str = "show_conversation_metrics";
 const SHOW_RECORDING_NOTIFICATION: &str = "show_recording_notification";
 
 /// One change at a time, whether it comes from the interface or from the
@@ -70,6 +71,7 @@ pub(crate) struct Stored {
     pub source_attribution: Option<bool>,
     pub language: Option<String>,
     pub show_recording_notification: Option<bool>,
+    pub show_conversation_metrics: Option<bool>,
     pub legacy_migrated: bool,
 }
 
@@ -84,6 +86,7 @@ pub struct BehaviorSettings {
     pub language: String,
     /// Whether the "recording started" notice is shown (default yes).
     pub show_recording_notification: bool,
+    pub show_conversation_metrics: bool,
     /// Whether the webview's old values were already handed over.
     pub legacy_migrated: bool,
 }
@@ -132,6 +135,7 @@ impl Stored {
                 .and_then(|value| value.as_str().map(str::to_string))
                 .filter(|language| valid_language(language)),
             show_recording_notification: boolean(SHOW_RECORDING_NOTIFICATION),
+            show_conversation_metrics: boolean(SHOW_CONVERSATION_METRICS),
             legacy_migrated: backing
                 .read(LEGACY_MIGRATED)
                 .and_then(|value| value.as_bool())
@@ -152,6 +156,7 @@ impl Stored {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_LANGUAGE.to_string()),
             show_recording_notification: self.show_recording_notification.unwrap_or(true),
+            show_conversation_metrics: self.show_conversation_metrics.unwrap_or(true),
             legacy_migrated: self.legacy_migrated,
         }
     }
@@ -164,8 +169,19 @@ pub(crate) fn defaults() -> BehaviorSettings {
 
 /// Writes one value and saves; on a failed save the previous value is put back.
 pub(crate) fn persist(backing: &dyn Backing, key: &str, value: Value) -> Result<(), String> {
+    replace(backing, key, Some(value)).map(drop)
+}
+
+pub(crate) fn replace(
+    backing: &dyn Backing,
+    key: &str,
+    value: Option<Value>,
+) -> Result<Option<Value>, String> {
     let previous = backing.read(key);
-    backing.write(key, value);
+    match value {
+        Some(value) => backing.write(key, value),
+        None => backing.remove(key),
+    }
     if let Err(error) = backing.commit() {
         match previous {
             Some(previous) => backing.write(key, previous),
@@ -173,7 +189,7 @@ pub(crate) fn persist(backing: &dyn Backing, key: &str, value: Value) -> Result<
         }
         return Err(error);
     }
-    Ok(())
+    Ok(previous)
 }
 
 pub(crate) fn persist_bool(backing: &dyn Backing, key: &str, enabled: bool) -> Result<(), String> {
@@ -388,6 +404,19 @@ pub async fn set_recording_notification_preference<R: Runtime>(
     let _change = CHANGE_LOCK.lock().await;
     tauri::async_runtime::spawn_blocking(move || {
         persist_bool(open(&app)?.as_ref(), SHOW_RECORDING_NOTIFICATION, enabled)
+    })
+    .await
+    .map_err(|_| "Could not save the setting".to_string())?
+}
+
+#[tauri::command]
+pub async fn set_conversation_metrics_preference<R: Runtime>(
+    app: AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let _change = CHANGE_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        persist_bool(open(&app)?.as_ref(), SHOW_CONVERSATION_METRICS, enabled)
     })
     .await
     .map_err(|_| "Could not save the setting".to_string())?
@@ -665,6 +694,14 @@ mod tests {
     }
 
     #[test]
+    fn conversation_metrics_are_shown_until_explicitly_hidden() {
+        let memory = Memory::default();
+        assert!(Stored::read(&memory).effective().show_conversation_metrics);
+        persist_bool(&memory, SHOW_CONVERSATION_METRICS, false).unwrap();
+        assert!(!Stored::read(&memory).effective().show_conversation_metrics);
+    }
+
+    #[test]
     fn the_legacy_payload_reads_camel_case_and_tolerates_missing_fields() {
         let legacy: LegacyBehaviorSettings =
             serde_json::from_value(json!({"parakeetDirectml": true, "cloudTranscription": false}))
@@ -680,6 +717,7 @@ mod tests {
             "sourceAttribution",
             "language",
             "showRecordingNotification",
+            "showConversationMetrics",
             "legacyMigrated",
         ] {
             assert!(settings.get(key).is_some(), "{key}");

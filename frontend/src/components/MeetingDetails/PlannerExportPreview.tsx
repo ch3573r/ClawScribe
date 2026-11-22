@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ListTodo, Loader2, User, CalendarClock } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -84,10 +84,14 @@ export function PlannerExportPreview({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reviewIds, setReviewIds] = useState(() => new Set<string>());
+  const previewRevision = useRef(0);
+  const polishingRequest = useRef<number | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    previewRevision.current++;
     let cancelled = false;
+    setPolishing(false);
     setLoading(true);
     setError(null);
     setReviewIds(new Set());
@@ -97,14 +101,14 @@ export function PlannerExportPreview({
     setBuckets([]);
     (async () => {
       try {
-        const [{ items, suggestionCount }, bucketList] = await Promise.all([
+        const [{ items, suggestionCount, candidates }, bucketList] = await Promise.all([
           getMarkdown().then((md) =>
             microsoftExportService.previewPlannerTasks(meetingId, meetingTitle, md),
           ),
           microsoftExportService.listBuckets(planId),
         ]);
         if (cancelled) return;
-        setPreviewCandidates(taskPreviewCandidates(items));
+        setPreviewCandidates(candidates ?? taskPreviewCandidates(items));
         setPendingSuggestions(suggestionCount);
         setBuckets(bucketList);
         // Default each task to the bucket chosen in Settings (fall back to first).
@@ -124,37 +128,6 @@ export function PlannerExportPreview({
         }));
         setRows(baseRows);
 
-        // Optional AI polish (Settings → Microsoft 365 → Planner). Reviewed below, so a
-        // poor rewrite never lands silently; on failure we keep the raw titles.
-        // All providers (including Codex, via its app-server) are supported.
-        const aiPolish = getExportDestinations().plannerAiPolish ?? false;
-        if (aiPolish && baseRows.length > 0) {
-          setPolishing(true);
-          try {
-            const polished = await microsoftExportService.polishPlannerTasks(
-              modelConfig.provider,
-              modelConfig.model,
-              baseRows.map((r) => ({ title: r.title, owner: r.owner, dueDate: r.dueDate })),
-            );
-            if (!cancelled && polished.length === baseRows.length) {
-              setRows((prev) =>
-                prev.map((r, i) => ({
-                  ...r,
-                  title: polished[i].title || r.title,
-                  details: polished[i].details || r.details,
-                })),
-              );
-            }
-          } catch (e) {
-            if (!cancelled) {
-              toast.info("Couldn't AI-polish tasks — using the original titles.", {
-                description: e instanceof Error ? e.message : String(e),
-              });
-            }
-          } finally {
-            if (!cancelled) setPolishing(false);
-          }
-        }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -163,6 +136,7 @@ export function PlannerExportPreview({
     })();
     return () => {
       cancelled = true;
+      previewRevision.current++;
     };
   }, [
     open,
@@ -183,6 +157,32 @@ export function PlannerExportPreview({
   const allSelected = rows.length > 0 && rows.every((r) => r.include);
   const isPreviewReady = !loading && !error && rows.length > 0;
   const canExport = isPreviewReady && !polishing && !busy && selectedCount > 0;
+
+  async function polishSelected() {
+    const revision = previewRevision.current;
+    if (polishingRequest.current === revision || !canExport) return;
+    const selected = rows.filter(row => row.include && row.title.trim());
+    polishingRequest.current = revision;
+    setPolishing(true);
+    try {
+      const polished = await microsoftExportService.polishPlannerTasks(
+        modelConfig.provider,
+        modelConfig.model,
+        selected.map(({ title, owner, dueDate }) => ({ title, owner, dueDate })),
+      );
+      if (revision !== previewRevision.current || polished.length !== selected.length) return;
+      const updates = new Map(selected.map((row, index) => [row.localId, polished[index]]));
+      setRows(previous => previous.map(row => {
+        const replacement = updates.get(row.localId);
+        return replacement ? { ...row, title: replacement.title || row.title, details: replacement.details || row.details } : row;
+      }));
+    } catch {
+      if (revision === previewRevision.current) toast.info("Could not polish tasks. Your draft is still available.");
+    } finally {
+      if (polishingRequest.current === revision) polishingRequest.current = null;
+      if (revision === previewRevision.current) setPolishing(false);
+    }
+  }
 
   const exportTasks = useCallback(async () => {
     const tasks = rows
@@ -267,6 +267,7 @@ export function PlannerExportPreview({
             <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
               <Button variant="ghost"
                 type="button"
+                disabled={polishing}
                 className="h-auto gap-0 rounded-none p-0 text-xs font-medium hover:bg-transparent hover:text-foreground"
                 onClick={() => {
                   const next = !allSelected;
@@ -275,6 +276,8 @@ export function PlannerExportPreview({
               >
                 {allSelected ? "Deselect all" : "Select all"}
               </Button>
+              {getExportDestinations().plannerAiPolish && <Button type="button" size="sm" variant="outline" disabled={!canExport}
+                onClick={() => void polishSelected()}>Polish selected with AI</Button>}
               <span className="flex items-center gap-2">
                 {polishing && (
                   <span className="flex items-center gap-1 text-primary">
@@ -299,6 +302,7 @@ export function PlannerExportPreview({
                   <div className="flex items-start gap-3">
                     <Checkbox
                       checked={row.include}
+                      disabled={polishing}
                       onCheckedChange={(checked) => update(index, { include: checked === true })}
                       aria-label={`Include "${row.title}"`}
                       className="mt-1.5 h-4 w-4 shrink-0"
@@ -308,7 +312,7 @@ export function PlannerExportPreview({
                         type="text"
                         value={row.title}
                         onChange={(e) => update(index, { title: e.target.value })}
-                        disabled={!row.include}
+                        disabled={!row.include || polishing}
                         className="h-auto shadow-none md:text-sm disabled:opacity-100 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm font-medium text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed"
                       />
                       {reviewIds.has(row.localId) && (
@@ -334,7 +338,7 @@ export function PlannerExportPreview({
                         <Textarea
                           value={row.details ?? ""}
                           onChange={(e) => update(index, { details: e.target.value })}
-                          disabled={!row.include}
+                          disabled={!row.include || polishing}
                           placeholder="Add context for the Planner task"
                           className="min-h-[5.5rem] resize-y bg-background text-xs leading-5"
                         />
@@ -357,7 +361,7 @@ export function PlannerExportPreview({
                           <Select
                             value={row.bucketId || EMPTY_BUCKET_VALUE}
                             onValueChange={(value) => update(index, { bucketId: value === EMPTY_BUCKET_VALUE ? "" : value })}
-                            disabled={!row.include}
+                            disabled={!row.include || polishing}
                           >
                             <SelectTrigger className="inline-flex h-auto w-auto rounded-md border border-border bg-muted px-2 py-1 text-xs text-foreground shadow-none disabled:cursor-not-allowed disabled:opacity-100"><SelectValue /></SelectTrigger>
                             <SelectContent>

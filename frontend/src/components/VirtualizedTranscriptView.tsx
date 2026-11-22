@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useReducer, startTransition, useEffect, memo, useMemo } from "react";
+import { useRef, useReducer, useState, startTransition, useEffect, memo, useMemo, useCallback, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
@@ -25,6 +25,10 @@ export interface VirtualizedTranscriptViewProps {
     segments: TranscriptSegmentData[];
     /** Saved-meeting empty state; recording keeps its live status. */
     emptyState?: React.ReactNode;
+    /** Optional controls and content above the transcript in its scroll area. */
+    header?: ReactNode;
+    beforeTranscript?: ReactNode;
+    contentClassName?: string;
     /** Whether recording is in progress */
     isRecording?: boolean;
     /** Whether recording is paused */
@@ -198,6 +202,9 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     focusedSource,
     segments,
     emptyState,
+    header,
+    beforeTranscript,
+    contentClassName,
     isRecording = false,
     isPaused = false,
     isProcessing = false,
@@ -221,8 +228,12 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     onSpeakerChange,
     onApplySpeakerToMatching,
 }) => {
-    // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
+    const headerRef = useRef<HTMLDivElement>(null);
+    const leadingRef = useRef<HTMLDivElement>(null);
+    const contentRef = useRef<HTMLDivElement>(null);
+    const [scrollMargin, setScrollMargin] = useState(0);
+    const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
     // Ref for infinite scroll trigger element
     const loadMoreTriggerRef = useRef<HTMLDivElement>(null);
 
@@ -230,9 +241,12 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     const [, rerender] = useReducer((x: number) => x + 1, 0);
 
     // Setup virtualizer for efficient rendering of large lists
+    const getItemKey = useCallback((index: number) => segments[index].id, [segments]);
     const virtualizer = useVirtualizer({
         count: segments.length,
+        getItemKey,
         getScrollElement: () => scrollRef.current,
+        scrollMargin,
         estimateSize: () => 60, // Estimated height per segment
         overscan: 10, // Render extra items above/below viewport
         onChange: () => {
@@ -242,14 +256,28 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         },
     });
 
-    // Custom hook for auto-scrolling (supports both virtualized and non-virtualized)
     useEffect(() => {
-        if (!focusedSource) return;
+        const content = contentRef.current;
+        if (!useVirtualization || !content) return;
+        // The virtual rows start below the controls and any assistance content
+        // in the same scroll area. Use their current offset, including on resize.
+        const updateMargin = () => setScrollMargin(content.offsetTop);
+        updateMargin();
+        const observer = new ResizeObserver(updateMargin);
+        if (headerRef.current) observer.observe(headerRef.current);
+        if (leadingRef.current) observer.observe(leadingRef.current);
+        return () => observer.disconnect();
+    }, [useVirtualization]);
+
+    const scrolledSource = useRef<number | undefined>(undefined);
+    useEffect(() => {
+        if (!focusedSource || scrolledSource.current === focusedSource.request) return;
         const index = segments.findIndex(segment => segment.id === focusedSource.id);
         if (index < 0) return;
         const timer = setTimeout(() => {
             if (segments.length >= VIRTUALIZATION_THRESHOLD) virtualizer.scrollToIndex(index, { align: 'center' });
             else scrollRef.current?.querySelectorAll('[data-segment-id]')[index]?.scrollIntoView({ block: 'nearest' });
+            scrolledSource.current = focusedSource.request;
         }, 60);
         return () => clearTimeout(timer);
     }, [focusedSource, segments, virtualizer]);
@@ -290,14 +318,14 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         };
     }, [followPlayback, onUserScroll]);
 
+    const liveTranscript = isRecording && !disableAutoScroll;
+    const liveFollowEnabled = liveTranscript && !isStopping && !isProcessing;
     const { autoScroll, scrollToBottom } = useAutoScroll({
         scrollRef,
-        segments,
-        isRecording,
+        contentRef,
+        segmentCount: segments.length,
+        enabled: liveFollowEnabled,
         isPaused,
-        virtualizer,
-        virtualizationThreshold: VIRTUALIZATION_THRESHOLD,
-        disableAutoScroll,
     });
 
     // Streaming text effect hook (typewriter animation for new transcripts)
@@ -363,8 +391,6 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         return () => scrollElement.removeEventListener('scroll', handleScroll);
     }, [onLoadMore, hasMore, isLoadingMore, isRecording]);
 
-    // Use simple rendering for small lists, virtualization for large lists
-    const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
     const speakerCatalog = useMemo(() => buildSpeakerCatalog(speakerSegments?.length ? speakerSegments : segments), [speakerSegments, segments]);
 
     // Resolve the playback position to a single active segment id, so clock
@@ -391,18 +417,27 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     }, [followPlayback, activeSegmentId]);
 
     return (
-        <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
-            {/* Recording Status Bar - Sticky at top, always visible when recording */}
-            <AnimatePresence>
-                {isRecording && (
-                    <div className="sticky top-0 z-10 bg-card pb-2">
-                        <RecordingStatusBar isPaused={isPaused} />
-                    </div>
-                )}
-            </AnimatePresence>
-
-            {/* Content - add padding when recording to prevent overlap */}
-            <div className={isRecording ? 'pt-2' : ''}>
+        <div className="relative flex h-full min-h-0 flex-col">
+            <div
+                ref={scrollRef}
+                role="region"
+                aria-label="Transcript"
+                tabIndex={liveTranscript ? 0 : undefined}
+                className={`relative min-h-0 flex-1 overflow-y-auto px-4 pt-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${liveTranscript ? 'pb-32' : 'pb-2'}`}
+            >
+            <div ref={headerRef} className="sticky top-0 z-10 bg-card">
+                {header}
+                <AnimatePresence>
+                    {isRecording && (
+                        <div className={contentClassName}>
+                            <RecordingStatusBar isPaused={isPaused} />
+                        </div>
+                    )}
+                </AnimatePresence>
+            </div>
+            <div className={contentClassName}>
+            <div ref={leadingRef} className={isRecording ? 'pb-2' : undefined}>{beforeTranscript}</div>
+            <div ref={contentRef}>
             {segments.length === 0 ? (
                 // Empty state
                 <motion.div
@@ -449,12 +484,13 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                     data-segment-id={segment.id}
                                     data-index={virtualRow.index}
                                     ref={virtualizer.measureElement}
+                                    className="flow-root pb-1"
                                     style={{
                                         position: "absolute",
                                         top: 0,
                                         left: 0,
                                         width: "100%",
-                                        transform: `translateY(${virtualRow.start}px)`,
+                                        transform: `translateY(${virtualRow.start - scrollMargin}px)`,
                                     }}
                                 >
                                     <TranscriptSegment
@@ -514,7 +550,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
             ) : (
                 // Simple rendering for small lists (better animations)
                 <>
-                    <div className="space-y-1">
+                    <div>
                         {segments.map((segment) => {
                             const isStreaming = streamingSegmentId === segment.id;
 
@@ -522,6 +558,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                 <motion.div
                                     key={segment.id}
                                     data-segment-id={segment.id}
+                                    className="flow-root pb-1"
                                     initial={{ opacity: 0, y: 5 }}
                                     animate={{ opacity: 1, y: 0 }}
                                     transition={{ duration: 0.15 }}
@@ -582,8 +619,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                 </>
             )}
             </div>
-            {isRecording && !disableAutoScroll && !autoScroll && segments.length > 0 && (
-                <div className="sticky bottom-3 z-20 flex justify-end pt-2 pointer-events-none">
+            </div>
+            </div>
+            {liveFollowEnabled && !autoScroll && segments.length > 0 && (
+                <div className="pointer-events-none absolute inset-x-4 bottom-24 z-20 flex justify-end">
                     <Button
                         variant="ghost"
                         type="button"

@@ -793,7 +793,7 @@ mod tests {
         let provider = MaiTranscribeProvider::new(endpoint, "test-key".into(), "test-model".into());
         let error = tokio::time::timeout(
             Duration::from_secs(5),
-            super::super::transcribe_mai_file(&provider, &audio, None, &cancelled),
+            super::super::transcribe_mai_file(&provider, &audio, None, &cancelled, false),
         )
         .await
         .unwrap()

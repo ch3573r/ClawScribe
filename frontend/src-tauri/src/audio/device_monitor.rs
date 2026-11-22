@@ -26,7 +26,7 @@ pub enum DeviceEvent {
 }
 
 /// Type of device being monitored
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceMonitorType {
     Microphone,
     SystemAudio,
@@ -158,8 +158,14 @@ impl AudioDeviceMonitor {
         info!("Stopping device monitor");
         self.stop_signal.notify_one();
 
-        if let Some(handle) = self.monitor_handle.take() {
-            let _ = handle.await;
+        if let Some(mut handle) = self.monitor_handle.take() {
+            if tokio::time::timeout(Duration::from_secs(3), &mut handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+                warn!("Audio device monitoring did not stop before the deadline");
+            }
         }
 
         info!("Device monitor stopped");
@@ -186,11 +192,17 @@ impl AudioDeviceMonitor {
                 }
             }
 
-            // Get current device list
-            let current_devices = match list_audio_devices().await {
-                Ok(devices) => devices,
-                Err(e) => {
-                    error!("Failed to list audio devices: {}", e);
+            // Enumeration can block inside a driver. Stopping the monitor
+            // must not wait for that native call or pin the async executor.
+            let runtime = tokio::runtime::Handle::current();
+            let scan = tokio::task::spawn_blocking(move || runtime.block_on(list_audio_devices()));
+            let current_devices = match tokio::select! {
+                _ = stop_signal.notified() => break,
+                result = scan => result,
+            } {
+                Ok(Ok(devices)) => devices,
+                _ => {
+                    error!("Failed to list audio devices");
                     continue;
                 }
             };
@@ -208,7 +220,13 @@ impl AudioDeviceMonitor {
 
             // Check each monitored device
             for monitored in &mut monitored_devices {
-                let device_found = current_devices.iter().any(|d| d.name == monitored.name);
+                let kind = match monitored.device_type {
+                    DeviceMonitorType::Microphone => super::devices::DeviceType::Input,
+                    DeviceMonitorType::SystemAudio => super::devices::DeviceType::Output,
+                };
+                let device_found = current_devices
+                    .iter()
+                    .any(|device| device.name == monitored.name && device.device_type == kind);
 
                 if device_found {
                     // Device is present
@@ -221,7 +239,7 @@ impl AudioDeviceMonitor {
 
                         let _ = event_sender.send(DeviceEvent::DeviceReconnected {
                             device_name: monitored.name.clone(),
-                            device_type: monitored.device_type.clone(),
+                            device_type: monitored.device_type,
                         });
 
                         monitored.consecutive_missing = 0;
@@ -246,7 +264,7 @@ impl AudioDeviceMonitor {
 
                         let _ = event_sender.send(DeviceEvent::DeviceDisconnected {
                             device_name: monitored.name.clone(),
-                            device_type: monitored.device_type.clone(),
+                            device_type: monitored.device_type,
                         });
                     }
                 }

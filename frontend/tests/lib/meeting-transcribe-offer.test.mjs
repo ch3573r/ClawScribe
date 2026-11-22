@@ -68,6 +68,16 @@ test('missing audio offers opening the recording folder', async () => {
   view.hooks.unmount();
 });
 
+test('an empty live result explains the observed cause and offers a manual retry', () => {
+  const { emptyLiveTranscriptMessage } = loadTsModule('src/lib/recording-outcome.ts');
+  const view = panel({ emptyLiveMessage: emptyLiveTranscriptMessage('no_text_recognized') });
+  const empty = find(view.render(), 'VirtualizedTranscriptView').props.emptyState;
+  assert.match(text(empty), /Live transcription processed speech but returned no text/);
+  assert.equal(text(find(empty, 'button')), 'Retranscribe');
+  assert.equal(find(view.render(), 'TranscriptButtonGroup').props.transcribeOpen, false);
+  view.hooks.unmount();
+});
+
 test('audio lookup shows loading without an offer or a missing-audio flash', () => {
   const view = panel({ audioStatus: 'loading' });
   const empty = find(view.render(), 'VirtualizedTranscriptView').props.emptyState;

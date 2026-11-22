@@ -1,6 +1,7 @@
 //! Small literal-search results from current saved rows. No model or index counts.
 use super::{
-    display, literal_fold, materialize, scan_patterns, ReadContext, SelectedRow, TextBlob,
+    display, folded_char, literal_fold, materialize, scan_patterns, ReadContext, SelectedRow,
+    TextBlob, READ_BYTES,
 };
 use crate::knowledge::{retrieval, types::*};
 use serde::Serialize;
@@ -19,6 +20,198 @@ const PAGE: usize = 128;
 const CONTEXT_BYTES: usize = 100;
 const APP_LIMIT: usize = 50;
 static SEARCH_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+#[derive(Clone)]
+pub(super) struct LiteralQuery {
+    patterns: Vec<String>,
+    archive: bool,
+}
+
+impl LiteralQuery {
+    fn new(query: &str, archive: bool) -> Result<Self, KnowledgeError> {
+        let mut text = query.trim();
+        if text.chars().take(MAX_QUERY_CHARS + 1).count() > MAX_QUERY_CHARS {
+            return Err(KnowledgeError::InvalidInput);
+        }
+        let mut patterns = Vec::new();
+        while let Some(first) = text.chars().next() {
+            let (term, rest) = if archive {
+                let closers: &[char] = match first {
+                    '"' => &['"'],
+                    '„' => &['“', '”', '"'],
+                    '“' => &['”', '"'],
+                    _ => &[],
+                };
+                if !closers.is_empty() {
+                    let after_open = &text[first.len_utf8()..];
+                    let Some(phrase) = after_open.split_once(closers) else {
+                        text = after_open.trim_start();
+                        continue;
+                    };
+                    phrase
+                } else {
+                    text.split_once(char::is_whitespace).unwrap_or((text, ""))
+                }
+            } else {
+                (text, "")
+            };
+            let pattern = literal_fold(term.trim());
+            if !pattern.is_empty() && !patterns.contains(&pattern) {
+                patterns.push(pattern);
+            }
+            text = rest.trim_start();
+        }
+        Ok(Self { patterns, archive })
+    }
+
+    pub(super) fn archive(query: &str) -> Result<Self, KnowledgeError> {
+        Self::new(query, true)
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    // Store original UTF-8 offsets even for case folds that expand a character.
+    fn folded(text: &str) -> (String, Vec<(usize, usize)>) {
+        let mut folded = String::with_capacity(text.len());
+        let mut offsets = Vec::with_capacity(text.len());
+        for (start, ch) in text.char_indices() {
+            for lower in folded_char(ch) {
+                folded.push(lower);
+                offsets.resize(
+                    offsets.len() + lower.len_utf8(),
+                    (start, start + ch.len_utf8()),
+                );
+            }
+        }
+        (folded, offsets)
+    }
+
+    fn record(&self, text: &str, start: usize, found: &mut [Option<(usize, usize)>]) {
+        let (folded, offsets) = Self::folded(text);
+        for (pattern, position) in self.patterns.iter().zip(found) {
+            if position.is_none() {
+                if let Some(index) = folded.find(pattern) {
+                    *position = Some((
+                        start + offsets[index].0,
+                        start + offsets[index + pattern.len() - 1].1,
+                    ));
+                }
+            }
+        }
+    }
+
+    pub(super) fn find(&self, text: &str) -> Option<(usize, usize)> {
+        let mut found = vec![None; self.patterns.len()];
+        self.record(text, 0, &mut found);
+        Self::context(&found)
+    }
+
+    // Prefer a window with several terms when they're nearby. A distant term
+    // still qualifies the row, without yielding an unbounded excerpt.
+    fn context(found: &[Option<(usize, usize)>]) -> Option<(usize, usize)> {
+        if found.iter().any(Option::is_none) {
+            return None;
+        }
+        let (start, first_end) = found.iter().flatten().min().copied()?;
+        let end = found
+            .iter()
+            .flatten()
+            .filter(|(next, _)| *next <= first_end + CONTEXT_BYTES)
+            .map(|(_, end)| *end)
+            .max()
+            .unwrap_or(first_end);
+        Some((start, end))
+    }
+
+    fn scan(
+        &self,
+        blob: &TextBlob<'_>,
+        context: &ReadContext,
+    ) -> Result<Option<(usize, usize)>, KnowledgeError> {
+        if self.patterns.len() == 1 {
+            return scan_patterns(blob, &self.patterns, context);
+        }
+        let mut found = vec![None; self.patterns.len()];
+        let mut start = 0;
+        while start < blob.len {
+            let (_, text) = blob.window(start, READ_BYTES, false, context)?;
+            self.record(&text, start, &mut found);
+            if let Some(span) = Self::context(&found) {
+                return Ok(Some(span));
+            }
+            if start + text.len() == blob.len {
+                break;
+            }
+            // Keep the same overlap as the legacy literal scanner.
+            let mut advance = text.len().saturating_sub(4096);
+            while !text.is_char_boundary(advance) {
+                advance += 1;
+            }
+            if advance == 0 {
+                return Err(KnowledgeError::InvalidInput);
+            }
+            start += advance;
+        }
+        Ok(None)
+    }
+
+    pub(super) fn highlights(&self, text: &str) -> Vec<(usize, usize)> {
+        if !self.archive {
+            return Vec::new();
+        }
+        let (folded, offsets) = Self::folded(text);
+        let mut ranges = Vec::new();
+        for pattern in &self.patterns {
+            ranges.extend(
+                folded
+                    .match_indices(pattern)
+                    .map(|(index, _)| (offsets[index].0, offsets[index + pattern.len() - 1].1)),
+            );
+        }
+        ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (start, end) in ranges {
+            if let Some(last) = merged.last_mut().filter(|last| start < last.1) {
+                last.1 = last.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        merged
+    }
+}
+
+/// Keep natural boundaries when a clipped edge is near whitespace. The byte
+/// range still refers to the exact saved source for citation and consent checks.
+pub(super) fn trim_window(
+    text: &str,
+    clipped_start: bool,
+    clipped_end: bool,
+    matched: (usize, usize),
+) -> (usize, usize) {
+    let start = if clipped_start {
+        text[..matched.0]
+            .find(char::is_whitespace)
+            .filter(|start| *start <= 24)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let end = if clipped_end {
+        text[matched.1..]
+            .rfind(char::is_whitespace)
+            .map(|end| matched.1 + end)
+            .filter(|end| text.len() - end <= 24)
+            .unwrap_or(text.len())
+    } else {
+        text.len()
+    };
+    let trimmed = text[start..end].trim_start();
+    let start = end - trimmed.len();
+    (start, start + trimmed.trim_end().len())
+}
 
 pub(super) struct Budget {
     deadline: Instant,
@@ -83,6 +276,8 @@ pub(crate) struct TitleHit {
     pub id: String,
     pub title: String,
     pub date: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub highlights: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,6 +290,12 @@ pub(crate) struct TranscriptHit {
     pub timestamp: String,
     pub speaker: Option<String>,
     pub start_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub highlights: Vec<(usize, usize)>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    clipped_start: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    clipped_end: bool,
     #[serde(skip)]
     selected: SelectedRow,
     #[serde(skip)]
@@ -149,7 +350,18 @@ pub(crate) async fn available_anchor(
     conn: &mut SqliteConnection,
     query: &str,
 ) -> Result<Option<String>, KnowledgeError> {
-    let anchor = indexed_anchor(&literal_fold(query));
+    query_anchor(conn, &LiteralQuery::new(query, false)?).await
+}
+
+async fn query_anchor(
+    conn: &mut SqliteConnection,
+    query: &LiteralQuery,
+) -> Result<Option<String>, KnowledgeError> {
+    let anchor = query
+        .patterns
+        .iter()
+        .filter_map(|part| indexed_anchor(part))
+        .max_by_key(String::len);
     if anchor.is_some() && !sqlx::query_scalar::<_, bool>(
         "SELECT count(*)=2 FROM sqlite_schema WHERE type='table' AND name IN ('knowledge_title_literal','knowledge_transcript_literal')"
     ).fetch_one(conn).await? { return Ok(None); }
@@ -164,18 +376,32 @@ pub(crate) async fn search(
     titles: bool,
     one_per_meeting: bool,
 ) -> Result<LiteralHits, KnowledgeError> {
-    let text = query.trim();
+    search_query(
+        conn,
+        &LiteralQuery::new(query, false)?,
+        scope,
+        limit,
+        titles,
+        one_per_meeting,
+    )
+    .await
+}
+
+async fn search_query(
+    conn: &mut SqliteConnection,
+    query: &LiteralQuery,
+    scope: Option<&KnowledgeScope>,
+    limit: usize,
+    titles: bool,
+    one_per_meeting: bool,
+) -> Result<LiteralHits, KnowledgeError> {
     let mut hits = LiteralHits::default();
-    if text.is_empty() {
+    if query.is_empty() {
         return Ok(hits);
     }
-    if text.chars().take(MAX_QUERY_CHARS + 1).count() > MAX_QUERY_CHARS {
-        return Err(KnowledgeError::InvalidInput);
-    }
-    let pattern = [literal_fold(text)];
     let mut tx = conn.begin().await?;
     // The standalone read-only tool can open a library before desktop migration.
-    let anchor = available_anchor(&mut tx, text).await?;
+    let anchor = query_anchor(&mut tx, query).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     let allowed = match scope {
         Some(scope) => match tokio::time::timeout_at(
@@ -244,15 +470,15 @@ pub(crate) async fn search(
                 format!("SELECT {columns} FROM {tables} WHERE {rowid}<=?1 AND (?2 IS NULL OR m.id IN(SELECT value FROM json_each(?2)))
                     ORDER BY {rowid} DESC LIMIT ?3")
             };
-            let mut query = sqlx::query_as(&statement)
+            let mut statement = sqlx::query_as(&statement)
                 .bind(before.unwrap_or(i64::MAX))
                 .bind(allowed.as_deref())
                 .bind(page as i64);
             if let Some(expression) = &anchor {
-                query = query.bind(expression);
+                statement = statement.bind(expression);
             }
             let rows: Vec<Candidate> =
-                match tokio::time::timeout_at(deadline, query.fetch_all(&mut *tx)).await {
+                match tokio::time::timeout_at(deadline, statement.fetch_all(&mut *tx)).await {
                     Ok(rows) => rows?,
                     Err(_) => {
                         hits.limited = true;
@@ -269,7 +495,7 @@ pub(crate) async fn search(
             match collect(
                 &mut handle,
                 rows,
-                &pattern,
+                query,
                 &context,
                 &mut hits,
                 &mut seen,
@@ -297,7 +523,7 @@ pub(crate) async fn search(
 fn collect(
     handle: &mut sqlx::sqlite::LockedSqliteHandle<'_>,
     rows: Vec<Candidate>,
-    pattern: &[String],
+    query: &LiteralQuery,
     context: &ReadContext,
     hits: &mut LiteralHits,
     seen: &mut HashSet<String>,
@@ -312,15 +538,17 @@ fn collect(
         if title {
             let matches = {
                 let blob = TextBlob::open(handle, c"meetings", c"title", row.meeting_rowid)?;
-                scan_patterns(&blob, pattern, context)?.is_some()
+                query.scan(&blob, context)?.is_some()
             };
             if matches {
                 if hits.titles.len() == limit {
                     return Ok(true);
                 }
+                let title = display(handle, c"meetings", c"title", row.meeting_rowid, context)?.0;
                 hits.titles.push(TitleHit {
                     id: row.meeting_id,
-                    title: display(handle, c"meetings", c"title", row.meeting_rowid, context)?.0,
+                    highlights: query.highlights(&title),
+                    title,
                     date: display(
                         handle,
                         c"meetings",
@@ -333,9 +561,9 @@ fn collect(
             }
             continue;
         }
-        let (start_byte, text) = {
+        let (start_byte, text, clipped_start, clipped_end) = {
             let blob = TextBlob::open(handle, c"transcripts", c"transcript", row.rowid)?;
-            let Some((start, end)) = scan_patterns(&blob, pattern, context)? else {
+            let Some((start, end)) = query.scan(&blob, context)? else {
                 continue;
             };
             if hits.passages.len() == limit {
@@ -343,7 +571,24 @@ fn collect(
             }
             let begin = start.saturating_sub(CONTEXT_BYTES);
             let length = end.saturating_add(CONTEXT_BYTES) - begin;
-            blob.window(begin, length, true, context)?
+            let (offset, text) = blob.window(begin, length, true, context)?;
+            if query.archive {
+                let (first, last) = trim_window(
+                    &text,
+                    offset > 0,
+                    offset + text.len() < blob.len,
+                    (start - offset, end - offset),
+                );
+                let start = offset + first;
+                (
+                    start,
+                    text[first..last].to_owned(),
+                    start > 0,
+                    offset + last < blob.len,
+                )
+            } else {
+                (offset, text, false, false)
+            }
         };
         let id = row.transcript_id.ok_or(KnowledgeError::Storage)?;
         let span = TextSpan {
@@ -381,6 +626,9 @@ fn collect(
             timestamp: display(handle, c"transcripts", c"timestamp", row.rowid, context)?.0,
             speaker,
             start_seconds: row.start_seconds,
+            highlights: query.highlights(&text),
+            clipped_start,
+            clipped_end,
             text,
             selected,
             span,
@@ -395,7 +643,22 @@ pub(crate) async fn linked(
     scope: Option<&KnowledgeScope>,
     one_per_meeting: bool,
 ) -> Result<LinkedHits, KnowledgeError> {
-    let hits = desktop(pool, query, scope, true, one_per_meeting).await?;
+    linked_query(
+        pool,
+        LiteralQuery::new(query, false)?,
+        scope,
+        one_per_meeting,
+    )
+    .await
+}
+
+pub(super) async fn linked_query(
+    pool: &SqlitePool,
+    query: LiteralQuery,
+    scope: Option<&KnowledgeScope>,
+    one_per_meeting: bool,
+) -> Result<LinkedHits, KnowledgeError> {
+    let hits = desktop_query(pool, query, scope, true, one_per_meeting).await?;
     let mut result = LinkedHits {
         titles: hits.titles,
         passages: Vec::new(),
@@ -433,15 +696,32 @@ pub(crate) async fn desktop(
     titles: bool,
     one_per_meeting: bool,
 ) -> Result<LiteralHits, KnowledgeError> {
+    desktop_query(
+        pool,
+        LiteralQuery::new(query, false)?,
+        scope,
+        titles,
+        one_per_meeting,
+    )
+    .await
+}
+
+async fn desktop_query(
+    pool: &SqlitePool,
+    query: LiteralQuery,
+    scope: Option<&KnowledgeScope>,
+    titles: bool,
+    one_per_meeting: bool,
+) -> Result<LiteralHits, KnowledgeError> {
     let permit = search_permit().await?;
     let mut conn = tokio::time::timeout(Duration::from_secs(3), pool.acquire())
         .await
         .map_err(|_| KnowledgeError::Busy)??;
     let runtime = tokio::runtime::Handle::current();
-    let (query, scope) = (query.to_owned(), scope.cloned());
+    let scope = scope.cloned();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        runtime.block_on(search(
+        runtime.block_on(search_query(
             &mut conn,
             &query,
             scope.as_ref(),

@@ -46,7 +46,13 @@ impl SettingsRepository {
         let setting = sqlx::query_as::<_, Setting>("SELECT * FROM settings LIMIT 1")
             .fetch_optional(pool)
             .await?;
-        Ok(setting)
+        Ok(setting.filter(|setting| {
+            // Treat retired provider selections like an unconfigured summary model.
+            !matches!(
+                setting.provider.trim().to_ascii_lowercase().as_str(),
+                "openclaw" | "openclaw-managed"
+            )
+        }))
     }
 
     pub async fn save_model_config(
@@ -97,7 +103,7 @@ impl SettingsRepository {
             return Ok(());
         }
         // Operator-managed providers use their own config instead of a separate API key column.
-        if provider == "custom-openai" || provider == "openclaw" || provider == "codex" {
+        if provider == "custom-openai" || provider == "codex" {
             return Err(sqlx::Error::Protocol(
                 format!("{provider} provider should not use save_api_key()").into(),
             ));
@@ -184,7 +190,7 @@ impl SettingsRepository {
             let config = Self::get_custom_openai_config_with(store, pool).await?;
             return Ok(config.and_then(|c| c.api_key));
         }
-        if provider == "openclaw" || provider == "codex" || provider == "claude-code" {
+        if provider == "codex" || provider == "claude-code" {
             return Ok(None);
         }
 
@@ -345,7 +351,7 @@ impl SettingsRepository {
                 Err(sqlx::Error::Protocol(KEY_REQUIRED_FOR_NEW_ADDRESS.into()))
             }
             // A key with no address it was saved for is bound to none: a new
-            // address needs the key entered again, as for OpenClaw.
+            // address needs the key entered again.
             (None, Some(_)) => Err(sqlx::Error::Protocol(KEY_REQUIRED_FOR_NEW_ADDRESS.into())),
             _ => Ok(()),
         }

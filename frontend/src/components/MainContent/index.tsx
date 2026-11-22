@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { RecordingHealthBanner } from '@/components/RecordingHealthBanner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 
 interface MainContentProps {
   children: React.ReactNode;
+  recoveryLibrary?: boolean;
 }
 
 function SavingRecordingBanner() {
@@ -40,7 +41,35 @@ function SavingRecordingBanner() {
   );
 }
 
-const MainContent: React.FC<MainContentProps> = ({ children }) => {
+function RecoveryLibraryBanner() {
+  const [returning, setReturning] = useState(false);
+  const [selectedOriginal, setSelectedOriginal] = useState(false);
+  const pending = useRef(false);
+  const selectOriginal = async () => {
+    if (pending.current) return;
+    pending.current = true;
+    setReturning(true);
+    try {
+      await invoke('return_to_original_library');
+      setSelectedOriginal(true);
+    } catch (error) {
+      toast.error('Could not select the original library', { description: String(error) });
+    } finally {
+      pending.current = false;
+      setReturning(false);
+    }
+  };
+  return <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-muted px-4 py-2 text-sm">
+    <p role="status"><strong>Recovery library.</strong>{' '}
+      {selectedOriginal ? 'Quit and reopen ClawScribe to use your original library.' : 'Restore a ZIP from Meetings, or select your original library for the next launch.'}
+    </p>
+    {!selectedOriginal && <Button size="sm" variant="outline" disabled={returning} onClick={selectOriginal}>
+      {returning ? 'Selecting original library…' : 'Return to original library'}
+    </Button>}
+  </div>;
+}
+
+const MainContent: React.FC<MainContentProps> = ({ children, recoveryLibrary }) => {
   const { sidebarOffset, isSidebarResizing } = useSidebar();
   return (
     <main
@@ -49,6 +78,7 @@ const MainContent: React.FC<MainContentProps> = ({ children }) => {
     >
       <RecordingHealthBanner />
       <SavingRecordingBanner />
+      {recoveryLibrary && <RecoveryLibraryBanner />}
       <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
     </main>
   );

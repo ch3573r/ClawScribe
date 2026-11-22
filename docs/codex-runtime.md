@@ -2,13 +2,12 @@
 
 ClawScribe bundles Codex only for the `Advanced: Codex app-server` provider.
 Normal meeting processing must continue to work through OpenAI/OpenAI-compatible
-API keys and OpenClaw without any Codex runtime.
+API keys without any Codex runtime.
 
 ## Provider Order
 
 1. OpenAI / OpenAI-compatible API key
-2. OpenClaw
-3. Advanced: Codex app-server
+2. Advanced: Codex app-server
 
 ## Bundled Runtime
 
@@ -95,9 +94,10 @@ Each run owns a temporary scratch folder for prompts and transcript input.
 Cleanup runs after success, failure, or cancellation and retries transient removal
 failures. Output documents and processing logs are saved in the meeting's
 recording folder, or app data `meeting-outputs/<id>` when it has no recording
-folder. Meeting deletion removes app-data outputs and legacy scratch runs, with
-failures reported. Outputs inside a recording folder follow the recording-file
-deletion choice and its ownership guards; keeping that folder keeps those outputs.
+folder. Meeting deletion removes app-data outputs and legacy scratch runs.
+Review and retry any failed cleanup under **Meetings → Archive → Storage**.
+Outputs inside a recording folder follow the recording-file deletion choice and
+its ownership guards. Keeping that folder keeps those outputs.
 
 The isolated profile requires `cli_auth_credentials_store = "keyring"`, supported
 by the [pinned credential-storage implementation](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/login/src/auth/storage.rs).

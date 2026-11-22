@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createHookHarness } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
-function recoveryHarness({ status = 'success', transcripts = [], failSave = false, failRead = false } = {}) {
+function recoveryHarness({ status = 'success', hasAudio = status !== 'none', transcripts = [], failSave = false, failRead = false } = {}) {
   const hooks = createHookHarness();
   const calls = [];
   const saves = [];
@@ -12,7 +12,7 @@ function recoveryHarness({ status = 'success', transcripts = [], failSave = fals
     react: hooks.react,
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push(command);
-      if (command === 'has_audio_checkpoints') return true;
+      if (command === 'has_audio_checkpoints') return hasAudio;
       if (command === 'find_interrupted_recordings') return { recordings: [], truncated: false, recordingActive: false };
       if (command === 'recover_audio_from_checkpoints') {
         assert.equal(args.meetingFolder, metadata.folderPath);
@@ -78,16 +78,29 @@ for (const status of ['none', 'failed', 'throw']) {
   });
 }
 
-for (const status of ['success', 'partial', 'none', 'failed']) {
+for (const status of ['success', 'partial', 'none']) {
   test(`recovered live transcript is incomplete when audio recovery is ${status}`, async () => {
     const h = recoveryHarness({ status, transcripts: [{ text: 'Synthetic saved words', timestamp: '00:00', sequenceId: 0 }] });
+    await h.render().checkForRecoverableTranscripts();
     const result = await h.render().recoverMeeting('interrupted');
     assert.equal(result.transcriptCount, 1);
     assert.equal(h.saves[0][1][0].text, 'Synthetic saved words');
-    assert.equal(h.saves[0][3].audio_save_failed, status === 'failed');
+    assert.equal(h.saves[0][3].audio_save_failed, false);
     assert.equal(h.saves[0][3].transcription_incomplete, true);
     assert.equal(h.calls.includes('cleanup_checkpoints'), status === 'success');
     assert.equal(h.calls.includes('release_recovered_capture'), ['success', 'partial'].includes(status));
+    h.hooks.unmount();
+  });
+}
+
+for (const status of ['none', 'failed', 'throw']) {
+  test(`a live draft stays recoverable when previously detected audio yields ${status}`, async () => {
+    const h = recoveryHarness({ status, hasAudio: true, transcripts: [{ text: 'Synthetic draft', timestamp: '00:00' }] });
+    await h.render().checkForRecoverableTranscripts();
+    await assert.rejects(h.render().recoverMeeting('interrupted'), /No audio could be recovered yet/);
+    assert.equal(h.saves.length, 0);
+    assert.ok(!h.calls.includes('markSaved'));
+    assert.equal(h.render().recoverableMeetings[0].recordingFolder, 'synthetic-recording');
     h.hooks.unmount();
   });
 }
@@ -100,6 +113,7 @@ test('recovery preserves timing, sequence, speaker and word fields from both cac
       confidence: null, is_partial: false, word_timestamps: words },
     { id: 2, text: 'Later', timestamp: '12:02', sequenceId: 3, speaker: 'Participants' },
   ] });
+  await h.render().checkForRecoverableTranscripts();
   await h.render().recoverMeeting('interrupted');
   const [first, second] = h.saves[0][1];
   assert.equal(first.id, '1');

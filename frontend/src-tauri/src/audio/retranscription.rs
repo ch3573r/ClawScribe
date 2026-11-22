@@ -113,8 +113,8 @@ impl Drop for RetranscriptionGuard {
 /// VAD redemption time in milliseconds. Keep this close to the live pipeline so
 /// retranscription rows do not bridge normal speaker handoffs into long
 /// multi-speaker transcript rows that diarization then has to split later.
-const VAD_REDEMPTION_TIME_MS: u32 = 500;
-const MAX_TRANSCRIPTION_SEGMENT_SAMPLES: usize = 25 * 16000;
+pub(super) const VAD_REDEMPTION_TIME_MS: u32 = 500;
+pub(super) const MAX_TRANSCRIPTION_SEGMENT_SAMPLES: usize = 25 * 16000;
 
 /// Progress update emitted during retranscription
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +267,7 @@ async fn run_retranscription<R: Runtime>(
                 &audio_path,
                 language.as_deref(),
                 &RETRANSCRIPTION_CANCELLED,
+                None,
             )
             .await;
             if RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire) {

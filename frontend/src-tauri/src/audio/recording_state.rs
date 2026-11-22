@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -93,19 +93,29 @@ pub struct RecordingStats {
 }
 
 /// Unified state management for audio recording
+#[derive(Clone, Default, serde::Serialize)]
+pub(crate) struct CaptureHealth {
+    pub warnings: Vec<String>,
+    pub destination_free_bytes: Option<u64>,
+    pub scratch_free_bytes: Option<u64>,
+    pub details: super::outcome::CaptureDetails,
+}
+
 pub struct RecordingState {
     // Core recording state
     is_recording: AtomicBool,
     capture_incomplete: AtomicBool,
     recovery_signal: tokio::sync::Notify,
     live_transcription_disabled: AtomicBool,
+    speech_clock_ms: AtomicU64,
     is_paused: AtomicBool,
 
     // Audio devices
     microphone_device: Mutex<Option<Arc<AudioDevice>>>,
     system_device: Mutex<Option<Arc<AudioDevice>>>,
     // Track which device is disconnected for reconnection attempts
-    disconnected_devices: Mutex<Vec<(Arc<AudioDevice>, DeviceType)>>,
+    disconnected_devices: Mutex<Vec<(Arc<AudioDevice>, DeviceType, u64)>>,
+    source_failure_revision: AtomicU64,
 
     // Audio pipeline
     audio_sender: Mutex<Option<mpsc::Sender<AudioChunk>>>,
@@ -120,6 +130,7 @@ pub struct RecordingState {
     last_error: Mutex<Option<AudioError>>,
     error_callback: Mutex<Option<Box<dyn Fn(&AudioError) + Send + Sync>>>,
     // Non-fatal warnings surfaced to the UI (e.g. system audio is silent).
+    pub(crate) health: Mutex<CaptureHealth>,
     warning_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
     warning_cleared_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
     // Called once per recording when the recordings volume runs low.
@@ -142,33 +153,7 @@ pub struct RecordingState {
 
 impl RecordingState {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            capture_incomplete: AtomicBool::new(false),
-            recovery_signal: tokio::sync::Notify::new(),
-            live_transcription_disabled: AtomicBool::new(false),
-            is_recording: AtomicBool::new(false),
-            is_paused: AtomicBool::new(false),
-            microphone_device: Mutex::new(None),
-            system_device: Mutex::new(None),
-            disconnected_devices: Mutex::new(Vec::new()),
-            audio_sender: Mutex::new(None),
-            buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
-            error_count: AtomicU32::new(0),
-            recoverable_error_count: AtomicU32::new(0),
-            recent_errors: Mutex::new(VecDeque::new()),
-            last_error: Mutex::new(None),
-            error_callback: Mutex::new(None),
-            warning_callback: Mutex::new(None),
-            warning_cleared_callback: Mutex::new(None),
-            disk_space_callback: Mutex::new(None),
-            levels_callback: Mutex::new(None),
-            latest_levels: Mutex::new(None),
-            stats: Mutex::new(RecordingStats::default()),
-            recording_start: Mutex::new(None),
-            recording_end: Mutex::new(None),
-            pause_start: Mutex::new(None),
-            total_pause_duration: Mutex::new(std::time::Duration::ZERO),
-        })
+        Arc::new(Self::default())
     }
 
     // Recording control
@@ -258,20 +243,48 @@ impl RecordingState {
 
     pub fn mark_source_missing(&self, device: Arc<AudioDevice>, device_type: DeviceType) {
         let mut pending = self.disconnected_devices.lock().unwrap();
-        pending.retain(|(_, source)| *source != device_type);
-        pending.push((device, device_type));
+        if !self.is_recording() {
+            return;
+        }
+        pending.retain(|(_, source, _)| *source != device_type);
+        let revision = self.source_failure_revision.fetch_add(1, Ordering::Relaxed);
+        pending.push((device, device_type, revision));
         self.mark_capture_incomplete();
     }
 
-    pub fn mark_source_reconnected(&self, device_type: &DeviceType) {
+    pub(super) fn source_failure_revision(&self, name: &str, kind: &DeviceType) -> Option<u64> {
         self.disconnected_devices
             .lock()
             .unwrap()
-            .retain(|(_, source)| source != device_type);
+            .iter()
+            .find(|(device, source, _)| device.name == name && source == kind)
+            .map(|(_, _, revision)| *revision)
+    }
+
+    pub(super) fn mark_source_reconnected(&self, device_type: &DeviceType, reopened_revision: u64) {
+        self.disconnected_devices
+            .lock()
+            .unwrap()
+            .retain(|(_, source, revision)| {
+                source != device_type || *revision != reopened_revision
+            });
     }
 
     pub fn disconnected_devices(&self) -> Vec<(Arc<AudioDevice>, DeviceType)> {
-        self.disconnected_devices.lock().unwrap().clone()
+        self.disconnected_devices
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(device, source, _)| (device.clone(), source.clone()))
+            .collect()
+    }
+
+    pub(super) fn source_is_missing(&self, kind: &DeviceType) -> bool {
+        self.disconnected_devices
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, source, _)| source == kind)
     }
 
     pub fn clear_active_device(&self, device_type: &DeviceType) {
@@ -331,6 +344,30 @@ impl RecordingState {
         }
     }
 
+    pub(crate) fn record_sample_loss(&self, samples: usize) {
+        let mut health = self.health.lock().unwrap();
+        let first = health.details.dropped_samples == 0;
+        health.details.dropped_samples = health
+            .details
+            .dropped_samples
+            .saturating_add(samples as u64);
+        drop(health);
+        self.mark_capture_incomplete();
+        if first {
+            self.report_warning("Some audio was lost while processing was busy. Recording continues; the saved meeting will show a capture gap.");
+        }
+    }
+
+    pub(crate) fn record_system_silence(&self) {
+        let mut health = self.health.lock().unwrap();
+        health.details.system_silence_periods =
+            health.details.system_silence_periods.saturating_add(1);
+    }
+
+    pub(super) fn observe_transcription_backend(&self, backend: String) {
+        self.health.lock().unwrap().details.backend = Some(backend);
+    }
+
     pub fn send_audio_chunk(&self, chunk: AudioChunk) -> Result<()> {
         if self.is_paused() || !self.is_recording() {
             return Ok(());
@@ -339,10 +376,8 @@ impl RecordingState {
         if let Some(sender) = sender {
             match sender.try_send(chunk) {
                 Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    if !self.capture_incomplete.swap(true, Ordering::AcqRel) {
-                        self.report_warning("Some audio was lost while processing was busy. Recording continues; the saved meeting will be marked incomplete.");
-                    }
+                Err(mpsc::error::TrySendError::Full(chunk)) => {
+                    self.record_sample_loss(chunk.data.len());
                     return Ok(());
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -429,6 +464,11 @@ impl RecordingState {
 
     /// Resolve one recoverable warning without clearing unrelated recording failures.
     pub fn clear_warning(&self, message: &str) {
+        self.health
+            .lock()
+            .unwrap()
+            .warnings
+            .retain(|warning| warning != message);
         if let Some(callback) = self.warning_cleared_callback.lock().unwrap().as_ref() {
             callback(message);
         }
@@ -436,6 +476,12 @@ impl RecordingState {
 
     /// Surface a non-fatal warning to the UI. Does not affect recording state.
     pub fn report_warning(&self, message: &str) {
+        let mut health = self.health.lock().unwrap();
+        if health.warnings.iter().any(|warning| warning == message) {
+            return;
+        }
+        health.warnings.push(message.into());
+        drop(health);
         log::warn!("Recording warning: {message}");
         if let Some(callback) = self.warning_callback.lock().unwrap().as_ref() {
             callback(message);
@@ -521,6 +567,16 @@ impl RecordingState {
         self.stats.lock().unwrap().clone()
     }
 
+    // The mixer counts only samples sent to the speech detector. Paused
+    // wall time never enters this timeline.
+    pub(super) fn set_speech_clock_ms(&self, position_ms: u64) {
+        self.speech_clock_ms.store(position_ms, Ordering::Relaxed);
+    }
+
+    pub(super) fn speech_clock_seconds(&self) -> f64 {
+        self.speech_clock_ms.load(Ordering::Relaxed) as f64 / 1000.0
+    }
+
     pub fn get_recording_duration(&self) -> Option<f64> {
         self.recording_start.lock().unwrap().map(|start| {
             self.recording_end
@@ -604,11 +660,13 @@ impl Default for RecordingState {
             capture_incomplete: AtomicBool::new(false),
             recovery_signal: tokio::sync::Notify::new(),
             live_transcription_disabled: AtomicBool::new(false),
+            speech_clock_ms: AtomicU64::new(0),
             is_recording: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
             disconnected_devices: Mutex::new(Vec::new()),
+            source_failure_revision: AtomicU64::new(0),
             audio_sender: Mutex::new(None),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
@@ -617,6 +675,7 @@ impl Default for RecordingState {
             last_error: Mutex::new(None),
             error_callback: Mutex::new(None),
             warning_callback: Mutex::new(None),
+            health: Mutex::new(Default::default()),
             warning_cleared_callback: Mutex::new(None),
             disk_space_callback: Mutex::new(None),
             levels_callback: Mutex::new(None),
@@ -644,6 +703,18 @@ impl Clone for RecordingStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_quiet_loopback_updates_diagnostics_only() {
+        let state = RecordingState::new();
+        state.record_system_silence();
+        state.record_system_silence();
+        let health = state.health.lock().unwrap();
+        assert_eq!(health.details.system_silence_periods, 2);
+        assert_eq!(health.details.dropped_samples, 0);
+        assert!(health.warnings.is_empty());
+        assert!(!state.capture_incomplete());
+    }
 
     #[test]
     fn controls_levels_expire_without_changing_which_sources_are_captured() {

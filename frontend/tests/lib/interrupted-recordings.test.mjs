@@ -25,7 +25,7 @@ test('a folder known to both sources appears once, with the browser data and the
   assert.equal(merged[0].meetingId, 'm1');
   assert.equal(merged[0].transcriptCount, 3, 'the browser transcript count is kept');
   assert.equal(merged[0].disk.folder, 'd:/recordings/weekly_2026-11-01/');
-  assert.equal('recordingFolder' in merged[0], false);
+  assert.equal(merged[0].recordingFolder, 'D:\\Recordings\\Weekly_2026-11-01');
 });
 
 test('a recording only on disk becomes a disk entry and a browser entry without a folder stays', () => {
@@ -55,10 +55,11 @@ test('a scan result from the core is read tolerantly', () => {
   assert.equal(lib.readDiskScan(null).recordings.length, 0);
   assert.equal(lib.readDiskScan('nope').recordings.length, 0);
   const scan = lib.readDiskScan({
-    truncated: true, recordingActive: false,
+    truncated: true, recordingActive: false, waitingForAudio: true,
     recordings: [{ folder: 'C:\\Rec\\one', title: ' ', sizeBytes: 'big', hasAudio: true, reasons: ['unfinished_audio', 7] }, { title: 'no folder' }, null],
   });
   assert.equal(scan.truncated, true);
+  assert.equal(scan.waitingForAudio, true);
   assert.equal(scan.recordings.length, 1);
   assert.equal(scan.recordings[0].title, null);
   assert.equal(scan.recordings[0].sizeBytes, 0);
@@ -76,7 +77,7 @@ test('duration and size are described briefly', () => {
   assert.equal(lib.describeSize(0), null);
 });
 
-function harness({ browserMeetings = [], scan = { recordings: [], truncated: false, recordingActive: false }, scanFails = false, audioStatus = 'success', failDiscard = false } = {}) {
+function harness({ browserMeetings = [], scan = { recordings: [], truncated: false, recordingActive: false }, scanFails = false, audioStatus = 'success', failDiscard = false, failAudioCheck = false, transcripts = [], saveDraft = async () => true } = {}) {
   const hooks = createHookHarness();
   const calls = [];
   const saves = [];
@@ -85,12 +86,16 @@ function harness({ browserMeetings = [], scan = { recordings: [], truncated: fal
     '@/lib/interruptedRecordings': lib,
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push([command, args]);
-      if (command === 'has_audio_checkpoints') return true;
+      if (command === 'has_audio_checkpoints') {
+        if (failAudioCheck) throw new Error('Folder disappeared after scan');
+        return true;
+      }
       if (command === 'find_interrupted_recordings') {
-        if (scanFails) throw new Error('scan failed');
-        return scan;
+        if (typeof scanFails === 'function' ? scanFails() : scanFails) throw new Error('scan failed');
+        return typeof scan === 'function' ? scan() : scan;
       }
       if (command === 'preview_interrupted_recording') return [{ text: 'first line', timestamp: '[00:01]', audioStartTime: 1 }];
+      if (command === 'save_offline_recording_transcript' || command === 'save_recovery_transcript_copy') return saveDraft(command, args);
       if (command === 'recover_audio_from_checkpoints') {
         return { status: audioStatus, chunk_count: 1, estimated_duration_seconds: 1, audio_file_path: ['success', 'partial'].includes(audioStatus) ? args.meetingFolder + '/audio-recovered.wav' : undefined };
       }
@@ -103,7 +108,7 @@ function harness({ browserMeetings = [], scan = { recordings: [], truncated: fal
     '@/services/indexedDBService': { indexedDBService: {
       getAllMeetings: async () => browserMeetings,
       getMeetingMetadata: async id => browserMeetings.find(m => m.meetingId === id),
-      getTranscripts: async () => [],
+      getTranscripts: async () => transcripts,
       markMeetingSaved: async id => { calls.push(['markSaved', id]); },
       deleteMeeting: async id => { calls.push(['deleteBrowser', id]); },
     } },
@@ -131,11 +136,31 @@ test('the recovery list merges the browser data with what the core found on disk
   h.hooks.unmount();
 });
 
-test('a failed disk scan leaves the browser list as it was', async () => {
-  const h = harness({ browserMeetings: [browser('m1', undefined, { lastUpdated: old })], scanFails: true });
+test('a failed native scan clears the offered cache and preserves browser-only drafts for retry', async () => {
+  let scanFails = false;
+  const h = harness({
+    browserMeetings: [
+      browser('pending', undefined, { lastUpdated: old }),
+      browser('saved', 'saved-folder', { lastUpdated: old }),
+      browser('deleted', 'retained-folder', { lastUpdated: old }),
+      browser('current', 'current-folder', { lastUpdated: old }),
+    ],
+    scan: { recordings: [], activeCacheId: 'current', resolvedCacheIds: ['saved', 'deleted'] },
+    scanFails: () => scanFails,
+  });
+  assert.equal((await h.render().checkForRecoverableTranscripts()).length, 1);
+  scanFails = true;
+  assert.deepEqual(json(await h.render().checkForRecoverableTranscripts()), []);
+  assert.deepEqual(json(h.render().recoverableMeetings), []);
+  assert.equal(h.render().scanFailed, true);
+  await assert.rejects(h.render().recoverMeeting('pending'), /check for interrupted recordings/i);
+  await assert.rejects(h.render().deleteRecoverableMeeting('pending'), /check for interrupted recordings/i);
+  assert.ok(!h.names().includes('deleteBrowser'));
+  assert.equal(h.saves.length, 0);
+  scanFails = false;
   const found = await h.render().checkForRecoverableTranscripts();
-  assert.equal(found.length, 1);
-  assert.equal(found[0].source, 'browser');
+  assert.deepEqual(json(found.map(entry => entry.meetingId)), ['pending']);
+  assert.equal(h.render().scanFailed, false);
   h.hooks.unmount();
 });
 
@@ -150,8 +175,180 @@ test('a saved or deleted native recording cannot reappear from the browser cache
   });
   const found = await h.render().checkForRecoverableTranscripts();
   assert.deepEqual(json(found.map(entry => entry.meetingId)), ['pending']);
-  assert.deepEqual(json(h.calls[0][1].cacheIds), ['committed', 'deleted', 'pending']);
+  assert.deepEqual(json(h.calls[0][1].cacheEntries.map(entry => entry.id)), ['committed', 'deleted', 'pending']);
   assert.ok(!h.names().includes('has_audio_checkpoints'));
+  h.hooks.unmount();
+});
+
+test('a late successful recovery scan cannot repopulate the list after a newer scan fails', async () => {
+  let finishFirst;
+  let requests = 0;
+  const h = harness({
+    browserMeetings: [browser('pending', undefined, { lastUpdated: old })],
+    scan: () => {
+      if (++requests === 1) return new Promise(resolve => { finishFirst = resolve; });
+      throw new Error('newer scan failed');
+    },
+  });
+  const first = h.render().checkForRecoverableTranscripts();
+  await Promise.resolve();
+  await h.render().checkForRecoverableTranscripts();
+  finishFirst({ recordings: [] });
+  await first;
+  assert.equal(h.render().scanFailed, true);
+  assert.equal(h.render().recoverableMeetings.length, 0);
+  h.hooks.unmount();
+});
+
+test('a folder reused by another recording is never attached to a detached browser entry', async () => {
+  const folder = 'C:\\Rec\\reused';
+  const h = harness({
+    browserMeetings: [browser('old-browser', folder, { lastUpdated: old })],
+    scan: { recordings: [disk(folder)], detachedCacheIds: ['old-browser'] },
+  });
+  const entries = await h.render().checkForRecoverableTranscripts();
+  assert.equal(entries.length, 2);
+  const oldEntry = entries.find(entry => entry.meetingId === 'old-browser');
+  assert.equal(oldEntry.disk, undefined);
+  assert.equal(oldEntry.folderPath, undefined);
+  assert.equal(oldEntry.recordingFolder, undefined);
+  assert.ok(!h.names().includes('has_audio_checkpoints'));
+  await assert.rejects(h.render().recoverMeeting('old-browser'), /No audio could be recovered yet/);
+  assert.ok(!h.names().includes('recover_audio_from_checkpoints'));
+  assert.equal(h.saves.length, 0);
+  h.hooks.unmount();
+});
+
+test('an unverified folder keeps its browser draft visible and returns to regular recovery after rescan', async () => {
+  const folder = 'C:\\Rec\\offline';
+  const draft = browser('offline', folder, { lastUpdated: old });
+  let available = false;
+  const h = harness({
+    browserMeetings: [draft, browser('text-only', undefined, { lastUpdated: old })],
+    transcripts: [{ text: 'Cached words', timestamp: '12:00' }],
+    scan: () => ({
+      recordings: [disk(folder)],
+      unverifiedCacheIds: available ? [] : ['offline'],
+    }),
+  });
+  const first = await h.render().checkForRecoverableTranscripts();
+  assert.deepEqual(json(first.map(entry => entry.meetingId)), ['offline', 'text-only']);
+  assert.equal(first[0].folderUnverified, true);
+  assert.equal(first[0].recordingFolder, folder);
+  assert.equal(first[0].folderPath, undefined);
+  assert.equal(first[0].disk, undefined);
+  assert.equal(h.render().scanFailed, false);
+  assert.equal(h.render().hasUnverifiedFolders, true);
+  assert.ok(!h.names().includes('has_audio_checkpoints'));
+  assert.equal((await h.render().loadMeetingTranscripts('offline'))[0].text, 'Cached words');
+  await assert.rejects(h.render().recoverMeeting('offline'), /verify the recordings folder/i);
+  await assert.rejects(h.render().deleteRecoverableMeeting('offline'), /verify the recordings folder/i);
+  assert.equal(h.saves.length, 0);
+  assert.ok(!h.names().includes('markSaved') && !h.names().includes('deleteBrowser'));
+
+  available = true;
+  const retried = await h.render().checkForRecoverableTranscripts();
+  assert.equal(h.render().scanFailed, false);
+  assert.equal(h.render().hasUnverifiedFolders, false);
+  assert.equal(retried.length, 2);
+  assert.equal(retried.find(entry => entry.meetingId === 'offline').recordingFolder, folder);
+  await h.render().recoverMeeting('offline');
+  assert.equal(h.saves[0][2], folder);
+  assert.equal(h.calls.filter(([name]) => name === 'find_interrupted_recordings')[1][1].cacheEntries[0].folder, folder);
+  h.hooks.unmount();
+});
+
+test('an audio probe failure also leaves the browser draft unverified and suppresses the disk candidate', async () => {
+  const folder = 'R:\\Rec\\offline';
+  const h = harness({
+    browserMeetings: [browser('offline', folder, { lastUpdated: old })],
+    scan: { recordings: [disk(folder)] },
+    failAudioCheck: true,
+  });
+  const entries = await h.render().checkForRecoverableTranscripts();
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].folderUnverified, true);
+  assert.equal(entries[0].disk, undefined);
+  h.hooks.unmount();
+});
+
+const stableId = 'meeting-11111111-1111-4111-8111-111111111111';
+const legacyId = 'meeting-1795260000000';
+for (const id of [stableId, legacyId]) {
+  test(`offline transcript save preserves the draft and association for ${id === stableId ? 'a stable ID' : 'a legacy ID and linked path'}`, async () => {
+    const folder = id === stableId ? 'R:\\Recordings\\offline' : 'C:\\LegacyJunction\\draft';
+    const command = id === stableId ? 'save_offline_recording_transcript' : 'save_recovery_transcript_copy';
+    const draft = browser(id, folder, { lastUpdated: old });
+    let outcome = 'fail';
+    const h = harness({
+      browserMeetings: [draft],
+      scan: () => outcome === 'returned'
+        ? { recordings: [disk('R:\\Actual\\draft', { registeredMeetingId: stableId })], resolvedCacheIds: [stableId] }
+        : { recordings: [], unverifiedCacheIds: [id] },
+      transcripts: [{ text: 'Cached words', timestamp: '12:00', speaker: 'Me' }],
+      saveDraft: () => {
+        if (outcome === 'fail') throw new Error('Synthetic write failure');
+        return id === stableId ? { meeting_id: id } : outcome === 'saved';
+      },
+    });
+    await h.render().checkForRecoverableTranscripts();
+    await assert.rejects(h.render().saveOfflineTranscript(id), /Could not save the transcript/);
+    assert.equal(h.render().recoverableMeetings[0].recordingFolder, folder);
+    if (id === legacyId) {
+      outcome = 'cancelled';
+      assert.equal(await h.render().saveOfflineTranscript(id), 'cancelled');
+    }
+    outcome = 'saved';
+    assert.equal(await h.render().saveOfflineTranscript(id), id === stableId ? 'library' : 'file');
+    const [, args] = h.calls.findLast(([name]) => name === command);
+    assert.equal(args.folder, undefined);
+    assert.equal(args.folderPath, undefined);
+    assert.equal(args.meetingId, id === stableId ? id : undefined);
+    assert.equal(args.transcripts[0].text, 'Cached words');
+    assert.equal(args.transcripts[0].speaker, 'Me');
+    assert.ok(!h.names().some(name => /checkpoints|markSaved|deleteBrowser|^save$/.test(name)));
+    assert.equal(draft.folderPath, folder);
+    if (id === stableId) {
+      outcome = 'returned';
+      const entries = await h.render().checkForRecoverableTranscripts();
+      assert.equal(entries.length, 1);
+      assert.equal(entries[0].disk.registeredMeetingId, id);
+      await h.render().recoverMeeting(entries[0].meetingId);
+      assert.ok(h.names().includes('repair_saved_recording'));
+      assert.equal(h.saves.length, 0);
+    } else {
+      const entries = await h.render().checkForRecoverableTranscripts();
+      assert.equal(entries[0].recordingFolder, folder);
+      assert.equal(entries[0].folderUnverified, true);
+    }
+    h.hooks.unmount();
+  });
+}
+
+test('unverified state does not override an active, resolved, or saved cache entry', async () => {
+  const ids = ['active', 'saved', 'deleted', 'committed', 'offline'];
+  const h = harness({
+    browserMeetings: ids.map(id => browser(id, `R:\\${id}`, { lastUpdated: old, savedToSQLite: id === 'committed' })),
+    scan: { recordings: [], activeCacheId: 'active', resolvedCacheIds: ['saved', 'deleted'], unverifiedCacheIds: ids },
+  });
+  assert.deepEqual(json((await h.render().checkForRecoverableTranscripts()).map(entry => entry.meetingId)), ['offline']);
+  h.hooks.unmount();
+});
+
+test('old browser-only recovery stays visible while a live or just-written cache stays hidden', async () => {
+  const older = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const h = harness({
+    browserMeetings: [
+      browser('old-unsaved', undefined, { lastUpdated: older }),
+      browser('old-resolved', undefined, { lastUpdated: older }),
+      browser('live', 'C:\\Recordings\\current', { lastUpdated: old }),
+      browser('just-written', undefined, { lastUpdated: Date.now() }),
+    ],
+    scan: { recordings: [], activeCacheId: 'live', resolvedCacheIds: ['old-resolved'] },
+  });
+  const found = await h.render().checkForRecoverableTranscripts();
+  assert.deepEqual(json(found.map(entry => entry.meetingId)), ['old-unsaved']);
+  assert.ok(h.calls[0][1].cacheEntries.some(entry => entry.id === 'old-resolved'));
   h.hooks.unmount();
 });
 

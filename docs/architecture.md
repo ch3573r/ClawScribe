@@ -38,7 +38,7 @@ recordings and migration paths continue to work.
 - `frontend/src-tauri/src/nemotron_engine/`: Nemotron 3.5 ASR streaming ONNX
   model catalog, feature extraction, DirectML/CPU loading, and RNN-T decoding.
 - `frontend/src-tauri/src/summary/`: summary generation providers, including
-  built-in/local, API-based, OpenClaw, and Codex app-server paths.
+  built-in/local, API-based, and Codex app-server paths.
 - `frontend/src-tauri/src/exports/`: Microsoft Graph auth, calendar lookup,
   OneNote export, Planner/To Do task export, idempotency, and testable Graph
   transport.
@@ -65,6 +65,14 @@ user tables do not create an empty snapshot. After successful migrations, each
 startup removes snapshots older than 14 days. Deleted meeting data can remain
 longer while the app is closed or cleanup fails. A backup failure warns without
 blocking startup; already-applied migrations do not create another copy.
+
+An opening failure can start an isolated recovery profile with explicit user
+consent. Startup prepares and migrates a fresh SQLite database in a new app
+data folder, closes the pool, then atomically saves the active profile's UUID
+beside the original app data directory and requests a restart. The UUID resolves
+to a separate Tauri profile and recording roots. The recovery initializer
+does not open or move the original database or its WAL. A missing database
+with a SQLite recovery file is treated as a startup failure.
 
 Background Teams detection returns matching candidates only. Unmatched browser
 window titles are returned only when the settings diagnostics panel requests them.
@@ -93,12 +101,16 @@ window titles are returned only when the settings diagnostics panel requests the
   split into per-VAD-segment provider calls.
 - Summary generation can be local or external depending on the configured
   provider.
-- Microsoft Graph is used only after Microsoft sign-in and only for calendar,
-  OneNote, Planner, and To Do workflows.
+- Microsoft Graph is used after Microsoft sign-in for calendar, OneNote,
+  Planner, To Do, and OneDrive or SharePoint.
 - Confluence direct publish uses the configured server URL and PAT. Browser
   draft export remains available when SSO, proxy, or tenant policy blocks REST.
-- OpenClaw handoff is optional and sends completed recording artifacts only to
-  the configured operator endpoint.
+  Direct publishing uses the meeting export history to retain the page ID,
+  account fingerprint, and draft revision. Repeats open the existing page for
+  reviewed edits. Uncertain submissions stay held for reconciliation. The browser clipboard
+  includes readable source times, nested lists, quotes, code, and task status.
+- The optional [outbound webhook](integrations/webhook.md) sends saved meeting
+  data to the configured automation endpoint.
 
 ### Diagnostics report
 
@@ -106,8 +118,7 @@ window titles are returned only when the settings diagnostics panel requests the
 snapshot. ClawScribe builds a separate, versioned JSON report from allowlisted
 app and platform fields, CPU and memory capacity, audio device counts,
 transcription and speaker separation status, and fixed failure categories.
-When the last recorded OpenClaw handoff failed, the report includes its failure
-category. The file is limited to 4 KiB.
+The file is limited to 4 KiB.
 
 The save command works offline with the report held in memory. The Tauri core
 opens the native save dialog and writes the report atomically to the chosen
@@ -126,11 +137,29 @@ imports/retranscription to temporary PCM on disk, uses one continuous VAD state,
 and reads one bounded speech segment for inference. Preparation needs temporary
 disk capacity; it does not retain a full decoded meeting in RAM.
 
+`audio/vad.rs` calls the pinned Silero model directly for each 30 ms frame and
+owns one PCM history for endpointing. During confirmed speech, it retains less
+than the segment cap of uncommitted PCM after each frame, plus any already
+emitted samples needed to preserve the last 300 ms of pre-roll. Only the longer
+of those two ranges is kept. Live caps are 3, 6, or 12 seconds by provider, and
+the import and saved-meeting preparation cap is 60 seconds. At 16 kHz f32 mono,
+the largest active history holds under 3.84 MB of PCM between frames, excluding
+allocation slack, input buffering, and segments returned to callers. Forced
+cuts advance an absolute sample cursor without resetting Silero's recurrent
+state, so the natural endpoint or final flush emits only the remaining tail.
+
 Imports own their newly created folder until the meeting database transaction
 commits. Failed or cancelled imports remove that copy; the source file is kept.
-Cancellation reports the same status during decoding, cloud and local inference.
+The worker copies in 256 KiB blocks and checks cancellation between filesystem
+operations. A single blocked filesystem operation can still delay cancellation.
+The meeting transaction includes a pending folder update. It records metadata
+publication before rebuilding the transcript file from saved rows. Repair checks
+the owner marker, registered location and other meetings before writing files.
+When `metadata.json` is absent, repair by folder and library deletion can use
+the matching `.clawscribe-import-owner`. An existing metadata file must agree
+with the owner marker.
 Batch inference retries each failed segment once. Imports retain successful text
-and mark persistent failures as incomplete with a segment-count warning.
+and mark persistent failures as incomplete.
 Retranscription replaces the transcript only when every segment succeeds.
 
 Whisper, Parakeet, and Nemotron model construction also runs behind the native
@@ -274,7 +303,7 @@ child loop and the supervisor.
 `audio/recording_mode.rs` persists the next-session mode through the Tauri store.
 Recording startup snapshots it into the manager and meeting metadata. Audio-only
 mode always enables the recording saver, omits VAD/model validation and the live
-recognition worker, and skips automatic summary/OpenClaw handoff. Capture and the
+recognition worker, and skips automatic summaries. Capture and the
 retained audio spool use the existing paths. Later transcription uses the existing
 reviewed retranscription flow and its configured local/cloud preference.
 If model validation fails after capture opens and audio saving is enabled, the
@@ -374,9 +403,14 @@ so refreshing the surrounding array cannot leave an utterance partly hidden.
 
 User template edits are validated and atomically stored as personal JSON files
 in the existing template directory. Overrides take precedence over bundled
-versions. The default template uses `summary_preferences.json`; a missing saved
-default falls back to `standard_meeting`. Shared template events refresh Settings
-and meeting selectors. Structured providers return a template-shaped
+versions. Deleting a personal template removes it from selection. Resetting a
+customized built-in template restores the bundled version. ClawScribe records
+removals in its own storage when the template came from a legacy Meetily profile.
+The bundled `psychiatric_session.json` resource retains the shipped template ID
+`psychatric_session`. The default template uses `summary_preferences.json` and
+falls back to `standard_meeting` when the saved template is unavailable. A series
+with a missing template uses the current default. Shared template events refresh
+Settings and meeting selectors. Structured providers return a template-shaped
 `notes_markdown` alongside their existing export fields; old stored outputs use
 the standard renderer. Manual summary saves retain source identities and
 invalidate the English generation cache. Summary replacement edits inline text,
@@ -463,28 +497,31 @@ workspace lookup are available only in debug builds.
 
 ### Summary context budgets
 
-`summary/context_budget.rs` resolves summary and chat budgets together. These
-are ClawScribe's request-planning limits, not guarantees about a provider account:
+ClawScribe selects the planning budget by provider and model. A compatible
+endpoint can use the same model name with different limits.
 
-| Provider or model family | Context tokens |
+| Provider or model | Context tokens used for planning |
 | --- | --- |
-| GPT-4o; GPT-5/6 and o1/o3/o4 reasoning names | 128,000 |
-| GPT-4.1 | 1,047,576 |
-| Llama 3.1/3.3 | 131,072 |
-| Claude | 200,000 |
-| Unknown cloud model | 32,768 |
-| Custom/OpenAI-compatible/OpenClaw endpoint | Configured context; otherwise 128,000 for reasoning names, 8,192 for other names |
-| Ollama | Model metadata, capped at 16,384; 8,192 fallback |
-| Built-in AI | Model registry, capped at 16,384 |
-| Codex | 32,768 |
+| OpenAI GPT-5.4, GPT-5.5 and listed GPT-5.6/6 Sol or Luna models | 1,050,000 |
+| OpenAI GPT-4.1, Mini and Nano | 1,047,576 |
+| OpenAI GPT-4o and GPT-4o mini | 128,000 |
+| Groq Llama 3.3 70B Versatile and GPT-OSS 120B | 131,072 |
+| Claude API models in the catalog | 1,000,000 for the listed Fable 5.2, Opus 5/5.5, Sonnet/Haiku 5.5 and Opus/Sonnet 4.6 models. 200,000 for the listed 4.5 models. |
+| Other cloud models, including OpenRouter | Configured context, or 32,768 by default |
+| Custom OpenAI-compatible endpoints | Configured context, or 8,192 by default |
+| Ollama and Built-in AI | Configured Ollama context or local model registry, capped at 16,384. The fallback is 8,192. |
+| Bundled Codex | 500,000 for GPT-6.1 Sol, otherwise 32,768 |
+| Claude Code | 200,000 |
 
-Family matching also applies to namespaced OpenRouter IDs. GPT-5/6 and o1/o3/o4
-names, and the Claude provider, default to 16,000 output tokens and up to 8,000
-extraction tokens. Other names default to 4,096 output tokens for Built-in AI
-and Codex, or 2,048 elsewhere. Default output is capped at `max(context / 4, 1024)`;
-thus it never exceeds a quarter of context when context is at least 4,096.
-Explicit output settings override the default. Codex reasoning names still use
-the Codex context budget, so their default output is capped at 8,192.
+Reasoning models and the Claude providers default to 16,000 output tokens.
+Other models default to 4,096 for Built-in AI and Codex, or 2,048 elsewhere.
+The default is capped at a quarter of the context with a 1,024-token floor for
+that cap. A configured output budget takes precedence, subject to the cataloged
+model's output limit. Provider references include the [OpenAI API model
+catalog](https://developers.openai.com/api/docs/models), the [Codex default for
+GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol), and
+[Anthropic's model limits](https://platform.claude.com/docs/en/models/overview).
+
 The local helper receives the resolved local context.
 After reserving output tokens and 256 tokens, planning converts the remainder
 to three UTF-8 bytes per token and subtracts prompt overhead in bytes. Extraction
@@ -504,8 +541,18 @@ An incomplete excerpt set never replaces a complete summary or reaches exports.
 
 Import records the selected, file-modified, or import timestamp as the meeting
 date and preserves the import time and chosen date source in meeting metadata.
-Multiple selected files are reviewed and submitted individually through the
-existing single-job transcription slot.
+The core import queue uses the existing single-job transcription slot, yields
+to recording, and keeps running through dialog close and navigation. It saves
+item status and meeting IDs locally. An active queue blocks update installation
+through result publication. Starting a recording can interrupt a running
+import before it starts saving, and queued files wait for recording to finish.
+After restart, interrupted items with a committed meeting reopen that meeting.
+An interrupted cancellation stays cancelled, and other unfinished items need
+their original files again. A damaged queue file is preserved in app settings
+and a fresh queue accepts new files. Deleting a meeting prunes its completed
+import entry. Source paths and picker grants stay in memory. Hosted imports
+require explicit approval of the selected destination and check the saved
+endpoint and cloud setting again before upload.
 
 ## Microsoft Export Persistence
 
@@ -564,9 +611,7 @@ sign-in generation is unchanged and the connection is still active. Sign-out
 invalidates that generation and clears memory and persisted credentials under
 the same lock, so an in-flight refresh cannot restore a signed-out account.
 
-Microsoft authentication HTTP calls time out after 30 seconds. OpenClaw handoffs
-time out after 60 seconds and retain at most 64 KiB of response text in submission
-markers.
+Microsoft authentication HTTP calls time out after 30 seconds.
 
 A Microsoft token fallback save removes the older keychain entry so the next
 load cannot prefer stale credentials over the encrypted fallback.
@@ -613,6 +658,15 @@ state, and absence of a saved meeting before removing it.
 Restored recording outcomes retain whether recovery files were excluded from the
 archive. Those meetings direct recovery to the original computer; they do not
 recommend retranscribing unavailable audio. Older archives default this flag to false.
+
+Portable archive version 3 writes the four transcript tables to separate
+bounded record streams from the same SQLite snapshot as the manifest. Restore
+checks the stream entries and reads their rows into the import transaction
+with the same schema and meeting ownership checks used by earlier versions.
+Custom templates and vocabulary use create-only publication with rollback on
+import failure. Calendar series defaults use conflict-safe database inserts.
+Daily backups share the manual archive and audio/export locks. Retention uses
+a profile-local index and checks file identity before removing a prior ZIP.
 
 A meeting restored without its recording files has no folder to publish to. Its
 archived pending file-sync rows are not imported and its file-retry flag is
@@ -704,6 +758,12 @@ therefore supersedes older work. Recording contention, disabled indexing,
 cancellation and superseded jobs do not consume the three real-failure attempts.
 The worker borrows the existing scheduler tokenizer inside bounded calls; it
 does not retain a second tokenizer or a handle across recording backoff.
+During a meeting rebuild, the last 64 distinct complete short passages (up to
+96 UTF-8 bytes each) can share a vector when the text bytes match exactly.
+Each occurrence has its own canonical chunk, fingerprint, position and rank.
+A vector alias points to an owned vector from the same source, revision,
+generation and embedding space. Existing per-row vectors remain readable.
+Rebuilding an index preserves the source revision and citation identities.
 
 Keyword evidence uses exact canonical UTF-8 windows of at most 2,048 bytes with
 at most 128 bytes of overlap. Semantic bodies use at most 320 model tokens and
@@ -777,7 +837,9 @@ answer branch; archive search does not accept Live scopes.
 mode. It returns actual mode, index status and canonical passages. Questions are
 limited to 1,024 UTF-8 bytes. Quoted lexical queries and a local cosine scan each
 retain at most 64 candidates; vector pages hold at most 512 rows and scoring
-runs on blocking workers. RRF uses constant 60 and returns at most 12 passages.
+runs on blocking workers. SQLite finds the eligible sources once, then pages
+each by its published revision, generation and chunk ID. Materialization still
+rechecks scope and canonical fingerprints. RRF uses constant 60 and returns at most 12 passages.
 When multiple current indexed sources are eligible, the semantic heap keeps
 at most three candidates per source. A sole eligible source retains all 64
 slots. This limits single-source crowding without merging or deleting stored
@@ -787,6 +849,12 @@ Lexical rank transfers to a published semantic chunk only when that chunk
 covers the complete match. Containment deduplication stays within one source
 revision and preserves distinct dated meetings. Missing models or recording
 contention return keyword results with a visible fallback reason.
+
+Run `node scripts/benchmark-meeting-retrieval.mjs` to compare SQLite query
+plans and vector reads before and after the change, with 240 synthetic meetings
+and 144,060 candidate rows. The benchmark also checks vector alias backfill and
+the number of embedding inputs a rebuild can avoid for repeated short rows.
+Real model inference and installed-app playback are checked separately.
 The saved semantic opt-in is distinct from runtime readiness. Settings show
 installation and verification separately. Index status distinguishes a pending
 or active check from a failed check. Once the worker discovers missing or
@@ -907,9 +975,13 @@ configuration, index work, or live history persistence. The existing provider
 supervisor retains resources until actual cleanup completes. Producer IDs and
 request validation discard old results after Stop or another recording starts.
 Live requests and bounded conversation history are held in memory and cleared
-on Stop; no Live owners, requests, messages or evidence associations are written
-to the database. Background indexing pauses during capture, and the existing
-recording admission gate preempts document extraction and blocks local inference.
+on Stop. An explicit save accepts the current native session and its completed
+answer ID. It saves the answer, provider, finalized-through time, and cited
+live excerpts as a recording note under the durable recording ID. The recording
+handoff attaches those notes in the transaction that saves the meeting. Related
+saved documents and transcripts are stored as locators and checked at access.
+Background indexing pauses during capture, and the existing recording admission
+gate preempts document extraction and blocks local inference.
 
 `LiveAssistanceProvider` is mounted once in the root layout, inside shared
 recording/configuration providers and outside route lifetimes. Its production
@@ -1012,8 +1084,14 @@ file paths in its URL, then re-resolves before using the existing paginated
 reveal/player callbacks. Group menus preserve the raw displayed citation group
 and every original ordinal. Literal links require the backend allowlist;
 separately labeled context links validate both map entries and resolve both
-canonical references independently. Native installed clicks remain a manual
-acceptance gate.
+canonical references independently. Dismissing an evidence preview returns focus
+to the citation or search result that opened it. Meeting memory scrolls the
+sources and conversation together with the composer below. When the card has
+22 rem or less of vertical space, the header, sources, conversation and
+composer share one scrollport. At short heights the meeting detail view
+scrolls its header and playback strip with the review panes, keeping a cited
+transcript row reachable. The production-export browser test exercises short
+and tall layouts. Native installed clicks remain a manual acceptance gate.
 Derived chunk IDs and SQLite rowids are never citation identities. Saved title,
 date and speaker labels describe the original answer snapshot. Editing a title
 or meeting date advances the source revision, invalidates pending answers and

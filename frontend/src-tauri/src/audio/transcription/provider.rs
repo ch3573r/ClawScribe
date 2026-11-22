@@ -70,6 +70,10 @@ pub trait TranscriptionProvider: Send + Sync {
     /// Get the name of the currently loaded model
     async fn get_current_model(&self) -> Option<String>;
 
+    async fn live_backend(&self) -> Option<String> {
+        None
+    }
+
     /// Get the provider name (for logging/debugging)
     fn provider_name(&self) -> &'static str;
 }

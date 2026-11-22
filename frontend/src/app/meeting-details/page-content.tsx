@@ -24,6 +24,7 @@ import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperatio
 import { useConfig } from '@/contexts/ConfigContext';
 import { useSourceAttribution } from '@/hooks/useSourceAttribution';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import type { TranscriptTextPatch } from '@/lib/meetingTranscripts';
 import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
 import { stepPlaybackRate } from '@/lib/playback-controls';
 import type { MeetingBookmark } from '@/lib/library';
@@ -33,6 +34,8 @@ import { Button } from '@/components/ui/button';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
+import { SERIES_REVIEW_CHANGED, type SeriesPreferences } from '@/lib/meeting-follow-through';
+import { MEETING_SERIES_TEMPLATE_CHANGED } from '@/lib/meetingCalendarStore';
 
 export default function PageContent({
   meeting,
@@ -40,10 +43,12 @@ export default function PageContent({
   savedSourceToken,
   fromArchive,
   archiveAction,
+  actionId,
   summaryData,
   summaryJob,
   onMeetingUpdated,
   onRefetchTranscripts,
+  onPatchTranscriptText,
   onRevealTranscript,
   onUpdateTranscriptSpeaker,
   onApplySpeakerToMatching,
@@ -51,9 +56,11 @@ export default function PageContent({
   segments,
   timelineSegments,
   timelineComplete,
+  isLoadingTranscript,
   hasMore,
   isLoadingMore,
   totalCount,
+  emptyLiveMessage,
   loadedCount,
   onLoadMore,
 }: {
@@ -62,24 +69,48 @@ export default function PageContent({
   savedSourceToken?: string | null;
   fromArchive?: boolean;
   archiveAction?: string | null;
+  actionId?: string | null;
   summaryData: MeetingSummary | null;
   summaryJob: SummaryJobSnapshot | null;
   onMeetingUpdated?: () => Promise<void>;
   onRevealTranscript?: (id: string, index: number) => Promise<void>;
   onRefetchTranscripts?: () => Promise<void>;
+  onPatchTranscriptText?: (patches: TranscriptTextPatch[]) => void;
   onUpdateTranscriptSpeaker?: (transcriptId: string, speaker: string | null) => Promise<void>;
   onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
   // Pagination props
   segments?: TranscriptSegmentData[];
   timelineSegments?: TranscriptSegmentData[];
   timelineComplete?: boolean;
+  isLoadingTranscript?: boolean;
   hasMore?: boolean;
   isLoadingMore?: boolean;
   totalCount?: number;
+  emptyLiveMessage?: string | null;
   loadedCount?: number;
   onLoadMore?: () => void;
 }) {
   const [focusedBookmark, setFocusedBookmark] = useState<string | null>(null);
+  const [seriesDefaults, setSeriesDefaults] = useState<{ meetingId: string; value: SeriesPreferences | null } | null>(null);
+  const series = seriesDefaults?.meetingId === meeting.id ? seriesDefaults.value : null;
+  useEffect(() => {
+    let revision = 0;
+    const load = () => {
+      const request = ++revision;
+      setSeriesDefaults(null);
+      void invoke<SeriesPreferences | null>('get_meeting_series_preferences', { meetingId: meeting.id }).then(value => {
+        if (request === revision) setSeriesDefaults({ meetingId: meeting.id, value });
+      }).catch(() => {});
+    };
+    load();
+    window.addEventListener(SERIES_REVIEW_CHANGED, load);
+    window.addEventListener(MEETING_SERIES_TEMPLATE_CHANGED, load);
+    return () => {
+      revision++;
+      window.removeEventListener(SERIES_REVIEW_CHANGED, load);
+      window.removeEventListener(MEETING_SERIES_TEMPLATE_CHANGED, load);
+    };
+  }, [meeting.id]);
   console.log('📄 PAGE CONTENT: Initializing with data:', {
     meetingId: meeting.id,
     hasSummary: !!summaryData,
@@ -114,8 +145,10 @@ export default function PageContent({
   const [isRecording] = useState(false);
   const [focusedSource, setFocusedSource] = useState<{ id: string; request: number }>();
   const evidenceFocusRequest = useRef(0);
+  const reviewRef = useRef<HTMLDivElement>(null);
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
+  const [audioCheck, setAudioCheck] = useState(0);
   const audioPlayer = useAudioPlayer(audioPath);
   const { seek, play, pause, isPlaying } = audioPlayer;
   // Review tools: follow-along, bookmarks on the timeline, and requests raised by keyboard shortcuts.
@@ -124,14 +157,35 @@ export default function PageContent({
   const [findOpenRequest, setFindOpenRequest] = useState(0);
   const [bookmarkRequest, setBookmarkRequest] = useState(0);
   const stopFollowing = useCallback(() => setFollowPlayback(false), []);
-  const isAudioReady = Boolean(audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
+  const isAudioReady = Boolean(audioStatus === 'found' && audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
+  const revealTranscriptPane = useCallback((keepFocus = false) => {
+    const review = reviewRef.current;
+    const panel = review?.querySelector<HTMLElement>('[data-transcript-panel]');
+    if (!review || !panel) return false;
+    if (keepFocus && document.activeElement !== panel) return false;
+    const scrolls = getComputedStyle(review).overflowY === 'auto';
+    if (scrolls) {
+      // The virtual list reveals the row inside the pane. Bring the whole pane
+      // into the available view first so the row can land anywhere within it.
+      review.scrollTop += panel.getBoundingClientRect().top - review.getBoundingClientRect().top;
+    }
+    if (!keepFocus) panel.focus({ preventScroll: scrolls });
+    return true;
+  }, []);
+  useEffect(() => {
+    // The playback strip resizes the virtual list after a cold audio load.
+    if (isAudioReady && revealTranscriptPane(true)) {
+      const request = ++evidenceFocusRequest.current;
+      setFocusedSource(source => source && { id: source.id, request });
+    }
+  }, [isAudioReady, revealTranscriptPane]);
   const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean) => {
     if (!onRevealTranscript || !current()) throw new Error('The transcript is not ready. Retry the citation.');
     await onRevealTranscript(id, index);
     if (!current()) return;
     setFocusedSource({ id, request: ++evidenceFocusRequest.current });
-    document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
-  }, [onRevealTranscript]);
+    revealTranscriptPane();
+  }, [onRevealTranscript, revealTranscriptPane]);
   const playEvidence = useCallback(async (seconds: number, current: () => boolean) => {
     if (!current()) return;
     if (!isAudioReady) throw new Error('Saved audio is missing or not ready. The transcript can still be reviewed.');
@@ -254,9 +308,9 @@ export default function PageContent({
     let cancelled = false;
     const folderPath = meeting.folder_path;
     setAudioStatus('loading');
+    setAudioPath(null);
 
     if (!folderPath) {
-      setAudioPath(null);
       setAudioStatus('missing');
       return;
     }
@@ -279,7 +333,7 @@ export default function PageContent({
     return () => {
       cancelled = true;
     };
-  }, [meeting.folder_path]);
+  }, [meeting.folder_path, audioCheck]);
 
   // Depend on the individual player functions (stable identities from
   // useAudioPlayer), not the whole player object, which changes identity on
@@ -289,8 +343,10 @@ export default function PageContent({
   }, [seek]);
 
   const playPassage = useCallback((seconds: number) => {
-    void seek(seconds);
-    void play();
+    const reportFailure = () => toast.error('Could not play that part of the recording.');
+    void seek(seconds).then(() => play()).then(played => {
+      if (played === false) reportFailure();
+    }, reportFailure);
   }, [seek, play]);
 
   const handleTimelinePlayPause = useCallback(() => {
@@ -330,17 +386,21 @@ export default function PageContent({
 
   return (
     <motion.div
+      ref={reviewRef}
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: 'easeOut' }}
-      className="flex h-full flex-col bg-background"
+      className="meeting-details-review custom-scrollbar flex h-full flex-col bg-background"
     >
       {fromArchive && <div className="shrink-0 px-4 pt-2">
-        <Button variant="ghost" size="sm" asChild><Link href="/meetings"><ChevronLeft />Back to archive</Link></Button>
+        <Button variant="ghost" size="sm" asChild><Link href="/meetings"><ChevronLeft />{archiveAction === 'actions' ? 'Back to open actions' : 'Back to archive'}</Link></Button>
       </div>}
       <EvidenceRoute token={evidenceToken} meetingId={meeting.id} audioReady={isAudioReady} audioStatus={audioStatus} audioError={audioPlayer.error} onReveal={revealEvidence} onPlay={playEvidence} />
-      {savedSourceToken && <SavedSearchRoute key={savedSourceToken} token={savedSourceToken} meetingId={meeting.id} onBookmark={setFocusedBookmark} />}
+      {savedSourceToken && <SavedSearchRoute key={savedSourceToken} token={savedSourceToken} meetingId={meeting.id} onBookmark={setFocusedBookmark} onPlay={isAudioReady ? playPassage : undefined} />}
       <MeetingHeader meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
+        initialActionId={archiveAction === 'actions' ? actionId : null}
+        initialSeriesOpen={archiveAction === 'series'}
+        seriesDestination={series?.destination}
         onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}
         duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
         disabled={summaryBusy}
@@ -351,7 +411,6 @@ export default function PageContent({
       {isAudioReady && (
         <SpeakerLaneTimeline
           bindings={playerBindings}
-          key={meeting.id}
           segments={timelineSegments ?? []}
           showSpeakerAttribution={showSpeakerAttribution}
           totalCount={totalCount}
@@ -369,8 +428,9 @@ export default function PageContent({
           bookmarks={bookmarks}
         />
       )}
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
+      <div className="meeting-details-panes flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
         <TranscriptPanel
+          emptyLiveMessage={emptyLiveMessage}
           bindings={playerBindings}
           focusedBookmark={focusedBookmark}
           openTranscription={archiveAction === 'transcribe'}
@@ -395,10 +455,14 @@ export default function PageContent({
           meetingId={meeting.id}
           meetingFolderPath={hasRecordingFolder ? meeting.folder_path : null}
           audioStatus={audioStatus}
+          audioError={audioPlayer.error}
+          onRetryAudio={hasRecordingFolder ? () => setAudioCheck(check => check + 1) : undefined}
+          isLoadingTranscript={isLoadingTranscript}
           showSpeakerAttribution={showSpeakerAttribution}
           activeTime={isAudioReady ? audioPlayer.currentTime : undefined}
           onSeekToTime={isAudioReady ? playPassage : undefined}
           onRefetchTranscripts={onRefetchTranscripts}
+          onPatchTranscriptText={onPatchTranscriptText}
           onUpdateTranscriptSpeaker={onUpdateTranscriptSpeaker}
           onApplySpeakerToMatching={onApplySpeakerToMatching}
           onRevealSegment={onRevealTranscript}
@@ -409,11 +473,12 @@ export default function PageContent({
           onBookmarksChange={setBookmarks}
         />
         <SummaryPanel
+          seriesLanguage={series?.language}
           details={meetingData.details}
           onRevealSource={async (source) => {
             await onRevealTranscript?.(source.transcript_id, source.transcript_index);
             setFocusedSource({ id: source.transcript_id, request: Date.now() });
-            document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
+            revealTranscriptPane();
           }}
           onPlaySource={isAudioReady ? async seconds => { await seek(seconds); if (!isPlaying) await play(); } : undefined}
           meeting={meeting}
@@ -431,6 +496,7 @@ export default function PageContent({
           setModelConfig={setModelConfig}
           onSaveModelConfig={handleSaveModelConfig}
           onGenerateSummary={summaryGeneration.handleGenerateSummary}
+          onRetryTranslation={summaryGeneration.handleRetryTranslation}
           onStopGeneration={summaryGeneration.handleStopGeneration}
           onPromptChange={handlePromptChange}
           contextLoading={contextLoading}

@@ -8,7 +8,9 @@ use std::collections::HashMap;
 
 use crate::exports::client::{GraphClient, GraphOutcome, Sleeper};
 use crate::exports::error::GraphErrorKind;
-use crate::exports::ledger::{task_key_for_action, ExportLedger, PositionalSiblings};
+use crate::exports::ledger::{
+    task_key_for_action, ExportLedger, PositionalSiblings, TaskEnrichment,
+};
 use crate::exports::model::{
     ExportActionItem, ExportStatus, MeetingExport, MicrosoftConnectionState,
 };
@@ -19,7 +21,7 @@ use crate::exports::transport::{GraphRequest, GraphTransport};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
-fn graph_url_with_path_segments(segments: &[&str]) -> String {
+pub(super) fn graph_url_with_path_segments(segments: &[&str]) -> String {
     let mut url = url::Url::parse(GRAPH_BASE).expect("Graph base URL is valid");
     {
         let mut path = url
@@ -74,7 +76,7 @@ pub struct ExportReport {
     pub items: Vec<ItemResult>,
 }
 
-fn now_rfc3339() -> Option<String> {
+pub(super) fn now_rfc3339() -> Option<String> {
     Some(chrono::Utc::now().to_rfc3339())
 }
 
@@ -85,6 +87,7 @@ fn parse_resource(body: &str) -> (Option<String>, Option<String>) {
     let id = value
         .get("id")
         .and_then(|v| v.as_str())
+        .filter(|id| super::ledger::valid_remote_id(id))
         .map(|s| s.to_string());
     let web_url = value
         .get("webUrl")
@@ -143,8 +146,11 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
     dedupe_key: String,
     local_id: String,
     request: GraphRequest,
+    enrichment: Option<TaskEnrichment>,
+    display_name: &str,
 ) -> (ItemResult, bool) {
     ledger.begin_attempt(&dedupe_key, now_rfc3339());
+    ledger.label_attempt(&dedupe_key, display_name);
     if ledger.checkpoint().await.is_err() {
         ledger.record_failure(
             &dedupe_key,
@@ -157,7 +163,22 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
     let (mut result, stop) = match client.execute_create(&request, token).await {
         GraphOutcome::Success(resp) => {
             let (id, url) = parse_resource(&resp.body);
+            if id.is_none() {
+                ledger.record_failure(
+                    &dedupe_key,
+                    ExportStatus::UnknownAfterSubmit,
+                    Some("remote_id_unconfirmed".into()),
+                    now_rfc3339(),
+                );
+                let mut result = from_ledger(dedupe_key, local_id, ledger);
+                result.graph_called = true;
+                let _ = ledger.checkpoint().await;
+                return (result, true);
+            }
             ledger.record_success(&dedupe_key, id.clone(), url.clone(), now_rfc3339());
+            if let Some(enrichment) = enrichment {
+                ledger.record_task_enrichment(&dedupe_key, enrichment, None);
+            }
             (
                 ItemResult {
                     dedupe_key,
@@ -227,7 +248,11 @@ async fn run_item<T: GraphTransport, S: Sleeper>(
 }
 
 /// Build an item result for something resolved from the ledger without a call.
-fn from_ledger(dedupe_key: String, local_id: String, ledger: &ExportLedger) -> ItemResult {
+pub(super) fn from_ledger(
+    dedupe_key: String,
+    local_id: String,
+    ledger: &ExportLedger,
+) -> ItemResult {
     let entry = ledger.entry(&dedupe_key);
     ItemResult {
         local_id,
@@ -248,12 +273,28 @@ pub async fn export_onenote<T: GraphTransport, S: Sleeper>(
     target: &OneNoteTarget,
     ctx: &ExportContext<'_>,
 ) -> ExportReport {
-    let url = format!(
-        "{GRAPH_BASE}/me/onenote/sections/{}/pages",
-        target.section_id
-    );
+    export_onenote_revision(
+        client,
+        ledger,
+        meeting,
+        target,
+        ctx,
+        &meeting.artifact_hash(),
+    )
+    .await
+}
+
+pub(super) async fn export_onenote_revision<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    ledger: &mut ExportLedger,
+    meeting: &MeetingExport,
+    target: &OneNoteTarget,
+    ctx: &ExportContext<'_>,
+    revision: &str,
+) -> ExportReport {
+    let url =
+        graph_url_with_path_segments(&["me", "onenote", "sections", &target.section_id, "pages"]);
     let pages = onenote::build_pages(meeting, DEFAULT_PAGE_BUDGET_BYTES);
-    let meeting_hash = meeting.artifact_hash();
     let mut items = Vec::new();
 
     for page in pages {
@@ -262,7 +303,7 @@ pub async fn export_onenote<T: GraphTransport, S: Sleeper>(
             ctx.tenant_id,
             ctx.user_id,
             target.section_id,
-            meeting_hash,
+            revision,
             page.kind.as_str(),
             page.index,
         );
@@ -288,6 +329,8 @@ pub async fn export_onenote<T: GraphTransport, S: Sleeper>(
             dedupe_key,
             local_id,
             request,
+            None,
+            &page.title,
         )
         .await;
         items.push(result);
@@ -392,37 +435,69 @@ pub async fn export_planner<T: GraphTransport, S: Sleeper>(
         };
         let local_id = action.local_action_id.clone();
 
-        if ledger.already_succeeded(&dedupe_key).is_some() || !ledger.may_attempt(&dedupe_key) {
-            items.push(from_ledger(dedupe_key, local_id, ledger));
-            continue;
-        }
-
-        // Build first so a malformed item fails fast without a Graph call.
-        let body = planner::build_task_request(destination, action)?;
-        let request = GraphRequest {
-            method: "POST".into(),
-            url: url.clone(),
-            content_type: "application/json".into(),
-            body: body.to_string(),
-            correlation_id: uuid::Uuid::new_v4().to_string(),
-            headers: Vec::new(),
+        let (mut result, mut stop) = if ledger.may_attempt(&dedupe_key) {
+            let body = planner::build_task_request(destination, action)?;
+            run_item(
+                client,
+                ledger,
+                ctx.bearer_token,
+                dedupe_key,
+                local_id,
+                json_request("POST", url.clone(), body),
+                Some(TaskEnrichment {
+                    notes_pending: true,
+                    due_date_pending: false,
+                }),
+                &action.task,
+            )
+            .await
+        } else {
+            (from_ledger(dedupe_key, local_id, ledger), false)
         };
-        let (result, stop) = run_item(
-            client,
-            ledger,
-            ctx.bearer_token,
-            dedupe_key,
-            local_id,
-            request,
-        )
-        .await;
-
-        // Best-effort: attach a description with context to the new task. The
-        // task already exists, so a details failure must not fail the export.
-        if let Some(task_id) = result.resource_id.as_deref() {
-            if result.status == ExportStatus::Succeeded {
-                let description = planner::build_task_details_description(meeting, action);
-                set_planner_task_details(client, ctx.bearer_token, task_id, &description).await;
+        if !stop && result.status == ExportStatus::Succeeded {
+            if let Some(task_id) = result.resource_id.clone() {
+                let mut pending = ledger
+                    .entry(&result.dedupe_key)
+                    .and_then(|entry| entry.task_enrichment)
+                    .unwrap_or(TaskEnrichment {
+                        notes_pending: true,
+                        due_date_pending: false,
+                    });
+                if pending.notes_pending {
+                    let description = planner::build_task_details_description(meeting, action);
+                    let checked = if result.graph_called {
+                        Ok(())
+                    } else {
+                        check_planner_task_destination(
+                            client,
+                            ctx.bearer_token,
+                            &task_id,
+                            destination,
+                        )
+                        .await
+                    };
+                    let error = match checked {
+                        Ok(()) => set_planner_task_details(
+                            client,
+                            ctx.bearer_token,
+                            &task_id,
+                            &description,
+                        )
+                        .await
+                        .err(),
+                        Err(reason) => Some(reason),
+                    };
+                    pending.notes_pending = error.is_some();
+                    stop = checkpoint_enrichment(
+                        ledger,
+                        &mut result,
+                        pending,
+                        error.map(|reason| format!("planner_details_{reason}")),
+                    )
+                    .await;
+                }
+            } else {
+                stop = mark_missing_task_id(ledger, &mut result).await;
             }
         }
 
@@ -472,63 +547,48 @@ pub async fn export_todo<T: GraphTransport, S: Sleeper>(
         };
         let local_id = action.local_action_id.clone();
 
-        if ledger.already_succeeded(&dedupe_key).is_some() || !ledger.may_attempt(&dedupe_key) {
-            items.push(from_ledger(dedupe_key, local_id, ledger));
-            continue;
-        }
-
-        let body = todo::build_task_request(destination, meeting, action)?;
-        let request = GraphRequest {
-            method: "POST".into(),
-            url: url.clone(),
-            content_type: "application/json".into(),
-            body: body.to_string(),
-            correlation_id: uuid::Uuid::new_v4().to_string(),
-            headers: Vec::new(),
+        let due_patch = todo::build_task_due_date_patch(action);
+        let required = TaskEnrichment {
+            notes_pending: true,
+            due_date_pending: due_patch.is_some(),
         };
-        let (mut result, stop) = run_item(
-            client,
-            ledger,
-            ctx.bearer_token,
-            dedupe_key,
-            local_id,
-            request,
-        )
-        .await;
-        if result.status == ExportStatus::Succeeded {
-            if let Some(task_id) = result.resource_id.as_deref() {
-                let mut patch_codes = Vec::new();
-                if let Some(code) = patch_todo_task(
-                    client,
-                    ctx.bearer_token,
-                    &destination.list_id,
-                    task_id,
-                    todo::build_task_body_patch(meeting, action),
-                    "body",
-                )
-                .await
-                {
-                    patch_codes.push(code);
-                }
-                if let Some(due_patch) = todo::build_task_due_date_patch(action) {
-                    if let Some(code) = patch_todo_task(
+        let (mut result, mut stop) = if ledger.may_attempt(&dedupe_key) {
+            let body = todo::build_task_request(destination, meeting, action)?;
+            run_item(
+                client,
+                ledger,
+                ctx.bearer_token,
+                dedupe_key,
+                local_id,
+                json_request("POST", url.clone(), body),
+                Some(required),
+                &action.task,
+            )
+            .await
+        } else {
+            (from_ledger(dedupe_key, local_id, ledger), false)
+        };
+        if !stop && result.status == ExportStatus::Succeeded {
+            if let Some(task_id) = result.resource_id.clone() {
+                let pending = ledger
+                    .entry(&result.dedupe_key)
+                    .and_then(|entry| entry.task_enrichment)
+                    .unwrap_or(required);
+                if pending.is_pending() {
+                    stop = enrich_todo_task(
                         client,
+                        ledger,
                         ctx.bearer_token,
-                        &destination.list_id,
-                        task_id,
+                        &mut result,
+                        todo_task_url(&destination.list_id, &task_id),
+                        pending,
+                        todo::build_task_body_patch(meeting, action),
                         due_patch,
-                        "due date",
                     )
-                    .await
-                    {
-                        patch_codes.push(code);
-                    }
+                    .await;
                 }
-
-                if !patch_codes.is_empty() {
-                    result.status = ExportStatus::PartialFailure;
-                    result.code = Some(patch_codes.join(","));
-                }
+            } else {
+                stop = mark_missing_task_id(ledger, &mut result).await;
             }
         }
         items.push(result);
@@ -545,113 +605,196 @@ pub async fn export_todo<T: GraphTransport, S: Sleeper>(
     })
 }
 
-/// Best-effort: To Do accepts title-only creates reliably. Patch optional notes
-/// and due-date metadata after the task exists so optional-field validation
-/// quirks cannot prevent task creation.
-async fn patch_todo_task<T: GraphTransport, S: Sleeper>(
-    client: &GraphClient<T, S>,
-    token: &str,
-    list_id: &str,
-    task_id: &str,
-    body: serde_json::Value,
-    label: &str,
-) -> Option<String> {
-    let request = GraphRequest {
-        method: "PATCH".into(),
-        url: todo_task_url(list_id, task_id),
+pub(super) fn json_request(method: &str, url: String, body: serde_json::Value) -> GraphRequest {
+    GraphRequest {
+        method: method.into(),
+        url,
         content_type: "application/json".into(),
-        body: body.to_string(),
+        body: if body.is_null() {
+            String::new()
+        } else {
+            body.to_string()
+        },
         correlation_id: uuid::Uuid::new_v4().to_string(),
         headers: Vec::new(),
-    };
-    match client.execute(&request, token).await {
-        GraphOutcome::Success(_) => None,
-        GraphOutcome::Failed(kind, detail) => {
-            let detail = detail.unwrap_or_else(|| kind.code().to_string());
-            log::warn!(
-                "Microsoft To Do {label} patch failed ({}): {detail}",
-                kind.code()
-            );
-            Some(todo_patch_failure_code(label, kind.code()))
-        }
-        GraphOutcome::Unknown(msg) => {
-            log::warn!("Microsoft To Do {label} patch network failure: {msg}");
-            Some(todo_patch_failure_code(label, "network"))
-        }
     }
 }
 
-fn todo_patch_failure_code(label: &str, reason: &str) -> String {
-    let label = label
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('_')
-        .to_string();
-    format!("todo_{}_patch_{}", label, reason)
+async fn mark_missing_task_id(ledger: &mut ExportLedger, result: &mut ItemResult) -> bool {
+    result.status = ExportStatus::UnknownAfterSubmit;
+    result.code = Some("remote_id_unconfirmed".into());
+    ledger.record_failure(
+        &result.dedupe_key,
+        result.status,
+        result.code.clone(),
+        now_rfc3339(),
+    );
+    ledger.checkpoint().await.is_err()
 }
 
-/// Best-effort: set a Planner task's description (its "notes"). Planner keeps
-/// the description on a separate `/details` resource that requires the current
-/// ETag via `If-Match`, so this is GET-then-PATCH. Any failure is logged and
-/// ignored — the task itself already exists.
+async fn checkpoint_enrichment(
+    ledger: &mut ExportLedger,
+    result: &mut ItemResult,
+    pending: TaskEnrichment,
+    error: Option<String>,
+) -> bool {
+    let expired = error
+        .as_deref()
+        .is_some_and(|code| code.ends_with("_unauthorized"));
+    ledger.record_task_enrichment(&result.dedupe_key, pending, error.clone());
+    if ledger.checkpoint().await.is_err() {
+        result.status = ExportStatus::PartialFailure;
+        result.code = Some("export_history_write_failed".into());
+        return true;
+    }
+    result.status = if expired {
+        ExportStatus::FailedAuth
+    } else if pending.is_pending() {
+        ExportStatus::PartialFailure
+    } else {
+        ExportStatus::Succeeded
+    };
+    result.code = error;
+    expired
+}
+
+fn graph_failed_reason(outcome: GraphOutcome) -> Result<String, &'static str> {
+    match outcome {
+        GraphOutcome::Success(response) => Ok(response.body),
+        GraphOutcome::Failed(kind, _) => Err(kind.code()),
+        GraphOutcome::Unknown(_) => Err("network"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enrich_todo_task<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    ledger: &mut ExportLedger,
+    token: &str,
+    result: &mut ItemResult,
+    url: String,
+    mut pending: TaskEnrichment,
+    body_patch: serde_json::Value,
+    due_patch: Option<serde_json::Value>,
+) -> bool {
+    // A previous write can have reached Graph even if its response or
+    // checkpoint was lost. Preserve any value already on the user's task.
+    if !result.graph_called {
+        let request = json_request("GET", url.clone(), serde_json::Value::Null);
+        let remote = graph_failed_reason(client.execute(&request, token).await).and_then(|body| {
+            serde_json::from_str::<serde_json::Value>(&body).map_err(|_| "invalid_response")
+        });
+        match remote {
+            Ok(remote)
+                if remote.get("id").and_then(|id| id.as_str()) == result.resource_id.as_deref() =>
+            {
+                if remote
+                    .pointer("/body/content")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|text| !text.trim().is_empty())
+                {
+                    pending.notes_pending = false;
+                }
+                if remote
+                    .get("dueDateTime")
+                    .is_some_and(|value| !value.is_null())
+                {
+                    pending.due_date_pending = false;
+                }
+            }
+            invalid => {
+                let reason = invalid.err().unwrap_or("invalid_response");
+                return checkpoint_enrichment(
+                    ledger,
+                    result,
+                    pending,
+                    Some(format!("todo_task_read_{reason}")),
+                )
+                .await;
+            }
+        }
+    }
+
+    pending.due_date_pending &= due_patch.is_some();
+    let mut error = None;
+    let mut checkpointed = false;
+    for (label, patch) in [
+        ("body", pending.notes_pending.then_some(body_patch)),
+        ("due_date", due_patch.filter(|_| pending.due_date_pending)),
+    ] {
+        let Some(body) = patch else { continue };
+        let request = json_request("PATCH", url.clone(), body);
+        match graph_failed_reason(client.execute(&request, token).await) {
+            Ok(_) if label == "body" => pending.notes_pending = false,
+            Ok(_) => pending.due_date_pending = false,
+            Err(reason) => {
+                let code = format!("todo_{label}_patch_{reason}");
+                if reason == "unauthorized" || error.is_none() {
+                    error = Some(code);
+                }
+            }
+        }
+        if checkpoint_enrichment(ledger, result, pending, error.clone()).await {
+            return true;
+        }
+        checkpointed = true;
+    }
+    if checkpointed {
+        false
+    } else {
+        checkpoint_enrichment(ledger, result, pending, error).await
+    }
+}
+
 async fn set_planner_task_details<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     token: &str,
     task_id: &str,
     description: &str,
-) {
-    let details_url = format!("{GRAPH_BASE}/planner/tasks/{task_id}/details");
-
-    let get = GraphRequest {
-        method: "GET".into(),
-        url: details_url.clone(),
-        content_type: "application/json".into(),
-        body: String::new(),
-        correlation_id: uuid::Uuid::new_v4().to_string(),
-        headers: Vec::new(),
-    };
-    let etag = match client.execute(&get, token).await {
-        GraphOutcome::Success(resp) => serde_json::from_str::<serde_json::Value>(&resp.body)
-            .ok()
-            .and_then(|v| v.get("@odata.etag")?.as_str().map(String::from)),
-        GraphOutcome::Failed(kind, _) => {
-            log::warn!("Planner task details GET failed ({})", kind.code());
-            None
-        }
-        GraphOutcome::Unknown(_) => {
-            log::warn!("Planner task details GET failed (network)");
-            None
-        }
-    };
-    let Some(etag) = etag else {
-        log::warn!("No ETag for Planner task {task_id}; skipping description");
-        return;
-    };
-
-    let patch = GraphRequest {
-        method: "PATCH".into(),
-        url: details_url,
-        content_type: "application/json".into(),
-        body: serde_json::json!({ "description": description }).to_string(),
-        correlation_id: uuid::Uuid::new_v4().to_string(),
-        headers: vec![("If-Match".to_string(), etag)],
-    };
-    match client.execute(&patch, token).await {
-        GraphOutcome::Failed(kind, _) => {
-            log::warn!("Planner task details PATCH failed ({})", kind.code());
-        }
-        GraphOutcome::Unknown(_) => {
-            log::warn!("Planner task details PATCH failed (network)");
-        }
-        GraphOutcome::Success(_) => {}
+) -> Result<(), &'static str> {
+    let url = graph_url_with_path_segments(&["planner", "tasks", task_id, "details"]);
+    let get = json_request("GET", url.clone(), serde_json::Value::Null);
+    let response = graph_failed_reason(client.execute(&get, token).await)?;
+    let details: serde_json::Value =
+        serde_json::from_str(&response).map_err(|_| "invalid_response")?;
+    if details
+        .get("description")
+        .and_then(|value| value.as_str())
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        return Ok(());
     }
+    let etag = details
+        .get("@odata.etag")
+        .and_then(|value| value.as_str())
+        .ok_or("missing_etag")?;
+    let mut patch = json_request(
+        "PATCH",
+        url,
+        serde_json::json!({ "description": description }),
+    );
+    patch.headers.push(("If-Match".into(), etag.into()));
+    graph_failed_reason(client.execute(&patch, token).await)?;
+    Ok(())
+}
+
+async fn check_planner_task_destination<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    id: &str,
+    destination: &PlannerDestination,
+) -> Result<(), &'static str> {
+    let url = graph_url_with_path_segments(&["planner", "tasks", id]);
+    let get = json_request("GET", url, serde_json::Value::Null);
+    let body = graph_failed_reason(client.execute(&get, token).await)?;
+    let task: serde_json::Value = serde_json::from_str(&body).map_err(|_| "invalid_response")?;
+    if task["id"].as_str() != Some(id)
+        || task["planId"].as_str() != Some(&destination.plan_id)
+        || task["bucketId"].as_str() != Some(&destination.bucket_id)
+    {
+        return Err("destination_mismatch");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -739,6 +882,18 @@ mod tests {
     }
     fn planner_url() -> String {
         format!("{GRAPH_BASE}/planner/tasks")
+    }
+
+    fn queue_planner_details(transport: &MockGraphTransport, ids: &[&str]) {
+        for id in ids {
+            transport.queue_for_url(
+                &format!("{}/{id}/details", planner_url()),
+                [
+                    GraphResponse::success(200, r#"{"@odata.etag":"etag","description":""}"#),
+                    GraphResponse::success(204, ""),
+                ],
+            );
+        }
     }
 
     fn assert_no_token_logged(transport: &MockGraphTransport, token: &str) {
@@ -874,6 +1029,7 @@ mod tests {
     #[tokio::test]
     async fn planner_429_then_success_no_duplicate() {
         let transport = MockGraphTransport::new();
+        queue_planner_details(&transport, &["task-1"]);
         // Single action item meeting for a clean throttle test.
         let mut m = meeting();
         m.action_items.truncate(1);
@@ -1134,6 +1290,7 @@ mod tests {
             &m.action_items[0],
         );
         ledger.record_success(&key, Some("task-1".into()), Some("http://t".into()), None);
+        ledger.record_task_enrichment(&key, TaskEnrichment::default(), None);
 
         let client = client(transport);
         let report = export_planner(&client, &mut ledger, &m, &dest, &ctx(), None)
@@ -1152,6 +1309,7 @@ mod tests {
     #[tokio::test]
     async fn planner_partial_failure_preserves_successes_and_retries_only_failed() {
         let transport = MockGraphTransport::new();
+        queue_planner_details(&transport, &["task-1", "task-3"]);
         transport.queue_for_url(
             &planner_url(),
             [
@@ -1194,6 +1352,7 @@ mod tests {
     #[tokio::test]
     async fn planner_partial_failure_retries_retriable_item_on_second_run() {
         let transport = MockGraphTransport::new();
+        queue_planner_details(&transport, &["task-1", "task-2", "task-3"]);
         // item1 ok, item2 throttled-exhausted (failed), item3 ok; then on retry
         // item2 succeeds.
         transport.queue_for_url(
@@ -1294,7 +1453,8 @@ mod tests {
             GraphResponse::success(200, r#"{"id":"todo-1"}"#),
         ]);
         let client = client(transport);
-        let mut ledger = ExportLedger::new("m1");
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = ExportLedger::load_or_new(dir.path(), "m1").unwrap();
         let mut m = meeting();
         m.action_items.truncate(1);
         m.action_items[0].due_date = Some("2026-07-01".into());
@@ -1318,17 +1478,201 @@ mod tests {
         assert_eq!(ledger_entry.status, ExportStatus::Succeeded);
         assert_eq!(ledger_entry.resource_id.as_deref(), Some("todo-1"));
 
+        let mut ledger = ExportLedger::load_or_new(dir.path(), "m1").unwrap();
+        let task_url = todo_task_url("list-1", "todo-1");
+        client.transport().queue_for_url(&task_url, [
+            GraphResponse::success(200, r#"{"id":"todo-1","body":{"content":""},"dueDateTime":{"dateTime":"2026-07-01T00:00:00"}}"#),
+            GraphResponse::success(204, ""),
+        ]);
         let report2 = export_todo(&client, &mut ledger, &m, &dest, &ctx(), None)
             .await
             .unwrap();
         assert_eq!(report2.overall, ExportStatus::Succeeded);
         assert!(!report2.items[0].graph_called);
+        assert_eq!(client.transport().calls_for(&task_url), 4);
         assert_eq!(
             client
                 .transport()
                 .calls_for(&format!("{GRAPH_BASE}/me/todo/lists/list-1/tasks")),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_task_with_a_remote_id_keeps_existing_notes() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        let mut meeting = meeting();
+        meeting.action_items.truncate(1);
+        let destination = ToDoDestination {
+            list_id: "list-1".into(),
+        };
+        let key = todo::dedupe_key(
+            "tenant",
+            "user",
+            &destination,
+            &meeting,
+            &meeting.action_items[0],
+        );
+        ledger.record_success(&key, Some("old-task".into()), None, None);
+        ledger.record_failure(&key, ExportStatus::PartialFailure, None, None);
+        ledger.checkpoint().await.unwrap();
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        let transport = MockGraphTransport::new();
+        transport.queue_for_url(
+            &todo_task_url("list-1", "old-task"),
+            [GraphResponse::success(
+                200,
+                r#"{"id":"old-task","body":{"content":"User's revised notes"},"dueDateTime":null}"#,
+            )],
+        );
+        let client = client(transport);
+        let report = export_todo(&client, &mut ledger, &meeting, &destination, &ctx(), None)
+            .await
+            .unwrap();
+        assert_eq!(report.overall, ExportStatus::Succeeded);
+        assert_eq!(report.items[0].resource_id.as_deref(), Some("old-task"));
+        let requests = client.transport().recorded();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+    }
+
+    #[tokio::test]
+    async fn rebinding_tasks_preserves_existing_provider_details_on_repeat_export() {
+        let mut ledger = ExportLedger::new("meeting");
+        let mut meeting = meeting();
+        meeting.action_items.truncate(1);
+        let action = &mut meeting.action_items[0];
+        action.due_date = Some("2026-07-01".into());
+        let planner = PlannerDestination {
+            plan_id: "plan-1".into(),
+            bucket_id: "bucket-1".into(),
+        };
+        let todo = ToDoDestination {
+            list_id: "list-1".into(),
+        };
+        let planner_key = planner::dedupe_key(
+            "tenant",
+            "user",
+            &planner,
+            &meeting,
+            &meeting.action_items[0],
+        );
+        let todo_key =
+            todo::dedupe_key("tenant", "user", &todo, &meeting, &meeting.action_items[0]);
+        for key in [&planner_key, &todo_key] {
+            ledger.record_success(key, Some("old-task".into()), None, None);
+            ledger.record_task_enrichment(key, TaskEnrichment::default(), None);
+        }
+        let client = client(MockGraphTransport::new());
+        let planner_item = format!("{}/replacement", planner_url());
+        let planner_details = format!("{planner_item}/details");
+        let todo_item = todo_task_url("list-1", "replacement");
+        client.transport().queue_for_url(
+            &planner_item,
+            std::iter::repeat(GraphResponse::success(
+                200,
+                r#"{"id":"replacement","title":"Reviewed","planId":"plan-1","bucketId":"bucket-1"}"#,
+            )).take(2),
+        );
+        client.transport().queue_for_url(
+            &planner_details,
+            [GraphResponse::success(
+                200,
+                r#"{"description":"Existing notes","checklist":{"item":{"title":"Existing work"}}}"#,
+            )],
+        );
+        client.transport().queue_for_url(
+            &todo_item,
+            std::iter::repeat(GraphResponse::success(
+                200,
+                r#"{"id":"replacement","title":"Reviewed","body":{"content":"Existing notes"},"dueDateTime":{"dateTime":"2026-07-02T00:00:00"}}"#,
+            )).take(2),
+        );
+        let account = ctx();
+        for key in [&planner_key, &todo_key] {
+            super::super::resolution::reconcile(
+                &client,
+                &mut ledger,
+                key,
+                &account,
+                Some("replacement"),
+            )
+            .await
+            .unwrap();
+            assert!(ledger.entry(key).unwrap().task_enrichment.is_none());
+        }
+        let planner_report =
+            export_planner(&client, &mut ledger, &meeting, &planner, &account, None)
+                .await
+                .unwrap();
+        let todo_report = export_todo(&client, &mut ledger, &meeting, &todo, &account, None)
+            .await
+            .unwrap();
+        for report in [planner_report, todo_report] {
+            assert_eq!(report.overall, ExportStatus::Succeeded);
+            assert_eq!(report.items[0].resource_id.as_deref(), Some("replacement"));
+        }
+        let calls = client.transport().recorded();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| (call.method.as_str(), call.url.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("GET", planner_item.as_str()),
+                ("GET", todo_item.as_str()),
+                ("GET", planner_item.as_str()),
+                ("GET", planner_details.as_str()),
+                ("GET", todo_item.as_str()),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn planner_repairs_missing_details_after_restart_without_recreating_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = ExportLedger::load_or_new(dir.path(), "m").unwrap();
+        let mut meeting = meeting();
+        meeting.action_items.truncate(1);
+        let destination = PlannerDestination {
+            plan_id: "plan-1".into(),
+            bucket_id: "bucket-1".into(),
+        };
+        let client = client(MockGraphTransport::new());
+        let details_url = format!("{}/task-1/details", planner_url());
+        client.transport().queue_for_url(
+            &planner_url(),
+            [GraphResponse::success(201, r#"{"id":"task-1"}"#)],
+        );
+        client.transport().queue_for_url(
+            &format!("{}/task-1", planner_url()),
+            [GraphResponse::success(
+                200,
+                r#"{"id":"task-1","planId":"plan-1","bucketId":"bucket-1"}"#,
+            )],
+        );
+        client.transport().queue_for_url(
+            &details_url,
+            [
+                GraphResponse::success(200, r#"{"@odata.etag":"etag-1","description":""}"#),
+                GraphResponse::failure(412, None),
+                GraphResponse::success(200, r#"{"@odata.etag":"etag-2","description":""}"#),
+                GraphResponse::success(204, ""),
+            ],
+        );
+        let first = export_planner(&client, &mut ledger, &meeting, &destination, &ctx(), None)
+            .await
+            .unwrap();
+        assert_eq!(first.overall, ExportStatus::PartialFailure);
+        assert_eq!(first.items[0].resource_id.as_deref(), Some("task-1"));
+        let mut restored = ExportLedger::load_or_new(dir.path(), "m").unwrap();
+        let second = export_planner(&client, &mut restored, &meeting, &destination, &ctx(), None)
+            .await
+            .unwrap();
+        assert_eq!(second.overall, ExportStatus::Succeeded);
+        assert_eq!(client.transport().calls_for(&planner_url()), 1);
+        assert_eq!(client.transport().calls_for(&details_url), 4);
     }
 
     #[test]

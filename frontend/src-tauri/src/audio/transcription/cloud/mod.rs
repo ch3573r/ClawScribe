@@ -201,6 +201,7 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
     audio_path: &Path,
     language: Option<&str>,
     cancelled: &AtomicBool,
+    import_destination: Option<&str>,
 ) -> Result<CloudTranscriptionOutcome, CloudTranscriptionError> {
     let app_state = app
         .try_state::<AppState>()
@@ -212,6 +213,16 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
         .ok_or_else(|| {
             CloudTranscriptionError::auth_config("Cloud transcription is not configured")
         })?;
+    if let Some(expected) = import_destination {
+        let current = destination_for_config(&config, provider)?;
+        if expected != current.fingerprint
+            || !crate::audio::recording_commands::cloud_transcription_enabled()
+        {
+            return Err(CloudTranscriptionError::auth_config(
+                "Cloud transcription settings changed after this import was approved",
+            ));
+        }
+    }
     let api_key = SettingsRepository::get_transcript_api_key(pool, provider)
         .await
         .map_err(|e| CloudTranscriptionError::auth_config(format!("Cloud credential error: {e}")))?
@@ -260,6 +271,7 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
                     let audio = tokio::fs::read(audio_path).await.map_err(|_| {
                         CloudTranscriptionError::auth_config("Could not read audio file")
                     })?;
+                    check_import_upload_opt_in(import_destination.is_some())?;
                     client
                         .transcribe_file(
                             audio,
@@ -312,8 +324,14 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
                 model.clone(),
             )
             .with_http_opt_in(config.cloud_http_opt_in(provider));
-            let cloud_segments =
-                transcribe_mai_file(&client, audio_path, language, cancelled).await?;
+            let cloud_segments = transcribe_mai_file(
+                &client,
+                audio_path,
+                language,
+                cancelled,
+                import_destination.is_some(),
+            )
+            .await?;
             Ok(CloudTranscriptionOutcome {
                 provider: PROVIDER_MAI_TRANSCRIBE.to_string(),
                 model,
@@ -332,6 +350,62 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
     }
 }
 
+#[derive(Serialize)]
+pub(crate) struct ImportCloudDestination {
+    pub endpoint: String,
+    pub fingerprint: String,
+}
+
+pub(crate) async fn import_destination(
+    pool: &sqlx::SqlitePool,
+    provider: &str,
+) -> Result<ImportCloudDestination, String> {
+    let config = SettingsRepository::get_transcript_config(pool)
+        .await
+        .map_err(|_| "Could not read cloud transcription settings")?
+        .ok_or("Cloud transcription is not configured")?;
+    destination_for_config(&config, provider).map_err(|error| error.to_string())
+}
+
+fn destination_for_config(
+    config: &crate::database::models::TranscriptSetting,
+    provider: &str,
+) -> Result<ImportCloudDestination, CloudTranscriptionError> {
+    use sha2::{Digest, Sha256};
+    let endpoint = match provider {
+        PROVIDER_CLOUD_WHISPER => config
+            .cloud_whisper_base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("https://api.openai.com/v1"),
+        PROVIDER_MAI_TRANSCRIBE => config
+            .mai_transcribe_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                CloudTranscriptionError::auth_config("Azure Speech endpoint is missing")
+            })?,
+        _ => {
+            return Err(CloudTranscriptionError::auth_config(
+                "Unknown cloud transcription provider",
+            ))
+        }
+    };
+    let opt_in = config.cloud_http_opt_in(provider);
+    crate::openai::secret_destination::validate_secret_destination(endpoint, opt_in)
+        .map_err(CloudTranscriptionError::auth_config)?;
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest(format!("{provider}\0{endpoint}\0{opt_in}"))
+    );
+    Ok(ImportCloudDestination {
+        endpoint: endpoint.to_owned(),
+        fingerprint,
+    })
+}
+
 fn upload_filename(path: &Path) -> &str {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -347,8 +421,10 @@ pub(crate) async fn transcribe_mai_file(
     audio_path: &Path,
     language: Option<&str>,
     cancelled: &AtomicBool,
+    import_consent_required: bool,
 ) -> Result<Vec<CloudTranscriptSegment>, CloudTranscriptionError> {
     if mai_supports_container(audio_path) {
+        check_import_upload_opt_in(import_consent_required)?;
         return unless_cancelled(
             client.transcribe_path(
                 audio_path,
@@ -364,6 +440,7 @@ pub(crate) async fn transcribe_mai_file(
 
     info!("Preparing temporary audio for MAI-Transcribe");
     let scratch = convert_to_mai_scratch(audio_path, cancelled).await?;
+    check_import_upload_opt_in(import_consent_required)?;
     unless_cancelled(
         client.transcribe_source(
             mai_transcribe::UploadSource::Scratch(&scratch),
@@ -375,6 +452,17 @@ pub(crate) async fn transcribe_mai_file(
     )
     .await
     .ok_or_else(cloud_cancelled)?
+}
+
+fn check_import_upload_opt_in(
+    import_consent_required: bool,
+) -> Result<(), CloudTranscriptionError> {
+    if import_consent_required && !crate::audio::recording_commands::cloud_transcription_enabled() {
+        return Err(CloudTranscriptionError::auth_config(
+            "Cloud transcription was disabled before upload",
+        ));
+    }
+    Ok(())
 }
 
 /// Converts into an unnamed temporary file. It has no path to leave behind: the
@@ -1196,7 +1284,7 @@ mod tests {
             .transcribe_file(vec![0; 44], "synthetic.wav", "audio/wav", None)
             .await
             .unwrap_err();
-        let mai_error = transcribe_mai_file(&mai, &audio, None, &AtomicBool::new(false))
+        let mai_error = transcribe_mai_file(&mai, &audio, None, &AtomicBool::new(false), false)
             .await
             .unwrap_err();
         for error in [whisper_error, mai_error] {
@@ -1591,15 +1679,20 @@ pub(crate) mod live_smoke {
                 let model = optional_env(ENV_MAI_MODEL)
                     .unwrap_or_else(|| DEFAULT_MAI_TRANSCRIBE_MODEL.into());
                 let provider = MaiTranscribeProvider::new(endpoint, api_key, model);
-                let segments =
-                    transcribe_mai_file(&provider, &audio_path, language, &AtomicBool::new(false))
-                        .await
-                        .unwrap_or_else(|error| {
-                            panic!(
-                                "MAI-Transcribe smoke failed: category={}, error={error}",
-                                error.category().as_str()
-                            )
-                        });
+                let segments = transcribe_mai_file(
+                    &provider,
+                    &audio_path,
+                    language,
+                    &AtomicBool::new(false),
+                    false,
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "MAI-Transcribe smoke failed: category={}, error={error}",
+                        error.category().as_str()
+                    )
+                });
 
                 assert_basic_segments("MAI-Transcribe", &segments);
                 assert_mai_never_emits_word_timestamps(&segments);

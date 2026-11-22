@@ -1,37 +1,6 @@
 use crate::summary::templates;
-use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Runtime};
 use tauri_plugin_store::StoreExt;
-use tracing::info;
-
-/// Template metadata for UI display
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TemplateInfo {
-    /// Template identifier (e.g., "daily_standup", "standard_meeting")
-    pub id: String,
-
-    /// Display name for the template
-    pub name: String,
-
-    /// Brief description of the template's purpose
-    pub description: String,
-}
-
-/// Detailed template structure for preview/debugging
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TemplateDetails {
-    /// Template identifier
-    pub id: String,
-
-    /// Display name
-    pub name: String,
-
-    /// Description
-    pub description: String,
-
-    /// List of section titles in order
-    pub sections: Vec<String>,
-}
 
 pub fn default_template<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<String, String> {
     let store = app
@@ -102,47 +71,28 @@ pub async fn api_save_template<R: Runtime>(
     Ok(())
 }
 
-/// Lists all available templates
-///
-/// Returns templates from both built-in (embedded) and custom (user data directory) sources.
-/// Templates are automatically discovered - no code changes needed to add new templates.
-///
-/// # Returns
-/// Vector of TemplateInfo with id, name, and description for each template
 #[tauri::command]
-pub async fn api_list_templates<R: Runtime>(
-    _app: tauri::AppHandle<R>,
-) -> Result<Vec<TemplateInfo>, String> {
-    info!("api_list_templates called");
+pub async fn api_remove_template<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    template_id: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || templates::remove_template(&template_id))
+        .await
+        .map_err(|_| "Could not remove the personal template")??;
+    let _ = app.emit("summary-templates-changed", ());
+    Ok(())
+}
 
-    let templates = templates::list_templates();
-
-    let template_infos: Vec<TemplateInfo> = templates
-        .into_iter()
-        .map(|(id, name, description)| TemplateInfo {
-            id,
-            name,
-            description,
-        })
-        .collect();
-
-    info!("Found {} available templates", template_infos.len());
-
-    Ok(template_infos)
+#[tauri::command]
+pub async fn api_list_templates() -> Result<Vec<templates::TemplateInfo>, String> {
+    tauri::async_runtime::spawn_blocking(templates::list_templates)
+        .await
+        .map_err(|_| "Could not load templates".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_list_templates() {
-        // This test requires the templates to be embedded/available
-        // In a real test environment, you might want to mock the templates module
-
-        // For now, just verify the function compiles and runs
-        // You can expand this with more specific assertions
-    }
 
     #[tokio::test]
     async fn test_validate_template_valid() {

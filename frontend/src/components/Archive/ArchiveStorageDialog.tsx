@@ -19,6 +19,22 @@ interface ArchiveStorage {
   partial: boolean;
 }
 
+interface PendingFileCleanup {
+  id: number;
+  title: string;
+  kind: string;
+  location: string | null;
+  reason: string | null;
+}
+
+const cleanupTypes: Record<string, string> = {
+  recording: "Recording folder",
+  reference: "Reference original",
+  outputs: "Generated meeting outputs",
+  codex: "Codex scratch files",
+  exports: "Export history",
+};
+
 const classes = {
   saved_audio_bytes: "Audio in saved meeting folders",
   recovery_bytes: "Recovery files in saved meeting folders",
@@ -32,28 +48,79 @@ export function ArchiveStorageDialog() {
   const [revision, setRevision] = useState(0);
   const [storage, setStorage] = useState<ArchiveStorage | null>(null);
   const [error, setError] = useState(false);
+  const [cleanup, setCleanup] = useState<PendingFileCleanup[] | null>(null);
+  const [cleanupError, setCleanupError] = useState(false);
+  const [review, setReview] = useState<PendingFileCleanup | null>(null);
+  const [working, setWorking] = useState(false);
+  const [status, setStatus] = useState("");
+  const [actionError, setActionError] = useState("");
+  const mutation = useRef(false);
   const returnFocus = useRef<HTMLElement | null>(null);
+  const title = useRef<HTMLHeadingElement | null>(null);
+  const reviewing = review !== null;
 
   useEffect(() => registerStorageDialogOpener(() => {
-    returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focused = document.activeElement;
+    returnFocus.current = focused && focused instanceof HTMLElement ? focused : null;
     setOpen(true);
   }), []);
+
+  useEffect(() => { if (open) title.current?.focus(); }, [open, reviewing]);
 
   useEffect(() => {
     if (!open) return;
     let current = true;
     setStorage(null);
     setError(false);
+    setCleanup(null);
+    setCleanupError(false);
     void invoke<ArchiveStorage>("measure_archive_storage").then(
       result => { if (current) setStorage(result); },
       () => { if (current) setError(true); },
     );
+    void invoke<PendingFileCleanup[]>("list_pending_meeting_file_cleanup").then(
+      result => { if (current) setCleanup(result); },
+      () => { if (current) setCleanupError(true); },
+    );
     return () => { current = false; };
   }, [open, revision]);
 
+  const changeOpen = (next: boolean) => {
+    if (mutation.current) return;
+    setOpen(next);
+    if (!next) { setReview(null); setActionError(""); setStatus(""); }
+  };
+
+  const actOnCleanup = async (keep: boolean) => {
+    if (!review || mutation.current) return;
+    mutation.current = true;
+    setWorking(true);
+    setActionError("");
+    try {
+      const args = { id: review.id };
+      const reason = keep
+        ? await invoke<void>("keep_pending_meeting_files", args)
+        : await invoke<string | null>("retry_meeting_file_cleanup", args);
+      if (reason) {
+        setReview({ ...review, reason });
+        setCleanup(items => items?.map(item => item.id === review.id ? { ...item, reason } : item) ?? null);
+        setActionError("The cleanup could not finish.");
+      } else {
+        setReview(null);
+        setStatus(keep ? "Files kept and removed from the cleanup list." : "File cleanup complete.");
+        setRevision(value => value + 1);
+      }
+    } catch {
+      setActionError("Could not update this cleanup entry. Try again.");
+    } finally {
+      mutation.current = false;
+      setWorking(false);
+    }
+  };
+
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent onCloseAutoFocus={event => {
+    <Dialog open={open} onOpenChange={changeOpen}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto" onCloseAutoFocus={event => {
         if (returnFocus.current?.isConnected) {
           event.preventDefault();
           returnFocus.current.focus();
@@ -61,10 +128,24 @@ export function ArchiveStorageDialog() {
         returnFocus.current = null;
       }}>
         <DialogHeader>
-          <DialogTitle>Library storage</DialogTitle>
-          <DialogDescription>File sizes for this library. Backup ZIPs and model downloads are outside these totals.</DialogDescription>
+          <DialogTitle ref={title} tabIndex={-1}>{review ? "Review pending file cleanup" : "Library storage"}</DialogTitle>
+          <DialogDescription>{review ? "Retrying permanently removes these files if ClawScribe can still verify ownership." : "File sizes for this library. Backup ZIPs and model downloads are outside these totals."}</DialogDescription>
         </DialogHeader>
-        {error ? <p role="alert">Could not measure library storage.</p> : storage ? <>
+        {review ? <>
+          <div className="space-y-2 text-sm">
+            <p className="break-words font-medium">{review.title || "Untitled meeting"} · {cleanupTypes[review.kind] ?? "Meeting files"}</p>
+            {review.location && <p className="break-all text-muted-foreground">{review.location}</p>}
+            <p>{review.reason ?? "The previous cleanup did not finish."}</p>
+            {working && <p role="status">Updating file cleanup…</p>}
+            {actionError && <p role="alert" className="text-destructive">{actionError}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" disabled={working} onClick={() => { setReview(null); setActionError(""); }}>Back to storage</Button>
+            <Button variant="outline" disabled={working} onClick={() => void actOnCleanup(true)}>Keep files</Button>
+            <Button disabled={working} onClick={() => void actOnCleanup(false)}>Retry cleanup</Button>
+          </DialogFooter>
+        </> : <>
+          {error ? <p role="alert">Could not measure library storage.</p> : storage ? <>
           <dl className="divide-y divide-border text-sm">
             {(Object.keys(classes) as (keyof typeof classes)[]).map(key => (
               <div key={key} className="flex items-baseline justify-between gap-4 py-2">
@@ -77,11 +158,25 @@ export function ArchiveStorageDialog() {
               Some files or recording locations could not be measured. The totals cover available files.
             </p>
           )}
-        </> : <p role="status">Measuring library storage…</p>}
-        <DialogFooter>
-          <Button variant="outline" disabled={!error && !storage} onClick={() => setRevision(current => current + 1)}>{error ? "Retry" : "Measure again"}</Button>
-          <Button onClick={() => setOpen(false)}>Done</Button>
-        </DialogFooter>
+          </> : <p role="status">Measuring library storage…</p>}
+          {status && <p role="status" className="text-sm">{status}</p>}
+          {cleanupError ? <p role="alert">Could not load pending file cleanup.</p> : cleanup === null ? <p role="status">Checking for pending file cleanup…</p> : cleanup.length > 0 && (
+            <section aria-label="Pending file cleanup" className="space-y-2">
+              <h3 className="font-medium">Pending file cleanup</h3>
+              <ul className="divide-y divide-border text-sm">
+                {cleanup.slice(0, 50).map(item => <li key={item.id} className="flex items-center justify-between gap-4 py-2">
+                  <p className="min-w-0 break-words">{item.title || "Untitled meeting"}<span className="block text-muted-foreground">{cleanupTypes[item.kind] ?? "Meeting files"}</span></p>
+                  <Button variant="outline" size="sm" aria-label={`Review ${cleanupTypes[item.kind] ?? "meeting files"} for ${item.title || "untitled meeting"}`} onClick={() => { setReview(item); setStatus(""); }}>Review</Button>
+                </li>)}
+              </ul>
+              {cleanup.length > 50 && <p className="text-sm text-muted-foreground">Showing the 50 most recent entries. Remaining entries appear as you resolve these.</p>}
+            </section>
+          )}
+          <DialogFooter>
+            <Button variant="outline" disabled={!error && !storage && !cleanupError} onClick={() => setRevision(current => current + 1)}>{error || cleanupError ? "Retry" : "Measure again"}</Button>
+            <Button onClick={() => changeOpen(false)}>Done</Button>
+          </DialogFooter>
+        </>}
       </DialogContent>
     </Dialog>
   );

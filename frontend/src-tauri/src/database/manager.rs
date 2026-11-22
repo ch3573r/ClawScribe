@@ -1,9 +1,36 @@
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
-use sqlx::{migrate::MigrateDatabase, Result, Sqlite, SqlitePool, Transaction};
+use sqlx::{ConnectOptions, Connection, Result, Sqlite, SqlitePool, Transaction};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 use tauri::Manager;
+
+pub(super) const DATABASE_FILENAME: &str = "meeting_minutes.sqlite";
+
+pub(super) fn database_exists(root: &Path) -> Result<bool> {
+    let inspect = |name: &str| -> std::io::Result<bool> {
+        match fs::symlink_metadata(root.join(name)) {
+            Ok(metadata) if metadata.is_file() && !crate::local_path::is_link(&metadata) => {
+                Ok(true)
+            }
+            Ok(_) => Err(std::io::Error::other(
+                "The database path is not a regular file",
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    };
+    let database = inspect(DATABASE_FILENAME)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        if inspect(&format!("{DATABASE_FILENAME}{suffix}"))? && !database {
+            return Err(std::io::Error::other(
+                "Database recovery files exist without the database",
+            )
+            .into());
+        }
+    }
+    Ok(database)
+}
 
 #[derive(Clone)]
 pub struct DatabaseManager {
@@ -40,7 +67,14 @@ impl DatabaseManager {
                 snapshot_database(Path::new(backend_db_path), Path::new(tauri_db_path)).await?;
             } else {
                 log::info!("Creating the local database");
-                Sqlite::create_database(tauri_db_path).await?;
+                // SQLx's URL parser treats the `?` in Windows verbatim paths
+                // as a query delimiter and decodes percent escapes in filenames.
+                connection_options(Path::new(tauri_db_path))
+                    .create_if_missing(true)
+                    .connect()
+                    .await?
+                    .close()
+                    .await?;
             }
         }
 
@@ -145,14 +179,15 @@ impl DatabaseManager {
         let app_data_dir = app_handle
             .path()
             .app_data_dir()
-            .expect("failed to get app data dir");
+            .map_err(std::io::Error::other)?;
+        database_exists(&app_data_dir)?;
         if !app_data_dir.exists() {
             fs::create_dir_all(&app_data_dir).map_err(|e| sqlx::Error::Io(e))?;
         }
 
         // Define database paths
         let tauri_db_path = app_data_dir
-            .join("meeting_minutes.sqlite")
+            .join(DATABASE_FILENAME)
             .to_string_lossy()
             .to_string();
         // Legacy backend DB path (for auto-migration if exists)
@@ -183,11 +218,8 @@ impl DatabaseManager {
         let app_data_dir = app_handle
             .path()
             .app_data_dir()
-            .expect("failed to get app data dir");
-
-        let tauri_db_path = app_data_dir.join("meeting_minutes.sqlite");
-
-        Ok(!tauri_db_path.exists())
+            .map_err(std::io::Error::other)?;
+        Ok(!database_exists(&app_data_dir)?)
     }
 
     /// Import a legacy database from the specified path and initialize
@@ -417,6 +449,21 @@ fn line_ending_variant_checksums(sql: &str) -> [Vec<u8>; 2] {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha384};
+
+    #[tokio::test]
+    async fn fresh_database_uses_the_literal_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("meeting%20minutes.sqlite");
+        let legacy = dir.path().join("missing.db");
+        let manager =
+            DatabaseManager::new_isolated(database.to_str().unwrap(), legacy.to_str().unwrap())
+                .await
+                .unwrap();
+
+        manager.cleanup().await.unwrap();
+        assert!(database.is_file());
+        assert!(!dir.path().join("meeting minutes.sqlite").exists());
+    }
 
     #[tokio::test]
     async fn startup_prunes_expired_snapshots_and_preserves_recent_and_unowned_files() {

@@ -11,14 +11,15 @@ import { ReplaceOptions, ReplacePreview, TextReplaceDialog } from './TextReplace
 import { TranscriptSegmentData } from '@/types';
 import { readLearnVocabulary, replacementSuggestion, vocabularySuggestions } from '@/lib/vocabulary-learning';
 import { offerVocabularyWords } from '@/lib/vocabulary-offer';
+import type { TranscriptTextPatch } from '@/lib/meetingTranscripts';
 
-interface EditResult { changed: number; file_warning: boolean }
-interface EditState { can_undo: boolean; pending_file_sync: boolean; has_edits: boolean; can_restore_previous: boolean }
+interface EditResult { changed: number; file_warning: boolean; patches: TranscriptTextPatch[] | null }
+interface EditState { can_undo: boolean; pending_file_sync: boolean; import_file_stage?: 'metadata' | 'transcript' | null; has_edits: boolean; can_restore_previous: boolean }
 
-export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, replaceOpen, onReplaceOpenChange, renderActions }: {
-  meetingId: string; editing: TranscriptSegmentData | null; onClose: () => void; onChanged?: () => Promise<void>;
+export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, replaceOpen, replaceQuery, onReplaceOpenChange, renderActions }: {
+  meetingId: string; editing: TranscriptSegmentData | null; onClose: () => void; onChanged?: (patches: TranscriptTextPatch[] | null) => void | Promise<void>;
   renderActions?: (actions: { busy: boolean; canUndo: boolean; canRestore: boolean; undo: () => void; restore: () => void }) => ReactNode;
-  replaceOpen: boolean; onReplaceOpenChange: (open: boolean) => void;
+  replaceOpen: boolean; replaceQuery?: string; onReplaceOpenChange: (open: boolean) => void;
 }) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -46,7 +47,7 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
     if (currentMeeting.current !== meetingId) return;
     setState(previous => ({ ...previous, pending_file_sync: result.file_warning }));
     toast.success(`${result.changed} transcript ${result.changed === 1 ? 'passage' : 'passages'} updated`, { description: 'Regenerate meeting notes to use the corrected text.' });
-    try { await refresh(); await onChanged?.(); }
+    try { await onChanged?.(result.patches); await refresh(); }
     catch { setError('The correction is saved. Reopen the meeting to refresh its transcript.'); }
   };
   const change = async (command: string, args: Record<string, unknown>, afterSaved?: () => void) => {
@@ -67,12 +68,12 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
     {renderActions?.({ busy, canUndo: state.can_undo, canRestore: state.can_restore_previous,
       undo: () => void change('api_undo_transcript_edit', {}), restore: () => void change('api_restore_previous_transcript', {}) })}
     {(state.pending_file_sync || (!editing && error)) && <div className="space-y-2 border-b border-border px-3 py-2 text-xs">
-      {state.pending_file_sync && <p role="alert">The transcript is saved in ClawScribe. The recording-folder copy needs updating. <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-xs font-normal underline hover:bg-transparent hover:text-current" disabled={busy} onClick={async () => {
+      {state.pending_file_sync && <p role="alert">{state.import_file_stage === 'metadata' ? 'The meeting is saved. Its recording-folder metadata needs updating.' : 'The transcript is saved in ClawScribe. The recording-folder copy needs updating.'} <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-xs font-normal underline hover:bg-transparent hover:text-current" disabled={busy} onClick={async () => {
         if (operation.current) return;
         operation.current = true;
         setBusy(true); setError('');
         try { await invoke('api_sync_transcript_file', { meetingId }); await refresh(); }
-        catch { if (currentMeeting.current === meetingId) setError('Could not update the recording-folder copy. Check that the folder is available, then retry.'); }
+        catch { if (currentMeeting.current === meetingId) { setError('Could not update the recording-folder copy. Check that the folder is available, then retry.'); await refresh().catch(() => {}); } }
         finally { operation.current = false; setBusy(false); }
       }}>Retry file update</Button></p>}
       {!editing && error && <p role="alert" className="text-destructive">{error}</p>}
@@ -85,6 +86,6 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
         <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={busy || !text.trim() || text === editing?.text} onClick={() => editing && void change('api_update_transcript_text', { transcriptId: editing.id, expectedText: editing.text, text }, () => { if (readLearnVocabulary()) void offerVocabularyWords(vocabularySuggestions(editing.text, text)); })}>{busy ? 'Saving…' : 'Save correction'}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
-    <TextReplaceDialog key={meetingId} open={replaceOpen} onOpenChange={onReplaceOpenChange} title="transcript" preview={preview} apply={replace} />
+    <TextReplaceDialog key={meetingId} open={replaceOpen} initialQuery={replaceQuery} offerWholeWords onOpenChange={onReplaceOpenChange} title="transcript" preview={preview} apply={replace} />
   </>;
 }

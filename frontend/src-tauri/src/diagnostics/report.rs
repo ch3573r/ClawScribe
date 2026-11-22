@@ -11,7 +11,6 @@ const COLLECTION_CHECKS: &[&str] = &[
     "transcription_config",
     "parakeet_directml",
     "audio_devices",
-    "openclaw",
     "codex",
     "recording_folder",
 ];
@@ -105,25 +104,6 @@ fn build_report(snapshot: &DiagnosticSnapshot) -> Value {
             "runtimeFilesExpected": diarization.runtime_dlls.len(),
         },
         "collectionFailures": collection_failures,
-        "recentFailures": last_openclaw_failure(snapshot).into_iter().collect::<Vec<_>>(),
-    })
-}
-
-fn last_openclaw_failure(snapshot: &DiagnosticSnapshot) -> Option<&'static str> {
-    let last_submission = snapshot
-        .integrations
-        .openclaw
-        .as_ref()?
-        .last_submission
-        .as_ref()?;
-    if last_submission.state != "failed" {
-        return None;
-    }
-    Some(match last_submission.status_code {
-        Some(401 | 403) => "openclaw_handoff_access_denied",
-        Some(429) => "openclaw_handoff_rate_limited",
-        Some(500..=599) => "openclaw_handoff_server_error",
-        _ => "openclaw_handoff_failed",
     })
 }
 

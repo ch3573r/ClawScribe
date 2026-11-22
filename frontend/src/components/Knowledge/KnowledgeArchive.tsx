@@ -19,8 +19,9 @@ import { EvidencePreview } from "./EvidencePreview";
 import { ReferenceDocuments } from "@/components/MeetingDetails/ReferenceDocuments";
 import { AttachReferenceButton } from "@/components/MeetingDetails/AttachReferenceButton";
 import type { ProjectFilter } from "@/lib/library";
-import type { MatchScope, SavedReference } from "@/lib/archive-search";
+import { supportsPersonalExcerpts, type MatchScope, type SavedReference } from "@/lib/archive-search";
 import { classifySummaryProvider } from "@/lib/privacy";
+import { archiveDateKey } from "@/lib/archive-review";
 import type { IndexStatus, MeetingFilter, SearchMode } from "@/types/knowledge";
 
 // Route navigation unmounts the archive; keep only the user's explicit source
@@ -42,6 +43,8 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
   const [all, setAll] = useState(initialMatches ? false : memorySources.all);
   const [selected, setSelected] = useState(initialMatches?.ids ?? memorySources.selected);
   const [notes, setNotes] = useState<SavedReference[]>(initialMatches?.notes ?? []);
+  const excerptsSupported = supportsPersonalExcerpts(modelConfig?.provider);
+  useEffect(() => { if (!excerptsSupported) setNotes([]); }, [excerptsSupported]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [meetingQuery, setMeetingQuery] = useState("");
   const [from, setFrom] = useState(initialMatches?.from ?? memorySources.from);
@@ -90,7 +93,7 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
   const invalidDates = !!from && !!to && from > to;
   const sourcesReady = (all || selected.length > 0) && !invalidDates;
   const attachmentMeetings = meetings.filter(meeting => {
-    const date = meeting.created_at?.slice(0, 10);
+    const date = archiveDateKey(meeting.created_at);
     return !invalidDates && (!from || (!!date && date >= from)) && (!to || (!!date && date <= to));
   });
   const attachmentMeetingId = !all && selected.length === 1 && attachmentMeetings.some(meeting => meeting.id === selected[0]) ? selected[0] : undefined;
@@ -127,8 +130,7 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
     </div>}
     </div>
   </div>;
-  return <section className="flex h-full min-h-0 flex-col gap-4 overflow-hidden" aria-label="Meeting memory">
-    <fieldset className="shrink-0 space-y-3">
+  const sources = <fieldset className="min-w-0 space-y-3">
       <legend className="mb-2 text-sm font-medium">Sources</legend>
       {(all || selected.length > 0) && <p className="text-sm text-muted-foreground">
         Asking uses {all ? "all meetings in this filter" : `${selected.length} selected meeting${selected.length === 1 ? "" : "s"}`}.
@@ -171,9 +173,11 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
         {selected.length > 3 && <Button variant="ghost" size="sm" onClick={() => setPickerOpen(true)}>+{selected.length - 3} meetings</Button>}
       </div></TooltipProvider>}
       {invalidDates && <p role="alert" className="text-sm text-destructive">The start date must be on or before the end date.</p>}
-    </fieldset>
-    <div className="min-h-0 flex-1"><KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model} secondary={secondary}
-      selectedNotes={notes} reviewActive={active} destinationRevision={JSON.stringify([modelConfig?.ollamaEndpoint, modelConfig?.customOpenAIEndpoint, modelConfig?.organization, modelConfig?.project])}
+    </fieldset>;
+  return <section className="h-full min-h-0 [container-name:meeting-memory] [container-type:size]" aria-label="Meeting memory">
+    <KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model}
+      secondary={<div className="space-y-4">{sources}{secondary}</div>}
+      initialQuestion={initialMatches?.question} selectedNotes={excerptsSupported ? notes : undefined} reviewActive={active} destinationRevision={JSON.stringify([modelConfig?.ollamaEndpoint, modelConfig?.customOpenAIEndpoint, modelConfig?.organization, modelConfig?.project])}
       removeNote={ref => setNotes(current => current.filter(value => value.fingerprint !== ref.fingerprint))}
       clearNotes={() => setNotes([])}
       emptyState={!state.owner && !all && !selected.length ? <div className="flex flex-col items-center gap-2 text-center">
@@ -181,7 +185,7 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
         <p className="text-sm text-muted-foreground">Pick one or more meetings, or search all saved meetings</p>
         <Button className="mt-4" onClick={() => setPickerOpen(true)}>Choose meetings</Button>
       </div> : undefined}
-    /></div>
+    />
     {active && <EvidencePreview state={state} />}
   </section>;
 }

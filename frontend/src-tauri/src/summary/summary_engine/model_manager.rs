@@ -340,6 +340,9 @@ impl ModelManager {
         let model_def =
             get_model_by_name(model_name).ok_or_else(|| anyhow!("Unknown summary model"))?;
         let reservation = self.active_downloads.start(model_name)?;
+        if let Some(callback) = &progress_callback {
+            callback(DownloadProgress::new(0, 0, 0.0));
+        }
         let path = self.models_dir.join(&model_def.gguf_file);
         if self.verified_model(&path, &model_def).await {
             if let Some(callback) = progress_callback {

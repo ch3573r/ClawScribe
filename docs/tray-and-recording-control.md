@@ -10,8 +10,10 @@ doing in ClawScribe.
   reloaded and is not brought to the front. If it is hidden in the tray, it
   stays hidden.
 - ClawScribe starts with the same saved device preferences and recording mode
-  as the Start button. The selected calendar event is saved with the recording.
-  Automatic calendar matching runs after capture starts.
+  as the Start button. Choose the microphone and system output in Home's
+  **Signal path** or **Settings → Recording**. Both use the same preferences
+  and apply changes to the next recording. The selected calendar event is saved
+  with the recording. Automatic calendar matching runs after capture starts.
 - Only one start can be under way. A repeated shortcut, a second command-line
   start or a detected call that arrives at the same moment does not start a
   second recording. During a save, **Start after saving** in the window or tray
@@ -39,11 +41,20 @@ the recording bar or tray.
 
 - The clock shows captured time and freezes during pauses. **Microphone** and
   **System audio** show levels from the running capture.
-- Choose **Bookmark** to mark the current time, or type a note and press Enter.
-  Find both in the saved meeting. Tab moves between the controls.
+- **Pause** and **Resume** control the current session. Capture warnings stay
+  visible in the panel. Retry a disconnected audio source from its warning.
+- Drag the bar from an area without a button. The panel remembers where you
+  moved it. If that display is disconnected,
+  the next panel opens on a connected display. Turn off **Remember floating
+  controls position** in **Settings → Recording** to use the default placement.
+- Choose **Add note** or press N while the panel has focus. Type a note or leave
+  the field empty to bookmark the current time, then press Enter. Escape closes
+  the field. Find both in the saved meeting. Tab moves between the controls.
 - **Stop** shows the current save stage. The window closes when saving finishes,
-  or directs you to the main app if the recording needs review.
-- Close the window with its title-bar button or Alt+F4 to continue recording.
+  including when no speech was transcribed. If the recording needs recovery,
+  choose **Open ClawScribe** to review it in the main app or **Dismiss** to close
+  the panel.
+- Use **Close controls** or Alt+F4 to close the window while recording continues.
   It stays closed for that recording until you reopen it. You can also reopen
   it from the tray during a save.
 
@@ -56,7 +67,9 @@ The controls use a separate bundled page and a private WebView2 profile on
 Windows. The core supplies the selected theme and accent. The main window continues to own
 call prompts, recording starts and post-processing. The controls webview has
 no Tauri plugin permissions. Its app commands can read a small status snapshot,
-add a note, stop its own recording or close the controls. The native webview
+add a note, pause, resume, retry a source, stop its own recording, move, resize
+or close the controls, and bring the main window forward for recovery review.
+The native webview
 label binds those commands to the original session, including after a reload.
 
 ## What the tray shows
@@ -68,9 +81,9 @@ for 15 seconds after previously arriving, check the microphone connection.
 Quiet samples still count as a working stream. A newly started or resumed
 meter continues to flag a microphone with no audible signal after 10 seconds.
 
-While the window is hidden or minimized, call prompts and recording problems
-can also show a Windows notification. These alerts contain generic text and
-use the existing meeting reminder and system error notification preferences.
+Call detection shows an actionable panel above other windows. You can also
+answer it from the tray. Recording problems can show a Windows notification
+while the main window is hidden or minimized.
 
 | State | Icon | Tooltip |
 | --- | --- | --- |

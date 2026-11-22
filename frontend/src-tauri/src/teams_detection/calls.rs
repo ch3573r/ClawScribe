@@ -39,6 +39,8 @@ pub struct CallWindow {
     // Only the core compares room identity. Never expose the address or its digest.
     #[serde(skip)]
     pub(crate) teams_room: Option<[u8; 32]>,
+    #[serde(skip)]
+    pub(crate) desktop_teams: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -87,7 +89,7 @@ fn desktop_provider(exe: &str) -> Option<Provider> {
     }
 }
 
-pub(super) fn teams_room(url: &url::Url) -> Option<[u8; 32]> {
+pub(crate) fn teams_room(url: &url::Url) -> Option<[u8; 32]> {
     use sha2::{Digest, Sha256};
     if url.scheme() != "https"
         || !url.username().is_empty()
@@ -102,17 +104,31 @@ pub(super) fn teams_room(url: &url::Url) -> Option<[u8; 32]> {
     }
     let path = url.path().trim_end_matches('/');
     let segments: Vec<_> = path.split('/').collect();
-    let valid = match segments.as_slice() {
-        ["", "meet", id] => !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
-        ["", "l", "meetup-join", thread, "0"] => {
-            !thread.is_empty()
-                && thread
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_%.:@".contains(&b))
+    let canonical = match segments.as_slice() {
+        ["", "meet", id] if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) => {
+            path.to_owned()
         }
-        _ => false,
+        ["", "l", "meetup-join", thread, "0"] if !thread.is_empty() => {
+            let mut bytes = thread.bytes();
+            let mut decoded = String::with_capacity(thread.len());
+            while let Some(byte) = bytes.next() {
+                let value = if byte == b'%' {
+                    let high = char::from(bytes.next()?).to_digit(16)?;
+                    let low = char::from(bytes.next()?).to_digit(16)?;
+                    (high * 16 + low) as u8
+                } else {
+                    byte
+                };
+                if !value.is_ascii_alphanumeric() && !b"-_.:@".contains(&value) {
+                    return None;
+                }
+                decoded.push(char::from(value));
+            }
+            format!("/l/meetup-join/{decoded}/0")
+        }
+        _ => return None,
     };
-    valid.then(|| Sha256::digest(format!("{}{path}", url.host_str().unwrap())).into())
+    Some(Sha256::digest(format!("{}{canonical}", url.host_str()?)).into())
 }
 
 fn browser_surface(address: &str) -> Option<(Provider, String, Option<[u8; 32]>)> {
@@ -438,6 +454,7 @@ mod native {
                 window,
                 key,
                 teams_room,
+                desktop_teams: desktop == Some(Provider::Teams),
             };
             let names: &[&str] = match provider {
                 Provider::Zoom
@@ -531,6 +548,10 @@ mod tests {
             "https://teams.cloud.microsoft/l/meetup-join/19%3ameeting_example%40thread.v2/0"
         )
         .is_some());
+        assert_eq!(
+            room("https://teams.cloud.microsoft/l/meetup-join/19%3Ameeting_example%40thread.v2/0"),
+            room("https://teams.cloud.microsoft/l/meetup-join/19:meeting_example@thread.v2/0?context=example")
+        );
         for address in [
             "http://teams.microsoft.com/meet/123",
             "https://teams.microsoft.com.example.org/meet/123",
@@ -538,6 +559,8 @@ mod tests {
             "https://teams.microsoft.com:444/meet/123",
             "https://teams.microsoft.com/v2/",
             "https://teams.microsoft.com/meet/123/extra",
+            "https://teams.microsoft.com/l/meetup-join/room%2Felsewhere/0",
+            "https://teams.microsoft.com/l/meetup-join/room%zz/0",
         ] {
             assert!(room(address).is_none());
         }

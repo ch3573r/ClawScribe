@@ -108,7 +108,6 @@ pub enum LLMProvider {
     BuiltInAI,
     OpenAICompatible,
     CustomOpenAI,
-    OpenClaw,
     Codex,
 }
 
@@ -125,7 +124,6 @@ impl LLMProvider {
             "builtin-ai" | "local-llama" | "localllama" => Ok(Self::BuiltInAI),
             "openai-compatible" | "api-key" => Ok(Self::OpenAICompatible),
             "custom-openai" => Ok(Self::CustomOpenAI),
-            "openclaw" | "openclaw-managed" => Ok(Self::OpenClaw),
             "codex" | "codex-login" | "codex-chatgpt" => Ok(Self::Codex),
             _ => Err(format!("Unsupported LLM provider: {}", s)),
         }
@@ -198,9 +196,7 @@ pub(crate) async fn generate_summary(
         let app_data_dir = app_data_dir
             .ok_or_else(|| "app_data_dir is required for BuiltInAI provider".to_string())?;
 
-        if let Some(check) = dispatch.and_then(|route| route.check) {
-            check()?;
-        }
+        let check = dispatch.and_then(|route| route.check);
         return crate::summary::summary_engine::generate_with_builtin(
             app_data_dir,
             model_name,
@@ -208,6 +204,7 @@ pub(crate) async fn generate_summary(
             user_prompt,
             max_tokens,
             cancellation_token,
+            check,
         )
         .await
         .map_err(|e| e.to_string());
@@ -251,14 +248,6 @@ pub(crate) async fn generate_summary(
                 .ok_or_else(|| "OpenAI-compatible endpoint not configured".to_string())?;
             (
                 format!("{}/chat/completions", endpoint.trim_end_matches('/')),
-                header::HeaderMap::new(),
-            )
-        }
-        LLMProvider::OpenClaw => {
-            let endpoint = custom_openai_endpoint
-                .ok_or_else(|| "OpenClaw model endpoint not configured".to_string())?;
-            (
-                endpoint.trim_end_matches('/').to_string(),
                 header::HeaderMap::new(),
             )
         }
@@ -350,7 +339,7 @@ pub(crate) async fn generate_summary(
         // For operator-managed OpenAI-compatible endpoints, apply optional parameters if provided.
         let (max_tokens_val, temperature_val, top_p_val) = if matches!(
             provider,
-            LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible | LLMProvider::OpenClaw
+            LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible
         ) {
             (max_tokens, temperature, top_p)
         } else {
@@ -400,7 +389,7 @@ pub(crate) async fn generate_summary(
             let checked_client;
             let client = if matches!(
                 provider,
-                LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible | LLMProvider::OpenClaw
+                LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible
             ) {
                 checked_client = crate::openai::secret_destination::secret_client(
                     if dispatch.is_some_and(|route| route.single_attempt) {
@@ -488,7 +477,7 @@ pub(crate) fn parse_response(
         reason,
         Some("length" | "max_tokens" | "model_context_window_exceeded")
     ) {
-        return Err("The model reached its output or context limit before finishing. No complete response was produced. Increase the output/context limit or choose a more concise template and retry.".into());
+        return Err(super::context_budget::MODEL_LIMIT.into());
     }
     if matches!(
         reason,
@@ -526,7 +515,7 @@ pub(crate) fn parse_response(
 }
 
 /// Helper function to get provider name for logging
-fn provider_name(provider: &LLMProvider) -> &str {
+pub(super) fn provider_name(provider: &LLMProvider) -> &str {
     match provider {
         LLMProvider::OpenAI => "OpenAI",
         LLMProvider::Claude => "Claude",
@@ -537,7 +526,6 @@ fn provider_name(provider: &LLMProvider) -> &str {
         LLMProvider::OpenRouter => "OpenRouter",
         LLMProvider::OpenAICompatible => "OpenAI-compatible",
         LLMProvider::CustomOpenAI => "Custom OpenAI",
-        LLMProvider::OpenClaw => "OpenClaw managed auth",
         LLMProvider::Codex => "Codex",
     }
 }
@@ -553,14 +541,12 @@ pub struct ConfiguredTextReply {
 pub(crate) struct TextEnvironment {
     pub app_data_dir: PathBuf,
     pub codex: Option<super::codex_provider::CodexAppServerProvider>,
-    pub openclaw: Option<crate::openclaw::OpenClawConfig>,
 }
 impl TextEnvironment {
     pub fn local(app_data_dir: PathBuf) -> Self {
         Self {
             app_data_dir,
             codex: None,
-            openclaw: None,
         }
     }
     pub fn from_app<R: tauri::Runtime>(
@@ -575,9 +561,6 @@ impl TextEnvironment {
         );
         if *provider == LLMProvider::Codex {
             environment.codex = Some(super::codex_provider::provider_from_app(app)?);
-        }
-        if *provider == LLMProvider::OpenClaw {
-            environment.openclaw = Some(crate::openclaw::load_config(app)?);
         }
         Ok(environment)
     }
@@ -597,8 +580,6 @@ enum TextExecution {
     Generic {
         api_key: String,
         ollama_endpoint: Option<String>,
-        endpoint: Option<String>,
-        allow_unencrypted: bool,
         app_data_dir: PathBuf,
     },
 }
@@ -613,7 +594,6 @@ pub(crate) fn canonical_provider(provider: &LLMProvider) -> &'static str {
         LLMProvider::BuiltInAI => "builtin-ai",
         LLMProvider::OpenAICompatible => "openai-compatible",
         LLMProvider::CustomOpenAI => "custom-openai",
-        LLMProvider::OpenClaw => "openclaw",
         LLMProvider::Codex => "codex",
     }
 }
@@ -683,8 +663,6 @@ pub(crate) async fn resolve_configured_text(
             TextExecution::Compatible(compatible)
         } else {
             let mut api_key = String::new();
-            let mut endpoint = None;
-            let mut allow_unencrypted = false;
             let mut ollama_endpoint = None;
             match provider {
                 LLMProvider::BuiltInAI => {
@@ -699,17 +677,6 @@ pub(crate) async fn resolve_configured_text(
                         .map_err(|_| "Failed to read local provider settings")?
                         .and_then(|setting| setting.ollama_endpoint);
                 }
-                LLMProvider::OpenClaw => {
-                    let config = environment
-                        .openclaw
-                        .ok_or("OpenClaw configuration unavailable")?;
-                    if !config.enabled || config.bearer_token.trim().is_empty() {
-                        return Err("OpenClaw is disabled or missing its credential".into());
-                    }
-                    endpoint = Some(config.model_endpoint);
-                    api_key = config.bearer_token;
-                    allow_unencrypted = config.allow_unencrypted;
-                }
                 _ => {
                     api_key = SettingsRepository::get_api_key(pool, canonical_provider(&provider))
                         .await
@@ -721,8 +688,6 @@ pub(crate) async fn resolve_configured_text(
             TextExecution::Generic {
                 api_key,
                 ollama_endpoint,
-                endpoint,
-                allow_unencrypted,
                 app_data_dir: environment.app_data_dir,
             }
         };
@@ -762,14 +727,13 @@ impl ResolvedText {
     pub(crate) fn note_destination(&self) -> Result<NoteDestination, String> {
         let (raw, allow_unencrypted, org, project) = match &self.execution {
             TextExecution::Compatible(compatible) => compatible.destination(),
-            TextExecution::Generic { endpoint, ollama_endpoint, allow_unencrypted, .. } => {
+            TextExecution::Generic { ollama_endpoint, .. } => {
                 let url = match self.provider {
                     LLMProvider::BuiltInAI => String::new(),
                     LLMProvider::Ollama => format!("{}/api/chat", ollama_endpoint.as_deref().unwrap_or("http://localhost:11434").trim_end_matches('/')),
-                    LLMProvider::OpenClaw => endpoint.clone().ok_or("Configure the OpenClaw endpoint")?,
                     _ => fixed_summary_endpoint(&self.provider).ok_or("Cannot verify this provider endpoint")?.into(),
                 };
-                (url, *allow_unencrypted, None, None)
+                (url, false, None, None)
             }
             _ => return Err("This provider manages its own connection. Deselect personal excerpts or choose a provider with a verifiable endpoint.".into()),
         };
@@ -853,7 +817,7 @@ async fn dispatch_text(
                 }
             }
             TextExecution::Codex(provider) => provider.run_text_prompt_cancellable(&format!("{system}\n\n{user}"), &token).await?,
-            TextExecution::Generic { api_key, ollama_endpoint, endpoint, allow_unencrypted, app_data_dir } => {
+            TextExecution::Generic { api_key, ollama_endpoint, app_data_dir } => {
                 let client = if reviewed.is_some() {
                     super::request_config::direct_client().http1_only().build()
                         .map_err(|_| "Cannot initialize reviewed connection")?
@@ -870,7 +834,7 @@ async fn dispatch_text(
                 });
                 let operation = generate_summary(
                     &client, &resolved.provider, &resolved.model, &api_key, &system, &user,
-                    ollama_endpoint.as_deref(), endpoint.as_deref(), allow_unencrypted,
+                    ollama_endpoint.as_deref(), None, false,
                     None, None, None, Some(&app_data_dir), Some(&token), route,
                 );
                 if resolved.provider == LLMProvider::BuiltInAI {
@@ -1394,30 +1358,6 @@ mod response_tests {
                 matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
             );
         }
-    }
-
-    #[tokio::test]
-    async fn openclaw_summary_refuses_unapproved_http_before_sending() {
-        let error = generate_summary(
-            &Client::new(),
-            &LLMProvider::OpenClaw,
-            "test",
-            "synthetic-token",
-            "system",
-            "question",
-            None,
-            Some("http://openclaw.local/v1/chat/completions"),
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("Allow unencrypted HTTP"));
     }
 
     #[tokio::test]

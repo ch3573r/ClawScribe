@@ -16,9 +16,14 @@ use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState}
 use super::transcription::queue::{BufferedSpool, TranscriptionQueueSender};
 use super::vad::ContinuousVadProcessor;
 
+#[cfg(test)]
+#[path = "capture_bench.rs"]
+mod capture_bench;
+
 /// Live VAD max-segment cap (ms). Set per active transcription provider at
 /// recording start; the pipeline reads it when creating the VAD. Default 6s.
 static LIVE_MAX_SEGMENT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(6_000);
+const LIVE_VAD_REDEMPTION_MS: u32 = 400;
 const TRANSCRIPTION_QUEUE_WARNING_THRESHOLD: u32 = 3;
 const MICROPHONE_STREAM_WARNING: &str =
     "Microphone samples stopped arriving. Check the microphone connection and recording devices.";
@@ -47,7 +52,6 @@ impl MicrophoneStreamWatch {
         Some(stalled)
     }
 }
-const SYSTEM_AUDIO_SILENCE_WARNING: &str = "No system audio detected. The selected system-audio device may not be the one your sound plays through — some outputs (e.g. a digital/S-PDIF output) can't be captured. Pick the output device your meeting audio actually uses (Settings → audio device).";
 
 #[derive(Default)]
 struct QueueWriteFailureTracker {
@@ -66,40 +70,31 @@ impl QueueWriteFailureTracker {
 }
 
 #[derive(Default)]
-struct SystemAudioWarningTracker {
-    audio_seen: bool,
-    warned: bool,
+struct SystemAudioSilenceTracker {
+    last_signal: Option<std::time::Instant>,
+    quiet: bool,
 }
 
-impl SystemAudioWarningTracker {
-    fn observe_samples(&mut self, device_type: &DeviceType, samples: &[f32]) -> bool {
-        if !self.audio_seen && *device_type == DeviceType::System {
-            let peak = samples.iter().fold(0.0f32, |peak, &x| peak.max(x.abs()));
-            if peak > 0.001 {
-                self.audio_seen = true;
-                return self.warned;
-            }
+impl SystemAudioSilenceTracker {
+    /// Returns true once per quiet period. WASAPI loopback can stop delivering
+    /// packets during normal silence, so this observation is diagnostic only.
+    fn update(&mut self, now: std::time::Instant, active: bool, audible: bool) -> bool {
+        if !active {
+            self.last_signal = None;
+        } else if audible || self.last_signal.is_none() {
+            self.last_signal = Some(now);
         }
-        false
+        let silent = self.last_signal.is_some_and(|last| {
+            now.saturating_duration_since(last) >= std::time::Duration::from_secs(15)
+        });
+        let began = silent && !self.quiet;
+        self.quiet = silent;
+        began
     }
+}
 
-    fn should_warn(
-        &mut self,
-        elapsed: std::time::Duration,
-        is_recording: bool,
-        has_system_device: bool,
-    ) -> bool {
-        if !self.warned
-            && !self.audio_seen
-            && elapsed.as_secs() >= 15
-            && is_recording
-            && has_system_device
-        {
-            self.warned = true;
-            return true;
-        }
-        false
-    }
+fn audible_system_audio(device_type: &DeviceType, samples: &[f32]) -> bool {
+    *device_type == DeviceType::System && samples.iter().any(|sample| sample.abs() > 0.001)
 }
 
 /// Choose the live VAD segment cap for the active transcription provider.
@@ -237,86 +232,45 @@ impl SourceAttributionHistory {
 struct AudioMixerRingBuffer {
     mic_buffer: VecDeque<f32>,
     system_buffer: VecDeque<f32>,
-    window_size_samples: usize, // Fixed mixing window (e.g., 50ms)
-    max_buffer_size: usize,     // Safety limit (e.g., 100ms)
+    window_size_samples: usize,
+    source_grace_samples: usize,
+    max_buffer_size: usize,
 }
 
 impl AudioMixerRingBuffer {
     fn new(sample_rate: u32) -> Self {
-        // Use 50ms windows for mixing
-        let window_ms = 600.0;
-        let window_size_samples = (sample_rate as f32 * window_ms / 1000.0) as usize;
-
-        // CRITICAL FIX: Increase max buffer to 400ms for system audio stability
-        // System audio (especially Core Audio on macOS) can have significant jitter
-        // due to sample-by-sample streaming → batching → channel transmission
-        // Accounts for: RNNoise buffering + Core Audio jitter + processing delays
-        let max_buffer_size = window_size_samples * 8; // 400ms (was 200ms)
-
-        info!(
-            "🔊 Ring buffer initialized: window={}ms ({} samples), max={}ms ({} samples)",
-            window_ms,
-            window_size_samples,
-            window_ms * 8.0,
-            max_buffer_size
-        );
+        let window_size_samples = sample_rate as usize * 600 / 1_000;
+        let source_grace_samples = sample_rate as usize / 10;
+        let max_buffer_size = window_size_samples * 8;
 
         Self {
             mic_buffer: VecDeque::with_capacity(max_buffer_size),
             system_buffer: VecDeque::with_capacity(max_buffer_size),
             window_size_samples,
+            source_grace_samples,
             max_buffer_size,
         }
     }
 
-    fn add_samples(&mut self, device_type: DeviceType, samples: Vec<f32>) {
-        // Log buffer health periodically for diagnostics
-        static mut SAMPLE_COUNTER: u64 = 0;
-        unsafe {
-            SAMPLE_COUNTER += 1;
-            if SAMPLE_COUNTER % 200 == 0 {
-                debug!(
-                    "📊 Ring buffer status: mic={} samples, sys={} samples (max={})",
-                    self.mic_buffer.len(),
-                    self.system_buffer.len(),
-                    self.max_buffer_size
-                );
-            }
-        }
-
-        match device_type {
-            DeviceType::Microphone => self.mic_buffer.extend(samples),
-            DeviceType::System => self.system_buffer.extend(samples),
-        }
-
-        // CRITICAL FIX: Add warnings before dropping samples
-        // This helps diagnose timing issues in production
-        if self.mic_buffer.len() > self.max_buffer_size {
-            warn!(
-                "⚠️ Microphone buffer overflow: {} > {} samples, dropping oldest {} samples",
-                self.mic_buffer.len(),
-                self.max_buffer_size,
-                self.mic_buffer.len() - self.max_buffer_size
-            );
-        }
-        if self.system_buffer.len() > self.max_buffer_size {
-            error!("🔴 SYSTEM AUDIO BUFFER OVERFLOW: {} > {} samples, dropping {} samples - THIS CAUSES DISTORTION!",
-                  self.system_buffer.len(), self.max_buffer_size,
-                  self.system_buffer.len() - self.max_buffer_size);
-        }
-
-        // Safety: prevent buffer overflow (keep only last 200ms)
-        while self.mic_buffer.len() > self.max_buffer_size {
-            self.mic_buffer.pop_front();
-        }
-        while self.system_buffer.len() > self.max_buffer_size {
-            self.system_buffer.pop_front();
-        }
+    fn add_samples(&mut self, device_type: DeviceType, samples: Vec<f32>) -> usize {
+        let buffer = match device_type {
+            DeviceType::Microphone => &mut self.mic_buffer,
+            DeviceType::System => &mut self.system_buffer,
+        };
+        buffer.extend(samples);
+        let dropped = buffer.len().saturating_sub(self.max_buffer_size);
+        buffer.drain(..dropped);
+        dropped
     }
 
     fn can_mix(&self) -> bool {
-        self.mic_buffer.len() >= self.window_size_samples
-            || self.system_buffer.len() >= self.window_size_samples
+        let mic = self.mic_buffer.len();
+        let system = self.system_buffer.len();
+        // A callback arriving just before its counterpart must not advance the
+        // mix clock with padding. Allow bounded sample lookahead so a missing
+        // or stalled source cannot block the active source.
+        mic.min(system) >= self.window_size_samples
+            || mic.max(system) >= self.window_size_samples + self.source_grace_samples
     }
 
     fn extract_window(&mut self) -> Option<(Vec<f32>, Vec<f32>)> {
@@ -1016,7 +970,6 @@ impl AudioPipeline {
         // This bridges natural pauses without excessive fragmentation
         // For mac os core audio, 900ms, for windows 400ms seems good
 
-        let redemption_time = if cfg!(target_os = "macos") { 400 } else { 400 };
         // Per-provider live cap, set at recording start (shorter for Nemotron).
         let live_max_segment_ms = LIVE_MAX_SEGMENT_MS.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -1024,7 +977,7 @@ impl AudioPipeline {
             Some(
                 match ContinuousVadProcessor::new_with_max_segment_duration(
                     sample_rate,
-                    redemption_time,
+                    LIVE_VAD_REDEMPTION_MS,
                     Some(live_max_segment_ms),
                 ) {
                     Ok(processor) => {
@@ -1106,12 +1059,7 @@ impl AudioPipeline {
     pub async fn run(mut self) -> Result<()> {
         info!("VAD-driven audio pipeline started - segments sent in real-time based on speech detection");
 
-        // System-audio silence detection: if a system device is selected but no
-        // non-silent samples ever arrive, the chosen loopback endpoint isn't the
-        // one audio actually plays through (e.g. an idle digital output). Warn
-        // once so it isn't a silent failure.
-        let run_start = std::time::Instant::now();
-        let mut system_audio_warning = SystemAudioWarningTracker::default();
+        let mut system_audio_silence = SystemAudioSilenceTracker::default();
         let mut microphone_stream = MicrophoneStreamWatch::default();
 
         // Speaker attribution ("Me" = mic, "Participants" = system). We compare
@@ -1132,6 +1080,7 @@ impl AudioPipeline {
                 self.vad_processor = None;
             }
             let mut microphone_samples = false;
+            let mut system_audible = false;
             // Receive audio chunks with timeout
             match tokio::time::timeout(
                 std::time::Duration::from_millis(50), // Shorter timeout for responsiveness
@@ -1140,18 +1089,6 @@ impl AudioPipeline {
             .await
             {
                 Ok(Some(chunk)) => {
-                    // PERFORMANCE: Check for flush signal (special chunk with ID >= u64::MAX - 10)
-                    // Multiple flush signals may be sent to ensure processing
-                    if chunk.chunk_id >= u64::MAX - 10 {
-                        info!(
-                            "📥 Received FLUSH signal #{} - flushing VAD processor",
-                            u64::MAX - chunk.chunk_id
-                        );
-                        self.flush_remaining_audio().await?;
-                        // Continue processing to handle any remaining chunks
-                        continue;
-                    }
-
                     // PERFORMANCE OPTIMIZATION: Eliminate per-chunk logging overhead
                     // Logging in hot paths causes severe performance degradation
                     self.processed_chunks += 1;
@@ -1173,13 +1110,8 @@ impl AudioPipeline {
                         self.last_summary_time = std::time::Instant::now();
                     }
 
-                    // Track whether the system-audio stream is actually carrying
-                    // sound (for the silence warning below).
-                    if system_audio_warning.observe_samples(&chunk.device_type, &chunk.data)
-                        && self.state.is_recording()
-                    {
-                        self.state.clear_warning(SYSTEM_AUDIO_SILENCE_WARNING);
-                    }
+                    // Measure quiet loopback periods independently of capture loss.
+                    system_audible = audible_system_audio(&chunk.device_type, &chunk.data);
 
                     // Live meters: one snapshot per ~100 ms, none while paused
                     // or stopping. This is the pipeline task, not the capture
@@ -1203,10 +1135,14 @@ impl AudioPipeline {
                     // STEP 1: Add raw audio to ring buffer for mixing
                     // Microphone audio is already normalized at capture level (AudioCapture)
                     // System audio remains raw
-                    self.ring_buffer
+                    let dropped = self
+                        .ring_buffer
                         .add_samples(chunk.device_type.clone(), chunk.data);
+                    if dropped > 0 {
+                        self.state.record_sample_loss(dropped);
+                    }
 
-                    // STEP 2: Mix audio in fixed windows when both streams have sufficient data
+                    // Mix paired windows, allowing one source to continue after the grace period.
                     while self.ring_buffer.can_mix() {
                         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_window() {
                             // Simple mixing without aggressive ducking
@@ -1289,8 +1225,7 @@ impl AudioPipeline {
                     break;
                 }
                 Err(_) => {
-                    // Timeout - no chunk this tick. Fall through to the silence
-                    // check so a dead/silent system stream is still detected.
+                    // No chunk this tick. The stream timers still advance.
                 }
             }
 
@@ -1300,22 +1235,21 @@ impl AudioPipeline {
                 microphone_samples,
             ) {
                 if stalled {
+                    self.state.mark_capture_incomplete();
                     self.state.report_warning(MICROPHONE_STREAM_WARNING);
                 } else {
                     self.state.clear_warning(MICROPHONE_STREAM_WARNING);
                 }
             }
 
-            // Warn once if a system device was selected but no non-silent system
-            // audio ever arrives (e.g. an idle/loopback-incapable output like a
-            // digital S/PDIF endpoint). Timer-based so it fires even when the
-            // system stream delivers no chunks at all.
-            if system_audio_warning.should_warn(
-                run_start.elapsed(),
-                self.state.is_recording(),
-                self.state.get_system_device().is_some(),
+            if system_audio_silence.update(
+                std::time::Instant::now(),
+                self.state.is_active()
+                    && self.state.get_system_device().is_some()
+                    && !self.state.source_is_missing(&DeviceType::System),
+                system_audible,
             ) {
-                self.state.report_warning(SYSTEM_AUDIO_SILENCE_WARNING);
+                self.state.record_system_silence();
             }
         }
 
@@ -1324,10 +1258,14 @@ impl AudioPipeline {
 
         // Drain independent disk workers after capture has closed. The bounded
         // deadlines mark omissions and retain recovery data on a stalled drive.
-        if let Some(recording) = &mut self.recording_sender_for_mixed {
-            recording.finish().await;
-        }
-        self.transcription_sender.finish().await;
+        tokio::join!(
+            async {
+                if let Some(recording) = &mut self.recording_sender_for_mixed {
+                    recording.finish().await;
+                }
+            },
+            self.transcription_sender.finish(),
+        );
 
         info!("VAD-driven audio pipeline ended");
         Ok(())
@@ -1360,6 +1298,9 @@ impl AudioPipeline {
             mic_rms / self.mic_floor,
             sys_rms / self.sys_floor,
         );
+        let position_ms =
+            self.attribution_history.input_samples * 1000 / u64::from(self.sample_rate);
+        self.state.set_speech_clock_ms(position_ms);
     }
 
     fn segment_source(&self, start_ms: f64, end_ms: f64) -> DeviceType {
@@ -1456,7 +1397,11 @@ impl AudioPipeline {
         let Some(vad) = self.vad_processor.as_mut() else {
             return Ok(());
         };
-        match vad.flush() {
+        if vad.drain_resampler().is_err() {
+            self.transcription_sender.mark_failed();
+            self.state.report_warning("Final audio resampling failed. Retranscribe the saved audio to recover the end of the recording.");
+        }
+        match vad.finish_buffered_speech() {
             Ok(final_segments) => {
                 for segment in final_segments {
                     let segment_source =
@@ -1580,12 +1525,18 @@ impl AudioPipelineManager {
         self.audio_sender = None;
 
         // Wait for pipeline to finish
-        if let Some(handle) = self.pipeline_handle.take() {
-            match handle.await {
-                Ok(result) => result,
-                Err(e) => {
+        if let Some(mut handle) = self.pipeline_handle.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(45), &mut handle).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
                     error!("Pipeline task failed: {}", e);
                     Err(anyhow::anyhow!("Audio pipeline task failed"))
+                }
+                Err(_) => {
+                    handle.abort();
+                    Err(anyhow::anyhow!(
+                        "Audio pipeline did not flush before the deadline"
+                    ))
                 }
             }
         } else {
@@ -1738,8 +1689,8 @@ mod source_attribution_tests {
 }
 
 #[cfg(test)]
-mod system_audio_warning_tests {
-    use super::{DeviceType, SystemAudioWarningTracker};
+mod system_audio_silence_tests {
+    use super::{audible_system_audio, DeviceType, SystemAudioSilenceTracker};
     use std::time::Duration;
 
     #[test]
@@ -1760,44 +1711,65 @@ mod system_audio_warning_tests {
     }
 
     #[test]
-    fn late_system_audio_resolves_the_silence_warning_once() {
-        let mut tracker = SystemAudioWarningTracker::default();
-        assert!(tracker.should_warn(Duration::from_secs(15), true, true));
-        assert!(tracker.observe_samples(&DeviceType::System, &[0.1, -0.2]));
-        assert!(!tracker.observe_samples(&DeviceType::System, &[0.1]));
-        assert!(!tracker.should_warn(Duration::from_secs(30), true, true));
+    fn only_audible_system_samples_reset_the_system_silence_timer() {
+        assert!(!audible_system_audio(&DeviceType::Microphone, &[0.5]));
+        assert!(!audible_system_audio(&DeviceType::System, &[0.0, 0.0005]));
+        assert!(audible_system_audio(&DeviceType::System, &[0.0, -0.002]));
     }
 
     #[test]
-    fn microphone_sound_cannot_resolve_system_silence() {
-        let mut tracker = SystemAudioWarningTracker::default();
-        assert!(tracker.should_warn(Duration::from_secs(15), true, true));
-        assert!(!tracker.observe_samples(&DeviceType::Microphone, &[0.5]));
-        assert!(!tracker.observe_samples(&DeviceType::System, &[0.0, 0.0005]));
-        assert!(!tracker.audio_seen);
+    fn a_quiet_period_requires_a_selected_device_and_the_grace_period() {
+        let mut tracker = SystemAudioSilenceTracker::default();
+        let start = std::time::Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        assert!(!tracker.update(at(0), false, false));
+        assert!(!tracker.update(at(15), true, false));
+        assert!(!tracker.update(at(29), true, false));
+        assert!(tracker.update(at(30), true, false));
+        assert!(!tracker.update(at(31), true, false));
     }
 
     #[test]
-    fn system_warning_requires_a_selected_device_and_the_grace_period() {
-        let mut tracker = SystemAudioWarningTracker::default();
-        assert!(!tracker.should_warn(Duration::from_secs(14), true, true));
-        assert!(!tracker.should_warn(Duration::from_secs(15), true, false));
-        assert!(!tracker.should_warn(Duration::from_secs(15), false, true));
-        assert!(tracker.should_warn(Duration::from_secs(15), true, true));
-        assert!(!tracker.should_warn(Duration::from_secs(16), true, true));
-    }
-
-    #[test]
-    fn early_system_audio_prevents_a_silence_warning() {
-        let mut tracker = SystemAudioWarningTracker::default();
-        assert!(!tracker.observe_samples(&DeviceType::System, &[0.1]));
-        assert!(!tracker.should_warn(Duration::from_secs(15), true, true));
+    fn system_audio_can_go_quiet_again_and_pause_resets_the_clock() {
+        let mut tracker = SystemAudioSilenceTracker::default();
+        let start = std::time::Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        assert!(!tracker.update(at(0), true, true));
+        assert!(tracker.update(at(15), true, false));
+        assert!(!tracker.update(at(16), true, true));
+        assert!(tracker.update(at(31), true, false));
+        assert!(!tracker.update(at(32), false, false));
+        assert!(!tracker.update(at(120), true, false));
+        assert!(tracker.update(at(135), true, false));
     }
 }
 
 #[cfg(test)]
 mod queue_failure_tests {
     use super::*;
+
+    #[test]
+    fn mixer_continues_when_only_one_source_delivers() {
+        let mut mixer = AudioMixerRingBuffer::new(48_000);
+        mixer.add_samples(DeviceType::System, vec![0.5; 28_800]);
+        assert!(mixer.extract_window().is_none());
+        mixer.add_samples(DeviceType::System, vec![0.5; 4_800]);
+        let (mic, system) = mixer.extract_window().unwrap();
+        assert_eq!(mic, vec![0.0; 28_800]);
+        assert_eq!(system, vec![0.5; 28_800]);
+        assert_eq!(mixer.system_buffer.len(), 4_800);
+    }
+
+    #[test]
+    fn mixer_reports_discarded_samples_and_keeps_the_newest_audio() {
+        let mut mixer = AudioMixerRingBuffer::new(48_000);
+        let mut samples = vec![0.5; 7];
+        samples.extend(vec![0.25; mixer.max_buffer_size]);
+        assert_eq!(mixer.add_samples(DeviceType::System, samples), 7);
+        assert_eq!(mixer.system_buffer.len(), mixer.max_buffer_size);
+        assert_eq!(mixer.system_buffer.front(), Some(&0.25));
+        assert!(mixer.mic_buffer.is_empty());
+    }
 
     #[tokio::test]
     async fn audio_only_flush_preserves_audio_without_vad_or_transcription() {

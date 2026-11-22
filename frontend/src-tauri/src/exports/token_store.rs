@@ -135,13 +135,26 @@ impl PersistedToken {
 /// The file is DPAPI-encrypted for the current user; plaintext is never
 /// written. Lives in the per-user app config dir.
 fn fallback_token_path() -> Option<std::path::PathBuf> {
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return Some(root.join("ms-token.bin"));
+    }
     dirs::config_dir().map(|d| d.join("ClawScribe").join("ms-token.bin"))
 }
 
 /// Pre-0.5.36 plaintext fallback location. Read once for migration, then
 /// deleted; never written again.
 fn legacy_plaintext_token_path() -> Option<std::path::PathBuf> {
+    if crate::database::recovery::data_dir().is_some() {
+        return None;
+    }
     dirs::config_dir().map(|d| d.join("ClawScribe").join("ms-token.json"))
+}
+
+fn credential_entry() -> Result<keyring::Entry, keyring::Error> {
+    keyring::Entry::new(
+        &crate::database::recovery::credential_service(SERVICE_NAME),
+        ACCOUNT_NAME,
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -272,7 +285,7 @@ pub fn save_token(token: &StoredToken) -> Result<(), TokenStoreError> {
     // Prefer the OS keychain; fall back to a file if it is unavailable or
     // rejects the write. Keeping both in sync avoids a stale fallback shadowing
     // a fresh keychain entry, so on a successful keychain write we clear the file.
-    let keychain = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
+    let keychain = credential_entry()
         .map_err(|e| TokenStoreError::KeyringError(e.to_string()))
         .and_then(|entry| {
             entry
@@ -288,7 +301,7 @@ pub fn save_token(token: &StoredToken) -> Result<(), TokenStoreError> {
         Err(e) => {
             log::warn!("Keychain token write failed ({e}); using file fallback");
             save_fallback(&json, save_to_file, || {
-                keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)?.delete_credential()
+                credential_entry()?.delete_credential()
             })
         }
     }
@@ -309,8 +322,7 @@ fn save_fallback(
 }
 
 pub fn load_token() -> Result<Option<StoredToken>, TokenStoreError> {
-    let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
-        .map_err(|e| TokenStoreError::KeyringError(e.to_string()))?;
+    let entry = credential_entry().map_err(|e| TokenStoreError::KeyringError(e.to_string()))?;
     load_token_from_sources(entry.get_password(), load_from_file)
 }
 
@@ -328,8 +340,7 @@ fn load_token_from_sources(
 
 pub fn delete_token() -> Result<(), TokenStoreError> {
     delete_file();
-    let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
-        .map_err(|e| TokenStoreError::KeyringError(e.to_string()))?;
+    let entry = credential_entry().map_err(|e| TokenStoreError::KeyringError(e.to_string()))?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),

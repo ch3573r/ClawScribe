@@ -52,8 +52,12 @@ Users can add custom templates to the application data directory:
 - **Windows**: `%APPDATA%\ClawScribe\templates\`
 - **Linux**: `~/.config/ClawScribe/templates/`
 
-Custom templates override built-in templates with the same filename.
-Existing `Meetily/templates` directories are still read as a legacy fallback.
+Custom templates override built-in templates with the same template ID. The
+bundled `psychiatric_session.json` resource uses the shipped
+`psychatric_session` ID, so personal overrides use `psychatric_session.json`.
+Existing `Meetily/templates` directories are read as a legacy fallback. When
+you delete or reset a legacy template in Settings, ClawScribe hides it in its
+own profile.
 
 ## Template Fields
 
@@ -84,5 +88,5 @@ let available = templates::list_templates();
 
 // Validate custom template JSON
 let custom_json = std::fs::read_to_string("custom.json")?;
-let validated = templates::validate_template(&custom_json)?;
+let validated = templates::validate_and_parse_template(&custom_json)?;
 ```

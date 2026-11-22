@@ -83,10 +83,7 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     mut summary: serde_json::Value,
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_save_meeting_summary (native) called for meeting_id: {}",
-        meeting_id
-    );
+    let _install_guard = crate::updates::admit_work()?;
     let pool = state.db_manager.pool();
 
     super::processor::validate_saved_summary(&summary)?;
@@ -100,21 +97,14 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     match SummaryProcessesRepository::update_meeting_summary(pool, &meeting_id, &summary).await {
         Ok(true) => {
             let _ = app.emit(super::automatic::CHANGED_EVENT, &meeting_id);
-            log_info!("Summary saved successfully for meeting_id: {}", meeting_id);
             Ok(serde_json::json!({
                 "message": "Meeting summary saved successfully"
             }))
         }
-        Ok(false) => {
-            log_warn!(
-                "Meeting not found or invalid JSON for meeting_id: {}",
-                meeting_id
-            );
-            Err("Meeting not found or can't convert the json".into())
-        }
-        Err(e) => {
-            log_error!("Failed to save meeting summary for {}: {}", meeting_id, e);
-            Err(e.to_string())
+        Ok(false) => Err("Meeting or saved summary was not found".into()),
+        Err(_) => {
+            log_error!("Could not persist the meeting summary");
+            Err("Could not save the meeting summary".into())
         }
     }
 }
@@ -253,6 +243,21 @@ async fn resolve_meeting_folder(
     Ok(MeetingFolderResolution::Folder(PathBuf::from(folder_path)))
 }
 
+fn summary_job_status(
+    meeting_id: &str,
+    status: String,
+    error: Option<String>,
+) -> (String, Option<String>) {
+    let status = status.to_lowercase();
+    if status == "cancelled" && error.as_deref() == Some(super::automatic::PAUSED_FOR_INFERENCE) {
+        if SummaryService::has_paused_automatic_job(meeting_id) {
+            return ("deferred".into(), error);
+        }
+        return (status, Some(super::automatic::PAUSE_ENDED.into()));
+    }
+    (status, error)
+}
+
 /// Gets summary status and data (Native SQLx implementation)
 ///
 /// Returns summary status (pending/processing/completed/failed) and parsed result data
@@ -263,16 +268,12 @@ pub async fn api_get_summary<R: Runtime>(
     meeting_id: String,
     _auth_token: Option<String>,
 ) -> Result<SummaryResponse, String> {
-    log_info!(
-        "api_get_summary (native) called for meeting_id: {}",
-        meeting_id
-    );
     let pool = state.db_manager.pool();
 
     match SummaryProcessesRepository::get_summary_status_data(pool, &meeting_id).await {
         Ok(Some((process, partial_notes))) => {
-            let mut status = process.status.to_lowercase();
-            let mut error = process.error;
+            let (mut status, mut error) =
+                summary_job_status(&meeting_id, process.status, process.error);
 
             // Parse result data if it exists (regardless of status)
             // This allows displaying restored summaries after cancellation or failure
@@ -289,8 +290,8 @@ pub async fn api_get_summary<R: Runtime>(
                             None
                         }
                     },
-                    Err(e) => {
-                        log_error!("Failed to parse summary result JSON: {}", e);
+                    Err(_) => {
+                        log_error!("Could not parse the saved summary JSON");
                         None
                     }
                 }
@@ -301,21 +302,14 @@ pub async fn api_get_summary<R: Runtime>(
             // Fetch meeting title from database
             let meeting_name =
                 match MeetingsRepository::get_meeting_metadata(pool, &meeting_id).await {
-                    Ok(Some(meeting_details)) => {
-                        log_info!("Fetched meeting metadata for {}", meeting_id);
-                        Some(meeting_details.title)
-                    }
-                    Ok(None) => {
-                        log_warn!("Meeting not found for meeting_id: {}", meeting_id);
-                        None
-                    }
-                    Err(e) => {
-                        log_error!("Failed to fetch meeting title: {}", e);
+                    Ok(details) => details.map(|meeting| meeting.title),
+                    Err(_) => {
+                        log_error!("Could not load the meeting title for its summary");
                         None
                     }
                 };
 
-            let response = SummaryResponse {
+            Ok(SummaryResponse {
                 transcript_changed: data
                     .as_ref()
                     .and_then(|result| result.get("transcript_content_revision")?.as_i64())
@@ -324,26 +318,16 @@ pub async fn api_get_summary<R: Runtime>(
                 progress: SummaryService::progress(&meeting_id),
                 partial_notes,
                 has_previous_result: process.previous_result.is_some(),
-                status: status.clone(),
+                status,
                 meeting_name,
-                meeting_id: meeting_id.clone(),
+                meeting_id,
                 start: process.start_time.map(|t| t.to_rfc3339()),
                 end: process.end_time.map(|t| t.to_rfc3339()),
                 data,
                 error,
-            };
-
-            log_info!(
-                "Summary status for {}: {}, has_data: {}",
-                meeting_id,
-                status,
-                response.data.is_some()
-            );
-            Ok(response)
+            })
         }
         Ok(None) => {
-            log_info!("No summary process found for meeting_id: {}", meeting_id);
-
             // Still fetch meeting title for idle state
             let meeting_name =
                 match MeetingsRepository::get_meeting_metadata(pool, &meeting_id).await {
@@ -365,17 +349,48 @@ pub async fn api_get_summary<R: Runtime>(
                 error: None,
             })
         }
-        Err(e) => {
-            log_error!("Error retrieving summary for {}: {}", meeting_id, e);
-            Err(format!("Failed to retrieve summary: {}", e))
+        Err(_) => {
+            log_error!("Could not load the meeting summary from the library");
+            Err("Could not load the meeting summary".into())
         }
     }
 }
 
 pub(super) struct MeetingSummaryContext {
     pub(super) prompt: String,
-    pub(super) title: crate::library::calendar::ProviderTitle,
     pub(super) template: String,
+    pub(super) series_language: Option<String>,
+}
+
+#[cfg(test)]
+mod pause_status_tests {
+    use super::*;
+    use crate::summary::automatic::{PAUSED_FOR_INFERENCE, PAUSE_ENDED};
+
+    #[tokio::test]
+    async fn paused_notes_require_a_live_local_automatic_job_to_show_as_deferred() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let meeting = "pause-status-test";
+        let status = || {
+            summary_job_status(
+                meeting,
+                "cancelled".into(),
+                Some(PAUSED_FOR_INFERENCE.into()),
+            )
+        };
+        // A restored or orphaned pause has no worker and offers manual retry.
+        let terminal = ("cancelled".into(), Some(PAUSE_ENDED.into()));
+        assert_eq!(status(), terminal);
+        let manual = SummaryService::register_job(meeting, "builtin-ai").unwrap();
+        assert_eq!(status(), terminal);
+        drop(manual);
+        let _automatic = SummaryService::try_register_job(meeting, "builtin-ai", true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status().0, "deferred");
+        assert!(SummaryService::cancel_summary(meeting));
+        assert_eq!(status(), terminal);
+    }
 }
 
 pub(super) async fn meeting_summary_context<R: Runtime>(
@@ -385,8 +400,7 @@ pub(super) async fn meeting_summary_context<R: Runtime>(
     base_prompt: String,
     template_id: Option<String>,
 ) -> Result<MeetingSummaryContext, String> {
-    let (calendar, summary_title) =
-        crate::library::calendar::read_snapshot(pool, meeting_id).await?;
+    let (calendar, _) = crate::library::calendar::read_snapshot(pool, meeting_id).await?;
     let final_prompt = match calendar.as_ref() {
         Some(link) => link.with_attendance(base_prompt),
         None => base_prompt,
@@ -407,10 +421,14 @@ pub(super) async fn meeting_summary_context<R: Runtime>(
         }
     };
 
+    let series_language = match calendar.as_ref() {
+        Some(link) => crate::library::follow_through::summary_language(pool, link).await?,
+        None => None,
+    };
     Ok(MeetingSummaryContext {
         prompt: final_prompt,
-        title: summary_title,
         template: final_template_id,
+        series_language,
     })
 }
 
@@ -452,14 +470,16 @@ pub async fn api_process_transcript<R: Runtime>(
     .await?;
 
     // Normalise empty / whitespace-only to None so "" and null behave identically
-    let summary_language = summary_language.and_then(|s| {
-        let t = s.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t.to_string())
-        }
-    });
+    let summary_language = summary_language
+        .and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        })
+        .or_else(|| context.series_language.clone());
 
     let job = SummaryService::register_job(&m_id, &model)?;
 
@@ -503,6 +523,7 @@ pub async fn api_process_transcript<R: Runtime>(
         context,
         summary_language,
         true,
+        false,
         job,
     ))
 }
@@ -520,6 +541,7 @@ pub async fn api_generate_meeting_summary<R: Runtime>(
     template_id: Option<String>,
     summary_language: Option<String>,
     include_speaker_labels: Option<bool>,
+    retry_translation: Option<bool>,
 ) -> Result<ProcessTranscriptResponse, String> {
     let pool = state.db_manager.pool().clone();
     let job = SummaryService::register_job(&meeting_id, &model)?;
@@ -533,11 +555,32 @@ pub async fn api_generate_meeting_summary<R: Runtime>(
     if !has_transcript {
         return Err("No saved transcript is available to summarize.".into());
     }
+    let retry_translation = retry_translation.unwrap_or(false);
+    let (template_id, include_speaker_labels) = if retry_translation {
+        let saved = SummaryProcessesRepository::get_summary_data(&pool, &meeting_id)
+            .await
+            .map_err(|_| "Could not read the English notes draft")?
+            .and_then(|row| row.result)
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .filter(|result| result["translation"]["target"].is_string())
+            .ok_or("There is no saved translation to retry.")?;
+        let template = saved
+            .pointer("/english_cache/source/template_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Could not read the template used by the English notes draft.")?;
+        let labels = saved["translation"]["include_speaker_labels"]
+            .as_bool()
+            .unwrap_or(true);
+        (Some(template.to_owned()), labels)
+    } else {
+        (template_id, include_speaker_labels.unwrap_or(true))
+    };
     let context = match custom_prompt {
         Some(context) => context,
         None => crate::library::context::read(&pool, &meeting_id).await?,
     };
     let context = meeting_summary_context(&app, &pool, &meeting_id, context, template_id).await?;
+    let summary_language = summary_language.or_else(|| context.series_language.clone());
     SummaryProcessesRepository::create_or_reset_process(&pool, &meeting_id)
         .await
         .map_err(|_| "Could not start summary generation")?;
@@ -550,7 +593,8 @@ pub async fn api_generate_meeting_summary<R: Runtime>(
         model_name,
         context,
         summary_language,
-        include_speaker_labels.unwrap_or(true),
+        include_speaker_labels,
+        retry_translation,
         job,
     ))
 }
@@ -566,6 +610,7 @@ fn spawn_summary<R: Runtime>(
     context: MeetingSummaryContext,
     summary_language: Option<String>,
     include_speaker_labels: bool,
+    retry_translation: bool,
     job: super::service::SummaryJob,
 ) -> ProcessTranscriptResponse {
     let meeting_id_clone = m_id.clone();
@@ -579,15 +624,16 @@ fn spawn_summary<R: Runtime>(
             super::service::SummaryProviderRequest::Manual {
                 provider: model,
                 model: model_name,
+                retry_translation,
             },
             context.prompt,
-            context.title,
             context.template,
             summary_language,
             include_speaker_labels,
             &job,
         )
         .await;
+        drop(job);
         let _ = app.emit(super::automatic::CHANGED_EVENT, &meeting_id_clone);
     });
 

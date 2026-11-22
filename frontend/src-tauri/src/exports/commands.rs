@@ -253,7 +253,7 @@ pub async fn microsoft_sign_out<R: tauri::Runtime>(
 ) -> Result<(), String> {
     {
         let mut session = state.inner.write().await;
-        crate::teams_detection::monitor::join::cancel_pending(&app);
+        crate::teams_detection::monitor::join::cancel_microsoft_pending(&app);
         session.end_session(token_store::delete_token)?;
     }
     crate::library::calendar::clear_microsoft(app_state.db_manager.pool()).await
@@ -316,7 +316,7 @@ pub(crate) static EXPORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 
 /// Serializes ledger owners and keeps an installer restart from interrupting
 /// an outbound write or its ledger checkpoint.
-fn export_guard() -> Result<
+pub(super) fn export_guard() -> Result<
     (
         tokio::sync::RwLockReadGuard<'static, ()>,
         tokio::sync::MutexGuard<'static, ()>,
@@ -326,12 +326,12 @@ fn export_guard() -> Result<
     let work = crate::updates::admit_work()?;
     let export = EXPORT_LOCK
         .try_lock()
-        .map_err(|_| "Another Microsoft export is in progress. Wait for it to finish and retry.")?;
+        .map_err(|_| "Another export is in progress. Wait for it to finish and retry.")?;
     Ok((work, export))
 }
 
 /// An unreadable history must never silently disable duplicate protection.
-async fn load_ledger<R: Runtime>(
+pub(super) async fn load_ledger<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
 ) -> Result<ExportLedger, String> {
@@ -602,8 +602,15 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     section_name: String,
     options: Option<super::ledger::OneNoteOptions>,
     resume_id: Option<String>,
+    replace_existing: Option<bool>,
 ) -> Result<ExportReportResponse, String> {
-    let (token, tenant_id, user_id) = get_token_and_context(&state, "Notes.Create").await?;
+    let replace_existing = replace_existing.unwrap_or(false);
+    let scope = if replace_existing {
+        "Notes.ReadWrite"
+    } else {
+        "Notes.Create"
+    };
+    let (token, tenant_id, user_id) = get_token_and_context(&state, scope).await?;
     let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
     let client = GraphClient::new(
@@ -627,6 +634,7 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
             markdown,
             options,
             resume_id,
+            replace_existing,
         },
     )
     .await?;
@@ -684,11 +692,15 @@ pub async fn list_onenote_resumes<R: Runtime>(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingExportHistory {
+    entry_key: String,
+    display_name: Option<String>,
     action_id: Option<uuid::Uuid>,
     destination: &'static str,
     status: ExportStatus,
     at: Option<String>,
     web_url: Option<String>,
+    can_resolve: bool,
+    can_confirm_absence: bool,
 }
 
 #[tauri::command]
@@ -705,8 +717,26 @@ pub async fn get_meeting_export_history<R: Runtime>(
                 "onenote" => "OneNote",
                 "planner" => "Planner",
                 "todo" => "Microsoft To Do",
+                "onedrive" => match key.rsplit(':').next()? {
+                    "folder" => "OneDrive folder",
+                    "docx" => "OneDrive Word document",
+                    "pdf" => "OneDrive PDF",
+                    "docx-link" => "OneDrive Word sharing link",
+                    "pdf-link" => "OneDrive PDF sharing link",
+                    _ => return None,
+                },
+                "confluence" => "Confluence",
                 _ => return None,
             };
+            let can_resolve = item.can_resolve() && !key.ends_with("-link");
+            let can_confirm_absence = can_resolve
+                && (destination != "Confluence"
+                    || (item.confluence.is_some()
+                        && item.resource_id.is_none()
+                        && item
+                            .display_name
+                            .as_deref()
+                            .is_some_and(|name| !name.trim().is_empty())));
             Some(MeetingExportHistory {
                 action_id: if matches!(destination, "Planner" | "Microsoft To Do") {
                     key.rsplit(':')
@@ -716,8 +746,18 @@ pub async fn get_meeting_export_history<R: Runtime>(
                     None
                 },
                 destination,
-                status: item.status,
+                status: if item.status == ExportStatus::Succeeded
+                    && item.task_enrichment.is_some_and(|state| state.is_pending())
+                {
+                    ExportStatus::PartialFailure
+                } else {
+                    item.status
+                },
+                entry_key: key,
+                display_name: item.display_name,
                 at: item.last_attempt_at,
+                can_resolve,
+                can_confirm_absence,
                 web_url: item
                     .web_url
                     .as_deref()
@@ -728,18 +768,92 @@ pub async fn get_meeting_export_history<R: Runtime>(
     history.extend(
         ledger
             .onenote_sections
-            .into_values()
-            .filter(|section| section.section_id.is_none())
-            .map(|section| MeetingExportHistory {
+            .into_iter()
+            .map(|(id, section)| MeetingExportHistory {
+                entry_key: format!("onenote-section:{id}"),
+                display_name: Some(section.section_name),
                 action_id: None,
                 destination: "OneNote section",
-                status: ExportStatus::UnknownAfterSubmit,
+                status: if section.section_id.is_some() {
+                    ExportStatus::Succeeded
+                } else {
+                    ExportStatus::UnknownAfterSubmit
+                },
                 at: Some(section.started_at),
                 web_url: None,
+                can_resolve: true,
+                can_confirm_absence: true,
             }),
     );
     history.sort_by(|a, b| b.at.cmp(&a.at));
     Ok(history)
+}
+
+#[tauri::command]
+pub async fn list_export_recovery_candidates<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, MicrosoftAuthState>,
+    meeting_id: String,
+    entry_key: String,
+) -> Result<super::resolution::ExportCandidates, String> {
+    let scope = super::resolution::scope_for(&entry_key)?;
+    let (token, tenant, user) = get_token_and_context(&state, scope).await?;
+    let account = ExportContext {
+        tenant_id: &tenant,
+        user_id: &user,
+        bearer_token: &token,
+    };
+    let ledger = load_ledger(&app, &meeting_id).await?;
+    let client = GraphClient::new(
+        ReqwestGraphTransport::without_redirects(),
+        TokioSleeper,
+        RetryPolicy::default(),
+    );
+    super::resolution::candidates(&client, &ledger, &entry_key, &account).await
+}
+
+#[tauri::command]
+pub async fn reconcile_meeting_export<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, MicrosoftAuthState>,
+    meeting_id: String,
+    entry_key: String,
+    existing_remote_id: Option<String>,
+    confluence_destination: Option<super::confluence::ConfluenceDestination>,
+) -> Result<(), String> {
+    let _guard = export_guard()?;
+    let mut ledger = load_ledger(&app, &meeting_id).await?;
+    if entry_key.starts_with("confluence:") {
+        let destination = confluence_destination
+            .ok_or("Select the original Confluence destination in Settings.")?;
+        return super::confluence::reconcile_page(
+            &mut ledger,
+            &entry_key,
+            destination,
+            existing_remote_id.as_deref(),
+        )
+        .await;
+    }
+    let scope = super::resolution::scope_for(&entry_key)?;
+    let (token, tenant, user) = get_token_and_context(&state, scope).await?;
+    let account = ExportContext {
+        tenant_id: &tenant,
+        user_id: &user,
+        bearer_token: &token,
+    };
+    let client = GraphClient::new(
+        ReqwestGraphTransport::without_redirects(),
+        TokioSleeper,
+        RetryPolicy::default(),
+    );
+    super::resolution::reconcile(
+        &client,
+        &mut ledger,
+        &entry_key,
+        &account,
+        existing_remote_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -819,6 +933,7 @@ pub struct PlannerTaskPreview {
 pub struct MeetingTaskPreview {
     items: Vec<PlannerTaskPreview>,
     suggestion_count: usize,
+    candidates: Vec<TaskPreviewCandidate>,
 }
 
 /// Parse a meeting summary's action items for the Planner export preview, so the
@@ -837,10 +952,17 @@ pub async fn preview_planner_tasks(
         None,
         &markdown,
     );
-    let mut suggestion_count = 0;
-    if let Some(actions) = super::actions::load(state.db_manager.pool(), &meeting_id).await? {
-        suggestion_count = super::actions::remaining_suggestions(&markdown, &actions).len();
-        meeting_export.action_items = actions
+    let pool = state.db_manager.pool();
+    let summary = crate::summary::sources::saved_result(pool, &meeting_id).await?;
+    let suggestions = super::actions::summary_suggestions(&markdown, summary.as_ref());
+    let mut candidates = Vec::new();
+    let suggestion_count;
+    if let Some(saved) = super::actions::load_saved(pool, &meeting_id).await? {
+        suggestion_count =
+            super::actions::remaining_suggestions(suggestions, &saved.actions, &saved.dismissed)
+                .len();
+        meeting_export.action_items = saved
+            .actions
             .into_iter()
             .filter(|action| !action.done)
             .map(|action| super::model::ExportActionItem {
@@ -852,8 +974,20 @@ pub async fn preview_planner_tasks(
                 legacy_action: action.legacy_action,
             })
             .collect();
-    } else if meeting_export.action_items.len() > MAX_TASK_PREVIEW_CANDIDATES {
-        return Err("This summary has more than 250 suggestions. Review and save up to 250 items in Meeting actions before exporting.".into());
+    } else {
+        let fallback = super::markdown_notes::parse_action_suggestions(&markdown);
+        suggestion_count = suggestions.len().saturating_sub(fallback.len());
+        if fallback.len() > MAX_TASK_PREVIEW_CANDIDATES {
+            return Err("This summary has more than 250 suggestions. Review and save up to 250 items in Meeting actions before exporting.".into());
+        }
+        candidates = fallback
+            .into_iter()
+            .map(|suggestion| TaskPreviewCandidate {
+                original_title_hash: super::planner::action_hash(&suggestion.action),
+                local_id: suggestion.action.local_action_id,
+                done: suggestion.done,
+            })
+            .collect();
     }
     let previews = meeting_export
         .action_items
@@ -874,6 +1008,7 @@ pub async fn preview_planner_tasks(
     Ok(MeetingTaskPreview {
         items: previews,
         suggestion_count,
+        candidates,
     })
 }
 
@@ -920,11 +1055,13 @@ pub struct ToDoTaskInput {
     pub details: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskPreviewCandidate {
     local_id: String,
     original_title_hash: String,
+    #[serde(default)]
+    done: bool,
 }
 
 struct SelectedTaskHistory<'a> {
@@ -1000,7 +1137,7 @@ impl<'a> SelectedTaskHistory<'a> {
         let title_hash = if let Some(candidates) = &self.preview {
             let candidate = candidates
                 .iter()
-                .find(|candidate| candidate.local_id == local_id)
+                .find(|candidate| candidate.local_id == local_id && !candidate.done)
                 .ok_or(REFRESH_TASK_PREVIEW)?;
             if original_title_hash
                 .as_ref()
@@ -1130,7 +1267,8 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
     let _export_guard = export_guard()?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
 
-    for (bucket_id, action_items) in by_bucket {
+    let mut buckets = by_bucket.into_iter();
+    while let Some((bucket_id, action_items)) = buckets.next() {
         let meeting_export = crate::exports::model::MeetingExport {
             meeting_id: meeting_id.clone(),
             title: meeting_title.clone(),
@@ -1166,11 +1304,28 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         if report.connection_state == Some(MicrosoftConnectionState::Expired) {
             expired = true;
         }
+        let stop = expired
+            || report.items.iter().any(|item| {
+                item.graph_called && item.status == ExportStatus::UnknownAfterSubmit
+                    || item
+                        .code
+                        .as_deref()
+                        .is_some_and(|code| code.starts_with("export_history_write_failed"))
+            });
         let resp: ExportReportResponse = report.into();
+        let attempted = resp.items.len();
         merged_items.extend(resp.items);
+        if stop {
+            merged_items.extend(planner_unattempted(
+                meeting_export
+                    .action_items
+                    .into_iter()
+                    .skip(attempted)
+                    .chain(buckets.flat_map(|(_, actions)| actions)),
+            ));
+            break;
+        }
     }
-    ledger.checkpoint().await?;
-
     if expired {
         let mut inner = state.inner.write().await;
         inner.connection_state = MicrosoftConnectionState::Expired;
@@ -1178,10 +1333,7 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
 
     let overall = if merged_items.is_empty() {
         "failed".to_string()
-    } else if merged_items
-        .iter()
-        .all(|i| i.status == "succeeded" || i.status == "skipped")
-    {
+    } else if merged_items.iter().all(|i| i.status == "succeeded") {
         "succeeded".to_string()
     } else {
         "partial".to_string()
@@ -1195,6 +1347,20 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
             None
         },
         items: merged_items,
+    })
+}
+
+fn planner_unattempted(
+    actions: impl Iterator<Item = ExportActionItem>,
+) -> impl Iterator<Item = ExportItemResult> {
+    actions.map(|action| ExportItemResult {
+        dedupe_key: String::new(),
+        local_id: action.local_action_id,
+        status: "skipped".into(),
+        resource_id: None,
+        web_url: None,
+        code: Some("export_stopped_before_attempt".into()),
+        graph_called: false,
     })
 }
 
@@ -1434,15 +1600,22 @@ pub async fn create_onedrive_destination_folder(
 }
 
 #[tauri::command]
-pub async fn export_meeting_to_onedrive_files(
+pub async fn export_meeting_to_onedrive_files<R: Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, MicrosoftAuthState>,
     request: files::OneDriveExportRequest,
 ) -> Result<files::OneDriveExportResponse, String> {
-    let _work = crate::updates::admit_work()?;
-    let (token, _, _) = get_token_and_context(&state, "Files.ReadWrite").await?;
+    let _guard = export_guard()?;
+    let (token, tenant_id, user_id) = get_token_and_context(&state, "Files.ReadWrite").await?;
+    let mut ledger = load_ledger(&app, &request.meeting_id).await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
-    files::export_meeting_files(&client, &token, request).await
+    let account = ExportContext {
+        tenant_id: &tenant_id,
+        user_id: &user_id,
+        bearer_token: &token,
+    };
+    files::export_meeting_files(&client, &mut ledger, &account, request).await
 }
 
 #[tauri::command]
@@ -1637,6 +1810,7 @@ mod export_history_tests {
         let candidate = |local_id: &str| TaskPreviewCandidate {
             local_id: local_id.into(),
             original_title_hash: "0123456789abcdef".into(),
+            done: false,
         };
         for invalid in [
             vec![candidate("action-2")],

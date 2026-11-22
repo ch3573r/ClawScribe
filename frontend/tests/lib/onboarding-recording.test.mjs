@@ -37,12 +37,13 @@ test('an opted-in notes model remains separate from the live transcription choic
       return args[0] === 'check_first_launch';
     } },
   });
-  await finishRecordingSetup('audio_only', 'fixture-model');
+  await finishRecordingSetup('audio_only', 'fixture-model', true);
   assert.deepEqual(calls.slice(0, -1).map(([command]) => command), [
     'check_first_launch', 'import_legacy_database_if_present', 'initialize_fresh_database',
   ]);
   assert.equal(calls.at(-1)[1].mode, 'audio_only');
   assert.equal(calls.at(-1)[1].localNotesModel, 'fixture-model');
+  assert.equal(calls.at(-1)[1].automaticNotes, true);
 });
 
 test('the setup screen allows audio before downloads, and speech setup never starts a notes download', async t => {
@@ -55,6 +56,7 @@ test('the setup screen allows audio before downloads, and speech setup never sta
     react: hook.react,
     'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/components/ui/button': { Button: 'Button' },
+    '@/components/ui/switch': { Switch: 'Switch' },
     '@/components/ui/progress': { Progress: 'Progress' },
     '@tauri-apps/api/event': { listen: async () => () => {} },
     '../OnboardingContainer': { OnboardingContainer: 'OnboardingContainer' },
@@ -89,21 +91,24 @@ test('the setup screen allows audio before downloads, and speech setup never sta
 
 test('concurrent setup downloads show only their own measured progress and clean up on exit', async t => {
   const hooks = createHookHarness(), listeners = new Map(), completed = [];
+  const cancelled = [];
   const speech = deferred(), notes = deferred();
   const speechEvent = 'parakeet-model-download-progress', notesEvent = 'builtin-ai-download-progress';
   const jsx = (type, props) => ({ type, props });
   const { SetupOverviewStep } = loadTsModule('src/components/onboarding/steps/SetupOverviewStep', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/components/ui/button': { Button: 'Button' }, '@/components/ui/progress': { Progress: 'Progress' },
+    '@/components/ui/switch': { Switch: 'Switch' },
     '../OnboardingContainer': { OnboardingContainer: 'OnboardingContainer' },
     '@tauri-apps/api/event': { listen: async (event, fn) => {
       listeners.set(event, payload => fn({ payload }));
       return () => { completed.push(event); listeners.delete(event); };
     } },
-    '@tauri-apps/api/core': { invoke: async command => {
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
       if (command === 'builtin_ai_get_recommended_model') return 'notes-model';
       if (command === 'parakeet_download_model') return speech.promise;
       if (command === 'builtin_ai_download_model') return notes.promise;
+      if (command === 'builtin_ai_cancel_download') cancelled.push(args.modelName);
       if (command === 'parakeet_get_available_models') return [];
       return false;
     } },
@@ -132,9 +137,13 @@ test('concurrent setup downloads show only their own measured progress and clean
   assert.equal(listeners.has(speechEvent), false);
   assert.ok(action('Retry speech model setup'), 'download completion alone does not establish readiness');
   assert.deepEqual(values(), [34]);
-  hooks.unmount();
-  assert.equal(listeners.size, 0);
+  action('Cancel notes setup').props.onClick();
+  assert.deepEqual(cancelled, ['notes-model']);
+  assert.equal(action('Download local notes model').props.disabled, true);
   notes.resolve();
   await flush();
+  assert.equal(action('Download local notes model').props.disabled, false);
+  hooks.unmount();
+  assert.equal(listeners.size, 0);
   assert.deepEqual(completed.sort(), [notesEvent, speechEvent].sort());
 });

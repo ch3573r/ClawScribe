@@ -12,7 +12,7 @@ use crate::{
         DEFAULT_MAI_TRANSCRIBE_MODEL, PROVIDER_CLOUD_WHISPER, PROVIDER_MAI_TRANSCRIBE,
     },
     database::{
-        models::MeetingModel,
+        models::{MeetingModel, TranscriptTimelineRow},
         repositories::{
             meeting::MeetingsRepository, setting::SettingsRepository,
             transcript::TranscriptsRepository,
@@ -315,7 +315,7 @@ fn normalize_speaker_label(speaker: Option<String>) -> Option<String> {
     }
 }
 
-fn parse_word_timestamps(value: Option<&str>) -> Option<Vec<TranscriptWord>> {
+pub(crate) fn parse_word_timestamps(value: Option<&str>) -> Option<Vec<TranscriptWord>> {
     value.and_then(|json| serde_json::from_str::<Vec<TranscriptWord>>(json).ok())
 }
 
@@ -330,23 +330,18 @@ pub async fn api_get_meetings<R: Runtime>(
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Listing local meetings");
     let pool = state.db_manager.pool();
-    let meetings: Result<Vec<MeetingModel>, sqlx::Error> =
-        MeetingsRepository::get_meetings(pool).await;
-
-    match meetings {
-        Ok(meeting_models) => {
-            log_info!("Successfully got {} meetings", meeting_models.len());
-
-            let result: Vec<Meeting> = meeting_models
+    match MeetingsRepository::get_meetings(pool).await {
+        Ok(meetings) => {
+            log_info!("Successfully got {} meetings", meetings.len());
+            Ok(meetings
                 .into_iter()
-                .map(|m| Meeting {
-                    id: m.id,
-                    title: m.title,
-                    created_at: m.created_at.0.to_rfc3339(),
-                    updated_at: m.updated_at.0.to_rfc3339(),
+                .map(|meeting| Meeting {
+                    id: meeting.id,
+                    title: meeting.title,
+                    created_at: meeting.created_at,
+                    updated_at: meeting.updated_at,
                 })
-                .collect();
-            Ok(result)
+                .collect())
         }
         Err(e) => {
             log_error!("Error getting meetings");
@@ -506,7 +501,6 @@ pub async fn api_save_model_config<R: Runtime>(
     if let Some(key) = api_key {
         if !key.is_empty()
             && provider != "custom-openai"
-            && provider != "openclaw"
             && provider != "codex"
             && provider != "claude-code"
         {
@@ -908,14 +902,15 @@ async fn test_transcript_provider_with(
             let provider_client = MaiTranscribeProvider::new(endpoint, api_key, model.clone())
                 .with_http_opt_in(allow_unencrypted);
             let cancelled = std::sync::atomic::AtomicBool::new(false);
-            let segments = transcribe_mai_file(&provider_client, audio_path, language, &cancelled)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "MAI-Transcribe test failed ({}): {error}",
-                        error.category().as_str()
-                    )
-                })?;
+            let segments =
+                transcribe_mai_file(&provider_client, audio_path, language, &cancelled, false)
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "MAI-Transcribe test failed ({}): {error}",
+                            error.category().as_str()
+                        )
+                    })?;
             build_cloud_test_result(PROVIDER_MAI_TRANSCRIBE, &model, &segments, false)
         }
         _ => Err(format!(
@@ -1019,120 +1014,35 @@ pub async fn api_delete_meeting<R: Runtime>(
     auth_token: Option<String>,
     delete_files: bool,
 ) -> Result<serde_json::Value, String> {
-    let _job = claim_meeting_deletion_job(delete_files)?;
-    use tauri::Manager;
+    let _work = crate::updates::admit_work()?;
+    let recording_job = claim_meeting_deletion_job(delete_files)?.map(std::sync::Arc::new);
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Deleting local meeting");
 
     let pool = state.db_manager.pool();
-    let folder: Option<String> =
-        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
-            .bind(&meeting_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| "Could not read the meeting folder")?
-            .flatten();
-    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    let deleted = MeetingsRepository::delete_from_library(pool, &meeting_id, delete_files)
+        .await
+        .map_err(|_| "Could not delete the meeting from the library.")?
+        .ok_or("The meeting was not found or was already deleted.")?;
+    let _ = app.emit("library-meeting-deleted", &meeting_id);
+    crate::audio::import::queue::forget_deleted_meeting(&app, &meeting_id).await;
 
-    match MeetingsRepository::delete_meeting_with_documents(pool, &meeting_id).await {
-        Ok((true, originals)) => {
-            let mut warnings = Vec::new();
-            match app.path().app_data_dir() {
-                Ok(data) => {
-                    let root = data.join("reference-documents");
-                    for name in originals {
-                        if let Err(warning) =
-                            crate::knowledge::documents::remove_original(&root, &name).await
-                        {
-                            warnings.push(warning);
-                        }
-                    }
-                    if let Some(warning) =
-                        crate::summary::codex_provider::remove_meeting_outputs(&data, &meeting_id)
-                            .await
-                    {
-                        warnings.push(warning);
-                    }
-                }
-                Err(_) => {
-                    if !originals.is_empty() {
-                        warnings.push("Could not locate reference document originals".into());
-                    }
-                    warnings.push("Could not locate generated meeting outputs".into());
-                }
-            }
-            if let Some(warning) =
-                crate::summary::codex_provider::remove_meeting_runs(&meeting_id).await
-            {
-                warnings.push(warning);
-            }
-            match crate::exports::commands::export_ledger_dir(&app, &meeting_id) {
-                Ok(ledger) => {
-                    if let Err(error) = tokio::fs::remove_dir_all(&ledger).await {
-                        if error.kind() != std::io::ErrorKind::NotFound {
-                            warnings
-                                .push(format!("Export history folder kept: {}", ledger.display()));
-                        }
-                    }
-                }
-                Err(_) => warnings.push("Could not locate the export history folder".into()),
-            }
-            if delete_files {
-                if let Some(folder) = folder {
-                    let other_folders = sqlx::query_scalar::<_, String>(
-                        "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL",
-                    )
-                    .fetch_all(pool)
-                    .await;
-                    let meeting_id_for_files = meeting_id.clone();
-                    match other_folders {
-                        Ok(others) => {
-                            let retained = format!(
-                                "Recording folder kept: {folder} (cleanup could not finish)"
-                            );
-                            let result = tokio::task::spawn_blocking(move || {
-                                crate::database::meeting_files::remove_recording_folder(
-                                    std::path::Path::new(&folder),
-                                    &meeting_id_for_files,
-                                    &roots,
-                                    &others
-                                        .into_iter()
-                                        .map(std::path::PathBuf::from)
-                                        .collect::<Vec<_>>(),
-                                )
-                            })
-                            .await;
-                            match result {
-                                Ok(Ok(())) => {}
-                                Ok(Err(warning)) => warnings.push(warning),
-                                Err(_) => warnings.push(retained),
-                            }
-                        }
-                        Err(_) => warnings.push(format!(
-                            "Recording folder kept: {folder} (could not check shared use)"
-                        )),
-                    }
-                }
-            }
-            log_info!("Successfully deleted meeting {}", meeting_id);
-            Ok(serde_json::json!({
-                "status": "success",
-                "message": "Meeting deleted successfully",
-                "warnings": warnings
-            }))
-        }
-        Ok((false, _)) => {
-            log_warn!("Meeting not found or already deleted");
-            Err(format!(
-                "Meeting not found or could not be deleted: {}",
-                meeting_id
-            ))
-        }
-        Err(e) => {
-            log_error!("Error deleting meeting");
-            Err(format!("Failed to delete meeting: {}", e))
-        }
+    let locations = crate::library::file_cleanup::CleanupLocations::for_app(&app).await;
+    let mut cleanup_pending = false;
+    for id in deleted.cleanup_ids {
+        let result =
+            crate::library::file_cleanup::attempt(pool, &locations, id, recording_job.clone())
+                .await;
+        cleanup_pending |= !matches!(result, Ok(None));
     }
+    if cleanup_pending {
+        log_warn!("Some deleted meeting files are pending cleanup");
+    }
+    Ok(serde_json::json!({
+        "status": "success",
+        "folder_path": deleted.folder,
+        "cleanup_pending": cleanup_pending
+    }))
 }
 
 fn claim_meeting_deletion_job(
@@ -1222,8 +1132,8 @@ pub async fn api_get_meeting_metadata<R: Runtime>(
             Ok(MeetingMetadata {
                 id: meeting.id,
                 title: meeting.title,
-                created_at: meeting.created_at.0.to_rfc3339(),
-                updated_at: meeting.updated_at.0.to_rfc3339(),
+                created_at: meeting.created_at,
+                updated_at: meeting.updated_at,
                 folder_path: meeting.folder_path,
             })
         }
@@ -1267,7 +1177,6 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
                 total_count
             );
 
-            // Convert Transcript to MeetingTranscript
             let meeting_transcripts = transcripts
                 .into_iter()
                 .map(|t| MeetingTranscript {
@@ -1296,6 +1205,16 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             Err(format!("Failed to retrieve transcripts: {}", e))
         }
     }
+}
+
+#[tauri::command]
+pub async fn api_get_meeting_transcript_timeline(
+    meeting_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<TranscriptTimelineRow>, String> {
+    MeetingsRepository::get_meeting_transcript_timeline(state.db_manager.pool(), &meeting_id)
+        .await
+        .map_err(|_| "Could not load the meeting timeline".into())
 }
 
 #[tauri::command]
@@ -1377,20 +1296,14 @@ pub async fn api_save_meeting_title<R: Runtime>(
     auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
-    log_info!("Saving meeting title");
+    let _install_guard = crate::updates::admit_work()?;
     let pool = state.db_manager.pool();
     match MeetingsRepository::update_meeting_title(pool, &meeting_id, &title).await {
-        Ok(true) => {
-            log_info!("Successfully saved meeting title");
-            Ok(serde_json::json!({"message": "Meeting title saved successfully"}))
-        }
-        Ok(false) => {
-            log_error!("No meeting found with id");
-            Err(format!("No meeting found with id {}", meeting_id))
-        }
-        Err(e) => {
-            log_error!("Failed to update meeting");
-            Err(format!("Failed to update meeting: {}", e))
+        Ok(true) => Ok(serde_json::json!({"message": "Meeting title saved successfully"})),
+        Ok(false) => Err("Meeting was not found".into()),
+        Err(_) => {
+            log_error!("Could not persist the meeting title");
+            Err("Could not save the meeting title".into())
         }
     }
 }
@@ -1403,6 +1316,97 @@ fn parse_recording_transcripts(
         .map(serde_json::from_value)
         .collect::<Result<_, _>>()
         .map_err(|_| "Invalid transcript segment data".into())
+}
+
+fn parse_recovery_transcript(
+    transcripts: Vec<serde_json::Value>,
+) -> Result<Vec<TranscriptSegment>, String> {
+    let mut segments = parse_recording_transcripts(transcripts)?;
+    segments.retain(|segment| !segment.text.trim().is_empty());
+    if segments.is_empty() {
+        return Err("There is no cached transcript to save.".into());
+    }
+    Ok(segments)
+}
+
+#[tauri::command]
+pub(crate) async fn save_offline_recording_transcript<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    meeting_title: String,
+    started_at: i64,
+    transcripts: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let _install_guard = crate::updates::admit_work()?;
+    if !crate::database::meeting_files::is_stable_recording_id(&meeting_id) {
+        return Err("This draft can be saved as a transcript copy.".into());
+    }
+    let _recording_job = crate::audio::inference::claim_job()?;
+    if crate::audio::recording_commands::active_recording_folder()
+        != crate::audio::interrupted::ActiveFolder::None
+    {
+        return Err("Try again when recording has stopped.".into());
+    }
+    let segments = parse_recovery_transcript(transcripts)?;
+    TranscriptsRepository::save_offline_recording_transcript(
+        state.db_manager.pool(),
+        &meeting_id,
+        &meeting_title,
+        &segments,
+        started_at,
+    )
+    .await
+    .map_err(|_| "Could not save the transcript to your library.".to_string())?;
+    let _ = app.emit("library-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn save_recovery_transcript_copy<R: Runtime>(
+    app: AppHandle<R>,
+    transcripts: Vec<serde_json::Value>,
+) -> Result<bool, String> {
+    let segments = parse_recovery_transcript(transcripts)?;
+    let chosen = crate::file_grants::pick_save(
+        app,
+        "Text transcript",
+        "txt",
+        "ClawScribe-recovered-transcript.txt".into(),
+    )
+    .await?;
+    tokio::task::spawn_blocking(move || write_recovery_transcript_copy(chosen, &segments))
+        .await
+        .map_err(|_| "Could not save the transcript copy.".to_string())?
+}
+
+fn write_recovery_transcript_copy(
+    chosen: Option<std::path::PathBuf>,
+    segments: &[TranscriptSegment],
+) -> Result<bool, String> {
+    use std::fmt::Write;
+    let Some(path) = chosen else {
+        return Ok(false);
+    };
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+    {
+        return Err("Choose a filename ending in .txt.".into());
+    }
+    crate::file_grants::save_target_parent_exists(&path)?;
+    let mut document = String::new();
+    for segment in segments {
+        if !segment.timestamp.trim().is_empty() {
+            let _ = write!(document, "[{}] ", segment.timestamp.trim());
+        }
+        if let Some(speaker) = segment.speaker.as_deref().filter(|s| !s.trim().is_empty()) {
+            let _ = write!(document, "{}: ", speaker.trim());
+        }
+        let _ = writeln!(document, "{}", segment.text);
+    }
+    crate::library::atomic_write(&path, document.as_bytes())?;
+    Ok(true)
 }
 
 fn read_recording_snapshot(
@@ -1444,6 +1448,29 @@ fn select_recording_transcripts(
 #[cfg(test)]
 mod recording_snapshot_tests {
     use super::*;
+
+    #[test]
+    fn transcript_copy_writes_reviewed_text_and_keeps_existing_files_on_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let segments = parse_recovery_transcript(vec![serde_json::json!({
+            "id": "sample", "text": "Synthetic cached words", "speaker": "Me", "timestamp": "00:01"
+        })])
+        .unwrap();
+        assert!(!write_recovery_transcript_copy(None, &segments).unwrap());
+        let chosen = root.path().join("draft.txt");
+        assert!(write_recovery_transcript_copy(Some(chosen.clone()), &segments).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(chosen).unwrap(),
+            "[00:01] Me: Synthetic cached words\n"
+        );
+
+        let blocked = root.path().join("folder.txt");
+        std::fs::create_dir(&blocked).unwrap();
+        let original = blocked.join("keep.txt");
+        std::fs::write(&original, b"Existing file").unwrap();
+        assert!(write_recovery_transcript_copy(Some(blocked), &segments).is_err());
+        assert_eq!(std::fs::read(original).unwrap(), b"Existing file");
+    }
 
     #[test]
     fn missing_and_invalid_snapshots_fall_back_to_valid_ui_segments() {

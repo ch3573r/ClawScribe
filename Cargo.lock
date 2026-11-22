@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "clawscribe"
-version = "0.65.1"
+version = "0.67.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -907,6 +907,7 @@ dependencies = [
  "ffmpeg-sidecar",
  "futures-channel",
  "futures-util",
+ "hmac",
  "keyring",
  "lazy_static",
  "libsqlite3-sys",
@@ -958,6 +959,7 @@ dependencies = [
  "which 6.0.3",
  "whisper-rs",
  "windows 0.57.0",
+ "xattr",
  "xz2",
  "zip 2.4.2",
 ]

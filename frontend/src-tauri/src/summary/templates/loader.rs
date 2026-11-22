@@ -1,250 +1,192 @@
-use super::defaults;
-use super::types::Template;
+use super::{defaults, storage, types::Template};
 use once_cell::sync::Lazy;
-use std::path::PathBuf;
+use serde::Serialize;
+use std::collections::BTreeSet;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::warn;
 
-// Global storage for the bundled templates directory path
 static BUNDLED_TEMPLATES_DIR: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
+// Keep existing defaults, overrides, series settings and summary provenance addressable.
+const PSYCHIATRIC_ID: &str = "psychatric_session";
+const PSYCHIATRIC_FILENAME: &str = "psychiatric_session.json";
 
-/// Set the bundled templates directory path (called once at app startup)
+#[derive(Serialize)]
+pub struct TemplateInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub personal: bool,
+    pub bundled: bool,
+}
+
 pub fn set_bundled_templates_dir(path: PathBuf) {
-    info!("Bundled templates directory set to: {:?}", path);
     if let Ok(mut dir) = BUNDLED_TEMPLATES_DIR.write() {
         *dir = Some(path);
     }
 }
 
-/// Get the user's custom templates directory path
-///
-/// Returns the platform-specific application data directory for custom templates:
-/// - macOS: ~/Library/Application Support/ClawScribe/templates/
-/// - Windows: %APPDATA%\ClawScribe\templates\
-/// - Linux: ~/.config/ClawScribe/templates/
 pub(super) fn get_custom_templates_dir() -> Option<PathBuf> {
-    data_templates_dir("ClawScribe")
-}
-
-fn get_legacy_custom_templates_dir() -> Option<PathBuf> {
-    data_templates_dir("Meetily")
-}
-
-fn data_templates_dir(app_name: &str) -> Option<PathBuf> {
-    let mut path = dirs::data_dir()?;
-    path.push(app_name);
-    path.push("templates");
-    Some(path)
-}
-
-fn custom_template_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(dir) = get_custom_templates_dir() {
-        dirs.push(dir);
+    if let Some(root) = crate::database::recovery::data_dir() {
+        return Some(root.join("templates"));
     }
-    if let Some(dir) = get_legacy_custom_templates_dir() {
-        if !dirs.contains(&dir) {
-            dirs.push(dir);
-        }
-    }
-    dirs
+    Some(dirs::data_dir()?.join("ClawScribe").join("templates"))
 }
 
-/// Load a template from the bundled resources directory
-///
-/// # Arguments
-/// * `template_id` - Template identifier (without .json extension)
-///
-/// # Returns
-/// The template JSON content if found, None otherwise
-fn load_bundled_template(template_id: &str) -> Option<String> {
-    let bundled_dir = BUNDLED_TEMPLATES_DIR.read().ok()?.clone()?;
-    let template_path = bundled_dir.join(format!("{}.json", template_id));
+pub(super) fn get_legacy_custom_templates_dir() -> Option<PathBuf> {
+    if crate::database::recovery::data_dir().is_some() {
+        return None;
+    }
+    Some(dirs::data_dir()?.join("Meetily").join("templates"))
+}
 
-    debug!("Checking for bundled template at: {:?}", template_path);
+pub(crate) fn custom_template_dirs() -> Vec<PathBuf> {
+    [
+        get_custom_templates_dir(),
+        get_legacy_custom_templates_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
 
-    match std::fs::read_to_string(&template_path) {
-        Ok(content) => {
-            info!(
-                "Loaded bundled template '{}' from {:?}",
-                template_id, template_path
-            );
-            Some(content)
-        }
-        Err(e) => {
-            debug!("No bundled template '{}' found: {}", template_id, e);
+fn bundled_dir() -> Option<PathBuf> {
+    BUNDLED_TEMPLATES_DIR.read().ok()?.clone()
+}
+
+fn read_template(directory: &Path, filename: &str, source: &str) -> Option<String> {
+    match std::fs::read_to_string(directory.join(filename)) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            warn!(source, kind = ?error.kind(), "Could not read template file");
             None
         }
     }
 }
 
-/// Load a template from the user's custom templates directory
-///
-/// # Arguments
-/// * `template_id` - Template identifier (without .json extension)
-///
-/// # Returns
-/// The template JSON content if found, None otherwise
-fn load_custom_template(template_id: &str) -> Option<String> {
-    for custom_dir in custom_template_dirs() {
-        let template_path = custom_dir.join(format!("{}.json", template_id));
-
-        debug!("Checking for custom template at: {:?}", template_path);
-
-        match std::fs::read_to_string(&template_path) {
-            Ok(content) => {
-                info!(
-                    "Loaded custom template '{}' from {:?}",
-                    template_id, template_path
-                );
-                return Some(content);
-            }
-            Err(e) => {
-                debug!("No custom template '{}' found: {}", template_id, e);
-            }
+fn read_bundled(directory: &Path, id: &str) -> Option<String> {
+    if id == PSYCHIATRIC_ID {
+        if let Some(template) = read_template(directory, PSYCHIATRIC_FILENAME, "bundled") {
+            return Some(template);
         }
+    } else if id == "psychiatric_session" {
+        // The corrected filename is a resource only. A personal template
+        // that already uses this ID still resolves independently.
+        return None;
     }
-
-    None
+    read_template(directory, &format!("{id}.json"), "bundled")
 }
 
-/// Load and parse a template by identifier
-///
-/// This function implements a fallback strategy:
-/// 1. Check user's custom templates directory
-/// 2. Check bundled resources directory (app templates)
-/// 3. Fall back to built-in embedded templates
-/// 4. Return error if not found in any location
-///
-/// # Arguments
-/// * `template_id` - Template identifier (e.g., "daily_standup", "standard_meeting")
-///
-/// # Returns
-/// Parsed and validated Template struct
-pub fn get_template(template_id: &str) -> Result<Template, String> {
-    super::storage::validate_id(template_id)?;
-    info!("Loading template: {}", template_id);
+fn read_personal(id: &str, personal: Option<&Path>, legacy: Option<&Path>) -> Option<String> {
+    let filename = format!("{id}.json");
+    match personal.and_then(|path| read_template(path, &filename, "personal")) {
+        Some(content) if content == storage::REMOVED_TEMPLATE => None,
+        Some(content) => Some(content),
+        None => legacy.and_then(|path| read_template(path, &filename, "legacy")),
+    }
+}
 
-    // Try custom template first, then bundled, then built-in
-    let json_content = if let Some(custom_content) = load_custom_template(template_id) {
-        debug!("Using custom template for '{}'", template_id);
-        custom_content
-    } else if let Some(bundled_content) = load_bundled_template(template_id) {
-        debug!("Using bundled template for '{}'", template_id);
-        bundled_content
-    } else if let Some(builtin_content) = defaults::get_builtin_template(template_id) {
-        debug!("Using built-in template for '{}'", template_id);
-        builtin_content.to_string()
-    } else {
-        return Err(format!(
-            "Template '{}' not found. Available templates: {}",
-            template_id,
-            list_template_ids().join(", ")
-        ));
+pub fn get_template(id: &str) -> Result<Template, String> {
+    storage::validate_id(id)?;
+    let personal = read_personal(
+        id,
+        get_custom_templates_dir().as_deref(),
+        get_legacy_custom_templates_dir().as_deref(),
+    );
+    let bundled = || {
+        bundled_dir()
+            .as_deref()
+            .and_then(|path| read_bundled(path, id))
     };
-
-    // Parse and validate
-    validate_and_parse_template(&json_content)
+    let content = personal
+        .or_else(bundled)
+        .or_else(|| defaults::get_builtin_template(id).map(str::to_owned))
+        .ok_or("Template is no longer available")?;
+    validate_and_parse_template(&content)
 }
 
-/// Validate and parse template JSON
-///
-/// # Arguments
-/// * `json_content` - Raw JSON string
-///
-/// # Returns
-/// Parsed and validated Template struct
-pub fn validate_and_parse_template(json_content: &str) -> Result<Template, String> {
-    let template: Template = serde_json::from_str(json_content)
-        .map_err(|e| format!("Failed to parse template JSON: {}", e))?;
-
+pub fn validate_and_parse_template(content: &str) -> Result<Template, String> {
+    let template: Template = serde_json::from_str(content).map_err(|error| {
+        format!(
+            "Could not parse template JSON at line {}, column {}",
+            error.line(),
+            error.column()
+        )
+    })?;
     template.validate()?;
-
     Ok(template)
 }
 
-/// List all available template identifiers
-///
-/// Returns a combined list of:
-/// - Built-in template IDs
-/// - Bundled template IDs (from app resources)
-/// - Custom template IDs (from user's data directory)
-pub fn list_template_ids() -> Vec<String> {
-    let mut ids: Vec<String> = defaults::list_builtin_template_ids()
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // Add bundled templates if directory is set
-    if let Ok(bundled_dir_lock) = BUNDLED_TEMPLATES_DIR.read() {
-        if let Some(bundled_dir) = bundled_dir_lock.as_ref() {
-            if bundled_dir.exists() {
-                match std::fs::read_dir(bundled_dir) {
-                    Ok(entries) => {
-                        for entry in entries.flatten() {
-                            if let Some(filename) = entry.file_name().to_str() {
-                                if filename.ends_with(".json") {
-                                    let id = filename.trim_end_matches(".json").to_string();
-                                    if !ids.contains(&id) {
-                                        ids.push(id);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to read bundled templates directory: {}", e);
-                    }
-                }
-            }
+fn ids_in(directory: Option<&Path>, bundled: bool) -> Vec<String> {
+    let Some(directory) = directory else {
+        return Vec::new();
+    };
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            warn!(bundled, kind = ?error.kind(), "Could not list templates");
+            return Vec::new();
         }
-    }
-
-    // Add custom templates if directory exists
-    for custom_dir in custom_template_dirs() {
-        if custom_dir.exists() {
-            match std::fs::read_dir(&custom_dir) {
-                Ok(entries) => {
-                    for entry in entries.flatten() {
-                        if let Some(filename) = entry.file_name().to_str() {
-                            if filename.ends_with(".json") {
-                                let id = filename.trim_end_matches(".json").to_string();
-                                if !ids.contains(&id) {
-                                    ids.push(id);
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to read custom templates directory: {}", e);
-                }
-            }
-        }
-    }
-
-    ids.sort();
-    ids
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let filename = entry.file_name();
+            let filename = filename.to_str()?;
+            let id = if bundled && filename == PSYCHIATRIC_FILENAME {
+                PSYCHIATRIC_ID
+            } else {
+                filename.strip_suffix(".json")?
+            };
+            storage::validate_id(id).ok()?;
+            Some(id.to_owned())
+        })
+        .collect()
 }
 
-/// List all available templates with their metadata
-///
-/// Returns a list of (id, name, description) tuples
-pub fn list_templates() -> Vec<(String, String, String)> {
-    let mut templates = Vec::new();
-
-    for id in list_template_ids() {
-        match get_template(&id) {
-            Ok(template) => {
-                templates.push((id, template.name, template.description));
+pub fn list_templates() -> Vec<TemplateInfo> {
+    let bundled = bundled_dir();
+    let personal = get_custom_templates_dir();
+    let legacy = get_legacy_custom_templates_dir();
+    let mut bundled_ids: BTreeSet<_> = ids_in(bundled.as_deref(), true).into_iter().collect();
+    bundled_ids.extend(
+        defaults::list_builtin_template_ids()
+            .into_iter()
+            .map(str::to_owned),
+    );
+    let mut ids = bundled_ids.clone();
+    ids.extend(ids_in(personal.as_deref(), false));
+    ids.extend(ids_in(legacy.as_deref(), false));
+    ids.into_iter()
+        .filter_map(|id| {
+            let personal_content = read_personal(&id, personal.as_deref(), legacy.as_deref());
+            let is_personal = personal_content.is_some();
+            let is_bundled = bundled_ids.contains(&id);
+            let content = personal_content
+                .or_else(|| bundled.as_deref().and_then(|path| read_bundled(path, &id)))
+                .or_else(|| defaults::get_builtin_template(&id).map(str::to_owned))?;
+            match validate_and_parse_template(&content) {
+                Ok(template) => Some(TemplateInfo {
+                    id,
+                    name: template.name,
+                    description: template.description,
+                    personal: is_personal,
+                    bundled: is_bundled,
+                }),
+                Err(_) => {
+                    warn!(
+                        personal = is_personal,
+                        bundled = is_bundled,
+                        "Ignored an invalid summary template"
+                    );
+                    None
+                }
             }
-            Err(e) => {
-                warn!("Failed to load template '{}': {}", id, e);
-            }
-        }
-    }
-
-    templates
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -252,31 +194,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_builtin_template() {
-        let template = get_template("daily_standup");
-        assert!(template.is_ok());
-
-        let template = template.unwrap();
-        assert_eq!(template.name, "Daily Standup");
-        assert!(!template.sections.is_empty());
+    fn corrected_bundled_filename_uses_the_shipped_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = include_str!("../../../templates/psychiatric_session.json");
+        std::fs::write(dir.path().join(PSYCHIATRIC_FILENAME), content).unwrap();
+        assert_eq!(ids_in(Some(dir.path()), true), [PSYCHIATRIC_ID]);
+        assert_eq!(
+            read_bundled(dir.path(), PSYCHIATRIC_ID).as_deref(),
+            Some(content)
+        );
+        assert!(read_bundled(dir.path(), "psychiatric_session").is_none());
+        assert!(validate_and_parse_template(content).is_ok());
     }
 
     #[test]
-    fn test_get_nonexistent_template() {
-        let result = get_template("nonexistent_template");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_list_template_ids() {
-        let ids = list_template_ids();
-        assert!(ids.contains(&"daily_standup".to_string()));
-        assert!(ids.contains(&"standard_meeting".to_string()));
-    }
-
-    #[test]
-    fn test_validate_invalid_json() {
-        let result = validate_and_parse_template("invalid json");
-        assert!(result.is_err());
+    fn removing_a_legacy_override_restores_the_bundled_fallback() {
+        let personal = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        let filename = "standard_meeting.json";
+        std::fs::write(legacy.path().join(filename), defaults::STANDARD_MEETING).unwrap();
+        assert!(read_personal(
+            "standard_meeting",
+            Some(personal.path()),
+            Some(legacy.path())
+        )
+        .is_some());
+        std::fs::write(personal.path().join(filename), storage::REMOVED_TEMPLATE).unwrap();
+        assert!(read_personal(
+            "standard_meeting",
+            Some(personal.path()),
+            Some(legacy.path())
+        )
+        .is_none());
     }
 }

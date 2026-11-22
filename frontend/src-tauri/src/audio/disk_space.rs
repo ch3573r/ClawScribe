@@ -65,17 +65,20 @@ fn strip_verbatim_prefix(path: &Path) -> PathBuf {
 }
 
 /// Free bytes of the volume with the longest mount point containing `path`.
-fn pick_free_bytes(path: &Path, volumes: &[(PathBuf, u64)]) -> Option<u64> {
+fn pick_volume<'a>(path: &Path, volumes: &'a [(PathBuf, u64)]) -> Option<&'a (PathBuf, u64)> {
     volumes
         .iter()
         .filter(|(mount, _)| path.starts_with(mount))
         .max_by_key(|(mount, _)| mount.components().count())
-        .map(|(_, free)| *free)
 }
 
 /// Free bytes where `folder` is (or would be created). Blocking. `None` when
 /// the volume cannot be determined, for example a network share.
 pub(crate) fn free_space(folder: &Path) -> Option<u64> {
+    free_space_volume(folder).map(|(_, free)| free)
+}
+
+pub(crate) fn free_space_volume(folder: &Path) -> Option<(PathBuf, u64)> {
     let existing = folder.ancestors().find(|ancestor| ancestor.exists())?;
     let resolved = strip_verbatim_prefix(&existing.canonicalize().ok()?);
     let disks = sysinfo::Disks::new_with_refreshed_list();
@@ -83,7 +86,7 @@ pub(crate) fn free_space(folder: &Path) -> Option<u64> {
         .iter()
         .map(|disk| (disk.mount_point().to_path_buf(), disk.available_space()))
         .collect();
-    pick_free_bytes(&resolved, &volumes)
+    pick_volume(&resolved, &volumes).cloned()
 }
 
 /// [`free_space`] off the async runtime and bounded in time.
@@ -146,6 +149,10 @@ impl DiskWatch {
 
 #[cfg(test)]
 mod tests {
+    fn free_bytes(path: &Path, volumes: &[(PathBuf, u64)]) -> Option<u64> {
+        pick_volume(path, volumes).map(|(_, free)| *free)
+    }
+
     use super::*;
 
     #[test]
@@ -184,13 +191,13 @@ mod tests {
             (PathBuf::from("/other"), 40),
         ];
         assert_eq!(
-            pick_free_bytes(Path::new("/data/recordings/a"), &volumes),
+            free_bytes(Path::new("/data/recordings/a"), &volumes),
             Some(30)
         );
-        assert_eq!(pick_free_bytes(Path::new("/data/x"), &volumes), Some(20));
-        assert_eq!(pick_free_bytes(Path::new("/home"), &volumes), Some(10));
+        assert_eq!(free_bytes(Path::new("/data/x"), &volumes), Some(20));
+        assert_eq!(free_bytes(Path::new("/home"), &volumes), Some(10));
         assert_eq!(
-            pick_free_bytes(Path::new("/data/recordings-old"), &volumes),
+            free_bytes(Path::new("/data/recordings-old"), &volumes),
             Some(20)
         );
     }
@@ -198,7 +205,7 @@ mod tests {
     #[test]
     fn an_unmatched_path_is_unknown_not_zero() {
         let volumes = vec![(PathBuf::from("/data"), 20)];
-        assert_eq!(pick_free_bytes(Path::new("/elsewhere"), &volumes), None);
+        assert_eq!(free_bytes(Path::new("/elsewhere"), &volumes), None);
     }
 
     #[test]

@@ -8,6 +8,7 @@ import { usePlatform } from "@/hooks/usePlatform";
 import type { UpcomingEntry } from "@/hooks/useUpcomingEvents";
 import { calendarLinkFromEvent, microsoftCalendarRevision } from "@/lib/meetingCalendar";
 import { confirmCallPrompt } from "@/services/callDetectionService";
+import { teamsJoinLink } from "@/lib/teams-join-link";
 
 interface JoinView {
   id: string;
@@ -16,15 +17,10 @@ interface JoinView {
   promptKey: string | null;
 }
 
-export function supportsJoinRecording({ event, sourceId, allDay }: UpcomingEntry): boolean {
-  if (sourceId || allDay || event.isCancelled || !event.joinUrl || !event.start ||
+export function supportsJoinRecording({ event, allDay }: UpcomingEntry): boolean {
+  if (allDay || event.isCancelled || !event.joinUrl || !event.start ||
       !(Date.parse(event.end ?? "") > Math.max(Date.now(), Date.parse(event.start)))) return false;
-  try {
-    const url = new URL(event.joinUrl);
-    return url.protocol === "https:" && !url.username && !url.password && !url.port &&
-      ["teams.microsoft.com", "teams.cloud.microsoft", "teams.live.com"].includes(url.hostname) &&
-      /^\/(?:meet\/\d+|l\/meetup-join\/[a-zA-Z0-9_%:.@-]+\/0)\/*$/.test(url.pathname);
-  } catch { return false; }
+  return teamsJoinLink(event.joinUrl) !== null;
 }
 
 export function useJoinRecording() {
@@ -63,9 +59,9 @@ export function useJoinRecording() {
   }
 
   function join(entry: UpcomingEntry) {
-    if (!windows || pending || account !== microsoftCalendarRevision || !supportsJoinRecording(entry)) return;
+    if (!windows || pending || (!entry.sourceId && account !== microsoftCalendarRevision) || !supportsJoinRecording(entry)) return;
     return action(() => invoke("join_and_record", {
-      link: calendarLinkFromEvent(entry.event), end: entry.event.end, url: entry.event.joinUrl,
+      link: calendarLinkFromEvent({ ...entry.event, sourceId: entry.sourceId }), end: entry.event.end, url: entry.event.joinUrl,
     }));
   }
 

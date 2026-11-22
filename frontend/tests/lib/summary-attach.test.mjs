@@ -8,11 +8,14 @@ import { createHookHarness } from './hook-harness.mjs';
 function setup() {
   const hooks = createHookHarness();
   const polls = [];
-  const events = { aiSummary: [], toasts: [], stopped: [] };
+  const events = { aiSummary: [], toasts: [], stopped: [], invocations: [] };
   const noop = () => {};
   const mocks = {
     react: hooks.react,
-    '@tauri-apps/api/core': { invoke: async () => ({}) },
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      events.invocations.push({ command, args });
+      return { process_id: 'saved-meeting' };
+    } },
     '@tauri-apps/plugin-dialog': { confirm: async () => true },
     sonner: { toast: { error: noop, info: noop, warning: noop, success: title => events.toasts.push(title) } },
     '@/lib/analytics': { trackSummaryGenerationCompleted: async () => {}, trackSummaryGenerationStarted: async () => {}, trackCustomPromptUsed: async () => {} },
@@ -54,6 +57,20 @@ test('attaching to a regeneration says so', t => {
   t.after(() => app.hooks.unmount());
   app.render().attachToRunningSummary(true);
   assert.equal(app.render().summaryStatus, 'regenerating');
+});
+
+test('translation retry keeps the saved draft and submits the explicit target once', async t => {
+  const app = setup();
+  t.after(() => app.hooks.unmount());
+  await app.render().handleRetryTranslation('de', 'Project notes');
+  assert.equal(app.render().summaryStatus, 'regenerating');
+  assert.deepEqual(app.events.aiSummary, []);
+  assert.equal(app.events.invocations.length, 1);
+  const { command, args } = app.events.invocations[0];
+  assert.equal(command, 'api_generate_meeting_summary');
+  assert.equal(args.summaryLanguage, 'de');
+  assert.equal(args.retryTranslation, true);
+  assert.equal(args.customPrompt, 'Project notes');
 });
 
 test('generating while attached leaves the active poll and its progress intact', async t => {

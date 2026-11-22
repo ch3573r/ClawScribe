@@ -196,7 +196,7 @@ impl CalendarLink {
         serde_json::to_string(self).map_err(|_| "Could not save the calendar link.".into())
     }
 
-    pub(crate) fn with_attendance(&self, custom_prompt: String) -> String {
+    pub(crate) fn confirmed_names(&self) -> Vec<&str> {
         let excluded: std::collections::HashSet<_> = self
             .attendees
             .iter()
@@ -213,10 +213,13 @@ impl CalendarLink {
                     labels.push(label);
                 }
             }
-            if labels.len() == 25 {
-                break;
-            }
         }
+        labels
+    }
+
+    pub(crate) fn with_attendance(&self, custom_prompt: String) -> String {
+        let mut labels = self.confirmed_names();
+        labels.truncate(25);
         if labels.is_empty() {
             return custom_prompt;
         }
@@ -229,12 +232,27 @@ impl CalendarLink {
         }
     }
 
-    fn series_key(&self) -> Option<(&str, &str)> {
+    pub(crate) fn series_key(&self) -> Option<(&str, &str)> {
         match self.source {
             CalendarSource::Ical => Some((self.source_id.as_deref()?, self.series_id.as_deref()?)),
             // The account scope is already part of the Graph series digest.
             CalendarSource::Microsoft => Some(("microsoft", self.series_id.as_deref()?)),
         }
+    }
+
+    pub(crate) fn reviewed_series_key(&self) -> Option<(&str, &str)> {
+        self.is_reviewed().then(|| self.series_key()).flatten()
+    }
+
+    pub(crate) fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    pub(crate) fn confirmed_emails(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.attendees
+            .iter()
+            .filter(|person| person.attendance == Attendance::Present)
+            .filter_map(|person| Some((person.email.as_deref()?, person.name())))
     }
 }
 
@@ -268,10 +286,14 @@ pub(crate) async fn read_snapshot(
             .await
             .map_err(|_| "Could not load the calendar link.".to_string())?
             .flatten();
-    Ok(match stored {
-        Some(stored) => interpret(&stored),
+    Ok(summary_snapshot(stored.as_deref()))
+}
+
+pub(crate) fn summary_snapshot(stored: Option<&str>) -> (Option<CalendarLink>, ProviderTitle) {
+    match stored {
+        Some(stored) => interpret(stored),
         None => (None, ProviderTitle::Include),
-    })
+    }
 }
 
 pub(crate) async fn read(

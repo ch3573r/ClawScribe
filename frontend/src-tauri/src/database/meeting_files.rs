@@ -1,15 +1,132 @@
 //! Recording deletion is restricted to unshared, app-owned directories.
 use std::path::{Path, PathBuf};
 
-pub(crate) fn is_link(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
+/// Reject redirection and unsupported reparse points. Rust's Windows
+/// `is_symlink` recognizes name surrogates, not every reparse point.
+pub(crate) fn is_link(_path: &Path, metadata: &std::fs::Metadata) -> bool {
+    if metadata.is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+            && !reparse_tag(_path).is_ok_and(is_cloud_tag)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn is_cloud_tag(tag: u32) -> bool {
+    // Windows SDK IO_REPARSE_TAG_CLOUD through IO_REPARSE_TAG_CLOUD_F.
+    const CLOUD: u32 = 0x9000_001a;
+    const CLOUD_MASK: u32 = 0x0000_f000;
+    tag & !CLOUD_MASK == CLOUD
+}
+
+#[cfg(windows)]
+fn reparse_tag(path: &Path) -> std::io::Result<u32> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)?;
+    reparse_tag_of(&file)
+}
+
+#[cfg(windows)]
+fn reparse_tag_of(file: &std::fs::File) -> std::io::Result<u32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO,
+        },
+    };
+    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    // SAFETY: The handle and correctly sized output buffer live through the call.
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(file.as_raw_handle() as isize),
+            FileAttributeTagInfo,
+            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            std::mem::size_of_val(&info) as u32,
+        )
+    }
+    .map_err(std::io::Error::other)?;
+    Ok(info.ReparseTag)
+}
+
+/// Hold directory handles without delete sharing while moving or purging a
+/// cleanup stage, so its ancestors cannot be replaced underneath the operation.
+#[cfg(windows)]
+pub(crate) fn pin_directory_chain(path: &Path) -> std::io::Result<Vec<std::fs::File>> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let ancestors: Vec<_> = path
+        .ancestors()
+        .filter(|part| part.parent().is_some())
+        .collect();
+    let mut pinned = Vec::with_capacity(ancestors.len());
+    for ancestor in ancestors.into_iter().rev() {
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES.0)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(ancestor)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_dir()
+            || (metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+                && !reparse_tag_of(&file).is_ok_and(is_cloud_tag))
+        {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        pinned.push(file);
+    }
+    Ok(pinned)
+}
+
+/// Inspect parents before the leaf so metadata lookup does not traverse links.
+pub(crate) fn directory_chain(path: &Path) -> std::io::Result<()> {
+    if !path.is_absolute() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let parents: Vec<_> = path.ancestors().filter(|part| part.has_root()).collect();
+    for parent in parents.into_iter().rev() {
+        let metadata = std::fs::symlink_metadata(parent)?;
+        if !metadata.is_dir() || is_link(parent, &metadata) {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) const CLEANUP_PREFIX: &str = ".clawscribe-cleanup~";
+
+pub(crate) fn is_cleanup_path(path: &Path) -> bool {
+    path.components().any(|part| {
+        part.as_os_str()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .starts_with(CLEANUP_PREFIX)
+    })
 }
 
 /// Resolves a folder a caller named (for example a webview) to its canonical
 /// path, and only if it is an existing directory strictly inside one of the
-/// recording `roots`. `..` segments, links and junctions are resolved first, so
-/// a path that leaves the roots by any route is refused. The error never
-/// contains the path.
+/// recording `roots`. Inspect the directory chain before canonicalizing to
+/// reject links and junctions on either path. The error omits the path.
 pub(crate) fn resolve_recording_folder(
     folder: &Path,
     roots: &[PathBuf],
@@ -23,15 +140,16 @@ pub(crate) fn resolve_recording_folder(
     if !crate::trusted_roots::text_allowed(&folder.to_string_lossy(), roots) {
         return Err(REFUSED.into());
     }
-    let canonical = folder.canonicalize().map_err(|_| REFUSED.to_string())?;
-    if !canonical.is_dir() {
+    if is_cleanup_path(folder) || directory_chain(folder).is_err() {
         return Err(REFUSED.into());
     }
+    let canonical = folder.canonicalize().map_err(|_| REFUSED.to_string())?;
     let inside = roots
         .iter()
+        .filter(|root| directory_chain(root).is_ok())
         .filter_map(|root| root.canonicalize().ok())
         .any(|root| canonical != root && canonical.starts_with(&root));
-    if inside {
+    if inside && !is_cleanup_path(&canonical) {
         Ok(canonical)
     } else {
         Err(REFUSED.into())
@@ -115,12 +233,19 @@ pub(crate) fn has_app_marker(folder: &Path, meeting_id: Option<&str>) -> bool {
 pub(crate) fn read_marker(folder: &Path) -> Option<serde_json::Value> {
     let path = folder.join("metadata.json");
     let metadata = std::fs::symlink_metadata(&path).ok()?;
-    if !metadata.is_file() || is_link(&metadata) || metadata.len() > MAX_MARKER_BYTES {
+    if !metadata.is_file() || is_link(&path, &metadata) || metadata.len() > MAX_MARKER_BYTES {
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     let text = |name: &str| value.get(name).is_some_and(serde_json::Value::is_string);
     (text("version") && text("transcript_file")).then_some(value)
+}
+
+pub(crate) fn has_unpublished_import_owner(folder: &Path, meeting_id: &str) -> bool {
+    matches!(
+        std::fs::symlink_metadata(folder.join("metadata.json")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) && crate::audio::import::owns_import_folder(folder, meeting_id)
 }
 
 /// The stable meeting ID assigned before audio capture starts.
@@ -134,9 +259,13 @@ pub(crate) fn stamped_meeting_id(marker: &serde_json::Value) -> Option<&str> {
 
 fn marker_id<'a>(marker: &'a serde_json::Value, field: &str) -> Option<&'a str> {
     let id = marker.get(field)?.as_str()?;
-    let raw = id.strip_prefix("meeting-")?;
-    let uuid = uuid::Uuid::parse_str(raw).ok()?;
-    (uuid.hyphenated().to_string() == raw).then_some(id)
+    is_stable_recording_id(id).then_some(id)
+}
+
+pub(crate) fn is_stable_recording_id(id: &str) -> bool {
+    id.strip_prefix("meeting-").is_some_and(|raw| {
+        uuid::Uuid::parse_str(raw).is_ok_and(|uuid| uuid.hyphenated().to_string() == raw)
+    })
 }
 
 pub(crate) fn has_invalid_marker_id(marker: &serde_json::Value) -> bool {
@@ -176,13 +305,18 @@ pub(crate) fn authorize_new_meeting_folder(
     requested: &str,
     roots: &[PathBuf],
 ) -> Result<String, String> {
-    if requested.trim().is_empty() {
+    if requested.trim().is_empty() || is_cleanup_path(Path::new(requested)) {
         return Err(REFUSED.into());
     }
     let path = Path::new(requested);
-    // A folder this process created is accepted first, wherever the root is:
-    // it is the core's own text, and nothing is looked up.
-    if let Some(text) = core_folder_text(path) {
+    // A folder created by this process may still be in use after the user
+    // changes roots. Check that the directory chain still belongs to it.
+    if let Some(text) = core_folder_text(path).filter(|_| {
+        directory_chain(path).is_ok()
+            && path
+                .canonicalize()
+                .is_ok_and(|path| !is_cleanup_path(&path))
+    }) {
         return Ok(text);
     }
     if !crate::trusted_roots::text_allowed(requested, roots) {
@@ -205,12 +339,7 @@ pub(crate) fn authorize_folder_to_open(
     if requested.trim().is_empty() || !crate::trusted_roots::text_allowed(requested, roots) {
         return Err(REFUSED.into());
     }
-    let path = Path::new(requested);
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| REFUSED.to_string())?;
-    if !metadata.is_dir() || is_link(&metadata) {
-        return Err(REFUSED.into());
-    }
-    resolve_recording_folder(path, roots).map(|canonical| plain_path(&canonical))
+    resolve_recording_folder(Path::new(requested), roots).map(|canonical| plain_path(&canonical))
 }
 
 /// The recording folder the core saved for a meeting. Commands that work on a
@@ -229,8 +358,15 @@ pub(crate) async fn registered_meeting_folder(
     .map_err(|_| "Could not read the meeting".to_string())?;
     let folder = folder.ok_or_else(|| "This meeting has no recording folder".to_string())?;
     // On a local drive, or inside a root the user trusted (a network folder).
+    let path = Path::new(&folder);
+    if !crate::trusted_roots::text_allowed(&folder, roots)
+        || is_cleanup_path(path)
+        || directory_chain(path).is_err()
+    {
+        return Err("The recording folder is not available".into());
+    }
     let resolved = crate::trusted_roots::resolve_allowed(&folder, roots)?;
-    if resolved.is_dir() {
+    if !is_cleanup_path(&resolved) {
         Ok(plain_path(&resolved))
     } else {
         Err("The recording folder is not available".into())
@@ -246,51 +382,200 @@ pub(crate) fn remove_recording_folder(
     roots: &[PathBuf],
     other_folders: &[PathBuf],
 ) -> Result<(), String> {
-    let retained = |reason: &str| format!("Recording folder kept: {} ({reason})", folder.display());
-    if !crate::trusted_roots::text_allowed(&folder.to_string_lossy(), roots) {
-        return Err(retained("not a recording location"));
-    }
-    let metadata = match std::fs::symlink_metadata(folder) {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(retained("could not inspect the folder")),
-    };
-    if !metadata.is_dir() || is_link(&metadata) {
-        return Err(retained("not a regular recording directory"));
-    }
-    let canonical = folder
-        .canonicalize()
-        .map_err(|_| retained("could not resolve the folder"))?;
-    if !roots
-        .iter()
-        .filter_map(|root| root.canonicalize().ok())
-        .any(|root| canonical != root && canonical.starts_with(root))
+    remove_library_recording_folder(folder, meeting_id, roots, other_folders, false)
+        .map_err(|reason| format!("Recording folder kept: {} ({reason})", folder.display()))
+}
+
+pub(crate) fn remove_library_recording_folder(
+    folder: &Path,
+    meeting_id: &str,
+    roots: &[PathBuf],
+    other_folders: &[PathBuf],
+    exact_marker: bool,
+) -> Result<(), &'static str> {
+    if let Some(folder) =
+        verify_recording_deletion(folder, meeting_id, roots, other_folders, exact_marker)?
     {
-        return Err(retained("outside the configured recording locations"));
+        let owner = if has_unpublished_import_owner(&folder, meeting_id) {
+            crate::audio::import::IMPORT_OWNER_FILE
+        } else {
+            "metadata.json"
+        };
+        remove_recording_folder_contents(&folder, owner).map_err(|_| "file deletion failed")?;
     }
-    // Reject linked ancestors as well as a junction at the folder itself.
-    for ancestor in folder.ancestors() {
-        if std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| is_link(&metadata)) {
-            return Err(retained("the path contains a link or junction"));
+    Ok(())
+}
+
+pub(crate) fn verify_recording_deletion(
+    folder: &Path,
+    meeting_id: &str,
+    roots: &[PathBuf],
+    other_folders: &[PathBuf],
+    exact_marker: bool,
+) -> Result<Option<PathBuf>, &'static str> {
+    if is_cleanup_path(folder)
+        || !crate::trusted_roots::text_allowed(&folder.to_string_lossy(), roots)
+    {
+        return Err("not a recording location");
+    }
+    match directory_chain(folder) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return if roots.iter().any(|root| {
+                crate::local_path::lexically_inside(&folder.to_string_lossy(), root)
+                    && directory_chain(root).is_ok()
+            }) {
+                Ok(None)
+            } else {
+                Err("the recording location is unavailable")
+            };
+        }
+        Err(_) => return Err("the folder could not be inspected as an unlinked directory"),
+    }
+    let canonical = resolve_recording_folder(folder, roots)
+        .map_err(|_| "outside the configured recording locations")?;
+    if contains_recording_root(&canonical, roots) {
+        return Err("the folder contains a configured recording location");
+    }
+    let marker_error = "no ClawScribe recording marker for this meeting";
+    let owner_file = folder.join(crate::audio::import::IMPORT_OWNER_FILE);
+    let has_import_owner = match std::fs::symlink_metadata(owner_file) {
+        Ok(_) if crate::audio::import::owns_import_folder(folder, meeting_id) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        _ => return Err(marker_error),
+    };
+    // An import may commit before metadata is published. If metadata exists,
+    // both ownership records must agree.
+    let unpublished = has_import_owner && has_unpublished_import_owner(folder, meeting_id);
+    if !unpublished && (exact_marker || has_import_owner) {
+        let marker = read_marker(folder).ok_or(marker_error)?;
+        let ids = [marker.get("meeting_id"), marker.get("recording_id")];
+        let mut present = ids.into_iter().flatten().filter(|value| !value.is_null());
+        if present.next().and_then(serde_json::Value::as_str) != Some(meeting_id)
+            || present.any(|id| id.as_str() != Some(meeting_id))
+        {
+            return Err(marker_error);
+        }
+    } else if !unpublished && !has_app_marker(folder, Some(meeting_id)) {
+        return Err(marker_error);
+    }
+    let compare = |a: &Path, b: &Path| {
+        let a = folder_key(a);
+        let b = folder_key(b);
+        a == b
+            || a.strip_prefix(&b).is_some_and(|rest| rest.starts_with('/'))
+            || b.strip_prefix(&a).is_some_and(|rest| rest.starts_with('/'))
+    };
+    if other_folders.iter().any(|other| {
+        !other.as_os_str().is_empty()
+            && (compare(other, folder)
+                || (crate::trusted_roots::text_allowed(&other.to_string_lossy(), roots)
+                    && other
+                        .canonicalize()
+                        .is_ok_and(|other| compare(&other, &canonical))))
+    }) {
+        return Err("another meeting uses this folder");
+    }
+    Ok(Some(canonical))
+}
+
+pub(crate) fn contains_recording_root(canonical: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .filter(|root| directory_chain(root).is_ok())
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| root.starts_with(canonical))
+}
+
+fn remove_recording_folder_contents(folder: &Path, owner: &str) -> std::io::Result<()> {
+    // Keep the ownership marker while removing children, so a file held open
+    // during this attempt can be retried after its handle closes.
+    for entry in std::fs::read_dir(folder)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == owner || (cfg!(windows) && name.eq_ignore_ascii_case(owner)) {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileTypeExt;
+            if kind.is_symlink_dir() {
+                std::fs::remove_dir(entry.path())?;
+                continue;
+            }
+        }
+        if kind.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
         }
     }
-    if !has_app_marker(folder, Some(meeting_id)) {
-        return Err(retained("no ClawScribe recording marker for this meeting"));
-    }
-    if other_folders.iter().any(|other| {
-        other == folder
-            || other.canonicalize().is_ok_and(|other| {
-                other == canonical || other.starts_with(&canonical) || canonical.starts_with(other)
-            })
-    }) {
-        return Err(retained("another meeting uses this folder"));
-    }
-    std::fs::remove_dir_all(folder).map_err(|_| retained("file deletion failed"))
+    std::fs::remove_file(folder.join(owner))?;
+    std::fs::remove_dir(folder)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_accepts_an_unpublished_import_only_with_exact_unshared_ownership() {
+        let base = tempfile::tempdir().unwrap();
+        let roots = [base.path().to_path_buf()];
+        let folder = base.path().join("imported");
+        std::fs::create_dir(&folder).unwrap();
+        let id = "meeting-4f7b980e-b123-4ca9-82e7-927204456483";
+        let owner = folder.join(crate::audio::import::IMPORT_OWNER_FILE);
+        std::fs::write(&owner, id).unwrap();
+        for exact in [false, true] {
+            assert!(verify_recording_deletion(&folder, id, &roots, &[], exact)
+                .unwrap()
+                .is_some());
+            assert!(verify_recording_deletion(&folder, "foreign", &roots, &[], exact).is_err());
+            assert!(verify_recording_deletion(
+                &folder,
+                id,
+                &roots,
+                &[folder.join("nested")],
+                exact
+            )
+            .is_err());
+            assert!(verify_recording_deletion(&folder, id, &[folder.clone()], &[], exact).is_err());
+        }
+        std::fs::write(folder.join("metadata.json"), b"foreign metadata").unwrap();
+        assert!(verify_recording_deletion(&folder, id, &roots, &[], true).is_err());
+        std::fs::remove_file(folder.join("metadata.json")).unwrap();
+        remove_library_recording_folder(&folder, id, &roots, &[], true).unwrap();
+        assert!(!folder.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_cloud_files_reparse_tags_are_allowed() {
+        for variant in 0..=15 {
+            assert!(is_cloud_tag(0x9000_001a | (variant << 12)));
+        }
+        for tag in [0, 0xa000_0003, 0xa000_000c, 0xb000_701a, 0x8000_0021] {
+            assert!(!is_cloud_tag(tag));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a Cloud Files placeholder on the designated Windows runner"]
+    fn windows_cloud_placeholder_metadata_uses_the_cloud_tag_without_being_a_symlink() {
+        let path = PathBuf::from(
+            std::env::var_os("CLAWSCRIBE_TEST_CLOUD_PLACEHOLDER")
+                .expect("set the Cloud Files placeholder fixture path"),
+        );
+        let metadata = std::fs::symlink_metadata(&path).expect("inspect placeholder metadata");
+        assert!(is_cloud_tag(
+            reparse_tag(&path).expect("read the Cloud Files tag")
+        ));
+        assert!(!metadata.file_type().is_symlink());
+        assert!(!is_link(&path, &metadata));
+    }
 
     #[test]
     fn rejects_conflicting_capture_and_meeting_ids() {
@@ -388,6 +673,10 @@ mod tests {
             .output()
             .unwrap();
         assert!(result.status.success());
+        let metadata = std::fs::symlink_metadata(&junction).unwrap();
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(reparse_tag(&junction).unwrap(), 0xa000_0003);
+        assert!(is_link(&junction, &metadata));
         assert!(resolve_recording_folder(&junction, &[root]).is_err());
         std::fs::remove_dir(&junction).unwrap();
     }
@@ -412,6 +701,14 @@ mod tests {
             .unwrap();
         assert!(result.status.success());
         let roots = [base.path().to_path_buf()];
+        assert!(
+            authorize_folder_to_open(&junction.join("meeting").to_string_lossy(), &roots).is_err()
+        );
+        assert!(
+            authorize_new_meeting_folder(&junction.join("meeting").to_string_lossy(), &roots)
+                .is_err()
+        );
+        assert!(resolve_recording_folder(&folder, &[junction.clone()]).is_err());
         assert!(remove_recording_folder(&junction, "meeting-1", &roots, &[]).is_err());
         assert!(
             remove_recording_folder(&junction.join("meeting"), "meeting-1", &roots, &[]).is_err()

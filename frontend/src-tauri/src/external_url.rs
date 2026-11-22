@@ -42,6 +42,42 @@ pub(crate) fn open_url_in_default_browser(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Launch the OS compose handler with the URI built by the reviewed draft flow.
+pub(crate) fn open_mail_draft(uri: &str) -> Result<(), String> {
+    let error = || "Could not open your default email client.".to_string();
+    #[cfg(windows)]
+    {
+        use windows::{
+            core::{w, PCWSTR},
+            Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+        };
+        let uri: Vec<u16> = uri.encode_utf16().chain([0]).collect();
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(uri.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if result.0 as isize <= 32 {
+            return Err(error());
+        }
+    }
+    #[cfg(not(windows))]
+    Command::new(if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    })
+    .arg(uri)
+    .spawn()
+    .map_err(|_| error())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,16 +3,13 @@
 import { UNCONFIGURED_SUMMARY_MODEL, DEFAULT_PARAKEET_MODEL } from '@/constants/modelDefaults';
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode, useRef } from 'react';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
-import {
-  selectedDevicesFromPreferences,
-  type SelectedDevices,
-} from '@/lib/audioDevicePreferences';
 import { configService, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import { NO_SECRET, withRefreshedKeyStatus, withoutSecrets, type SecretStatus } from '@/lib/secret-key';
 import { loadBehaviorSettings, mirrorLegacyBehavior, refreshBehaviorSettings } from '@/lib/behaviorSettings';
 import { toast } from 'sonner';
 import { useAudioDeviceInventory } from '@/hooks/useAudioDeviceInventory';
+import { useRecordingDevicePreferences } from '@/hooks/useRecordingDevicePreferences';
 
 export interface OllamaModel {
   name: string;
@@ -51,7 +48,7 @@ export interface NotificationSettings {
   };
 }
 
-interface ConfigContextType {
+interface ConfigContextType extends ReturnType<typeof useRecordingDevicePreferences> {
   // Model configuration
   modelConfig: ModelConfig;
   setModelConfig: (config: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => void;
@@ -64,11 +61,7 @@ interface ConfigContextType {
   loadTranscriptConfig: () => Promise<void>;
 
   // Device configuration
-  selectedDevices: SelectedDevices;
-  setSelectedDevices: (devices: SelectedDevices) => void;
   audioDeviceInventory: ReturnType<typeof useAudioDeviceInventory>;
-  devicePreferencesStatus: 'loading' | 'ready' | 'error';
-  refreshDevicePreferences: () => Promise<void>;
 
   // Language preference
   selectedLanguage: string;
@@ -123,18 +116,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string>('');
 
   // Device configuration state
-  const [selectedDevices, updateSelectedDevices] = useState<SelectedDevices>({
-    micDevice: null,
-    systemDevice: null
-  });
-  const [devicePreferencesStatus, setDevicePreferencesStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const devicePreferencesRevision = useRef(0);
+  const { selectedDevices, devicePreferencesStatus, isSavingDevicePreferences, refreshDevicePreferences, saveSelectedDevices } = useRecordingDevicePreferences();
   const audioDeviceInventory = useAudioDeviceInventory();
-  const setSelectedDevices = useCallback((devices: SelectedDevices) => {
-    devicePreferencesRevision.current += 1;
-    updateSelectedDevices(devices);
-    setDevicePreferencesStatus('ready');
-  }, []);
 
   // Language preference state
   // The core owns the language: it applies it at start-up and the value shown
@@ -351,22 +334,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     return () => { void subscription.then(unlisten => unlisten()); };
   }, [refreshProviderKeyStatus]);
 
-  // Load device preferences on mount
-  const refreshDevicePreferences = useCallback(async () => {
-    const request = ++devicePreferencesRevision.current;
-    setDevicePreferencesStatus('loading');
-    try {
-      const prefs = await configService.getRecordingPreferences();
-      if (request === devicePreferencesRevision.current) setSelectedDevices(selectedDevicesFromPreferences(prefs));
-    } catch {
-      if (request === devicePreferencesRevision.current) setDevicePreferencesStatus('error');
-    }
-  }, [setSelectedDevices]);
-  useEffect(() => {
-    void refreshDevicePreferences();
-    return () => { devicePreferencesRevision.current += 1; };
-  }, [refreshDevicePreferences]);
-
   // Calculate model options based on available models
   const modelOptions = useMemo<Record<ModelConfig['provider'], string[]>>(() => ({
     ollama: models.map(model => model.name),
@@ -376,7 +343,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     openai: ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-4o-mini'],
     'builtin-ai': [],
     'custom-openai': [modelConfig.customOpenAIModel || modelConfig.model || 'gpt-4o-mini'],
-    openclaw: ['openclaw-managed'],
     codex: ['gpt-5.6-sol'],
     'claude-code': ['sonnet', 'opus', 'haiku'],
   }), [models, modelConfig.customOpenAIModel, modelConfig.model]);
@@ -484,7 +450,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     loadTranscriptConfig,
     setTranscriptModelConfig,
     selectedDevices,
-    setSelectedDevices,
+    saveSelectedDevices,
+    isSavingDevicePreferences,
     audioDeviceInventory,
     devicePreferencesStatus,
     refreshDevicePreferences,
@@ -509,7 +476,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     transcriptConfigStatus,
     loadTranscriptConfig,
     selectedDevices,
-    setSelectedDevices,
+    saveSelectedDevices,
+    isSavingDevicePreferences,
     audioDeviceInventory,
     devicePreferencesStatus,
     refreshDevicePreferences,

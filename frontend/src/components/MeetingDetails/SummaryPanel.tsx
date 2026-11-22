@@ -21,12 +21,13 @@ import { toast } from 'sonner';
 import { Languages, ChevronDown, ChevronUp, Search, Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Copy } from 'lucide-react';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import type { summaryDetails } from '@/lib/meeting-summary';
+import { FollowUpEmail } from './FollowUpEmail';
+import { SavedLiveAnswers } from './SavedLiveAnswers';
+import { LOCAL_SUMMARY_HINT, type summaryDetails } from '@/lib/meeting-summary';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
 import { useRecentLanguages } from '@/hooks/useRecentLanguages';
-import { labelForCode } from '@/lib/summary-languages';
+import { labelForCode, normaliseLanguageCode } from '@/lib/summary-languages';
 import {
   readMeetingSummaryLanguage,
   saveMeetingSummaryLanguage,
@@ -36,6 +37,7 @@ import {
 import type { SummaryDraft, SaveState } from '@/lib/meetingDrafts';
 
 interface SummaryPanelProps {
+  seriesLanguage?: string | null;
   details: ReturnType<typeof summaryDetails> & { transcriptChanged: boolean };
   saveState: SaveState;
   hasPreviousSummary: boolean;
@@ -63,6 +65,7 @@ interface SummaryPanelProps {
   setModelConfig: (config: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => void;
   onSaveModelConfig: (config?: ModelConfig) => Promise<void>;
   onGenerateSummary: (customPrompt: string) => Promise<void>;
+  onRetryTranslation: (target: string, customPrompt: string) => Promise<void>;
   onStopGeneration: () => void;
   customPrompt: string;
   contextLoading: boolean;
@@ -87,6 +90,7 @@ type SummaryTextMatch = {
 
 export function SummaryPanel({
   details,
+  seriesLanguage,
   saveState, hasPreviousSummary, summaryRevision, onRestorePrevious, onSummaryDraft,
   onRevealSource,
   onPlaySource,
@@ -105,6 +109,7 @@ export function SummaryPanel({
   setModelConfig,
   onSaveModelConfig,
   onGenerateSummary,
+  onRetryTranslation,
   onStopGeneration,
   customPrompt, contextLoading, onPromptChange,
   onSaveSummary,
@@ -163,9 +168,9 @@ export function SummaryPanel({
   activeMeetingIdRef.current = meeting.id;
   const { addRecent } = useRecentLanguages();
 
-  const effectiveLangLabel = summaryLang ? labelForCode(summaryLang) : 'Auto';
+  const effectiveLangLabel = summaryLang ? labelForCode(summaryLang) : seriesLanguage ? labelForCode(seriesLanguage) : 'Auto';
   const isLocalFallbackLanguage = summaryLangStorage === 'local_fallback';
-  const autoSubtitle = isLocalFallbackLanguage
+  const autoSubtitle = seriesLanguage ? `Use the series setting · ${labelForCode(seriesLanguage)}` : isLocalFallbackLanguage
     ? 'Saved on this device for folderless meetings'
     : 'Uses dominant transcript language';
 
@@ -401,11 +406,11 @@ export function SummaryPanel({
         <div className="flex min-w-0 flex-nowrap items-center gap-2">
           <h2 className="shrink-0 text-sm font-semibold">Summary</h2>
           <div className="min-w-0 flex-1">
-            {aiSummary && <span className="block truncate text-xs text-muted-foreground" role="status" title={saveState === 'error' ? 'Save failed — edits retained' : undefined}>
+            {aiSummary && saveState !== 'discarded' && <span className="block truncate text-xs text-muted-foreground" role="status" title={saveState === 'error' ? 'Save failed — edits retained' : undefined}>
               {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Save failed — edits retained' : 'Unsaved changes'}
             </span>}
           </div>
-          {aiSummary && !isSummaryLoading && <Button variant="ghost" size="sm" aria-label="Copy summary" title="Copy summary" onClick={() => void onCopySummary()}><Copy aria-hidden="true" />{!compactToolbar && 'Copy summary'}</Button>}
+          {aiSummary && <Button variant="ghost" size="sm" aria-label="Copy summary" title="Copy summary" onClick={() => void onCopySummary()}><Copy aria-hidden="true" />{!compactToolbar && 'Copy summary'}</Button>}
           <SummaryGeneratorButtonGroup compact={compactToolbar} generateRef={generateRef} onCheckingChange={setCheckingModels} secondaryGenerate={!aiSummary && !isSummaryLoading && transcripts.length > 0} modelConfig={modelConfig} setModelConfig={setModelConfig} onSaveModelConfig={onSaveModelConfig}
             onActionsCloseAutoFocus={event => {
               if (retainFindFocusRef.current) event.preventDefault();
@@ -429,20 +434,25 @@ export function SummaryPanel({
           summaryRef.current.replaceText(options, token);
           toast.success('Summary text replaced', { description: 'Changes save automatically. Use Ctrl+Z in the editor to undo.' });
         }} />
-      {aiSummary && !isSummaryLoading && details && (details.model || details.email || details.transcriptChanged) && <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1 text-xs text-muted-foreground">
+      {aiSummary && details && (details.model || details.email || details.transcriptChanged || details.reduction?.passes || details.reduction?.limitRetries || details.localProvider) && <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1 text-xs text-muted-foreground">
         {details.model && <span>Generated with {details.model}{details.template && ` · ${details.template}`}</span>}
+        {details.localProvider && <span>{LOCAL_SUMMARY_HINT}</span>}
+        {!!details.reduction?.passes && <span>{details.reduction.sourceExcerpts} excerpts condensed in {details.reduction.passes} {details.reduction.passes === 1 ? 'pass' : 'passes'}</span>}
+        {!!details.reduction?.limitRetries && <span>Retried with a smaller model input</span>}
         {details.transcriptChanged && <span role="status" className="font-medium text-warning-foreground">Transcript changed since generation</span>}
         {details.email && <Button variant="ghost" size="sm" className="ml-auto text-xs" onClick={() => setEmailOpen(true)}>Follow-up email</Button>}
       </div>}
-      {details?.email && <Dialog open={emailOpen} onOpenChange={setEmailOpen}><DialogContent className="max-h-[80vh] overflow-y-auto" aria-describedby={undefined}>
-        <DialogHeader><DialogTitle>Follow-up email draft</DialogTitle></DialogHeader>
-        {details.email.subject && <p className="font-medium">{details.email.subject}</p>}
-        <p className="whitespace-pre-wrap break-words text-sm">{details.email.body}</p>
-        <DialogFooter><Button onClick={async () => {
-          try { await navigator.clipboard.writeText([details.email?.subject, details.email?.body].filter(Boolean).join('\n\n')); toast.success('Email draft copied'); }
-          catch { toast.error('Could not copy the email draft'); }
-        }}>Copy draft</Button></DialogFooter>
-      </DialogContent></Dialog>}
+      {aiSummary && details?.translation && (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2 text-sm">
+          <p role="status">
+            English notes saved. {labelForCode(normaliseLanguageCode(details.translation.target) ?? details.translation.target)} translation failed.
+            <span className="block text-xs text-muted-foreground">{details.translation.message}</span>
+          </p>
+          {!details.transcriptChanged && <Button variant="outline" size="sm" disabled={isSummaryLoading || contextLoading}
+            onClick={() => void onRetryTranslation(details.translation!.target, customPrompt)}>Retry translation</Button>}
+        </div>
+      )}
+      {emailOpen && details?.email && <FollowUpEmail key={meeting.id} meetingId={meeting.id} initialDraft={details.email} close={() => setEmailOpen(false)} />}
       {isFindOpen && aiSummary && !isSummaryLoading && (
         <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
           <Search className="h-4 w-4 text-muted-foreground" />
@@ -484,8 +494,14 @@ export function SummaryPanel({
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
-          {isSummaryLoading ? <div role="status" className="flex h-full min-h-48 items-center justify-center gap-3 p-8 text-sm text-muted-foreground"><span className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />Generating summary…</div>
-          : !aiSummary ? <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 p-8 text-center">
+          <SavedLiveAnswers key={meeting.id} meetingId={meeting.id} />
+          {isSummaryLoading && (
+            <p role="status" className="flex items-center gap-2 border-b border-border px-4 py-2 text-sm text-muted-foreground">
+              {jobState === 'deferred' ? 'Automatic notes will resume after local inference is free.'
+                : aiSummary ? 'Generating a new summary. The saved notes are available below.' : 'Generating summary…'}
+            </p>
+          )}
+          {!aiSummary && !isSummaryLoading ? <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 p-8 text-center">
               <h3 className="text-base font-semibold">{transcripts.length ? 'No summary yet' : 'No transcript yet'}</h3>
               <p className="max-w-sm text-sm text-muted-foreground">{transcripts.length ? 'Notes use the template and AI model chosen in the toolbar.' : 'Transcribe the recording first, then generate a summary.'}</p>
               {transcripts.length > 0 && (
@@ -494,10 +510,10 @@ export function SummaryPanel({
                 </Button>
               )}
             </div>
-          : <div ref={summarySearchRootRef} className="mx-auto w-full max-w-[45rem] px-6 py-5">
+          : aiSummary && <div ref={summarySearchRootRef} className="mx-auto w-full max-w-[45rem] px-6 py-5">
               <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource}>
                 <SummarySurface><BlockNoteSummaryView key={`${meeting.id}:${summaryRevision}`} saveState={saveState} onDraftChange={onSummaryDraft} ref={summaryRef}
-                  summaryData={aiSummary} onSave={onSaveSummary} onSummaryChange={onSummaryChange} status={summaryStatus} error={summaryError}
+                  summaryData={aiSummary} readOnly={isSummaryLoading} onSave={onSaveSummary} onSummaryChange={onSummaryChange} status={summaryStatus} error={summaryError}
                   meeting={{ id: meeting.id, title: meetingTitle, created_at: meeting.created_at }} /></SummarySurface>
               </SummarySources>
             </div>}

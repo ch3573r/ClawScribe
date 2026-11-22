@@ -33,7 +33,6 @@ from the source version.
 - [GPU acceleration](GPU_ACCELERATION.md)
 - [Teams detection](teams-detection.md)
 - [Recording from the tray, shortcuts and command line](tray-and-recording-control.md)
-- [Optional OpenClaw handoff](openclaw-handoff.md)
 - [Integration backlog](integrations-backlog.md)
 
 ## Authentication And Providers
@@ -54,6 +53,7 @@ These documents describe proposed work, not currently available features.
 ## Microsoft 365 Exports
 
 - [Microsoft Graph integration](integrations/microsoft-graph.md)
+- [Outbound webhook](integrations/webhook.md)
 - [OneNote export](integrations/onenote-export.md)
 - [Planner export](integrations/planner-export.md)
 - [Microsoft To Do export](integrations/todo-export.md)

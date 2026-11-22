@@ -694,14 +694,9 @@ async fn configured_chat_dispatch_needs_no_credential_table_and_reports_actual_p
     .await
     .unwrap();
     assert_eq!(resolved.model, "sonnet");
-    let api_budget = super::super::context_budget::resolve(
-        &super::super::llm_client::LLMProvider::Claude,
-        "claude-sonnet",
-        None,
-        None,
-    );
-    assert_eq!(resolved.budget.context_tokens, api_budget.context_tokens);
-    assert_eq!(resolved.budget.output_tokens, api_budget.output_tokens);
+    // This configuration selects a Claude Code alias with the CLI's fixed budget.
+    assert_eq!(resolved.budget.context_tokens, 200_000);
+    assert_eq!(resolved.budget.output_tokens, 16_000);
     let reply = super::super::llm_client::dispatch_resolved_text(
         resolved,
         "system".into(),

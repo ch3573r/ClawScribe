@@ -907,7 +907,9 @@ pub(super) async fn reusable_vector(
     space: &str,
 ) -> Result<Option<Vec<f32>>, KnowledgeError> {
     let bytes: Option<Vec<u8>> = sqlx::query_scalar(
-        "SELECT v.vector FROM knowledge_chunks c JOIN knowledge_vectors v ON v.chunk_id=c.id
+        "SELECT v.vector FROM knowledge_chunks c
+         LEFT JOIN knowledge_vector_aliases a ON a.chunk_id=c.id
+         JOIN knowledge_vectors v ON v.chunk_id=COALESCE(a.vector_chunk_id,c.id)
          WHERE c.source_id=? AND c.transcript_id=? AND c.start_byte=? AND c.end_byte=?
            AND c.revision<? AND c.text=? AND v.space=? AND v.dimensions=384
          ORDER BY c.revision DESC LIMIT 1",
@@ -939,6 +941,32 @@ pub async fn stage_evidence(
     vector: &[f32],
     space: &str,
 ) -> Result<(), KnowledgeError> {
+    stage_index_chunk(
+        pool,
+        job,
+        reference,
+        text,
+        ordinal,
+        StagedVector::Owned(vector),
+        space,
+    )
+    .await
+}
+
+pub(super) enum StagedVector<'a> {
+    Owned(&'a [f32]),
+    Shared(&'a str),
+}
+
+pub(super) async fn stage_index_chunk(
+    pool: &SqlitePool,
+    job: &SourceJob,
+    reference: &EvidenceRef,
+    text: &str,
+    ordinal: i64,
+    vector: StagedVector<'_>,
+    space: &str,
+) -> Result<(), KnowledgeError> {
     let spans = match &reference.locator {
         EvidenceLocator::Transcript { spans, .. } | EvidenceLocator::Document { spans, .. } => {
             spans
@@ -952,7 +980,6 @@ pub async fn stage_evidence(
         return Err(KnowledgeError::InvalidInput);
     }
     let span = &spans[0];
-    let vector = super::embedding::normalize(vector.to_vec())?;
     let mut tx = pool.begin().await?;
     // This conditional write obtains SQLite's writer lock before checking the
     // generation; later commands cannot dirty or replace it during publication.
@@ -962,9 +989,43 @@ pub async fn stage_evidence(
     }
     sqlx::query("INSERT INTO knowledge_chunks(id,source_id,revision,generation,ordinal,transcript_id,start_byte,end_byte,fingerprint,text) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET generation=excluded.generation,ordinal=excluded.ordinal")
         .bind(&reference.chunk_id).bind(&job.source_id).bind(job.revision).bind(job.generation).bind(ordinal).bind(&span.transcript_id).bind(span.start_byte as i64).bind(span.end_byte as i64).bind(&reference.fingerprint).bind(text).execute(&mut *tx).await?;
-    let bytes: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
-    sqlx::query("INSERT INTO knowledge_vectors(chunk_id,space,dimensions,vector) VALUES(?,?,384,?) ON CONFLICT(chunk_id) DO UPDATE SET space=excluded.space,vector=excluded.vector")
-        .bind(&reference.chunk_id).bind(space).bind(bytes).execute(&mut *tx).await?;
+    match vector {
+        StagedVector::Owned(vector) => {
+            let vector = super::embedding::normalize(vector.to_vec())?;
+            let bytes: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+            sqlx::query("INSERT INTO knowledge_vectors(chunk_id,space,dimensions,vector) VALUES(?,?,384,?) ON CONFLICT(chunk_id) DO UPDATE SET space=excluded.space,vector=excluded.vector")
+                .bind(&reference.chunk_id).bind(space).bind(bytes).execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM knowledge_vector_aliases WHERE chunk_id=?")
+                .bind(&reference.chunk_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        StagedVector::Shared(owner) => {
+            let alias = sqlx::query(
+                "INSERT INTO knowledge_vector_aliases(chunk_id,vector_chunk_id)
+                 SELECT ?,c.id FROM knowledge_chunks c JOIN knowledge_vectors v ON v.chunk_id=c.id
+                 WHERE c.id=? AND c.source_id=? AND c.revision=? AND c.generation=? AND c.text=? AND v.space=?
+                 ON CONFLICT(chunk_id) DO UPDATE SET vector_chunk_id=excluded.vector_chunk_id",
+            )
+            .bind(&reference.chunk_id).bind(owner).bind(&job.source_id).bind(job.revision)
+            .bind(job.generation).bind(text).bind(space).execute(&mut *tx).await?;
+            if alias.rows_affected() != 1 {
+                return Err(KnowledgeError::Superseded);
+            }
+            // Move dependent aliases before deleting the old vector cascades to them.
+            sqlx::query(
+                "UPDATE knowledge_vector_aliases SET vector_chunk_id=? WHERE vector_chunk_id=?",
+            )
+            .bind(owner)
+            .bind(&reference.chunk_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM knowledge_vectors WHERE chunk_id=?")
+                .bind(&reference.chunk_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -1728,6 +1789,85 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn converting_a_vector_owner_to_an_alias_keeps_the_existing_hits() {
+        use super::super::{embedding, retrieval};
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = database().await;
+        meeting(&pool, "one").await;
+        sqlx::raw_sql(
+            "INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES
+             ('first','one','Ja.','00:01'), ('second','one','Ja.','00:02'), ('third','one','Ja.','00:03')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let job = next_job(&pool).await.unwrap().unwrap();
+        let mut refs = Vec::new();
+        for row in rows_page(&pool, &job, None).await.unwrap() {
+            let span = TextSpan {
+                transcript_id: row.id.clone(),
+                start_byte: 0,
+                end_byte: row.transcript.len(),
+            };
+            refs.push(evidence(&job, &row, &span).unwrap());
+        }
+        let vector = embedding::normalize(vec![1.0; 384]).unwrap();
+        stage_evidence(&pool, &job, &refs[0], "Ja.", 0, &vector, "space")
+            .await
+            .unwrap();
+        stage_index_chunk(
+            &pool,
+            &job,
+            &refs[1],
+            "Ja.",
+            1,
+            StagedVector::Shared(&refs[0].chunk_id),
+            "space",
+        )
+        .await
+        .unwrap();
+        stage_evidence(&pool, &job, &refs[2], "Ja.", 2, &vector, "space")
+            .await
+            .unwrap();
+        stage_index_chunk(
+            &pool,
+            &job,
+            &refs[0],
+            "Ja.",
+            0,
+            StagedVector::Shared(&refs[2].chunk_id),
+            "space",
+        )
+        .await
+        .unwrap();
+        publish(&pool, &job, "space").await.unwrap();
+
+        let scope = retrieval::freeze_scope(
+            &pool,
+            &KnowledgeScope::Meeting {
+                meeting_id: "one".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let hits =
+            retrieval::search_channels(&pool, &scope, "unmatched query", Some(("space", &vector)))
+                .await
+                .unwrap();
+        assert_eq!(hits.len(), refs.len());
+        for reference in refs {
+            assert!(hits
+                .iter()
+                .any(|hit| hit.evidence.chunk_id == reference.chunk_id));
+        }
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM knowledge_vectors").await,
+            1
         );
     }
 

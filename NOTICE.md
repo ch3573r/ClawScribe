@@ -31,6 +31,10 @@ Additional upstream acknowledgments retained from the original project:
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime) (MIT), used via the [`ort`](https://crates.io/crates/ort) crate, for Parakeet/Nemotron inference
 - [OpenAI Whisper](https://github.com/openai/whisper) (MIT) models, run via [`whisper-rs`](https://crates.io/crates/whisper-rs)
 
+Windows installers also include Microsoft Visual C++ x64 runtime and OpenMP
+DLLs, copyright Microsoft Corporation, distributed app-local under the
+[Visual Studio terms for distributable code](https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution).
+
 NVIDIA Parakeet and Nemotron models are governed by NVIDIA's model license terms;
 ClawScribe downloads them at runtime from their published sources rather than
 bundling them in the installer.

@@ -64,7 +64,7 @@ pub fn escape_xml(input: &str) -> String {
 /// zero or more Transcript pages when a transcript excerpt is present and large.
 pub fn build_pages(meeting: &MeetingExport, page_budget_bytes: usize) -> Vec<OneNotePage> {
     let mut pages = vec![OneNotePage {
-        title: format!("{} - Notes", meeting.title),
+        title: meeting.title.clone(),
         kind: OneNotePageKind::Notes,
         index: 0,
         xhtml: build_notes_xhtml(meeting),
@@ -140,7 +140,30 @@ fn build_notes_xhtml(meeting: &MeetingExport) -> String {
         body.push_str("</ul>");
     }
 
-    wrap_page(&title, created, &body)
+    let marker = format!(
+        "{}{}",
+        notes_marker_prefix(&meeting.meeting_id),
+        notes_revision(meeting)
+    );
+    wrap_page(
+        &title,
+        created,
+        &format!("<div><div data-id=\"{marker}\">{body}</div></div>"),
+    )
+}
+
+pub(super) fn notes_marker_prefix(meeting_id: &str) -> String {
+    format!(
+        "clawscribe-{}-",
+        super::ledger::artifact_key_hash(&["onenote-notes", meeting_id])
+    )
+}
+
+pub(super) fn notes_revision(meeting: &MeetingExport) -> String {
+    super::ledger::artifact_key_hash(&[
+        &meeting.artifact_hash(),
+        meeting.summary_html.as_deref().unwrap_or(""),
+    ])
 }
 
 /// Split the transcript into page bodies that each stay under the byte budget.
@@ -182,7 +205,7 @@ fn build_transcript_pages(
 
 fn render_transcript_page(title: &str, created: &str, escaped_pre_body: &str) -> String {
     let body = format!("<h1>{title}</h1><h2>Transcript</h2><pre>{escaped_pre_body}</pre>");
-    wrap_page(title, created, &body)
+    wrap_page(title, created, &format!("<div>{body}</div>"))
 }
 
 fn wrap_page(escaped_title: &str, created: &str, body: &str) -> String {

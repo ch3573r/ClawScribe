@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { listen } from '@tauri-apps/api/event';
 import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
-import { RecordingOutcome, recordingBlocksAutoSummary, recordingRecoveryMessage } from '@/lib/recording-outcome';
+import { emptyLiveTranscriptMessage, type CaptureDetails, type RecordingOutcome, recordingBlocksAutoSummary, recordingRecoveryMessage } from '@/lib/recording-outcome';
 
 function MeetingDetailsContent() {
   const searchParams = useSearchParams() ?? new URLSearchParams();
@@ -27,6 +27,7 @@ function MeetingDetailsContent() {
   const [summaryJob, setSummaryJob] = useState<SummaryJobSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const [capture, setCapture] = useState<{ meetingId: string; details: CaptureDetails } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -35,6 +36,7 @@ function MeetingDetailsContent() {
       try {
         const outcome = await invoke<RecordingOutcome | null>('get_recording_outcome', { meetingId });
         if (active) {
+          setCapture(outcome?.capture_details ? { meetingId, details: outcome.capture_details } : null);
           const warning = outcome && recordingRecoveryMessage(outcome);
           setRecoveryMessage(warning && recordingBlocksAutoSummary(outcome)
             ? `${warning} Automatic notes are paused.`
@@ -65,12 +67,14 @@ function MeetingDetailsContent() {
     timelineSegments,
     timelineComplete,
     transcripts,
+    isLoading: isLoadingTranscript,
     isLoadingMore,
     hasMore,
     totalCount,
     loadedCount,
     loadMore,
     refetch,
+    patchTranscriptText,
     revealSource,
     updateSpeaker,
     applySpeakerToMatching,
@@ -226,13 +230,15 @@ function MeetingDetailsContent() {
     {recoveryMessage && <div role="alert" className="shrink-0 border-b border-warning-border/40 bg-warning px-4 py-3 text-sm text-foreground">
       <strong>Meeting needs review. </strong>{recoveryMessage}
     </div>}
-    <div className="min-h-0 flex-1"><PageContent
+    {capture?.meetingId === meetingId && capture && <RecordingCaptureDetails details={capture.details} />}
+    <div className="min-h-0 flex-1 [container-name:meeting-details] [container-type:size]"><PageContent
     key={meetingDetails.id}
     meeting={meetingDetails}
     evidenceToken={evidenceToken}
     savedSourceToken={searchParams.get('savedSource')}
     fromArchive={fromArchive}
     archiveAction={archiveAction}
+    actionId={searchParams.get('actionId')}
     summaryData={meetingSummary}
     summaryJob={summaryJob}
     onMeetingUpdated={async () => {
@@ -242,6 +248,7 @@ function MeetingDetailsContent() {
       await refetchMeetings();
     }}
     onRefetchTranscripts={refetch}
+    onPatchTranscriptText={patchTranscriptText}
     onRevealTranscript={revealSource}
     onUpdateTranscriptSpeaker={updateSpeaker}
     onApplySpeakerToMatching={applySpeakerToMatching}
@@ -250,11 +257,24 @@ function MeetingDetailsContent() {
     timelineSegments={timelineSegments}
     timelineComplete={timelineComplete}
     hasMore={hasMore}
+    isLoadingTranscript={isLoadingTranscript && !loadedCount}
     isLoadingMore={isLoadingMore}
     totalCount={totalCount}
+    emptyLiveMessage={capture?.meetingId === meetingId ? emptyLiveTranscriptMessage(capture?.details.empty_live_transcript ?? null) : null}
     loadedCount={loadedCount}
     onLoadMore={loadMore}
   /></div></div>;
+}
+
+function RecordingCaptureDetails({ details }: { details: CaptureDetails }) {
+  const items = [
+    details.backend,
+    details.dropped_samples > 0 ? 'Some samples were dropped during capture.' : null,
+    details.system_silence_periods > 0 ? 'System audio was quiet for one or more periods.' : null,
+  ].filter(Boolean);
+  return items.length > 0
+    ? <p className="shrink-0 border-b border-border px-4 py-2 text-xs text-muted-foreground">{items.join(' ')}</p>
+    : null;
 }
 
 export default function MeetingDetails() {

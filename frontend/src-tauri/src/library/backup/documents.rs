@@ -47,7 +47,7 @@ fn fields(row: &Map<String, Value>, names: &[&str]) -> Result<(), String> {
 }
 
 pub(super) fn set_file_references(manifest: &mut Manifest) -> Result<(), String> {
-    if manifest.version != 2 {
+    if manifest.version < 2 {
         return Ok(());
     }
     manifest.document_files.clear();
@@ -71,7 +71,7 @@ pub(super) fn validate(manifest: &Manifest) -> Result<BTreeMap<String, Document>
         }
         return Ok(BTreeMap::new());
     }
-    if manifest.version != 2
+    if !matches!(manifest.version, 2 | 3)
         || TABLES
             .iter()
             .any(|table| !manifest.tables.contains_key(*table))

@@ -64,8 +64,8 @@ export const MODEL_DISPLAY_CONFIG: Record<string, ModelDisplayInfo> = {
     tier: 'precise'
   },
   'parakeet-tdt-0.6b-v2-int8': {
-    friendlyName: 'Compact',
-    bestFor: 'Smaller download, good accuracy',
+    friendlyName: 'Compact (English only)',
+    bestFor: 'Smaller English model',
     tier: 'balanced'
   }
 };
@@ -103,7 +103,7 @@ export const PARAKEET_MODEL_CONFIGS: Record<string, Partial<ParakeetModelInfo>> 
     quantization: 'FP16'
   },
   'parakeet-tdt-0.6b-v2-int8': {
-    description: '25x real-time, smaller size with good accuracy',
+    description: 'English-only v2 int8 with a smaller download.',
     size_mb: 661, // Actual download: 652MB encoder + 9MB decoder + 0.15MB extras
     accuracy: 'High',
     speed: 'Very Fast',

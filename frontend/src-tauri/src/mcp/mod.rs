@@ -33,9 +33,9 @@ pub fn dispatch() -> Option<i32> {
         let identifier = config["identifier"]
             .as_str()
             .ok_or(io::ErrorKind::InvalidData)?;
-        let app_data = dirs::data_dir()
-            .ok_or(io::ErrorKind::NotFound)?
-            .join(identifier);
+        let base = dirs::data_dir().ok_or(io::ErrorKind::NotFound)?;
+        let app_data = crate::database::recovery::selected_data_dir(&base, identifier)
+            .map_err(io::Error::other)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -60,7 +60,7 @@ struct Tool {
     text_offset: bool,
 }
 
-static TOOLS: [Tool; 6] = [
+static TOOLS: [Tool; 8] = [
     Tool {
         name: "list_meetings",
         description: "List saved meetings, newest first. Use next_offset for the next page.",
@@ -103,9 +103,27 @@ static TOOLS: [Tool; 6] = [
         paged: false,
         text_offset: false,
     },
+    Tool {
+        name: "get_meeting_metadata",
+        description: "Read limited metadata for one saved meeting by its ID. Uses the reviewed follow-through permission.",
+        required_text: Some("meeting_id"),
+        paged: false,
+        text_offset: false,
+    },
+    Tool {
+        name: "list_reviewed_actions",
+        description: "Read open, user-reviewed actions from one saved meeting by its ID. Uses the reviewed follow-through permission.",
+        required_text: Some("meeting_id"),
+        paged: true,
+        text_offset: false,
+    },
 ];
 
 impl Tool {
+    fn follow_through(&self) -> bool {
+        matches!(self.name, "get_meeting_metadata" | "list_reviewed_actions")
+    }
+
     fn schema(&self) -> Value {
         let mut properties = Map::new();
         if let Some(name) = self.required_text {
@@ -210,7 +228,7 @@ enum Handshake {
 
 // Bounded pending reads allow pings and cancellation while SQL is running.
 // An aborted future yields None and never sends its tool result.
-type ReadResult = (Value, bool, Option<Result<Value, &'static str>>);
+type ReadResult = (Value, bool, bool, Option<Result<Value, &'static str>>);
 struct Server {
     app_data: PathBuf,
     handshake: Handshake,
@@ -319,7 +337,11 @@ impl Server {
                 if params.get("cursor").is_some() {
                     return Some(error(id, -32602, "Unknown tool list cursor"));
                 }
-                json!({"tools":TOOLS.iter().map(Tool::schema).collect::<Vec<_>>()})
+                let follow_through = settings::allowed(&self.app_data, true);
+                let library = settings::enabled(&self.app_data);
+                json!({"tools":TOOLS.iter().filter(|tool| {
+                    if tool.follow_through() { follow_through } else { library || !follow_through }
+                }).map(Tool::schema).collect::<Vec<_>>()})
             }
             "tools/call" => return self.call(id, modern, params),
             _ => return Some(error(id, -32601, "Method not found")),
@@ -340,7 +362,8 @@ impl Server {
             Some(Value::Object(args)) => args,
             _ => return Some(error(id, -32602, "Expected an arguments object")),
         };
-        if !settings::enabled(&self.app_data) {
+        let follow_through = tool.follow_through();
+        if !settings::allowed(&self.app_data, follow_through) {
             return Some(result(id, modern, tool_error(DISABLED)));
         }
         let args = match tool.arguments(input) {
@@ -359,7 +382,7 @@ impl Server {
         }
         let app_data = self.app_data.clone();
         let (read, cancel) = abortable(async move {
-            if !settings::enabled(&app_data) {
+            if !settings::allowed(&app_data, follow_through) {
                 return Err(DISABLED);
             }
             tokio::time::timeout(
@@ -374,14 +397,14 @@ impl Server {
         self.cancellations.push((id.clone(), cancel));
         let id = id.clone();
         self.reads
-            .push(async move { (id, modern, read.await.ok()) }.boxed());
+            .push(async move { (id, modern, follow_through, read.await.ok()) }.boxed());
         None
     }
 
-    fn finish(&mut self, (id, modern, read): ReadResult) -> Option<Value> {
+    fn finish(&mut self, (id, modern, follow_through, read): ReadResult) -> Option<Value> {
         self.cancellations.retain(|(key, _)| key != &id);
         let read = read?;
-        let body = if !settings::enabled(&self.app_data) {
+        let body = if !settings::allowed(&self.app_data, follow_through) {
             tool_error(DISABLED)
         } else {
             match read {
@@ -526,6 +549,59 @@ mod tests {
             denied["result"]
         );
         assert_eq!(server.handle(call(4)).unwrap()["result"], denied["result"]);
+    }
+
+    #[tokio::test]
+    async fn follow_through_permission_is_independent_requires_a_reference_and_revokes_pending_reads(
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let mut server = Server::new(root.path().into());
+        ready(&mut server);
+        let metadata = |id| {
+            request(
+                id,
+                "tools/call",
+                json!({
+                    "name":"get_meeting_metadata", "arguments":{"meeting_id":"selected"}
+                }),
+            )
+        };
+        settings::set_enabled(root.path(), true).unwrap();
+        let denied = server.handle(metadata(2)).unwrap();
+        assert_eq!(denied["result"]["isError"], true);
+        settings::set_enabled(root.path(), false).unwrap();
+        settings::set_follow_through(root.path(), true).unwrap();
+        let tools = server.handle(request(3, "tools/list", json!({}))).unwrap();
+        let names: Vec<_> = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["get_meeting_metadata", "list_reviewed_actions"]);
+        assert_eq!(
+            server
+                .handle(request(4, "tools/call", json!({"name":"list_meetings"})))
+                .unwrap()["result"]["isError"],
+            true
+        );
+        assert_eq!(
+            server
+                .handle(request(
+                    5,
+                    "tools/call",
+                    json!({"name":"list_reviewed_actions"})
+                ))
+                .unwrap()["result"]["isError"],
+            true
+        );
+        assert!(server.handle(metadata(6)).is_none());
+        settings::set_follow_through(root.path(), false).unwrap();
+        let outstanding = server.reads.next().await.unwrap();
+        assert_eq!(
+            server.finish(outstanding).unwrap()["result"],
+            denied["result"]
+        );
     }
 
     #[tokio::test]

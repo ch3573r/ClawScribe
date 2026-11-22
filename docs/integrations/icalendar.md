@@ -14,7 +14,16 @@ credential storage.
 
 **Upcoming meetings** on Home shows the next five meetings across your
 configured calendars for the coming week. The Calendars page lists more
-occurrences. **Use for next recording** takes priority over automatic matching.
+occurrences. Timed invitations with a supported Teams URL offer **Join** and
+**Join and record** on Windows. ClawScribe accepts eligible Teams meeting URLs
+from the event's URL field or, when that field has no supported Teams link,
+from the description if its eligible links all refer to one room. ClawScribe
+removes the description text and retains the selected join URL, including query
+parameters such as a passcode. The URL stays in the local imported calendar
+copy or in memory for a subscription. The saved meeting association stores
+the event reference and attendance separately from the join URL. Calls whose
+room cannot be identified still require confirmation.
+**Use for next recording** takes priority over automatic matching.
 The selection expires five minutes after the event ends. Choose **Clear selection**
 to remove it sooner. Invitations without an end time expire one hour after their
 start, or one hour after selection if the start time is also missing.
@@ -32,8 +41,6 @@ attendance in an automatic summary, or review after saving and regenerate.
 Active edits survive a window reload and are included when an interrupted
 recording is recovered in the same library. Saved links and attendance are
 included in library backups.
-
-Links and attendance are saved with the meeting and included in library backups.
 
 An event that ClawScribe links automatically is local convenience. It can name
 the meeting and prefill the invitee list, but its title and invitees are not sent
@@ -62,6 +69,20 @@ account, including rescheduled occurrences. Choose **Use the default template**
 to clear the preference. Changing a series template leaves attendance as it was.
 Single events, detached iCalendar imports, and links without a stable series ID
 use the regular summary template settings. Series preferences are stored locally.
+
+Choose **Preparation brief** for a recurring event under **Upcoming meetings**.
+The brief uses up to eight earlier reviewed occurrences of the same series and
+calendar source or Microsoft account. It lists open reviewed actions and
+approved decisions and notes with links to the source meetings. Briefs are
+assembled locally. Each saved recording needs a reviewed link to contribute.
+
+In the saved meeting menu, choose **Recurring meeting** to approve decisions
+and notes for that occurrence, choose a supported summary language for the
+series, or highlight a follow-up option in Export. An explicit meeting
+language overrides the series language. The language setting leaves the
+existing automatic summary permission in force. Planner and Microsoft To Do
+use the destinations configured for the active Microsoft connection and still
+open task review. The email option opens a review before any handoff.
 
 ClawScribe checks for calendar updates while Home or the Calendars page is
 open. **Refresh** requests an immediate update. Use the calendar's menu

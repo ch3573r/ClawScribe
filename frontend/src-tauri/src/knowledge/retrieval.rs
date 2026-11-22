@@ -3,6 +3,7 @@ use super::store;
 #[cfg(test)]
 use super::store::{CanonicalRow, SourceJob};
 use super::types::*;
+use futures_util::TryStreamExt;
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::{BTreeMap, BinaryHeap};
 
@@ -12,6 +13,8 @@ pub const RESULT_LIMIT: usize = 12;
 pub const RRF_CONSTANT: f64 = 60.;
 const SCOPE_CTE: &str = "WITH allowed AS (SELECT value FROM json_each(?)), selected_documents AS (SELECT value FROM json_each(?))";
 const SCOPED_SOURCE: &str = "(s.meeting_id IN(SELECT value FROM allowed) OR (s.kind='document' AND EXISTS(SELECT 1 FROM knowledge_documents d JOIN knowledge_document_attachments a ON a.document_id=d.id WHERE d.source_id=s.id AND d.id IN(SELECT value FROM selected_documents) AND a.meeting_id IN(SELECT value FROM allowed))))";
+const PUBLISHED_SOURCE: &str = "s.semantic_revision=s.revision AND s.semantic_space=? AND EXISTS (SELECT 1 FROM knowledge_chunks c JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE c.source_id=s.id AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space)";
+const SEMANTIC_SOURCE_PAGE: &str = "SELECT c.id,v.vector,s.id FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id LEFT JOIN knowledge_vector_aliases a ON a.chunk_id=c.id JOIN knowledge_vectors v ON v.chunk_id=COALESCE(a.vector_chunk_id,c.id) WHERE s.id=? AND s.semantic_space=? AND s.semantic_revision=s.revision AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space AND c.id>? ORDER BY c.id LIMIT ?";
 #[cfg(test)]
 tokio::task_local! { static MOVE_AFTER_FTS: std::cell::RefCell<Option<(String,String)>>; }
 #[cfg(test)]
@@ -23,17 +26,6 @@ pub struct FrozenScope {
     pub scope: KnowledgeScope,
     pub meeting_ids: Vec<String>,
     pub document_ids: Vec<String>,
-}
-fn valid_scope_date(value: &str) -> bool {
-    value.len() == 10
-        && value.bytes().enumerate().all(|(index, byte)| {
-            if index == 4 || index == 7 {
-                byte == b'-'
-            } else {
-                byte.is_ascii_digit()
-            }
-        })
-        && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
 }
 pub async fn freeze_scope(
     pool: &SqlitePool,
@@ -70,80 +62,74 @@ pub(super) async fn freeze_scope_rows(
     {
         return Err(KnowledgeError::InvalidInput);
     }
+    let parse_bound = |value: &str| {
+        crate::database::models::calendar_date(value).ok_or(KnowledgeError::InvalidInput)
+    };
+    let from = filter.from.as_deref().map(parse_bound).transpose()?;
+    let to = filter.to.as_deref().map(parse_bound).transpose()?;
     if filter.meeting_ids.iter().any(|id| id.trim().is_empty())
         || filter.tags.iter().any(|tag| tag.trim().is_empty())
-        || filter.from.as_ref().is_some_and(|v| !valid_scope_date(v))
-        || filter.to.as_ref().is_some_and(|v| !valid_scope_date(v))
-        || matches!((&filter.from,&filter.to),(Some(from),Some(to)) if from>to)
+        || matches!((from, to), (Some(from), Some(to)) if from > to)
     {
         return Err(KnowledgeError::InvalidInput);
     }
-    let mut ids = std::collections::BTreeMap::<String, (String, Vec<String>)>::new();
+    let wanted_tags: Vec<_> = filter.tags.iter().map(|tag| tag.to_lowercase()).collect();
+    let tags = if filter.untagged || !wanted_tags.is_empty() {
+        "(SELECT json_group_array(tag) FROM meeting_tags WHERE meeting_id=m.id)"
+    } else {
+        "'[]'"
+    };
     let selection = if filter.meeting_ids.is_empty() {
         None
     } else {
         Some(serde_json::to_string(&filter.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?)
     };
     let restriction = if selection.is_some() {
-        "AND m.id IN (SELECT value FROM json_each(?4))"
+        "WHERE m.id IN (SELECT value FROM json_each(?))"
     } else {
         ""
     };
     let statement = format!(
-        "SELECT m.id,m.created_at,t.tag FROM meetings m LEFT JOIN meeting_tags t ON t.meeting_id=m.id
-         WHERE (?1 IS NULL OR substr(m.created_at,1,10)>=?1) AND (?2 IS NULL OR substr(m.created_at,1,10)<=?2)
-         {restriction} ORDER BY m.id LIMIT ?3"
+        "SELECT m.id,m.created_at,{tags} AS tags FROM meetings m
+         {restriction} ORDER BY m.id"
     );
-    let mut query = sqlx::query(&statement)
-        // Leave saved-answer scope semantics intact for older date formats.
-        .bind(row_limit.and(filter.from.as_deref()))
-        .bind(row_limit.and(filter.to.as_deref()))
-        .bind(row_limit.map_or(-1, |limit| limit + 1));
+    let mut query = sqlx::query(&statement);
     if let Some(selection) = selection {
         query = query.bind(selection);
     }
-    let rows = query.fetch_all(&mut *connection).await?;
-    if row_limit.is_some_and(|limit| rows.len() > limit as usize) {
-        return Err(KnowledgeError::Busy);
-    }
-    for row in rows {
-        let id: String = row.try_get("id")?;
-        let date: String = row.try_get("created_at")?;
-        let entry = ids.entry(id).or_insert((date, Vec::new()));
-        if let Some(tag) = row.try_get::<Option<String>, _>("tag")? {
-            entry.1.push(tag.to_lowercase());
+    let mut rows = query.fetch(&mut *connection);
+    let mut meeting_ids = Vec::new();
+    // Decode the same timestamps the sidebar receives and count each meeting
+    // once, after applying both date and project filters.
+    while let Some(row) = rows.try_next().await? {
+        if from.is_some() || to.is_some() {
+            let Some(date) = crate::database::models::local_meeting_date(&row, "created_at") else {
+                continue;
+            };
+            if from.is_some_and(|from| date < from) || to.is_some_and(|to| date > to) {
+                continue;
+            }
         }
-    }
-    let meeting_ids = ids
-        .into_iter()
-        .filter(|(_, (date, tags))| {
-            filter
-                .from
-                .as_ref()
-                .is_none_or(|from| date.get(..10).unwrap_or(date) >= from.as_str())
-                && filter
-                    .to
-                    .as_ref()
-                    .is_none_or(|to| date.get(..10).unwrap_or(date) <= to.as_str())
-                && if filter.untagged {
-                    tags.is_empty()
-                } else if filter.tags.is_empty() {
-                    true
-                } else {
-                    match filter.tag_mode {
-                        TagMatch::Any => filter
-                            .tags
-                            .iter()
-                            .any(|tag| tags.contains(&tag.to_lowercase())),
-                        TagMatch::All => filter
-                            .tags
-                            .iter()
-                            .all(|tag| tags.contains(&tag.to_lowercase())),
-                    }
+        if filter.untagged || !wanted_tags.is_empty() {
+            let tags: sqlx::types::Json<Vec<String>> = row.try_get("tags")?;
+            let tags: Vec<_> = tags.0.iter().map(|tag| tag.to_lowercase()).collect();
+            let matches = if filter.untagged {
+                tags.is_empty()
+            } else {
+                match filter.tag_mode {
+                    TagMatch::Any => wanted_tags.iter().any(|tag| tags.contains(tag)),
+                    TagMatch::All => wanted_tags.iter().all(|tag| tags.contains(tag)),
                 }
-        })
-        .map(|(id, _)| id)
-        .collect();
+            };
+            if !matches {
+                continue;
+            }
+        }
+        if row_limit.is_some_and(|limit| meeting_ids.len() as i64 >= limit) {
+            return Err(KnowledgeError::Busy);
+        }
+        meeting_ids.push(row.try_get("id")?);
+    }
     Ok(FrozenScope {
         scope: scope.clone(),
         meeting_ids,
@@ -508,56 +494,71 @@ async fn semantic_candidates(
 ) -> Result<Vec<Passage>, KnowledgeError> {
     let query = super::embedding::normalize(query.to_vec())?;
     // Empty or stale generations do not reduce another source's budget.
-    let eligible: i64 = sqlx::query_scalar(&format!("{SCOPE_CTE} SELECT COUNT(DISTINCT s.id) FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE {SCOPED_SOURCE} AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space"))
-        .bind(allowed).bind(documents).bind(space).fetch_one(pool).await?;
-    let per_source = if eligible >= 2 { 3 } else { CANDIDATES };
+    let sources: Vec<String> = sqlx::query_scalar(&format!(
+        "{SCOPE_CTE} SELECT s.id FROM knowledge_sources s WHERE {SCOPED_SOURCE} AND {PUBLISHED_SOURCE}"
+    ))
+        .bind(allowed).bind(documents).bind(space).fetch_all(pool).await?;
+    let per_source = if sources.len() >= 2 { 3 } else { CANDIDATES };
     let mut heap = BinaryHeap::<Scored>::new();
-    let mut after = String::new();
-    loop {
-        let page:Vec<(String,Vec<u8>,String)>=sqlx::query_as(&format!("{SCOPE_CTE} SELECT c.id,v.vector,s.id FROM knowledge_vectors v JOIN knowledge_chunks c ON c.id=v.chunk_id JOIN knowledge_sources s ON s.id=c.source_id WHERE {SCOPED_SOURCE} AND v.space=? AND s.semantic_space=? AND s.semantic_revision=s.revision AND c.revision=s.revision AND c.generation=s.generation AND c.id>? ORDER BY c.id LIMIT ?")).bind(allowed).bind(documents).bind(space).bind(space).bind(&after).bind(VECTOR_PAGE as i64).fetch_all(pool).await?;
-        if page.is_empty() {
-            break;
-        }
-        debug_assert!(page.len() <= 512);
-        after = page.last().unwrap().0.clone();
-        let query = query.clone();
-        heap = tokio::task::spawn_blocking(move || {
-            for (id, bytes, source_id) in page {
-                if bytes.len() != 384 * 4 {
-                    continue;
-                }
-                let mut score = 0.;
-                for (value, weight) in bytes.chunks_exact(4).zip(&query) {
-                    score += f32::from_le_bytes(value.try_into().unwrap()) as f64 * *weight as f64;
-                }
-                if !score.is_finite() {
-                    continue;
-                }
-                let hit = Scored {
-                    score,
-                    id,
-                    source_id,
-                };
-                if per_source < CANDIDATES {
-                    let same_source = || heap.iter().filter(|item| item.source_id == hit.source_id);
-                    if same_source().count() >= per_source {
-                        let weakest = same_source().max().unwrap();
-                        if hit >= *weakest {
-                            continue;
+    for source in sources {
+        let mut after = String::new();
+        loop {
+            let page: Vec<(String, Vec<u8>, String)> = sqlx::query_as(SEMANTIC_SOURCE_PAGE)
+                .bind(&source)
+                .bind(space)
+                .bind(&after)
+                .bind(VECTOR_PAGE as i64)
+                .fetch_all(pool)
+                .await?;
+            let Some((last, _, _)) = page.last() else {
+                break;
+            };
+            let final_page = page.len() < VECTOR_PAGE;
+            after.clone_from(last);
+            let query = query.clone();
+            heap = tokio::task::spawn_blocking(move || {
+                for (id, bytes, source_id) in page {
+                    if bytes.len() != 384 * 4 {
+                        continue;
+                    }
+                    let mut score = 0.;
+                    for (value, weight) in bytes.chunks_exact(4).zip(&query) {
+                        score +=
+                            f32::from_le_bytes(value.try_into().unwrap()) as f64 * *weight as f64;
+                    }
+                    if !score.is_finite() {
+                        continue;
+                    }
+                    let hit = Scored {
+                        score,
+                        id,
+                        source_id,
+                    };
+                    if per_source < CANDIDATES {
+                        let same_source =
+                            || heap.iter().filter(|item| item.source_id == hit.source_id);
+                        if same_source().count() >= per_source {
+                            let weakest = same_source().max().unwrap();
+                            if hit >= *weakest {
+                                continue;
+                            }
+                            let remove = weakest.id.clone();
+                            heap.retain(|item| item.id != remove);
                         }
-                        let remove = weakest.id.clone();
-                        heap.retain(|item| item.id != remove);
+                    }
+                    heap.push(hit);
+                    if heap.len() > CANDIDATES {
+                        heap.pop();
                     }
                 }
-                heap.push(hit);
-                if heap.len() > CANDIDATES {
-                    heap.pop();
-                }
+                heap
+            })
+            .await
+            .map_err(|_| KnowledgeError::ProviderFailure)?;
+            if final_page {
+                break;
             }
-            heap
-        })
-        .await
-        .map_err(|_| KnowledgeError::ProviderFailure)?;
+        }
     }
     let mut best = heap.into_vec();
     best.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
@@ -625,7 +626,7 @@ pub(super) async fn retrieve_with_vector(
         serde_json::to_string(&scope.meeting_ids).map_err(|_| KnowledgeError::InvalidInput)?;
     let documents =
         serde_json::to_string(&scope.document_ids).map_err(|_| KnowledgeError::InvalidInput)?;
-    let scoped_ready = request.mode == SearchMode::Hybrid && sqlx::query_scalar::<_, bool>(&format!("{SCOPE_CTE} SELECT EXISTS(SELECT 1 FROM knowledge_sources s JOIN knowledge_chunks c ON c.source_id=s.id JOIN knowledge_vectors v ON v.chunk_id=c.id WHERE {SCOPED_SOURCE} AND s.semantic_revision=s.revision AND s.semantic_space=? AND c.revision=s.revision AND c.generation=s.generation AND v.space=s.semantic_space)"))
+    let scoped_ready = request.mode == SearchMode::Hybrid && sqlx::query_scalar::<_, bool>(&format!("{SCOPE_CTE} SELECT EXISTS(SELECT 1 FROM knowledge_sources s WHERE {SCOPED_SOURCE} AND {PUBLISHED_SOURCE})"))
         .bind(allowed).bind(documents).bind(&space.id).fetch_one(pool).await?;
     let embedding = if scoped_ready {
         Some(
@@ -1044,6 +1045,146 @@ mod tests {
             freeze_scope(&pool, &scope).await.unwrap().meeting_ids,
             vec!["two"]
         );
+    }
+
+    #[tokio::test]
+    async fn date_scope_uses_the_local_day_for_both_midnights_and_legacy_timestamps() {
+        use chrono::{FixedOffset, Local, TimeZone, Utc};
+
+        let pool = fixture().await;
+        let day = "2026-11-21";
+        let early = Local.with_ymd_and_hms(2026, 11, 21, 0, 30, 0).unwrap();
+        let late = Local.with_ymd_and_hms(2026, 11, 21, 23, 30, 0).unwrap();
+        let west = FixedOffset::west_opt(12 * 3600).unwrap();
+        let east = FixedOffset::east_opt(14 * 3600).unwrap();
+        let different_prefix = |time: chrono::DateTime<Local>| {
+            [time.with_timezone(&west), time.with_timezone(&east)]
+                .into_iter()
+                .find(|stamp| stamp.date_naive() != time.date_naive())
+                .unwrap()
+                .to_rfc3339()
+        };
+        for (id, stamp) in [
+            ("early", different_prefix(early)),
+            ("late", different_prefix(late)),
+            ("legacy-day", day.to_string()),
+            (
+                "legacy-time",
+                late.with_timezone(&Utc).format("%F %T").to_string(),
+            ),
+            (
+                "outside",
+                Local
+                    .with_ymd_and_hms(2026, 11, 22, 0, 0, 0)
+                    .unwrap()
+                    .to_rfc3339(),
+            ),
+        ] {
+            sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES (?,'Synthetic meeting',?,?)")
+                .bind(id).bind(&stamp).bind(&stamp).execute(&pool).await.unwrap();
+        }
+        for tag in ["alpha", "beta", "gamma"] {
+            sqlx::query("INSERT INTO meeting_tags(meeting_id,tag) VALUES ('early',?)")
+                .bind(tag)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                all_meetings: true,
+                from: Some(day.into()),
+                to: Some(day.into()),
+                ..Default::default()
+            },
+        };
+        let expected = vec!["early", "late", "legacy-day", "legacy-time"];
+        assert_eq!(
+            freeze_scope(&pool, &scope).await.unwrap().meeting_ids,
+            expected
+        );
+        assert_eq!(
+            freeze_scope_rows(&mut *pool.acquire().await.unwrap(), &scope, Some(4))
+                .await
+                .unwrap()
+                .meeting_ids,
+            expected
+        );
+        let tagged_scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                all_meetings: true,
+                from: Some(day.into()),
+                to: Some(day.into()),
+                tags: vec!["ALPHA".into(), "gamma".into()],
+                tag_mode: TagMatch::All,
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            freeze_scope_rows(&mut *pool.acquire().await.unwrap(), &tagged_scope, Some(1))
+                .await
+                .unwrap()
+                .meeting_ids,
+            vec!["early"]
+        );
+        let rows = crate::database::repositories::meeting::MeetingsRepository::get_meetings(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == "legacy-day")
+                .unwrap()
+                .created_at,
+            day
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == "legacy-time")
+                .unwrap()
+                .created_at,
+            late.with_timezone(&Utc).to_rfc3339()
+        );
+    }
+
+    #[tokio::test]
+    async fn date_scope_uses_the_instant_for_both_copies_of_the_dst_repeated_hour() {
+        use chrono::{DateTime, Local};
+        let pool = fixture().await;
+        let stamps = [
+            ("summer-offset", "2026-10-25T02:30:00+02:00"),
+            ("winter-offset", "2026-10-25T02:30:00+01:00"),
+        ];
+        let local_day = |stamp| {
+            DateTime::parse_from_rfc3339(stamp)
+                .unwrap()
+                .with_timezone(&Local)
+                .format("%F")
+                .to_string()
+        };
+        for (id, stamp) in stamps {
+            sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES (?,'Synthetic meeting',?,?)")
+                .bind(id).bind(stamp).bind(stamp).execute(&pool).await.unwrap();
+        }
+        for (_, stamp) in stamps {
+            let day = local_day(stamp);
+            let scope = KnowledgeScope::Library {
+                filter: MeetingFilter {
+                    meeting_ids: stamps.iter().map(|(id, _)| id.to_string()).collect(),
+                    from: Some(day.clone()),
+                    to: Some(day.clone()),
+                    ..Default::default()
+                },
+            };
+            let expected: Vec<_> = stamps
+                .iter()
+                .filter(|(_, stamp)| local_day(stamp) == day)
+                .map(|(id, _)| *id)
+                .collect();
+            assert_eq!(
+                freeze_scope(&pool, &scope).await.unwrap().meeting_ids,
+                expected
+            );
+        }
     }
     #[tokio::test]
     async fn vector_scan_reaches_last_page_with_bounded_candidates_and_results() {

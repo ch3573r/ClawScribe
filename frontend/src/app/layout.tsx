@@ -46,7 +46,6 @@ import { useRouter } from 'next/navigation'
 import { ThemeInitializer } from '@/components/ThemeSettings'
 import { AppShortcuts } from '@/components/AppShortcuts'
 import { RecordingRequests } from '@/components/RecordingRequests'
-import { AudioDeviceHotSwapMonitor } from '@/components/AudioDeviceHotSwapMonitor'
 import { ArchiveStorageDialog } from '@/components/Archive/ArchiveStorageDialog'
 
 
@@ -111,17 +110,17 @@ const fontVariables = [sourceSans3, atkinson, lexend, firaSans, ibmPlexSans, int
 function AppImportDialog({
   showImportDialog,
   handleImportDialogClose,
-  importFilePath,
+  importFilePaths,
 }: {
   showImportDialog: boolean;
   handleImportDialogClose: (open: boolean) => void;
-  importFilePath: string | null;
+  importFilePaths: string[];
 }) {
   return (
     <ImportAudioDialog
       open={showImportDialog}
       onOpenChange={handleImportDialogClose}
-      preselectedFile={importFilePath}
+      preselectedFiles={importFilePaths}
     />
   );
 }
@@ -133,6 +132,7 @@ export default function RootLayout({
 }) {
   const router = useRouter()
   const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null)
+  const [recoveryLibrary, setRecoveryLibrary] = useState(false)
 
   useEffect(() => {
     const close = listen('summary-flush-on-close', () => { void flushMeetingDrafts().catch(() => {}); });
@@ -157,7 +157,7 @@ export default function RootLayout({
   // Import audio state
   const [showDropOverlay, setShowDropOverlay] = useState(false)
   const [showImportDialog, setShowImportDialog] = useState(false)
-  const [importFilePath, setImportFilePath] = useState<string | null>(null)
+  const [importFilePaths, setImportFilePaths] = useState<string[]>([])
 
   useEffect(() => {
     installTeamsDetectionDebugBridge()
@@ -174,8 +174,13 @@ export default function RootLayout({
   }, [])
 
   useEffect(() => {
-    // Check onboarding status first
-    invoke<{ completed: boolean } | null>('get_onboarding_status')
+    invoke<boolean>('startup_recovery_active')
+      .catch(() => false)
+      .then(active => {
+        setRecoveryLibrary(active)
+        if (active) return { completed: true }
+        return invoke<{ completed: boolean } | null>('get_onboarding_status')
+      })
       .then((status) => {
         const isComplete = status?.completed ?? false
         setShowOnboarding(!isComplete)
@@ -268,15 +273,13 @@ export default function RootLayout({
 
   // Handle file drop for audio import
   const handleFileDrop = useCallback((audioPaths: string[], otherCount: number) => {
-    // The first audio file the core granted
-    const audioFile = audioPaths.find(p => {
+    const audioFiles = audioPaths.filter(p => {
       const ext = p.split('.').pop()?.toLowerCase();
       return !!ext && isAudioExtension(ext);
     });
 
-    if (audioFile) {
-      console.log('[Layout] Audio file dropped');
-      setImportFilePath(audioFile);
+    if (audioFiles.length) {
+      setImportFilePaths(audioFiles);
       setShowImportDialog(true);
     } else if (audioPaths.length + otherCount > 0) {
       toast.error('Please drop an audio file', {
@@ -340,13 +343,13 @@ export default function RootLayout({
   const handleImportDialogClose = useCallback((open: boolean) => {
     setShowImportDialog(open);
     if (!open) {
-      setImportFilePath(null);
+      setImportFilePaths([]);
     }
   }, []);
 
   // Handler for ImportDialogProvider - opens import dialog from any child component
   const handleOpenImportDialog = useCallback((filePath?: string | null) => {
-    setImportFilePath(filePath ?? null);
+    setImportFilePaths(filePath ? [filePath] : []);
     setShowImportDialog(true);
   }, []);
 
@@ -364,7 +367,6 @@ export default function RootLayout({
         <AppTitlebar />
         <AnalyticsProvider>
           <RecordingStateProvider>
-            <AudioDeviceHotSwapMonitor />
             <TranscriptProvider>
               <ConfigProvider>
                 <LiveAssistanceProvider>
@@ -389,7 +391,7 @@ export default function RootLayout({
                               ) : showOnboarding === false ? (
                                 <div className="flex pt-[var(--titlebar-height)]">
                                   <Sidebar />
-                                  <MainContent>{children}</MainContent>
+                                  <MainContent recoveryLibrary={recoveryLibrary}>{children}</MainContent>
                                 </div>
                               ) : null}
                               {/* Import audio overlay and dialog */}
@@ -397,7 +399,7 @@ export default function RootLayout({
                               <AppImportDialog
                                 showImportDialog={showImportDialog}
                                 handleImportDialogClose={handleImportDialogClose}
-                                importFilePath={importFilePath}
+                                importFilePaths={importFilePaths}
                               />
                             </ImportDialogProvider>
                           </RecordingPostProcessingProvider>

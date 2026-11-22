@@ -1,5 +1,5 @@
 //! Local desktop discovery only. These rows are never transcript evidence.
-use super::{folded_char, literal, literal_fold};
+use super::literal::{self, LiteralQuery};
 use crate::knowledge::{
     chunking::floor_boundary,
     retrieval,
@@ -41,6 +41,10 @@ pub(crate) struct SavedHit {
     pub date: String,
     pub text: String,
     pub seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    highlights: Vec<(usize, usize)>,
+    clipped_start: bool,
+    clipped_end: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     note_context: Option<(String, String)>,
 }
@@ -66,21 +70,31 @@ pub(crate) async fn search_saved_meetings(
     scope: Option<KnowledgeScope>,
     one_per_meeting: bool,
 ) -> Result<DesktopResults, String> {
+    search_archive(state.db_manager.pool(), &query, scope, one_per_meeting)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+async fn search_archive(
+    pool: &SqlitePool,
+    query: &str,
+    scope: Option<KnowledgeScope>,
+    one_per_meeting: bool,
+) -> Result<DesktopResults, KnowledgeError> {
     if matches!(&scope, Some(KnowledgeScope::Library { filter }) if !filter.all_meetings && filter.meeting_ids.is_empty())
     {
         return Ok(DesktopResults::default());
     }
-    let pool = state.db_manager.pool();
-    let linked = literal::linked(pool, &query, scope.as_ref(), one_per_meeting)
-        .await
-        .map_err(|err| err.to_string())?;
-    let saved = match search(pool, query, scope, one_per_meeting).await {
+    let query = LiteralQuery::archive(query)?;
+    let linked =
+        literal::linked_query(pool, query.clone(), scope.as_ref(), one_per_meeting).await?;
+    let saved = match search_query(pool, query, scope, one_per_meeting).await {
         Ok(saved) => saved,
         Err(KnowledgeError::Busy) => SavedResults {
             limited: true,
             ..Default::default()
         },
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(error),
     };
     Ok(DesktopResults {
         titles: linked.titles,
@@ -158,22 +172,17 @@ impl SavedSource {
 }
 
 // Return original UTF-8 offsets even when a character folds to several scalars.
-fn excerpt(text: &str, pattern: &str) -> Option<(usize, usize)> {
-    let found = literal_fold(text).find(pattern)?;
-    let mut folded_bytes = 0;
-    let mut begin = None;
-    for (i, ch) in text.char_indices() {
-        folded_bytes += folded_char(ch).map(char::len_utf8).sum::<usize>();
-        if folded_bytes > found {
-            begin.get_or_insert(i);
-        }
-        if folded_bytes >= found + pattern.len() {
-            let start = floor_boundary(text, begin?.saturating_sub(100));
-            let end = floor_boundary(text, i + ch.len_utf8() + 100);
-            return Some((start, end));
-        }
-    }
-    None
+fn excerpt(text: &str, query: &LiteralQuery) -> Option<(usize, usize)> {
+    let (found_start, found_end) = query.find(text)?;
+    let start = floor_boundary(text, found_start.saturating_sub(100));
+    let end = floor_boundary(text, found_end + 100);
+    let (first, last) = literal::trim_window(
+        &text[start..end],
+        start > 0,
+        end < text.len(),
+        (found_start - start, found_end - start),
+    );
+    Some((start + first, start + last))
 }
 
 fn hit(
@@ -208,23 +217,22 @@ fn hit(
         date: row.date,
         text,
         seconds: row.seconds,
+        highlights: Vec::new(),
+        clipped_start: start > 0,
+        clipped_end: end < body.len(),
         note_context: None,
     })
 }
 
 async fn search_rows(
     conn: &mut SqliteConnection,
-    query: &str,
+    query: &LiteralQuery,
     scope: Option<&KnowledgeScope>,
     one_per_meeting: bool,
 ) -> Result<SavedResults, KnowledgeError> {
     let mut result = SavedResults::default();
-    let pattern = literal_fold(query.trim());
-    if pattern.is_empty() {
+    if query.is_empty() {
         return Ok(result);
-    }
-    if query.trim().chars().count() > literal::MAX_QUERY_CHARS {
-        return Err(KnowledgeError::InvalidInput);
     }
     let allowed = if let Some(scope) = scope {
         match tokio::time::timeout(
@@ -297,7 +305,7 @@ async fn search_rows(
             let Some(text) = source.text(&row) else {
                 continue;
             };
-            if let Some((start, end)) = excerpt(&text, &pattern) {
+            if let Some((start, end)) = excerpt(&text, query) {
                 if matches >= HIT_LIMIT {
                     result.limited = true;
                     break;
@@ -305,7 +313,10 @@ async fn search_rows(
                 if one_per_meeting {
                     seen.insert(row.meeting_id.clone());
                 }
-                result.hits.extend(hit(row, source, &text, start, end));
+                if let Some(mut hit) = hit(row, source, &text, start, end) {
+                    hit.highlights = query.highlights(&hit.text);
+                    result.hits.push(hit);
+                }
                 matches += 1;
             }
         }
@@ -313,9 +324,19 @@ async fn search_rows(
     Ok(result)
 }
 
+#[cfg(test)]
 pub(crate) async fn search(
     pool: &SqlitePool,
     query: String,
+    scope: Option<KnowledgeScope>,
+    one_per_meeting: bool,
+) -> Result<SavedResults, KnowledgeError> {
+    search_query(pool, LiteralQuery::archive(&query)?, scope, one_per_meeting).await
+}
+
+async fn search_query(
+    pool: &SqlitePool,
+    query: LiteralQuery,
     scope: Option<KnowledgeScope>,
     one_per_meeting: bool,
 ) -> Result<SavedResults, KnowledgeError> {
@@ -384,6 +405,72 @@ mod tests {
     use super::*;
     use crate::knowledge::types::{MeetingFilter, TagMatch};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn archive_requires_every_literal_in_one_source_and_respects_quoted_order() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO meetings(id,title,created_at,updated_at) VALUES
+                ('match','50%_ und die ÄPFEL auf der Straße','2026-01-01','2026-01-01'),
+                ('separate','Äpfel','2026-01-02','2026-01-02');
+             INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES
+                ('a','match','Die Äpfel auf der Straße kosten 50%_.','00:00'),
+                ('b','separate','Straße 50%_','00:00');
+             INSERT INTO meeting_bookmarks(id,meeting_id,label,seconds) VALUES
+                ('bookmark','match','Straße und rote Äpfel 50%_','1');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let results = search_archive(&pool, "50%_ STRAẞE Äpfel", None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            results
+                .titles
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            ["match"]
+        );
+        assert_eq!(results.passages.len(), 1);
+        assert_eq!(results.saved.len(), 1);
+        let hit = &results.passages[0].hit;
+        let highlights = hit
+            .highlights
+            .iter()
+            .map(|&(start, end)| &hit.text[start..end])
+            .collect::<Vec<_>>();
+        assert_eq!(highlights, ["Äpfel", "Straße", "50%_"]);
+
+        for query in [
+            "„Äpfel auf der Straße“ 50%_",
+            "„Äpfel auf der Straße” 50%_",
+            "„Äpfel auf der Straße\" 50%_",
+        ] {
+            let results = search_archive(&pool, query, None, false).await.unwrap();
+            assert_eq!(results.titles.len(), 1, "{query}");
+            assert_eq!(results.passages.len(), 1, "{query}");
+            assert!(results.saved.is_empty(), "{query}");
+        }
+
+        for query in [
+            "\"50%_ Straße Äpfel",
+            "„50%_ Straße Äpfel",
+            "“50%_ Straße Äpfel",
+        ] {
+            let results = search_archive(&pool, query, None, false).await.unwrap();
+            assert_eq!(results.titles.len(), 1, "{query}");
+            assert_eq!(results.passages.len(), 1, "{query}");
+            assert_eq!(results.saved.len(), 1, "{query}");
+        }
+    }
 
     #[tokio::test]
     async fn saved_hits_use_current_display_text_and_preserve_meeting_boundaries() {
@@ -496,7 +583,8 @@ mod tests {
     #[test]
     fn excerpt_handles_expanding_lowercase_and_multibyte_boundaries() {
         let text = format!("{}İ Σίσυφος 📘{}", "界".repeat(128), "界".repeat(128));
-        let (start, end) = excerpt(&text, &literal_fold("i\u{307} ΣΊΣΥΦΟΣ 📘")).unwrap();
+        let query = LiteralQuery::archive("\"i\u{307} ΣΊΣΥΦΟΣ 📘\"").unwrap();
+        let (start, end) = excerpt(&text, &query).unwrap();
         assert!(text[start..end].contains("İ Σίσυφος 📘"));
     }
 }

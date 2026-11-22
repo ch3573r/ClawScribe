@@ -48,7 +48,7 @@ fn find_legacy_database(candidates: &[PathBuf]) -> Option<PathBuf> {
 /// The legacy file is read through a read-only connection and never modified.
 #[tauri::command]
 pub async fn import_legacy_database_if_present(app: AppHandle) -> Result<bool, String> {
-    if app.try_state::<AppState>().is_some() {
+    if super::setup::startup_failed() || app.try_state::<AppState>().is_some() {
         return Err("The database already exists".into());
     }
     let app_data_dir = app
@@ -104,6 +104,9 @@ mod tests {
 /// Initialize a fresh database (for users who don't want to import)
 #[tauri::command]
 pub async fn initialize_fresh_database(app: AppHandle) -> Result<(), String> {
+    if super::setup::startup_failed() || app.try_state::<AppState>().is_some() {
+        return Err("The database cannot be initialized from this window.".into());
+    }
     info!("Initializing fresh database");
 
     let db_manager = DatabaseManager::new_from_app_handle(&app)

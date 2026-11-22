@@ -28,6 +28,7 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
   const [isRestoring, setIsRestoring] = useState(false);
   const blockNoteSummaryRef = useRef<BlockNoteSummaryViewRef>(null);
   const { setCurrentMeeting, setMeetings } = useSidebar();
+  const publishedTitle = useRef({ id: meeting.id, title: meeting.title });
 
   useEffect(() => {
     const unsubscribe = draft.subscribe(() => refresh(value => value + 1));
@@ -47,19 +48,25 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
         setDetails({ ...summaryDetails(result.data), transcriptChanged: result.transcript_changed === true });
       }
     };
+    const summarySubscription = listen<string>('summary-job-changed', ({ payload }) => {
+      if (payload === meeting.id) void refresh().catch(() => {});
+    });
     const subscriptions = ['transcript-text-edited', 'retranscription-complete', 'speaker-diarization-complete', 'transcript-speaker-updated'].map(event =>
       listen<{ meeting_id: string }>(event, ({ payload }) => { if (payload.meeting_id === meeting.id) void refresh().catch(() => {}); }));
+    subscriptions.push(summarySubscription);
     void Promise.allSettled(subscriptions).then(() => { if (active) void refresh().catch(() => {}); });
     return () => { active = false; subscriptions.forEach(sub => void sub.then(off => off()).catch(() => {})); };
   }, [meeting.id, aiSummary]);
 
   const updateSidebar = useCallback((title: string) => {
+    publishedTitle.current = { id: meeting.id, title };
     setMeetings(previous => previous.map((item: CurrentMeeting) => item.id === meeting.id ? { ...item, title } : item));
-    setCurrentMeeting({ id: meeting.id, title });
+    setCurrentMeeting(previous => previous?.id === meeting.id ? { ...previous, title } : previous);
   }, [meeting.id, setMeetings, setCurrentMeeting]);
   useEffect(() => {
-    if (draft.state === 'saved') updateSidebar(meetingTitle);
-  }, [draft.state, meetingTitle, updateSidebar]);
+    if (publishedTitle.current.id !== meeting.id) publishedTitle.current = { id: meeting.id, title: meeting.title };
+    if (draft.state === 'saved' && publishedTitle.current.title !== meetingTitle) updateSidebar(meetingTitle);
+  }, [draft.state, meeting.id, meeting.title, meetingTitle, updateSidebar]);
 
   const handleTitleChange = useCallback((title: string) => {
     setMeetingTitle(title);

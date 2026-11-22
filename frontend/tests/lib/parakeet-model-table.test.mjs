@@ -62,6 +62,7 @@ test('one table, the default model first, tags beside the name and no emoji', ()
   assert.doesNotMatch(text(tree), /[\u{1F300}-\u{1FAFF}☀-➿]/u);
   assert.match(text(tree), /1,276 MB/);
   assert.match(text(rowFor(rows, 'Parakeet Ultra fp16')), /Parakeet Ultra fp16/);
+  assert.match(text(rowFor(rows, 'Compact')), /English only/i);
 });
 
 test('every state keeps the action that applies to it', () => {
@@ -92,7 +93,7 @@ test('every state keeps the action that applies to it', () => {
   const failed = rowFor(rows, 'Compact');
   assert.match(text(failed), /Download failed/);
   assert.match(text(failed), /Network dropped/);
-  button(failed, 'Retry download of Compact').props.onClick();
+  button(failed, 'Retry download of Compact (English only)').props.onClick();
 
   assert.deepEqual(calls.map(call => call.join(':')), [
     'select:parakeet-tdt-0.6b-v3-int8', 'delete:parakeet-tdt-0.6b-v3-int8', 'download:parakeet-tdt-0.6b-v3-smoothquant-int8',

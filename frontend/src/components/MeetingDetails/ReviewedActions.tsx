@@ -20,19 +20,24 @@ interface ReviewedAction {
   legacyAction: { id: string; titleHash: string } | null;
 }
 
+type DismissedSuggestion = { id: string; legacyAction: NonNullable<ReviewedAction["legacyAction"]> };
+
 function message(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, onReturnFocus }: {
+export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, onReturnFocus, targetActionId }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   meetingId: string;
   getMarkdown: () => Promise<string>;
   onReturnFocus?: () => void;
+  targetActionId?: string | null;
 }) {
   const [actions, setActions] = useState<ReviewedAction[]>([]);
+  const [dismissed, setDismissed] = useState<DismissedSuggestion[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [revision, setRevision] = useState("");
   const [history, setHistory] = useState<MeetingExportHistory[]>([]);
   const [historyError, setHistoryError] = useState(false);
   const [reload, setReload] = useState(0);
@@ -46,6 +51,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
     if (!open) return;
     let active = true;
     setActions([]);
+    setDismissed([]);
     setLoaded(false);
     setError("");
     setNotice("");
@@ -55,13 +61,19 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
     void invoke<MeetingExportHistory[]>("get_meeting_export_history", { meetingId }).then(items => {
       if (active) setHistory(items);
     }).catch(() => { if (active) setHistoryError(true); });
-    void invoke<ReviewedAction[]>("get_reviewed_meeting_actions", { meetingId }).then(rows => {
+    void invoke<{ actions: ReviewedAction[]; revision: string }>("get_reviewed_action_editor", { meetingId }).then(result => {
       if (!active) return;
-      setActions(rows);
+      setActions(result.actions);
+      setRevision(result.revision);
       setLoaded(true);
     }).catch(error => { if (active) setError(message(error)); });
     return () => { active = false; };
   }, [open, meetingId, reload]);
+
+  useEffect(() => {
+    if (!open || !loaded || !targetActionId) return;
+    document.getElementById(`action-done-${targetActionId}`)?.focus();
+  }, [open, loaded, targetActionId]);
 
   function update(id: string, patch: Partial<ReviewedAction>) {
     setActions(previous => previous.map(action => action.id === id ? { ...action, ...patch } : action));
@@ -83,7 +95,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
 
   function importSuggestions() {
     void run(async () => {
-      const suggestions = await invoke<ReviewedAction[]>("suggest_meeting_actions", { markdown: await getMarkdown(), reviewed: actions });
+      const suggestions = await invoke<ReviewedAction[]>("suggest_meeting_actions", { meetingId, markdown: await getMarkdown(), reviewed: actions, dismissed });
       const additional = suggestions.slice(0, 250 - actions.length);
       setActions([...actions, ...additional]);
       if (!additional.length) setNotice("No new action suggestions found in the meeting summary.");
@@ -95,10 +107,16 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
     setActions(previous => [...previous, { id: globalThis.crypto.randomUUID(), title: "", owner: null, dueDate: null, done: false, sourceKey: null, legacyAction: null }]);
   }
 
+  function removeAction(action: ReviewedAction) {
+    const { id, legacyAction } = action;
+    if (legacyAction) setDismissed(previous => [...previous, { id, legacyAction }]);
+    setActions(rows => rows.filter(row => row.id !== id));
+  }
+
   function inspectSource(action: ReviewedAction) {
     void run(async () => {
       setSource(null);
-      const passage = await invoke<ResolvedSummarySource>("api_resolve_summary_source", { meetingId, key: action.sourceKey });
+      const passage = await invoke<ResolvedSummarySource>("resolve_reviewed_action_source", { meetingId, actionId: action.id, key: action.sourceKey });
       setSource({ actionId: action.id, passage });
     });
   }
@@ -121,7 +139,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
       {loaded && <form className="space-y-4" onSubmit={event => {
         event.preventDefault();
         void run(async () => {
-          await invoke("save_reviewed_meeting_actions", { meetingId, actions });
+          await invoke("save_reviewed_meeting_actions", { meetingId, actions, dismissed, expectedRevision: revision });
           onOpenChange(false);
         });
       }}>
@@ -131,6 +149,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
         </div>
         {notice && <p role="status" className="text-sm text-muted-foreground">{notice}</p>}
         {historyError && <p role="status" className="text-sm text-muted-foreground">Export history is unavailable. You can still edit your actions.</p>}
+        {targetActionId && !actions.some(action => action.id === targetActionId) && <p role="status" className="text-sm text-muted-foreground">The selected action is no longer saved.</p>}
         {!actions.length && <p className="text-sm text-muted-foreground">No actions saved for this meeting.</p>}
         {actions.map(action => <fieldset key={action.id} disabled={busy} className="space-y-2 rounded-md border border-border p-3">
           <Label htmlFor={`action-title-${action.id}`}>Task</Label>
@@ -151,7 +170,7 @@ export function ReviewedActions({ open, onOpenChange, meetingId, getMarkdown, on
             <Checkbox id={`action-done-${action.id}`} checked={action.done} onCheckedChange={checked => update(action.id, { done: checked === true })} />
             <Label htmlFor={`action-done-${action.id}`}>Done</Label>
             {action.sourceKey && <Button type="button" size="sm" variant="ghost" onClick={() => inspectSource(action)}>View source</Button>}
-            <Button type="button" size="sm" variant="ghost" className="ml-auto" aria-label={action.title ? `Remove ${action.title}` : "Remove blank action"} onClick={() => setActions(rows => rows.filter(row => row.id !== action.id))}>Remove</Button>
+            <Button type="button" size="sm" variant="ghost" className="ml-auto" aria-label={action.title ? `Remove ${action.title}` : "Remove blank action"} onClick={() => removeAction(action)}>Remove</Button>
           </div>
           {source?.actionId === action.id && <div className="space-y-2">
             {source.passage.stale && <p role="status" className="text-sm text-muted-foreground">This passage has changed since the action was suggested.</p>}

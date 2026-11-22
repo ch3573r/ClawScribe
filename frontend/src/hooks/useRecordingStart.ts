@@ -14,7 +14,8 @@ import { readRecordingCalendar, resolveRecordingCalendar } from '@/services/reco
 import { toast } from 'sonner';
 import { readPinnedSummaryLanguageDefault } from '@/lib/summary-language-preferences';
 import {
-  isDiskSpaceRefusal, LIVE_MODEL_FAILURE_MESSAGE, liveModelStartFailure, startErrorText, transcriptionSettingsPath,
+  describeRecordingsFolderRefusal, isDiskSpaceRefusal, LIVE_MODEL_FAILURE_MESSAGE,
+  liveModelStartFailure, startErrorText, transcriptionSettingsPath,
 } from '@/lib/start-error';
 import { openStorageDialog } from '@/lib/storage-dialog-controller';
 
@@ -33,11 +34,17 @@ export function reportStartFailure(error: unknown): void {
     toast.info('Recording is busy. During a save, choose Start after saving to record again.');
     return;
   }
+  const folderRefusal = describeRecordingsFolderRefusal(error);
   if (isDiskSpaceRefusal(error)) {
     toast.error('Not enough disk space', {
       description: message,
       duration: 15000,
       action: { label: 'Review storage', onClick: openStorageDialog },
+    });
+  } else if (folderRefusal) {
+    toast.error(folderRefusal.title, {
+      description: folderRefusal.message,
+      action: { label: 'Recording settings', onClick: () => window.location.assign('/settings?tab=recording') },
     });
   } else if (modelFailure) {
     toast.error('Live transcription unavailable', {
@@ -66,12 +73,12 @@ function meetingTitleAt(timestamp: number): string {
 
 export function useStartRecordingSession() {
   const { setIsMeetingActive } = useSidebar();
-  const { selectedDevices, devicePreferencesStatus } = useConfig();
+  const { selectedDevices, devicePreferencesStatus, isSavingDevicePreferences } = useConfig();
   const { setStatus, isRecording, isStopping, isProcessing, isSaving } = useRecordingState();
 
   const start = useCallback(async (source: StartSource, requestId?: string): Promise<string> => {
     if (startInProgress || isRecording || isStopping || isProcessing || isSaving) throw START_BUSY;
-    if (devicePreferencesStatus !== 'ready') throw DEVICE_PREFERENCES_UNAVAILABLE;
+    if (devicePreferencesStatus !== 'ready' || isSavingDevicePreferences) throw DEVICE_PREFERENCES_UNAVAILABLE;
     startInProgress = true;
     const now = Date.now();
     // A join claim already owns its invitation in the core. Manual choices stay available.
@@ -109,7 +116,7 @@ export function useStartRecordingSession() {
     } finally {
       startInProgress = false;
     }
-  }, [devicePreferencesStatus, selectedDevices, setIsMeetingActive, setStatus, isRecording, isStopping, isProcessing, isSaving]);
+  }, [devicePreferencesStatus, isSavingDevicePreferences, selectedDevices, setIsMeetingActive, setStatus, isRecording, isStopping, isProcessing, isSaving]);
   return start;
 }
 

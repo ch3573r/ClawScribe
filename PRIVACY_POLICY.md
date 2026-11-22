@@ -32,9 +32,9 @@ third party's terms.
 
 **Summary and meeting chat providers.** A remote provider receives transcript or
 meeting text and supplied context needed for the selected operation. OpenAI,
-OpenAI-compatible endpoints, Anthropic, Groq, OpenRouter, remote Ollama, managed
-OpenClaw, and the configured Codex path are not equivalent to local-only
-processing. A provider named Ollama is local only when its endpoint is local.
+OpenAI-compatible endpoints, Anthropic, Groq, OpenRouter, remote Ollama, and the
+configured Codex path can send this data off-device. Ollama processing stays on
+your device when its endpoint is local.
 
 **Personal notes in a library question.** Searching personal notes and bookmarks
 runs on your device. **Ask about these results** opens a question scoped to the
@@ -42,10 +42,6 @@ displayed meetings. To share a personal excerpt, select it, review the exact
 text, provider, model and destination, then confirm the question. Approval
 allows one send attempt. ClawScribe excludes that question and answer from
 the history it sends with later questions. A new attempt requires a new review.
-
-**OpenClaw handoff.** When enabled, completed recording artifacts are handed to
-the configured endpoint. OpenClaw is optional; it is not required for standalone
-local recording or transcription.
 
 **Microsoft Graph.** Signing in exchanges credentials with Microsoft and enables
 the delegated integration. Calendar features read meeting context and invited
@@ -58,23 +54,45 @@ from MAI transcription credentials and AI-provider credentials.
 publishing sends the chosen document to the configured Server/Data Center
 endpoint. Review the destination and content before publishing.
 
+**Outbound webhook.** The webhook is off by default. If you enable it, ClawScribe
+sends meeting details to your saved endpoint when you export or when the
+recording, import or summary events you select occur. You can choose whether
+to include summary and action items or transcript text. Test deliveries use
+sample data. The local delivery history stores the event, meeting ID, time,
+attempt count and outcome. [Webhook configuration and payload](docs/integrations/webhook.md)
+
+**Export history and recovery.** The local meeting history can contain task,
+page, and file names, remote item and destination IDs, service links, status,
+timestamps, and account and export revision fingerprints. It travels with
+portable library backups. Recovery reads the original destination using the
+saved connection to verify an item you choose. The candidate list is displayed
+for review. Saving a resolution records the selected item or confirmed absence
+locally. The OneNote page includes a content marker
+derived from the meeting and revision so the app can identify its own block.
+Dismissed suggestions keep an action ID and title fingerprint with the meeting
+so the app can recognize them when offering suggestions again.
+
 **Downloads and updates.** Model publishers, release hosting, and configured
 provider services receive the network requests required for those operations.
 Automatic update checks are not meeting-content uploads.
 
 ## Credential Storage
 
-Summary and hosted-transcription API keys, and the OpenClaw token, use Windows
-Credential Manager. If that store is unavailable on Windows, a current-user
-DPAPI-encrypted fallback is stored in SQLite for API keys or in the OpenClaw
-configuration file for its token. Legacy plaintext is migrated before use. If
-protected storage or migration fails, that provider cannot use the saved secret
-until protected storage is available; the old plaintext may remain pending migration.
+Summary and hosted-transcription API keys use Windows Credential Manager. If
+that store is unavailable on Windows, a current-user DPAPI-encrypted fallback is
+stored in SQLite. The app migrates legacy plaintext before use. If protected
+storage or migration fails, the provider cannot use the saved secret until
+protected storage is available. The old plaintext may remain pending migration.
 
 The bundled Codex provider uses an isolated profile and keyring-only ChatGPT
 sign-in, with no credential-file fallback. An old `auth.json` is removed after a
 keyring sign-in succeeds. The Confluence token and its destination binding are
 stored in the keyring.
+
+The webhook URL and optional signing secret use the platform credential store
+with the current-user DPAPI fallback on Windows. Settings show the scheme, host
+and port. ClawScribe excludes the full URL, signing secret and body from
+logs and delivery history.
 
 Microsoft session persistence stores the refresh token and associated account
 metadata, not the short-lived access token. It first uses the platform credential
@@ -174,7 +192,6 @@ content can be inaccurate.
 - Microsoft tokens: `frontend/src-tauri/src/exports/token_store.rs`
 - Provider key settings: `frontend/src-tauri/src/database/repositories/setting.rs`
 - Protected provider credentials: `frontend/src-tauri/src/credentials.rs`
-- OpenClaw configuration: `frontend/src-tauri/src/openclaw.rs`
 - Confluence credentials: `frontend/src-tauri/src/exports/confluence.rs`
 - Codex sign-in and output cleanup: `frontend/src-tauri/src/summary/codex_provider.rs`
 - Database snapshots: `frontend/src-tauri/src/database/manager.rs`
