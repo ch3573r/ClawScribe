@@ -44,8 +44,8 @@ export function supportsPersonalExcerpts(provider: string | null | undefined) {
   // Match the endpoint-verifiable providers and aliases in Rust's LLMProvider.
   switch (provider?.toLowerCase()) {
     case 'builtin-ai': case 'ollama': case 'groq': case 'claude': case 'openrouter':
-    case 'openai': case 'custom-openai': case 'openclaw':
-    case 'local-llama': case 'localllama': case 'openai-compatible': case 'api-key': case 'openclaw-managed':
+    case 'openai': case 'custom-openai':
+    case 'local-llama': case 'localllama': case 'openai-compatible': case 'api-key':
       return true;
     default:
       return false;

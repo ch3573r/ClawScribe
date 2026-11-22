@@ -2,7 +2,7 @@
 
 ClawScribe uses Microsoft Graph as an optional delegated integration for
 calendar context, OneNote, Planner, Microsoft To Do, and OneDrive or SharePoint
-file export. Microsoft auth is separate from OpenAI, OpenClaw, Codex, Ollama, and
+file export. Microsoft auth is separate from OpenAI, Codex, Ollama, and
 other summary providers.
 
 ## Current Capabilities
@@ -74,7 +74,7 @@ Expected connection states:
 - `access_denied`
 
 If Microsoft auth fails, local recording, transcription, summary generation,
-OpenClaw, and Confluence browser draft export must remain usable.
+and Confluence browser draft export must remain usable.
 
 ## Calendar
 

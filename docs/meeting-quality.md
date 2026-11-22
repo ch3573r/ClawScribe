@@ -495,7 +495,7 @@ before their final prompt and reject incomplete reductions. Budgets reserve
 output and prompt overhead, use UTF-8 bytes conservatively, and limit reduction
 to eight passes. Built-in AI and Ollama context is capped at 16,384 tokens.
 Direct cloud providers use model-specific budgets. Unknown cloud models default
-to 32,768 tokens. OpenClaw and compatible endpoints default to 8,192 and honor
+to 32,768 tokens. OpenAI-compatible endpoints default to 8,192 and honor
 a configured context size. The bundled Codex route uses 500,000 tokens for
 GPT-6.1 Sol and 32,768 for other models. The architecture guide lists default
 output budgets and how much input each stage can use. [Summary context budgets](architecture.md#summary-context-budgets).

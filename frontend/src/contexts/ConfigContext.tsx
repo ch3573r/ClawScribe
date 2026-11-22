@@ -343,7 +343,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     openai: ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-4o-mini'],
     'builtin-ai': [],
     'custom-openai': [modelConfig.customOpenAIModel || modelConfig.model || 'gpt-4o-mini'],
-    openclaw: ['openclaw-managed'],
     codex: ['gpt-5.6-sol'],
     'claude-code': ['sonnet', 'opus', 'haiku'],
   }), [models, modelConfig.customOpenAIModel, modelConfig.model]);

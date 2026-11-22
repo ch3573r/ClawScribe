@@ -38,7 +38,7 @@ recordings and migration paths continue to work.
 - `frontend/src-tauri/src/nemotron_engine/`: Nemotron 3.5 ASR streaming ONNX
   model catalog, feature extraction, DirectML/CPU loading, and RNN-T decoding.
 - `frontend/src-tauri/src/summary/`: summary generation providers, including
-  built-in/local, API-based, OpenClaw, and Codex app-server paths.
+  built-in/local, API-based, and Codex app-server paths.
 - `frontend/src-tauri/src/exports/`: Microsoft Graph auth, calendar lookup,
   OneNote export, Planner/To Do task export, idempotency, and testable Graph
   transport.
@@ -109,8 +109,8 @@ window titles are returned only when the settings diagnostics panel requests the
   account fingerprint, and draft revision. Repeats open the existing page for
   reviewed edits. Uncertain submissions stay held for reconciliation. The browser clipboard
   includes readable source times, nested lists, quotes, code, and task status.
-- OpenClaw handoff is optional and sends completed recording artifacts only to
-  the configured operator endpoint.
+- The optional [outbound webhook](integrations/webhook.md) sends saved meeting
+  data to the configured automation endpoint.
 
 ### Diagnostics report
 
@@ -118,8 +118,7 @@ window titles are returned only when the settings diagnostics panel requests the
 snapshot. ClawScribe builds a separate, versioned JSON report from allowlisted
 app and platform fields, CPU and memory capacity, audio device counts,
 transcription and speaker separation status, and fixed failure categories.
-When the last recorded OpenClaw handoff failed, the report includes its failure
-category. The file is limited to 4 KiB.
+The file is limited to 4 KiB.
 
 The save command works offline with the report held in memory. The Tauri core
 opens the native save dialog and writes the report atomically to the chosen
@@ -304,7 +303,7 @@ child loop and the supervisor.
 `audio/recording_mode.rs` persists the next-session mode through the Tauri store.
 Recording startup snapshots it into the manager and meeting metadata. Audio-only
 mode always enables the recording saver, omits VAD/model validation and the live
-recognition worker, and skips automatic summary/OpenClaw handoff. Capture and the
+recognition worker, and skips automatic summaries. Capture and the
 retained audio spool use the existing paths. Later transcription uses the existing
 reviewed retranscription flow and its configured local/cloud preference.
 If model validation fails after capture opens and audio saving is enabled, the
@@ -509,7 +508,7 @@ endpoint can use the same model name with different limits.
 | Groq Llama 3.3 70B Versatile and GPT-OSS 120B | 131,072 |
 | Claude API models in the catalog | 1,000,000 for the listed Fable 5.2, Opus 5/5.5, Sonnet/Haiku 5.5 and Opus/Sonnet 4.6 models. 200,000 for the listed 4.5 models. |
 | Other cloud models, including OpenRouter | Configured context, or 32,768 by default |
-| Custom, OpenAI-compatible and OpenClaw endpoints | Configured context, or 8,192 by default |
+| Custom OpenAI-compatible endpoints | Configured context, or 8,192 by default |
 | Ollama and Built-in AI | Configured Ollama context or local model registry, capped at 16,384. The fallback is 8,192. |
 | Bundled Codex | 500,000 for GPT-6.1 Sol, otherwise 32,768 |
 | Claude Code | 200,000 |
@@ -612,9 +611,7 @@ sign-in generation is unchanged and the connection is still active. Sign-out
 invalidates that generation and clears memory and persisted credentials under
 the same lock, so an in-flight refresh cannot restore a signed-out account.
 
-Microsoft authentication HTTP calls time out after 30 seconds. OpenClaw handoffs
-time out after 60 seconds and retain at most 64 KiB of response text in submission
-markers.
+Microsoft authentication HTTP calls time out after 30 seconds.
 
 A Microsoft token fallback save removes the older keychain entry so the next
 load cannot prefer stale credentials over the encrypted fallback.

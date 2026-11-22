@@ -8,7 +8,6 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use tauri::{AppHandle, Runtime};
 use url::{Host, Url};
 
 pub(crate) type DispatchCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
@@ -97,10 +96,7 @@ async fn credential(pool: &SqlitePool, provider: &'static str) -> Result<String,
 }
 
 impl AutomaticRequest {
-    pub async fn resolve<R: Runtime>(
-        app: &AppHandle<R>,
-        pool: &SqlitePool,
-    ) -> Result<Self, String> {
+    pub async fn resolve(pool: &SqlitePool) -> Result<Self, String> {
         let settings = SettingsRepository::get_model_config(pool)
             .await
             .map_err(|_| "Could not read the summary model settings")?
@@ -165,23 +161,6 @@ impl AutomaticRequest {
                     None => return Err("Set the compatible summary endpoint in Settings.".into()),
                 };
                 Self::compatible(config)?
-            }
-            LLMProvider::OpenClaw => {
-                let config = crate::openclaw::load_config(app)
-                    .map_err(|_| "Could not read the OpenClaw summary provider settings")?;
-                if !config.enabled || config.bearer_token.trim().is_empty() {
-                    return Err("Enable OpenClaw and set its credential in Settings.".into());
-                }
-                Self::compatible(OpenAICompatibleProviderConfig {
-                    base_url: canonical_endpoint(&config.model_endpoint)?.into(),
-                    api_key: Some(config.bearer_token),
-                    allow_unencrypted: config.allow_unencrypted,
-                    context_window: super::context_budget::resolve(&provider, &model, None, None)
-                        .context_tokens,
-                    model: model.clone(),
-                    temperature: None,
-                    ..OpenAICompatibleProviderConfig::default()
-                })?
             }
             LLMProvider::Claude | LLMProvider::Groq | LLMProvider::OpenRouter => {
                 let endpoint = canonical_endpoint(
@@ -293,6 +272,33 @@ impl AutomaticRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retired_summary_provider_is_unset_in_settings_and_automatic_notes() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        for provider in ["openclaw", "OpenClaw-Managed"] {
+            SettingsRepository::save_model_config(&pool, provider, "legacy", "large-v3", None)
+                .await
+                .unwrap();
+            let settings =
+                crate::api::api::model_config_view(&crate::credentials::platform_store(), &pool)
+                    .await
+                    .unwrap();
+            assert!(settings.is_none());
+            assert_eq!(
+                AutomaticRequest::resolve(&pool).await.err().as_deref(),
+                Some("Choose a summary model in Settings.")
+            );
+        }
+        SettingsRepository::save_model_config(&pool, "ollama", "new-model", "large-v3", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            AutomaticRequest::resolve(&pool).await.unwrap().provider,
+            LLMProvider::Ollama
+        );
+    }
 
     fn ollama(url: &str) -> DestinationReview {
         AutomaticRequest {

@@ -1,13 +1,11 @@
 # Codex App-Server Auth
 
-Codex is an advanced standalone ClawScribe provider, not the default processing
-path and not an OpenClaw dependency.
+Codex is an advanced ClawScribe provider.
 
 Provider order:
 
 1. OpenAI / OpenAI-compatible API key
-2. OpenClaw
-3. Advanced: Codex app-server
+2. Advanced: Codex app-server
 
 Normal ClawScribe meeting processing must work without any Codex runtime.
 
@@ -143,7 +141,7 @@ match, Settings must show:
 Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe.
 ```
 
-with a controlled repair/install action. OpenAI API key and OpenClaw must remain
+with a controlled repair/install action. OpenAI API-key authentication must remain
 fully usable when the Codex runtime is missing.
 
 Pinned runtime metadata is recorded in [../codex-runtime.md](../codex-runtime.md)

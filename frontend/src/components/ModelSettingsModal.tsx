@@ -19,8 +19,7 @@ import {
 } from '@/components/ui/select';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Switch } from '@/components/ui/switch';
-import { Lock, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown, ServerCog, Wrench } from 'lucide-react';
+import { Lock, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown, Wrench } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   Command,
@@ -31,7 +30,6 @@ import {
   CommandList,
 } from '@/components/ui/command';
 import { cn, isOllamaNotInstalledError } from '@/lib/utils';
-import { openClawDeliveryLabel } from '@/lib/openclaw-delivery';
 import { toast } from 'sonner';
 import { ClaudeCodeProviderCard, CLAUDE_CODE_MODELS, useClaudeCodeSettings } from './ClaudeCodeProviderCard';
 import { platform as osPlatform } from '@tauri-apps/plugin-os';
@@ -50,7 +48,7 @@ import {
 import type { KeyProvider } from '@/contexts/ConfigContext';
 
 export interface ModelConfig {
-  provider: 'ollama' | 'groq' | 'claude' | 'claude-code' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai' | 'openclaw' | 'codex';
+  provider: 'ollama' | 'groq' | 'claude' | 'claude-code' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai' | 'codex';
   model: string;
   whisperModel: string;
   /** A key the user has just typed, held only until it is saved. Never loaded from the core. */
@@ -103,22 +101,6 @@ interface OpenAIAuthStatus {
   requestAuthentication: string;
   authReferenceUrl: string;
   unsupportedReason?: string;
-}
-
-interface OpenClawConfigStatus {
-  destination_problem: string | null;
-  allow_unencrypted: boolean;
-  enabled: boolean;
-  configured: boolean;
-  ready: boolean;
-  model_ready: boolean;
-  delivery_state: string;
-  bearer_token_configured: boolean;
-  endpoint: string;
-  model_endpoint: string;
-  source: string;
-  status_message: string;
-  include_audio_path: boolean;
 }
 
 interface CodexProviderConfig {
@@ -230,7 +212,6 @@ const PROVIDER_SUMMARY: Record<ModelConfig['provider'], string> = {
   openai: 'OpenAI API with your own key',
   groq: 'Groq API with your own key',
   openrouter: 'OpenRouter API with your own key',
-  openclaw: 'Routes summaries through your OpenClaw gateway',
   codex: 'Bundled Codex runtime signed in with ChatGPT',
   'claude-code': 'Uses the Claude Code you installed and signed in to',
 };
@@ -364,7 +345,6 @@ export function ModelSettingsModal({
   // Custom OpenAI state
   const [customDestinationProblem, setCustomDestinationProblem] = useState<string | null>(null);
   const [customAllowUnencrypted, setCustomAllowUnencrypted] = useState(false);
-  const [openClawAllowUnencrypted, setOpenClawAllowUnencrypted] = useState(false);
   const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
   const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
   // A key typed for the custom provider; the stored one is only reported as a status.
@@ -390,15 +370,6 @@ export function ModelSettingsModal({
   );
   const [openAIAuthStatus, setOpenAIAuthStatus] = useState<OpenAIAuthStatus | null>(null);
   const [isLoadingOpenAIAuthStatus, setIsLoadingOpenAIAuthStatus] = useState<boolean>(false);
-  const [openClawStatus, setOpenClawStatus] = useState<OpenClawConfigStatus | null>(null);
-  const [openClawStatusError, setOpenClawStatusError] = useState<string>('');
-  const [isLoadingOpenClawStatus, setIsLoadingOpenClawStatus] = useState<boolean>(false);
-  const [openClawEnabled, setOpenClawEnabled] = useState<boolean>(false);
-  const [openClawEndpoint, setOpenClawEndpoint] = useState<string>('');
-  const [openClawModelEndpoint, setOpenClawModelEndpoint] = useState<string>('');
-  const [openClawBearerToken, setOpenClawBearerToken] = useState<string>('');
-  const [openClawSource, setOpenClawSource] = useState<string>('ClawScribe');
-  const [openClawIncludeAudioPath, setOpenClawIncludeAudioPath] = useState<boolean>(false);
   const [codexConfig, setCodexConfig] = useState<CodexProviderConfig>({
     codexHomeMode: 'clawscribe-isolated',
     codexHomePath: null,
@@ -483,7 +454,6 @@ export function ModelSettingsModal({
     openrouter: openRouterModels.map((m) => m.id),
     'builtin-ai': builtinAiModels.map((m) => m.name),
     'custom-openai': [customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL],
-    openclaw: ['openclaw-managed'],
     codex: codexPickerModels.map((model) => model.id),
     'claude-code': CLAUDE_CODE_MODELS,
   }), [models, catalog, openRouterModels, builtinAiModels, customOpenAIModel, codexPickerModels]);
@@ -508,17 +478,7 @@ export function ModelSettingsModal({
   // A stored key goes only to the address it was saved for: changing the
   // address asks for the key again, and nothing is saved until it is entered.
   const customKeyRequired = keyRequiredForAddress(savedCustomEndpoint, customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, customKeyStatus, customOpenAIApiKey);
-  const openClawTokenRequired = !!openClawStatus?.bearer_token_configured && !openClawBearerToken.trim()
-    && (keyRequiredForAddress(openClawStatus.endpoint, openClawEndpoint, { stored: true, hint: null }, '')
-      || keyRequiredForAddress(openClawStatus.model_endpoint, openClawModelEndpoint, { stored: true, hint: null }, ''));
-  const typedKeyProblem = keyProblem(apiKey) || keyProblem(customOpenAIApiKey) || keyProblem(openClawBearerToken);
-
-  const isOpenClawInvalid = modelConfig.provider === 'openclaw' && (
-    openClawTokenRequired ||
-    !openClawModelEndpoint.trim() ||
-    !openClawSource.trim() ||
-    (!openClawBearerToken.trim() && !openClawStatus?.bearer_token_configured)
-  );
+  const typedKeyProblem = keyProblem(apiKey) || keyProblem(customOpenAIApiKey);
 
   const isDoneDisabled =
     (modelConfig.provider === 'claude-code' && claudeCode.busy) ||
@@ -526,8 +486,7 @@ export function ModelSettingsModal({
     (modelConfig.provider === 'ollama' && ollamaEndpointChanged) ||
     isCustomOpenAIInvalid ||
     (modelConfig.provider === 'custom-openai' && customKeyRequired) ||
-    typedKeyProblem !== null ||
-    isOpenClawInvalid;
+    typedKeyProblem !== null;
 
   useEffect(() => {
     const fetchModelConfig = async () => {
@@ -774,29 +733,6 @@ export function ModelSettingsModal({
     }
   };
 
-  const loadOpenClawStatus = async () => {
-    setIsLoadingOpenClawStatus(true);
-    setOpenClawStatusError('');
-    try {
-      const status = (await invoke('get_openclaw_config_status')) as OpenClawConfigStatus;
-      setOpenClawStatus(status);
-      setOpenClawEnabled(status.enabled);
-      setOpenClawEndpoint(status.endpoint || '');
-      setOpenClawModelEndpoint(status.model_endpoint || '');
-      setOpenClawAllowUnencrypted(status.allow_unencrypted ?? false);
-      setOpenClawSource(status.source || 'ClawScribe');
-      setOpenClawIncludeAudioPath(status.include_audio_path);
-      setOpenClawBearerToken('');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error('Error loading OpenClaw handoff status:', err);
-      setOpenClawStatus(null);
-      setOpenClawStatusError(message);
-    } finally {
-      setIsLoadingOpenClawStatus(false);
-    }
-  };
-
   const loadCodexModels = useCallback(async () => {
     setIsLoadingCodexModels(true);
     setCodexModelError('');
@@ -928,9 +864,6 @@ export function ModelSettingsModal({
     if (modelConfig.provider === 'openai') {
       loadOpenAIAuthStatus();
     }
-    if (modelConfig.provider === 'openclaw') {
-      loadOpenClawStatus();
-    }
   }, [modelConfig.provider]);
 
   useEffect(() => {
@@ -976,10 +909,9 @@ export function ModelSettingsModal({
   }, [modelOptions, modelConfig.provider, modelConfig.model, setModelConfig]);
 
   const handleSave = async () => {
-    const problem = keyProblem(apiKey) || keyProblem(customOpenAIApiKey) || keyProblem(openClawBearerToken);
+    const problem = keyProblem(apiKey) || keyProblem(customOpenAIApiKey);
     if (problem) { toast.error(problem); return; }
     if (modelConfig.provider === 'custom-openai' && customKeyRequired) { toast.error(KEY_REQUIRED_FOR_NEW_ADDRESS); return; }
-    if (modelConfig.provider === 'openclaw' && openClawTokenRequired) { toast.error(KEY_REQUIRED_FOR_NEW_ADDRESS); return; }
     if (modelConfig.provider === 'claude-code') {
       try { await claudeCode.save(); }
       catch { toast.error('Could not save Claude Code settings'); return; }
@@ -1047,29 +979,6 @@ export function ModelSettingsModal({
       } catch (err) {
         console.error('Failed to save OpenAI auth mode:', err);
         toast.error('Failed to save OpenAI auth mode');
-        return;
-      }
-    }
-
-    if (updatedConfig.provider === 'openclaw') {
-      try {
-        await invoke('save_openclaw_config', {
-          config: {
-            enabled: openClawEnabled,
-            allow_unencrypted: openClawAllowUnencrypted,
-            endpoint: openClawEndpoint.trim(),
-            model_endpoint: openClawModelEndpoint.trim(),
-            bearer_token: openClawBearerToken.trim(),
-            source: openClawSource.trim(),
-            include_audio_path: openClawIncludeAudioPath,
-          },
-        });
-        setOpenClawBearerToken('');
-        await loadOpenClawStatus();
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        console.error('Failed to save OpenClaw configuration:', err);
-        toast.error(errorMsg || 'Failed to save OpenClaw configuration');
         return;
       }
     }
@@ -1357,7 +1266,6 @@ export function ModelSettingsModal({
   const draftProviderMissing = (): string | null => {
     if (needsKey(modelConfig.provider) && !hasUsableKey(modelConfig.apiKey, keyStatus)) return 'Enter an API key first';
     if (MODEL_LIST_PROVIDERS.includes(modelConfig.provider) && !modelConfig.model?.trim()) return 'Choose a model first';
-    if (modelConfig.provider === 'openclaw' && openClawMissing(openClawValues()).length > 0) return 'Fill in the OpenClaw settings first';
     if (modelConfig.provider === 'codex' && codexStatus && !codexStatus.found) return 'Install the Codex runtime first';
     if (modelConfig.provider === 'claude-code' && claudeCode.status && claudeCode.status.state !== 'ready') return 'Claude Code is not ready yet';
     return null;
@@ -1489,60 +1397,6 @@ export function ModelSettingsModal({
     return held;
   };
 
-  // The core reports only that a token is saved, never the token.
-  const openClawTokenStatus: SecretStatus = { stored: !!openClawStatus?.bearer_token_configured, hint: null };
-  const removeOpenClawToken = async () => {
-    await invoke('clear_openclaw_bearer_token');
-    setOpenClawBearerToken('');
-    await loadOpenClawStatus();
-  };
-
-  const openClawValues = () => ({
-    enabled: openClawEnabled, endpoint: openClawEndpoint, modelEndpoint: openClawModelEndpoint, source: openClawSource,
-    token: openClawBearerToken, includeAudioPath: openClawIncludeAudioPath, allowUnencrypted: openClawAllowUnencrypted,
-  });
-  const openClawMissing = (v: ReturnType<typeof openClawValues>) => [
-    !v.endpoint.trim() && 'meeting handoff URL',
-    !v.modelEndpoint.trim() && 'summary gateway URL',
-    !v.source.trim() && 'source name',
-    !v.token.trim() && !openClawStatus?.bearer_token_configured && 'bearer token',
-    !v.token.trim() && !!openClawStatus?.bearer_token_configured
-      && (keyRequiredForAddress(openClawStatus.endpoint, v.endpoint, { stored: true, hint: null }, '')
-        || keyRequiredForAddress(openClawStatus.model_endpoint, v.modelEndpoint, { stored: true, hint: null }, ''))
-      && 'bearer token for the new address',
-  ].filter(Boolean) as string[];
-
-  // Keeps what was entered. Saves once every required value is present.
-  const commitOpenClaw = async (over: Partial<ReturnType<typeof openClawValues>>): Promise<CommitResult> => {
-    const v = { ...openClawValues(), ...over };
-    setOpenClawEnabled(v.enabled); setOpenClawEndpoint(v.endpoint); setOpenClawModelEndpoint(v.modelEndpoint);
-    setOpenClawSource(v.source); setOpenClawBearerToken(v.token); setOpenClawIncludeAudioPath(v.includeAudioPath);
-    setOpenClawAllowUnencrypted(v.allowUnencrypted);
-    if (openClawMissing(v).length > 0) return 'held';
-    try {
-      await invoke('save_openclaw_config', {
-        config: {
-          enabled: v.enabled, allow_unencrypted: v.allowUnencrypted, endpoint: v.endpoint.trim(), model_endpoint: v.modelEndpoint.trim(),
-          bearer_token: v.token.trim(), source: v.source.trim(), include_audio_path: v.includeAudioPath,
-        },
-      });
-    } catch (err) {
-      throw new SaveError(safeMessage(err, 'Could not save the OpenClaw settings', [v.token]));
-    }
-    setOpenClawBearerToken('');
-    await loadOpenClawStatus();
-  };
-
-  // A switch that fails to save goes back to its saved position.
-  const commitOpenClawSwitch = async (over: Partial<ReturnType<typeof openClawValues>>) => {
-    const before = openClawValues();
-    try { return await commitOpenClaw(over); }
-    catch (failure) {
-      setOpenClawEnabled(before.enabled); setOpenClawIncludeAudioPath(before.includeAudioPath); setOpenClawAllowUnencrypted(before.allowUnencrypted);
-      throw failure;
-    }
-  };
-
   const modelListLoading =
     (modelConfig.provider === 'openrouter' && isLoadingOpenRouter) || (catalog.provider === modelConfig.provider && catalog.status === 'loading') ||
     (modelConfig.provider === 'ollama' && isLoadingOllama);
@@ -1604,11 +1458,6 @@ export function ModelSettingsModal({
       if (customCheck.state === 'error') return { tone: 'error', text: 'Could not connect' };
       return { tone: 'neutral', text: 'Not checked yet' };
     }
-    if (provider === 'openclaw') {
-      if (isLoadingOpenClawStatus) return { tone: 'neutral', text: 'Checking…' };
-      if (openClawStatusError) return { tone: 'error', text: 'Status unavailable' };
-      return openClawStatus?.ready ? { tone: 'ok', text: 'Ready' } : { tone: 'warning', text: 'Needs setup' };
-    }
     if (provider === 'codex') {
       if (isCodexBusy) return { tone: 'neutral', text: 'Checking…' };
       if (!codexStatus) return { tone: 'neutral', text: 'Not checked yet' };
@@ -1630,14 +1479,13 @@ export function ModelSettingsModal({
 
   const checkingNow =
     (modelConfig.provider === 'claude-code' && claudeBusy) || (modelConfig.provider === 'codex' && isCodexBusy) ||
-    (modelConfig.provider === 'openclaw' && isLoadingOpenClawStatus) || (modelConfig.provider === 'ollama' && isLoadingOllama) ||
+    (modelConfig.provider === 'ollama' && isLoadingOllama) ||
     (modelConfig.provider === 'custom-openai' && customCheck.state === 'checking') || (needsKey(modelConfig.provider) && modelListLoading);
 
   const checkAgain = async () => {
     const provider = modelConfig.provider;
     if (provider === 'claude-code') return claudeCode.check();
     if (provider === 'codex') return checkCodexInstallation(codexConfig);
-    if (provider === 'openclaw') return loadOpenClawStatus();
     if (provider === 'ollama') return fetchOllamaModels(true, ollamaEndpoint);
     if (provider === 'custom-openai') return runCustomCheck();
     if (provider === 'openai') await loadOpenAIAuthStatus();
@@ -1926,47 +1774,6 @@ export function ModelSettingsModal({
       }
     }
 
-    if (provider === 'openclaw') {
-      const missing = openClawMissing(openClawValues());
-      rows.push(
-        <SettingsRow key="oc-enabled" title="Enable OpenClaw handoff" htmlFor="openclaw-enabled" description={withError('Sends every finished recording to the gateway, whichever summary provider is in use. Also needed for OpenClaw summaries', feedback.states['oc-enabled']?.status === 'error' ? feedback.states['oc-enabled'].message : null)}>
-          <SaveMark status={feedback.states['oc-enabled']?.status} />
-          <Switch id="openclaw-enabled" checked={openClawEnabled} disabled={feedback.busy}
-            onCheckedChange={(value) => { void feedback.run('oc-enabled', () => commitOpenClawSwitch({ enabled: value })); }} />
-        </SettingsRow>,
-        <CommitInputRow key="oc-endpoint" id="openclaw-endpoint" title="Meeting handoff URL" type="url" placeholder="https://your-openclaw-host/meetings/completed"
-          value={openClawEndpoint} validate={(value) => (value ? urlProblem(value) : 'The meeting handoff URL is required')} onCommit={(value) => commitOpenClaw({ endpoint: value })} />,
-        <CommitInputRow key="oc-model-endpoint" id="openclaw-model-endpoint" title="Summary gateway URL" type="url" placeholder="https://your-openclaw-host/v1/chat/completions"
-          value={openClawModelEndpoint} validate={(value) => (value ? urlProblem(value) : 'The summary gateway URL is required')} onCommit={(value) => commitOpenClaw({ modelEndpoint: value })} />,
-        <div key="oc-http" className="px-5 py-3 empty:hidden">
-          <UnencryptedHttpOptIn
-            destinationProblem={openClawEndpoint === openClawStatus?.endpoint && openClawModelEndpoint === openClawStatus?.model_endpoint && openClawAllowUnencrypted === openClawStatus?.allow_unencrypted ? openClawStatus?.destination_problem : null}
-            urls={[openClawEndpoint, openClawModelEndpoint]} checked={openClawAllowUnencrypted}
-            onChange={(value) => { void feedback.run('oc-http', () => commitOpenClawSwitch({ allowUnencrypted: value })); }} />
-        </div>,
-        <SecretKeyRow key="oc-token" id="openclaw-bearer-token" title="Bearer token" status={openClawTokenStatus}
-          placeholder="Paste the OpenClaw ingest token"
-          description="Must match the token on the OpenClaw ingest service"
-          onCommit={(value) => commitOpenClaw({ token: value })}
-          required={openClawTokenRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null}
-          onRemove={removeOpenClawToken} removeWarning={removeWarning('openclaw')} />,
-      );
-      if (missing.length > 0) {
-        rows.push(<NoteRow key="oc-missing" role="status">Not saved yet. Still needed: {missing.join(', ')}</NoteRow>);
-      } else if (openClawStatus?.status_message || openClawStatusError) {
-        rows.push(<NoteRow key="oc-status" tone={openClawStatusError ? 'error' : 'muted'}>{openClawStatusError ? `OpenClaw status unavailable: ${openClawStatusError}` : openClawStatus?.status_message}</NoteRow>);
-      }
-      advanced.push(
-        <CommitInputRow key="oc-source" id="openclaw-source" title="Source name" placeholder="ClawScribe" value={openClawSource}
-          validate={requiredProblem('The source name')} onCommit={(value) => commitOpenClaw({ source: value })} />,
-        <SettingsRow key="oc-audio" title="Include local audio path" htmlFor="openclaw-include-audio-path" description="Adds this PC's audio file path to the submitted metadata">
-          <SaveMark status={feedback.states['oc-audio']?.status} />
-          <Switch id="openclaw-include-audio-path" checked={openClawIncludeAudioPath} disabled={feedback.busy}
-            onCheckedChange={(value) => { void feedback.run('oc-audio', () => commitOpenClawSwitch({ includeAudioPath: value })); }} />
-        </SettingsRow>,
-      );
-    }
-
     return { rows, advanced };
   };
 
@@ -1999,7 +1806,6 @@ export function ModelSettingsModal({
                 <SelectItem value="claude">Claude</SelectItem>
                 <SelectItem value="groq">Groq</SelectItem>
                 <SelectItem value="openrouter">OpenRouter</SelectItem>
-                <SelectItem value="openclaw">OpenClaw</SelectItem>
               </SelectGroup>
               <SelectGroup>
                 <SelectLabel className="normal-case">Advanced</SelectLabel>
@@ -2140,7 +1946,6 @@ export function ModelSettingsModal({
                   <SelectItem value="claude">Claude</SelectItem>
                   <SelectItem value="groq">Groq</SelectItem>
                   <SelectItem value="openrouter">OpenRouter</SelectItem>
-                  <SelectItem value="openclaw">OpenClaw</SelectItem>
                 </SelectGroup>
                 <SelectGroup>
                   <SelectLabel className="normal-case">Advanced</SelectLabel>
@@ -2150,7 +1955,7 @@ export function ModelSettingsModal({
               </SelectContent>
             </Select>
 
-            {modelConfig.provider !== 'builtin-ai' && modelConfig.provider !== 'custom-openai' && modelConfig.provider !== 'openclaw' && modelConfig.provider !== 'codex' && modelConfig.provider !== 'claude-code' && (
+            {modelConfig.provider !== 'builtin-ai' && modelConfig.provider !== 'custom-openai' && modelConfig.provider !== 'codex' && modelConfig.provider !== 'claude-code' && (
               <Popover open={modelComboboxOpen} onOpenChange={setModelComboboxOpen} modal={true}>
                 <PopoverTrigger asChild>
                   <Button
@@ -2421,7 +2226,7 @@ export function ModelSettingsModal({
                   </span>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  Codex app-server mode uses a bundled/pinned Codex runtime and ChatGPT/Codex sign-in. It does not use the Microsoft Store app executable and does not require Codex to be installed globally. For normal use without Codex, choose OpenAI API key or OpenClaw.
+                  Codex app-server mode uses a bundled/pinned Codex runtime and ChatGPT/Codex sign-in. It does not use the Microsoft Store app executable and does not require Codex to be installed globally. For normal use without Codex, choose OpenAI API key.
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {codexStatus?.found
@@ -2557,135 +2362,6 @@ export function ModelSettingsModal({
                 </AlertDescription>
               </Alert>
             )}
-          </div>
-        )}
-
-        {modelConfig.provider === 'openclaw' && (
-          <div className="space-y-4 border-t pt-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-start gap-3">
-                <div className={cn(
-                  'mt-0.5 rounded-md p-2',
-                  openClawStatus?.model_ready ? 'bg-success text-success-foreground' : 'bg-warning text-warning-foreground'
-                )}>
-                  <ServerCog className="h-4 w-4" />
-                </div>
-                <div className="space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium">OpenClaw gateway</span>
-                    <span className={cn(
-                      'rounded-full px-2 py-0.5 text-xs font-medium',
-                      openClawStatus?.model_ready ? 'bg-success text-success-foreground' : 'bg-warning text-warning-foreground'
-                    )}>
-                      {isLoadingOpenClawStatus
-                        ? 'Checking'
-                        : openClawStatus?.model_ready
-                          ? 'Gateway configured'
-                          : 'Needs setup'}
-                    </span>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Route summaries through the OpenClaw ingest service. OAuth stays on the OpenClaw side; ClawScribe only stores this endpoint configuration and bearer token.
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {openClawStatusError
-                      ? `OpenClaw status unavailable: ${openClawStatusError}`
-                      : openClawStatus ? `${openClawStatus.status_message} ${openClawDeliveryLabel(openClawStatus).text}.` : 'OpenClaw status has not been checked yet.'}
-                  </p>
-                </div>
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={loadOpenClawStatus}
-                disabled={isLoadingOpenClawStatus}
-                title="Refresh OpenClaw status"
-              >
-                <RefreshCw className={cn('h-4 w-4', isLoadingOpenClawStatus && 'animate-spin')} />
-              </Button>
-            </div>
-
-            <div className="flex items-center justify-between rounded-md border p-3">
-              <div>
-                <Label htmlFor="openclaw-enabled">Enable OpenClaw handoff</Label>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Submit completed recordings and allow OpenClaw-backed summaries.
-                </p>
-              </div>
-              <Switch
-                id="openclaw-enabled"
-                checked={openClawEnabled}
-                onCheckedChange={setOpenClawEnabled}
-              />
-            </div>
-
-            <div>
-              <Label htmlFor="openclaw-endpoint">Meeting handoff URL</Label>
-              <Input
-                id="openclaw-endpoint"
-                type="url"
-                value={openClawEndpoint}
-                onChange={(e) => setOpenClawEndpoint(e.target.value)}
-                placeholder="https://your-openclaw-host/meetings/completed"
-                className="mt-1"
-              />
-            </div>
-
-            <div>
-              <Label htmlFor="openclaw-model-endpoint">Summary gateway URL *</Label>
-              <Input
-                id="openclaw-model-endpoint"
-                type="url"
-                value={openClawModelEndpoint}
-                onChange={(e) => setOpenClawModelEndpoint(e.target.value)}
-                placeholder="https://your-openclaw-host/v1/chat/completions"
-                className="mt-1"
-              />
-            </div>
-
-            <div>
-              <UnencryptedHttpOptIn destinationProblem={openClawEndpoint === openClawStatus?.endpoint && openClawModelEndpoint === openClawStatus?.model_endpoint && openClawAllowUnencrypted === openClawStatus?.allow_unencrypted ? openClawStatus?.destination_problem : null} urls={[openClawEndpoint, openClawModelEndpoint]} checked={openClawAllowUnencrypted} onChange={setOpenClawAllowUnencrypted} />
-              <Label htmlFor="openclaw-bearer-token">Bearer token *</Label>
-              <div className="mt-1">
-                <SecretKeyControl
-                  id="openclaw-bearer-token" label="bearer token" status={openClawTokenStatus}
-                  draft={openClawBearerToken} onDraftChange={setOpenClawBearerToken}
-                  onRemove={removeOpenClawToken} removeWarning={removeWarning('openclaw')}
-                  placeholder="Paste the OpenClaw ingest bearer token"
-                />
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {openClawStatus?.bearer_token_configured
-                  ? 'A token is already configured. Leaving this blank keeps the saved token.'
-                  : 'This must match MEETING_OPENCLAW_INGEST_TOKEN on the OpenClaw ingest service.'}
-              </p>
-            </div>
-
-            <div>
-              <Label htmlFor="openclaw-source">Source name *</Label>
-              <Input
-                id="openclaw-source"
-                value={openClawSource}
-                onChange={(e) => setOpenClawSource(e.target.value)}
-                placeholder="ClawScribe"
-                className="mt-1"
-              />
-            </div>
-
-            <div className="flex items-center justify-between rounded-md border p-3">
-              <div>
-                <Label htmlFor="openclaw-include-audio-path">Include local audio path</Label>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Include the recorder machine&apos;s audio path in submitted metadata.
-                </p>
-              </div>
-              <Switch
-                id="openclaw-include-audio-path"
-                checked={openClawIncludeAudioPath}
-                onCheckedChange={setOpenClawIncludeAudioPath}
-              />
-            </div>
           </div>
         )}
 

@@ -240,28 +240,28 @@ mod tests {
     #[test]
     fn a_key_may_move_from_http_to_https_on_the_same_host_and_nowhere_else() {
         assert!(keeps_destination(
-            "http://openclaw.example.com",
-            "https://openclaw.example.com"
+            "http://gateway.example.com",
+            "https://gateway.example.com"
         ));
         assert!(keeps_destination(
-            "http://openclaw.example.com:8080/a",
-            "https://OpenClaw.example.com:8080/a/"
+            "http://gateway.example.com:8080/a",
+            "https://Gateway.example.com:8080/a/"
         ));
         assert!(!keeps_destination(
-            "https://openclaw.example.com",
-            "http://openclaw.example.com"
+            "https://gateway.example.com",
+            "http://gateway.example.com"
         ));
         assert!(!keeps_destination(
-            "http://openclaw.example.com",
+            "http://gateway.example.com",
             "https://other.example.com"
         ));
         assert!(!keeps_destination(
-            "http://openclaw.example.com:8080",
-            "https://openclaw.example.com:9090"
+            "http://gateway.example.com:8080",
+            "https://gateway.example.com:9090"
         ));
         assert!(!keeps_destination(
-            "http://openclaw.example.com/a",
-            "https://openclaw.example.com/b"
+            "http://gateway.example.com/a",
+            "https://gateway.example.com/b"
         ));
     }
 
@@ -311,12 +311,12 @@ mod tests {
     #[test]
     fn destination_policy_and_legacy_migration() {
         assert!(validate_secret_destination("http://public.example.com", true).is_err());
-        assert!(validate_secret_destination("http://openclaw.local", false).is_err());
-        assert!(validate_secret_destination("http://openclaw.local", true).is_ok());
+        assert!(validate_secret_destination("http://gateway.local", false).is_err());
+        assert!(validate_secret_destination("http://gateway.local", true).is_ok());
         for url in ["http://localhost", "http://127.0.0.1", "http://[::1]"] {
             assert!(validate_secret_destination(url, false).is_ok());
         }
-        let mut old = serde_json::json!({"endpoint":"http://openclaw.local"});
+        let mut old = serde_json::json!({"endpoint":"http://gateway.local"});
         assert!(migrate_http_opt_in(&mut old, &["endpoint"]).unwrap());
         assert_eq!(old["allow_unencrypted"], true);
         old["allow_unencrypted"] = false.into();

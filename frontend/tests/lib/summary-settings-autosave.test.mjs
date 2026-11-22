@@ -132,7 +132,7 @@ test('the data panel describes audio use for summaries without asserting a trans
   const claudeCode = describeProviderData('claude-code');
   assert.equal(claudeCode.local, false);
   assert.deepEqual(Array.from(claudeCode.items, item => item.title), ['Transcript text', 'Template and language', 'Audio']);
-  for (const provider of ['claude-code', 'claude', 'groq', 'openrouter', 'custom-openai', 'codex', 'openclaw', 'builtin-ai', 'ollama']) {
+  for (const provider of ['claude-code', 'claude', 'groq', 'openrouter', 'custom-openai', 'codex', 'builtin-ai', 'ollama']) {
     const audio = describeProviderData(provider).items.find(item => item.title === 'Audio');
     assert.equal(audio?.detail, 'Summary requests do not include audio', provider);
   }
@@ -143,7 +143,6 @@ test('the data panel describes audio use for summaries without asserting a trans
   }
   const remote = describeProviderData('ollama', 'http://ollama.example.com:11434');
   assert.equal(remote.local, false, 'an Ollama server on another host receives the transcript');
-  assert.equal(describeProviderData('openclaw').items.some(item => item.title === 'Completed meetings'), true);
 });
 
 test('See everything in Privacy opens the Privacy tab', () => {

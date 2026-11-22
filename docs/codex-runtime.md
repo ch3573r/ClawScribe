@@ -2,13 +2,12 @@
 
 ClawScribe bundles Codex only for the `Advanced: Codex app-server` provider.
 Normal meeting processing must continue to work through OpenAI/OpenAI-compatible
-API keys and OpenClaw without any Codex runtime.
+API keys without any Codex runtime.
 
 ## Provider Order
 
 1. OpenAI / OpenAI-compatible API key
-2. OpenClaw
-3. Advanced: Codex app-server
+2. Advanced: Codex app-server
 
 ## Bundled Runtime
 

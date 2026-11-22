@@ -6,7 +6,6 @@ use crate::audio::diarization::{
 use crate::audio::recording_commands;
 use crate::database::repositories::setting::SettingsRepository;
 use crate::nemotron_engine::commands::{nemotron_get_available_models, NEMOTRON_ENGINE};
-use crate::openclaw::{get_openclaw_config_status, OpenClawConfigStatus};
 use crate::parakeet_engine::commands::{
     get_parakeet_use_directml, parakeet_get_available_models, parakeet_get_current_model,
     parakeet_get_models_directory, parakeet_init, parakeet_is_model_loaded,
@@ -87,7 +86,6 @@ pub struct AudioDiagnostics {
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationDiagnostics {
     pub teams: Option<TeamsDetectionStatus>,
-    pub openclaw: Option<OpenClawConfigStatus>,
     pub codex: Option<CodexInstallationStatus>,
 }
 
@@ -145,13 +143,6 @@ pub(crate) async fn get_diagnostics_snapshot<R: Runtime>(
     };
 
     let teams = Some(get_teams_detection_status(None, false));
-    let openclaw = match get_openclaw_config_status(app.clone()).await {
-        Ok(status) => Some(status),
-        Err(error) => {
-            errors.push(format!("openclaw: {error}"));
-            None
-        }
-    };
     let codex = match codex_check_installation(app.clone()).await {
         Ok(status) => Some(status),
         Err(error) => {
@@ -196,11 +187,7 @@ pub(crate) async fn get_diagnostics_snapshot<R: Runtime>(
         audio,
         recording: recording_commands::get_recording_state().await,
         diarization: speaker_diarization_runtime_status(),
-        integrations: IntegrationDiagnostics {
-            teams,
-            openclaw,
-            codex,
-        },
+        integrations: IntegrationDiagnostics { teams, codex },
         errors,
     };
     report_state.remember(&snapshot);

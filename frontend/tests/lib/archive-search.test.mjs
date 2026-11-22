@@ -208,7 +208,7 @@ test('only individually checked, visible note revisions cross the handoff as loc
 test('personal excerpts accept known endpoints and legacy aliases case-insensitively', () => {
   const { supportsPersonalExcerpts } = loadTsModule('src/lib/archive-search.ts');
   for (const provider of ['OpenAI', 'CLAUDE', 'Groq', 'Ollama', 'OpenRouter', 'BuiltIn-AI',
-    'Local-Llama', 'LocalLlama', 'OpenAI-Compatible', 'API-Key', 'Custom-OpenAI', 'OpenClaw', 'OpenClaw-Managed']) {
+    'Local-Llama', 'LocalLlama', 'OpenAI-Compatible', 'API-Key', 'Custom-OpenAI']) {
     assert.equal(supportsPersonalExcerpts(provider), true, provider);
   }
   for (const provider of ['Claude-Code', 'Codex', 'Codex-Login', 'Codex-ChatGPT', 'unknown', 'openai-other', '', null, undefined]) {

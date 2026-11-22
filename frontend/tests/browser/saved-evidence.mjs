@@ -95,7 +95,6 @@ try {
             case 'knowledge_list_scope_documents':
             case 'knowledge_list_documents':
             case 'list_meeting_bookmarks': return [];
-            case 'get_openclaw_submission_status': return { enabled: false };
             case 'plugin:event|listen': return ++eventId;
             default: return null;
           }

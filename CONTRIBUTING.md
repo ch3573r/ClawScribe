@@ -113,7 +113,7 @@ cargo test --lib exports::
 
 ### Microsoft 365
 
-- Keep Microsoft auth separate from OpenAI, OpenClaw, Codex, and other summary
+- Keep Microsoft auth separate from OpenAI, Codex, and other summary
   provider auth.
 - Request only the Graph scopes used by the code.
 - OneNote section listing can fail on large OneDrive/SharePoint libraries due
@@ -183,7 +183,7 @@ Never commit:
 - Generated installers or build artifacts
 - Machine-specific paths unless they are clearly examples
 
-Use placeholders such as `example.com`, `openclaw.local`, or
+Use placeholders such as `example.com`, `gateway.local`, or
 `<redacted-token>` in docs and tests. Store real secrets in the OS credential
 store, environment variables, or local ignored config only.
 

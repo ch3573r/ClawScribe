@@ -81,7 +81,7 @@ export function PrivacySettings() {
           </SettingsCard>
           <SettingsCard
             title="Keep everything local"
-            description="Use a built-in or Ollama summary model. Keep cloud transcription, live assistance, OpenClaw handoff and webhooks off."
+            description="Use a built-in or Ollama summary model. Keep cloud transcription, live assistance and webhooks off."
           >
             <SettingsFooter>
               <Button type="button" variant="outline" size="sm" onClick={() => openSettingsTab("summary")}>Open summary</Button>

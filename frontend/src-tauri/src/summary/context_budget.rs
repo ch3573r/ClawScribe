@@ -108,7 +108,7 @@ pub(crate) fn resolve(
             .min(16_384),
         LLMProvider::Codex => documented.map(|limits| limits.0).unwrap_or(32_768),
         LLMProvider::ClaudeCode => 200_000,
-        LLMProvider::CustomOpenAI | LLMProvider::OpenClaw | LLMProvider::OpenAICompatible => {
+        LLMProvider::CustomOpenAI | LLMProvider::OpenAICompatible => {
             context.unwrap_or(DEFAULT_CONTEXT_TOKENS)
         }
         _ => context
@@ -639,8 +639,6 @@ mod tests {
             (LLMProvider::OpenAI, "gpt-5.6-sol", None),
             (LLMProvider::OpenAICompatible, "gpt-6-sol", None),
             (LLMProvider::CustomOpenAI, "gpt-5.5", None),
-            (LLMProvider::OpenClaw, "gpt-6-sol", None),
-            (LLMProvider::OpenClaw, "configured-model", None),
             (LLMProvider::CustomOpenAI, "configured-model", None),
             (LLMProvider::Claude, "claude-sonnet", None),
             (LLMProvider::Groq, "llama-3.3-70b-versatile", None),
@@ -663,35 +661,33 @@ mod tests {
                     &template,
                     "en",
                 );
-                let overhead = if matches!(
-                    provider,
-                    LLMProvider::OpenAI | LLMProvider::OpenClaw | LLMProvider::CustomOpenAI
-                ) {
-                    super::super::openai_provider::build_system_prompt(false).len()
-                        + super::super::openai_provider::json_schema_response_format()
-                            .to_string()
+                let overhead =
+                    if matches!(provider, LLMProvider::OpenAI | LLMProvider::CustomOpenAI) {
+                        super::super::openai_provider::build_system_prompt(false).len()
+                            + super::super::openai_provider::json_schema_response_format()
+                                .to_string()
+                                .len()
+                            + super::super::openai_provider::build_user_prompt(
+                                "test-meeting",
+                                &None,
+                                "",
+                                Some(&prompt),
+                            )
                             .len()
-                        + super::super::openai_provider::build_user_prompt(
-                            "test-meeting",
-                            &None,
-                            "",
-                            Some(&prompt),
+                    } else if *provider == LLMProvider::Codex {
+                        super::super::codex_provider::build_meeting_prompt().len()
+                            + super::super::codex_provider::output_schema_json().len()
+                            + prompt.len()
+                            + 1024
+                    } else {
+                        super::super::processor::build_final_report_system_prompt(
+                            &template.to_section_instructions(),
+                            &template.to_markdown_structure(),
                         )
                         .len()
-                } else if *provider == LLMProvider::Codex {
-                    super::super::codex_provider::build_meeting_prompt().len()
-                        + super::super::codex_provider::output_schema_json().len()
-                        + prompt.len()
-                        + 1024
-                } else {
-                    super::super::processor::build_final_report_system_prompt(
-                        &template.to_section_instructions(),
-                        &template.to_markdown_structure(),
-                    )
-                    .len()
-                        + super::super::sources::SOURCE_INSTRUCTION.len()
-                        + 1024
-                };
+                            + super::super::sources::SOURCE_INSTRUCTION.len()
+                            + 1024
+                    };
                 let limits = resolve(provider, model, *context, None);
                 let budget = limits.input(provider, model, overhead).unwrap();
                 let pieces = if 60_000 <= budget {

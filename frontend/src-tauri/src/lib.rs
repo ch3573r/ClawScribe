@@ -49,7 +49,6 @@ pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
 pub mod openai;
-pub mod openclaw;
 pub mod openrouter;
 pub mod parakeet_engine;
 pub mod power;
@@ -682,6 +681,7 @@ pub fn run() {
                 let _ = audio::recording_preferences::recording_roots(_app.handle()).await;
             });
             summary::codex_provider::mark_custom_home_once(_app.handle());
+            credentials::forget_retired_openclaw_credential(_app.handle());
 
             // Initialize system tray
             if let Err(e) = tray::create_tray(_app.handle()) {
@@ -954,19 +954,12 @@ pub fn run() {
             audio::recording_commands::get_live_conversation_metrics,
             audio::recording_commands::attempt_device_reconnect,
             // Playback device detection (Bluetooth warning)
-            // OpenClaw handoff commands
             diagnostics::get_diagnostics_snapshot,
             diagnostics::save_diagnostics_report,
             audio::pc_test::run_transcription_pc_test,
             mcp::settings::get_mcp_access,
             mcp::settings::set_mcp_access,
             mcp::settings::set_mcp_follow_through_access,
-            openclaw::get_openclaw_config_status,
-            openclaw::save_openclaw_config,
-            openclaw::clear_openclaw_bearer_token,
-            openclaw::handoff::get_openclaw_submission_status,
-            openclaw::handoff::submit_meeting_folder_to_openclaw,
-            openclaw::handoff::reconcile_openclaw_handoff,
             webhook::get_webhook_settings,
             webhook::save_webhook_settings,
             webhook::remove_webhook_settings,

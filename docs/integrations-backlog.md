@@ -1,8 +1,8 @@
 # Integrations backlog
 
 ClawScribe supports Microsoft calendar lookup, OneNote, Planner, To Do,
-OneDrive or SharePoint file export, and Confluence drafts. Additional Graph
-permissions require a user-facing reason and a consent review.
+OneDrive or SharePoint file export, Confluence drafts, and outbound webhooks.
+Additional Graph permissions require a user-facing reason and a consent review.
 
 ## Microsoft 365 — shelved / not next
 - [ ] **Email recap to attendees (Outlook `Mail.Send`)** — shelved for now.

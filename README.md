@@ -281,7 +281,7 @@ Generate template-based meeting summaries from the transcript and optional
 context, regenerate notes, and chat about the selected meeting. Per-meeting summary
 context is saved in the local library and included in backups. Configurable
 providers include Built-in AI, Ollama, OpenAI, OpenAI-compatible endpoints,
-OpenRouter, Anthropic/Claude, Groq, OpenClaw managed processing, and the advanced
+OpenRouter, Anthropic/Claude, Groq, and the advanced
 bundled Codex app-server path, plus **Claude Code** using your own installation.
 
 Enable **Summarize automatically** in Summary settings to generate local notes
@@ -383,10 +383,6 @@ See [call detection](docs/teams-detection.md).
   browser draft, or publishes through a configured self-hosted REST endpoint.
   If the page is already published, use **Open** to apply reviewed edits in
   Confluence.
-- **OpenClaw** can send saved meeting transcripts to a configured destination.
-  Each meeting shows its delivery result. You can review failed deliveries
-  and confirm uncertain ones at the original destination before retrying.
-  When recording files need repair, the handoff waits for your review.
 
 **Export history** shows Microsoft and Confluence results from the meeting and
 travels with portable backups. Inspect the original destination and choose
@@ -398,15 +394,12 @@ An optional outbound webhook sends saved meeting details, notes and selected
 transcript text to your automation endpoint. Configure it in **Settings →
 Webhook**. [Webhook setup and request format](docs/integrations/webhook.md)
 
-Private-network HTTP for OpenClaw, custom OpenAI endpoints, and Confluence requires
+Private-network HTTP for custom OpenAI endpoints and Confluence requires
 an explicit unencrypted-HTTP opt-in in Settings. Existing private HTTP setups
 retain access on upgrade. Tailscale addresses and MagicDNS names are supported.
 Public HTTP destinations are rejected on save/send; existing settings remain
 editable and explain what needs correction. Confluence remembers its HTTP choice
 for the saved server even while that server is offline.
-
-OpenClaw is optional. A standalone installation does not require an OpenClaw
-endpoint, token, or separate server.
 
 ## Library And Data
 
@@ -627,7 +620,7 @@ Recording and transcription remain local unless you explicitly enable cloud
 transcription or configure external summary/export processing. Data sent to an
 external provider is subject to that provider's configuration and policies.
 
-Provider keys, OpenClaw, and Microsoft refresh tokens use protected OS storage,
+Provider keys and Microsoft refresh tokens use protected OS storage,
 with current-user DPAPI fallbacks on Windows. Codex sign-in and Confluence use
 the keyring without file fallback. Meeting files and the full database are not
 encrypted by this protection; see the [privacy policy](PRIVACY_POLICY.md).

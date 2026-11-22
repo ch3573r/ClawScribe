@@ -830,6 +830,9 @@ fn unpack(
     let legacy_history_budget = MAX_MANIFEST - bytes.len() as u64;
     let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(failure)?;
     drop(bytes);
+    // Older manifests can contain profile-local delivery rows. Discard them
+    // before validating the portable table list.
+    manifest.tables.remove("openclaw_handoffs");
     if !matches!(manifest.version, 1..=3)
         || manifest.format != "ClawScribe meeting archive"
         || !manifest.tables.contains_key("meetings")
@@ -1178,10 +1181,14 @@ async fn import_conversations(
         let question = text_field(row, "question")?;
         let provider = text_field(row, "provider")?;
         let model = text_field(row, "model")?;
-        let parsed_provider = crate::summary::llm_client::LLMProvider::from_str(provider)?;
-        if crate::summary::llm_client::canonical_provider(&parsed_provider) != provider
-            || model.trim().is_empty()
-        {
+        use crate::summary::llm_client::{canonical_provider, LLMProvider};
+        // The historical provider is part of the saved request fingerprint.
+        // Only the archive reader accepts it.
+        let historical_provider = provider == "openclaw";
+        let canonical = historical_provider
+            || LLMProvider::from_str(provider)
+                .is_ok_and(|parsed| canonical_provider(&parsed) == provider);
+        if !canonical || model.trim().is_empty() {
             return Err("Invalid saved provider metadata.".into());
         }
         let fingerprint = text_field(row, "input_fingerprint")?;
@@ -2365,6 +2372,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upgrade_drops_legacy_delivery_history_and_preserves_the_meeting() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let current = sqlx::migrate!("./migrations");
+        let previous = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                current
+                    .iter()
+                    .filter(|migration| migration.version <= 20261122004500)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        previous.run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('legacy', 'Archived meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO openclaw_handoffs (meeting_id, updated_at, status_json) VALUES ('legacy', CURRENT_TIMESTAMP, '{}')")
+            .execute(&pool).await.unwrap();
+
+        current.run(&pool).await.unwrap();
+
+        let leftover: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE tbl_name = 'openclaw_handoffs'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(leftover, 0);
+        let title: String = sqlx::query_scalar("SELECT title FROM meetings WHERE id = 'legacy'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(title, "Archived meeting");
+    }
+
+    #[tokio::test]
+    async fn restores_legacy_delivery_rows_and_conversation_provenance() {
+        let (source, request) = conversation_fixture_schema(false, "openclaw").await;
+        let (mut manifest, folders) = snapshot(&source).await.unwrap();
+        manifest.tables.insert(
+            "openclaw_handoffs".into(),
+            vec![serde_json::from_value(serde_json::json!({
+                "meeting_id": "archive-source",
+                "destination": "https://example.com/unused",
+                "updated_at": "2026-11-21",
+                "status_json": "{}"
+            }))
+            .unwrap()],
+        );
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("backup.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+
+        let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+        assert!(!manifest.tables.contains_key("openclaw_handoffs"));
+        let destination = empty_conversation_destination().await;
+        let report = import_manifest(&destination, manifest, stage)
+            .await
+            .unwrap();
+        assert_eq!(report.meetings, 1);
+        let history = crate::knowledge::conversations::history(&destination, &request.owner)
+            .await
+            .unwrap();
+        let reply = history
+            .iter()
+            .find_map(|message| message.reply.as_ref())
+            .unwrap();
+        assert_eq!(reply.content, "21 September [K1].");
+        assert_eq!(reply.provider, "openclaw");
+    }
+
+    #[tokio::test]
     async fn archive_policy_accounts_for_every_database_table() {
         // Every new table must be explicitly portable or profile-local.
         let excluded = [
@@ -2380,7 +2463,6 @@ mod tests {
             "knowledge_vectors",
             "knowledge_vector_aliases",
             "licensing",
-            "openclaw_handoffs", // delivery history names the local profile's destination
             "pending_meeting_file_cleanup",
             "recording_calendar_drafts",
             "recording_library_deletions",
@@ -2829,7 +2911,7 @@ mod tests {
 
     pub(super) async fn conversation_fixture() -> (SqlitePool, crate::knowledge::types::AskRequest)
     {
-        conversation_fixture_schema(false).await
+        conversation_fixture_schema(false, "builtin-ai").await
     }
 
     // Write the evidence columns available in the shipped schema. Current
@@ -2861,6 +2943,7 @@ mod tests {
 
     async fn conversation_fixture_schema(
         legacy: bool,
+        provider: &str,
     ) -> (SqlitePool, crate::knowledge::types::AskRequest) {
         use crate::knowledge::{conversations, retrieval, store, types::*};
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -2906,7 +2989,7 @@ mod tests {
                 mode: SearchMode::Keyword,
             },
         };
-        conversations::reserve(&pool, &request, "builtin-ai", "qwen3.5:4b")
+        conversations::reserve(&pool, &request, provider, "qwen3.5:4b")
             .await
             .unwrap();
         let frozen = retrieval::freeze_scope(&pool, &request.search.scope)
@@ -3269,7 +3352,7 @@ mod tests {
         async fn schema(pool: &SqlitePool) -> Vec<(String, String, String, Option<String>)> {
             sqlx::query_as("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN('index','trigger') AND (name LIKE 'knowledge_%' OR tbl_name LIKE 'knowledge_%') ORDER BY type,name").fetch_all(pool).await.unwrap()
         }
-        let (source, first) = conversation_fixture_schema(true).await;
+        let (source, first) = conversation_fixture_schema(true, "builtin-ai").await;
         let mut owners = vec![first.owner.clone()];
         for index in 0..3 {
             let meeting = format!("upgrade-meeting-{index}");

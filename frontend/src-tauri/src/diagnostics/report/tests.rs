@@ -4,7 +4,6 @@ use crate::diagnostics::{
     AppDiagnosticInfo, AudioDiagnostics, IntegrationDiagnostics, ModelEngineDiagnostics,
     TranscriptionDiagnostics,
 };
-use crate::openclaw::{OpenClawConfigStatus, OpenClawSubmissionStatus};
 use crate::whisper_engine::commands::WhisperAccelerationStatus;
 
 fn snapshot() -> DiagnosticSnapshot {
@@ -72,34 +71,6 @@ fn snapshot() -> DiagnosticSnapshot {
         integrations: IntegrationDiagnostics {
             teams: None,
             codex: None,
-            openclaw: Some(OpenClawConfigStatus {
-                destination_problem: None,
-                allow_unencrypted: false,
-                enabled: true,
-                configured: true,
-                ready: true,
-                delivery_state: "failed".into(),
-                model_ready: false,
-                bearer_token_configured: true,
-                endpoint: private_endpoint.into(),
-                model_endpoint: private_endpoint.into(),
-                source: "private-user@example.invalid".into(),
-                status_message: private_note.into(),
-                config_path: private_path.into(),
-                last_status_path: private_path.into(),
-                include_audio_path: true,
-                last_submission: Some(OpenClawSubmissionStatus {
-                    state: "failed".into(),
-                    folder_path: Some(private_path.into()),
-                    marker_path: Some(private_path.into()),
-                    updated_at: "2030-02-03T10:15:00Z".into(),
-                    status_code: Some(403),
-                    message: private_note.into(),
-                    endpoint: Some(private_endpoint.into()),
-                    source: Some("private-user@example.invalid".into()),
-                    idempotency_key: Some("private handoff ID".into()),
-                }),
-            }),
         },
         errors: vec![
             format!("audio_devices: {private_path}"),
@@ -114,7 +85,6 @@ fn exports_allowlisted_metadata_and_failure_categories_only() {
     let report = build_report(&snapshot());
     let serialized = report.to_string();
     assert!(!serialized.contains("private"));
-    assert!(!serialized.contains("2030-02-03"));
     for key in [
         "recording",
         "integrations",
@@ -142,14 +112,10 @@ fn exports_allowlisted_metadata_and_failure_categories_only() {
         }])
     );
     assert_eq!(report["collectionFailures"], json!(["audio_devices"]));
-    assert_eq!(
-        report["recentFailures"],
-        json!(["openclaw_handoff_access_denied"])
-    );
 }
 
 #[test]
-fn report_size_stays_bounded_and_unknown_outcomes_are_ignored() {
+fn report_size_stays_bounded_and_repeated_checks_are_deduplicated() {
     let mut snapshot = snapshot();
     snapshot.transcription.selected_provider = "parakeet".into();
     snapshot
@@ -157,16 +123,6 @@ fn report_size_stays_bounded_and_unknown_outcomes_are_ignored() {
         .engines
         .resize(500, snapshot.transcription.engines[0].clone());
     snapshot.errors = vec!["recording_folder: ".to_string() + &"x".repeat(8192); 40];
-    snapshot
-        .integrations
-        .openclaw
-        .as_mut()
-        .unwrap()
-        .last_submission
-        .as_mut()
-        .unwrap()
-        .state = "failed: private status detail".into();
-
     let report = build_report(&snapshot);
     assert!(serde_json::to_vec_pretty(&report).unwrap().len() < MAX_REPORT_BYTES);
     assert_eq!(report["transcription"]["selectedProvider"], "parakeet");
@@ -175,7 +131,6 @@ fn report_size_stays_bounded_and_unknown_outcomes_are_ignored() {
         1
     );
     assert_eq!(report["collectionFailures"], json!(["recording_folder"]));
-    assert_eq!(report["recentFailures"], json!([]));
 }
 
 #[test]

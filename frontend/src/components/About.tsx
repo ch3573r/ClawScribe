@@ -25,7 +25,7 @@ export function About() {
                     Based on Meetily Community Edition 0.4.0
                 </p>
                 <p className="text-medium text-muted-foreground mt-1">
-                    Local meeting capture, transcripts, summaries, and OpenClaw handoff.
+                    Local meeting capture, transcripts, and summaries.
                 </p>
                 <div className="mt-4 rounded-md border border-border bg-card p-4">
                     <UpdateChannelSettings id="about-prerelease-updates" />
@@ -59,7 +59,7 @@ export function About() {
             <div className="text-center space-y-2">
                 <h3 className="text-medium font-semibold text-foreground">Need a private meeting workflow?</h3>
                 <p className="text-s text-muted-foreground">
-                    ClawScribe is tuned for local-first capture and optional OpenClaw processing without a visible meeting bot.
+                    ClawScribe captures meetings locally without requiring a meeting bot.
                 </p>
             </div>
 

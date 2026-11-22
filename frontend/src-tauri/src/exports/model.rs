@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Connection state for the (separate) Microsoft account used for export.
 ///
-/// This is independent from OpenAI / OpenClaw / Codex auth. Mirrors the states
+/// This is independent from OpenAI / Codex auth. Mirrors the states
 /// documented in `microsoft-graph.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

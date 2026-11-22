@@ -127,17 +127,6 @@ export function ConfluenceIcon({ className = "h-5 w-5" }: IntegrationIconProps) 
   );
 }
 
-export function OpenClawIcon({ className = "h-5 w-5" }: IntegrationIconProps) {
-  return (
-    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" focusable="false">
-      <rect x="3" y="3" width="18" height="18" rx="5" fill="hsl(var(--foreground))" />
-      <path d="M7 14.5c2.1 2.5 6.6 3.1 10 0" fill="none" stroke="hsl(var(--theme-success-bg))" strokeLinecap="round" strokeWidth="1.8" />
-      <path d="M8 10.7 10.4 8l2.1 3.8L15.9 7" fill="none" stroke="hsl(var(--background))" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
-      <circle cx="17" cy="13" r="1.4" fill="hsl(var(--background) / 0.75)" />
-    </svg>
-  );
-}
-
 export function CodexIcon({ className = "h-5 w-5" }: IntegrationIconProps) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden="true" focusable="false">
