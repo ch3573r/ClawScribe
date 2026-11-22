@@ -365,16 +365,18 @@ jobs:
           $features = ($featureList | Select-Object -Unique) -join ","
           $sherpaRuntime = if ($featureList -contains "directml" -or $featureList -contains "windows-gpu") { "directml" } else { "cpu" }
           .\frontend\scripts\stage-sherpa-runtime.ps1 -TauriRoot "frontend\src-tauri" -Runtime $sherpaRuntime
+          .\frontend\scripts\stage-vc-runtime.ps1
           Remove-Item -LiteralPath "frontend\src-tauri\target\release\bundle\msi" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath "frontend\src-tauri\target\release\bundle\nsis" -Recurse -Force -ErrorAction SilentlyContinue
           cd frontend
           pnpm install --frozen-lockfile
           pnpm typecheck
           pnpm test
+          $releaseConfig = (Resolve-Path -LiteralPath "src-tauri/tauri.windows-release.conf.json").Path
           if ($features) {
-            pnpm exec tauri build -- --locked --features $features
+            pnpm exec tauri build --config $releaseConfig -- --locked --features $features
           } else {
-            pnpm exec tauri build -- --locked
+            pnpm exec tauri build --config $releaseConfig -- --locked
           }
           $buildElapsedSeconds = [Math]::Round(((Get-Date) - $buildStartedAt).TotalSeconds, 3)
           $buildElapsedSecondsText = $buildElapsedSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
@@ -393,8 +395,8 @@ jobs:
           if ($featureList.Count -gt 0) { $featureArgs = @("--features", ($featureList -join ",")) }
           .\frontend\scripts\test-windows-native.ps1 -Features ($featureList -join ",")
 
-      # Unpacks the NSIS installer just built (nothing is installed) and runs the
-      # packaged executable's headless self-test on a synthetic profile in two
+      # Unpacks both installers (nothing is installed), audits their VC++
+      # dependencies, and runs the NSIS executable's self-test in two
       # processes. It does not capture audio, load speech models, drive the
       # interface or run the installer; those acceptance checks stay manual.
       - name: Run packaged-binary acceptance
@@ -414,7 +416,12 @@ jobs:
           if (-not $installer) {
             throw "No current-version NSIS setup '$expectedNsis' was found for packaged-binary acceptance."
           }
-          .\frontend\scripts\test-packaged-acceptance.ps1 -Installer $installer
+          $expectedMsi = "ClawScribe_$($env:CLAWSCRIBE_INSTALLER_VERSION)_x64_en-US.msi"
+          $msiInstaller = Join-Path (Split-Path -Parent (Split-Path -Parent $installer)) "msi/$expectedMsi"
+          if (-not (Test-Path -LiteralPath $msiInstaller -PathType Leaf)) {
+            throw "No current-version MSI '$expectedMsi' was found for packaged-binary acceptance."
+          }
+          .\frontend\scripts\test-packaged-acceptance.ps1 -Installer $installer -MsiInstaller $msiInstaller
 
       - name: Write build metadata
         if: ${{ !inputs['check-only'] }}
@@ -499,6 +506,8 @@ jobs:
             "requested_build_ref=${{ inputs['build-ref'] || github.ref }}"
           )
           $metadata | Set-Content -LiteralPath (Join-Path $bundleRoot "BUILD-METADATA.txt") -Encoding ascii
+          Get-Content -LiteralPath "frontend/src-tauri/binaries/vc-runtime/versions.txt" |
+            Add-Content -LiteralPath (Join-Path $bundleRoot "BUILD-METADATA.txt") -Encoding ascii
           $metrics = [ordered]@{
             product = "ClawScribe"
             version = $sourceVersion

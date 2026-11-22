@@ -23,6 +23,10 @@ provided for deployment scenarios. Read that release's validation and signing
 notes before installing. Draft builds are unpublished, and prereleases do not
 advance the stable automatic-update channel.
 
+Starting with 0.67.0, both Windows installers include the required Microsoft
+Visual C++ runtime DLLs. Releases through 0.66.1 require the Microsoft Visual
+C++ 2015–2022 x64 Redistributable to be installed.
+
 The Windows GPU build needs the Vulkan loader (`vulkan-1.dll`) at startup, even
 when selecting a non-Vulkan model. Use a supported GPU driver or the official
 Vulkan runtime. The CI runtime fix does not install a driver or runtime on your
