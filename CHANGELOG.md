@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.66.1 preview
+
+- Scrolling back in a live transcript holds your place. Return to the bottom or use **Jump to live transcript** to resume following. The Listening indicator has room above the recording controls.
+- Saved citations keep the target passage visible as audio loads. Closing the source preview returns keyboard focus to the control that opened it.
+- See the [Windows preview notes](docs/releases/0.66.1.md) for recording and local notes limitations.
+
 ## 0.66.0
 
 - Recover interrupted transcripts when recording storage is offline. Recordings retain their identity through device reconnection, and saved meetings report audio gaps.
