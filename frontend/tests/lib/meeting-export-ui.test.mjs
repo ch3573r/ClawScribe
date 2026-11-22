@@ -13,14 +13,15 @@ function nodes(root) {
 const text = root => typeof root === 'string' ? root : Array.isArray(root) ? root.map(text).join('') : text(root?.props?.children ?? '');
 const find = (root, type, label) => nodes(root).find(node => node.type === type && (label === undefined || text(node) === label));
 
-async function setup({ connected = true, rest = false, restFailure = false, restOutcome = 'published', save = async () => 'export.docx', readFailure = false, resumes = [], history = [], candidates = [] } = {}) {
+async function setup({ connected = true, rest = false, restFailure = false, restOutcome = 'published', save = async () => 'export.docx', readFailure = false, resumes = [], history = [], candidates = [], webhook = null } = {}) {
   const harness = createHookHarness();
   const calls = [], errors = [], notices = [];
   const draft = loadTsModule('src/lib/confluenceDraft.ts');
   const { MeetingExportButtons } = loadTsModule('src/components/MeetingDetails/MeetingExportButtons.tsx', {
     react: harness.react,
     'react/jsx-runtime': { jsx, jsxs: jsx },
-    'lucide-react': names('Loader2 Upload ChevronDown'),
+    'lucide-react': names('Loader2 Upload ChevronDown Webhook'),
+    '@/hooks/useWebhookSettings': { useWebhookSettings: () => ({ status: 'ready', value: webhook }) },
     '@/components/IntegrationIcons': names('ConfluenceIcon WordIcon OneNoteIcon OneDriveIcon PlannerIcon ToDoIcon'),
     '@/components/ui/button': names('Button'),
     '@/components/ui/input': names('Input'),
@@ -39,6 +40,7 @@ async function setup({ connected = true, rest = false, restFailure = false, rest
         return save();
       }
       calls.push({ kind: command, args });
+      if (command === 'send_meeting_webhook') return { outcome: 'succeeded', httpStatus: 204 };
       if (command === 'api_get_meeting') {
         if (readFailure) throw new Error('Synthetic read failure');
         return { transcripts: [{ id: 'saved', timestamp: '09:10:11', speaker: 'Speaker A', text: 'Saved words.' }] };
@@ -88,6 +90,23 @@ test('Word export uses its integration icon', async () => {
   const view = await setup();
   const item = find(view.render(), 'DropdownMenuItem', 'Word document (.docx)');
   assert.ok(find(item, 'WordIcon'));
+});
+
+test('the webhook menu item requires an enabled destination and sends the meeting ID', async () => {
+  const configuration = { configured: true, destination: 'https://hooks.example.com', revision: 'example-revision' };
+  const off = await setup({ webhook: { ...configuration, enabled: false } });
+  assert.equal(find(off.render(), 'DropdownMenuItem', 'Send to webhook'), undefined);
+  const on = await setup({ webhook: { ...configuration, enabled: true } });
+  const item = find(on.render(), 'DropdownMenuItem', 'Send to webhook');
+  assert.ok(item);
+  item.props.onSelect();
+  item.props.onSelect();
+  await flush();
+  assert.equal(on.calls.length, 1);
+  assert.equal(on.calls[0].kind, 'send_meeting_webhook');
+  assert.equal(on.calls[0].args.meetingId, 'meeting');
+  assert.equal(on.calls[0].args.revision, 'example-revision');
+  assert.deepEqual(on.notices, [['success', 'Meeting sent to webhook']]);
 });
 
 for (const [menuLabel, buttonLabel, kind] of destinations) {

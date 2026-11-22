@@ -4,7 +4,7 @@ import { openExternal } from '@/lib/openExternal';
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { Loader2, Upload, ChevronDown } from "lucide-react";
+import { Loader2, Upload, ChevronDown, Webhook } from "lucide-react";
 import {
   ConfluenceIcon,
   WordIcon,
@@ -62,6 +62,8 @@ import { ToDoExportPreview } from "./ToDoExportPreview";
 import { ExportContentOptions } from "./ExportContentOptions";
 import { defaultExportOptions, prepareMeetingExport, readExportSummary } from "@/lib/meetingExportContent";
 import { safeDocumentName } from "@/lib/library";
+import { useWebhookSettings } from "@/hooks/useWebhookSettings";
+import { canSendWebhook, webhookCommandError, webhookDeliveryMessage, type WebhookDelivery } from "@/lib/webhook";
 
 interface MeetingExportButtonsProps {
   meetingId: string;
@@ -76,7 +78,7 @@ interface MeetingExportButtonsProps {
 }
 
 type DocumentDestination = "word" | "onedrive" | "confluence";
-type Busy = DocumentDestination | "onenote" | null;
+type Busy = DocumentDestination | "onenote" | "webhook" | null;
 
 const documentLabels: Record<DocumentDestination, { title: string; description: string; submit: string }> = {
   word: { title: "Export Word document", description: "Save an editable .docx on this computer. Microsoft sign-in is not required.", submit: "Save as Word document" },
@@ -160,6 +162,8 @@ export function MeetingExportButtons({
   onReviewEmail,
   seriesDestination,
 }: MeetingExportButtonsProps) {
+  const webhook = useWebhookSettings();
+  const webhookConfig = webhook.status === "ready" ? webhook.value : null;
   const [connected, setConnected] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<MeetingExportHistory[] | null>(null);
@@ -653,6 +657,25 @@ export function MeetingExportButtons({
     }
   };
 
+  async function sendWebhook() {
+    if (!canSendWebhook(webhookConfig) || pending.current) return;
+    pending.current = true;
+    setBusy("webhook");
+    try {
+      const result = await invoke<WebhookDelivery>("send_meeting_webhook", {
+        meetingId,
+        revision: webhookConfig.revision,
+      });
+      if (result.outcome === "succeeded") toast.success("Meeting sent to webhook");
+      else toast.error(webhookDeliveryMessage(result));
+    } catch (error) {
+      toast.error(webhookCommandError(error, "Could not send the meeting to the webhook."));
+    } finally {
+      pending.current = false;
+      setBusy(null);
+    }
+  }
+
   return (
     <div className="flex items-center gap-2">
       <DropdownMenu>
@@ -701,6 +724,12 @@ export function MeetingExportButtons({
             <ConfluenceIcon className="mr-2 h-4 w-4" />
             Confluence
           </DropdownMenuItem>
+          {canSendWebhook(webhookConfig) && (
+            <DropdownMenuItem onSelect={() => void sendWebhook()}>
+              <Webhook className="mr-2 h-4 w-4" />
+              Send to webhook
+            </DropdownMenuItem>
+          )}
           {onReviewEmail && <DropdownMenuItem onSelect={onReviewEmail}>Follow-up email{seriesDestination === "email" && " · Series preference"}</DropdownMenuItem>}
           <DropdownMenuItem onClick={() => void openHistory()}>Export history</DropdownMenuItem>
         </DropdownMenuContent>

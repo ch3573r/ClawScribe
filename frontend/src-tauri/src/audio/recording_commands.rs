@@ -2110,8 +2110,13 @@ async fn stop_recording_session<R: Runtime>(
     crate::tray::update_tray_menu(&app);
 
     if let Some(id) = meeting_id {
-        if suspend_attempt.is_none() && transcribes {
-            wake_saved_recording_summary(&app, id);
+        if suspend_attempt.is_none() {
+            if !audio_save_failed {
+                crate::webhook::recording_saved(&app, &id);
+            }
+            if transcribes {
+                wake_saved_recording_summary(&app, id);
+            }
         }
         info!("Recording stop committed to the library");
     }

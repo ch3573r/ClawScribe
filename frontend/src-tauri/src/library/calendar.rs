@@ -196,7 +196,7 @@ impl CalendarLink {
         serde_json::to_string(self).map_err(|_| "Could not save the calendar link.".into())
     }
 
-    pub(crate) fn with_attendance(&self, custom_prompt: String) -> String {
+    pub(crate) fn confirmed_names(&self) -> Vec<&str> {
         let excluded: std::collections::HashSet<_> = self
             .attendees
             .iter()
@@ -217,6 +217,11 @@ impl CalendarLink {
                 break;
             }
         }
+        labels
+    }
+
+    pub(crate) fn with_attendance(&self, custom_prompt: String) -> String {
+        let labels = self.confirmed_names();
         if labels.is_empty() {
             return custom_prompt;
         }

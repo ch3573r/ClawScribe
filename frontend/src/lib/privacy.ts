@@ -1,3 +1,5 @@
+import { canSendWebhook, type WebhookConfig } from "./webhook";
+
 /**
  * Derives the Privacy page from the real settings. State goes in, rows come
  * out: nothing here is fixed text that could be wrong for the current setup.
@@ -35,6 +37,7 @@ export interface PrivacyInput {
    * including its transcript, to the gateway, whatever the summary provider is.
    */
   handoff: Loadable<{ enabled: boolean; endpoint: string | null }>;
+  webhook: Loadable<WebhookConfig>;
 }
 
 export interface PrivacyRow {
@@ -299,6 +302,29 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       });
   const exportsState = blocked(input.microsoft);
 
+  const webhook = input.webhook.status === "ready" ? input.webhook.value : null;
+  const webhookActive = canSendWebhook(webhook) ? webhook : null;
+  const webhookHost = endpointHost(webhookActive?.destination);
+  const webhookLeaves = !!webhookHost && !isLoopbackHost(webhookHost);
+  const webhookTriggers = [
+    webhookActive?.onSummary && "a summary is ready",
+    webhookActive?.onRecording && "a recording or import is saved",
+  ].filter(Boolean).join(" or ");
+  const webhookAuto = webhookLeaves && !!webhookTriggers;
+  const webhookText = webhookLeaves && webhookActive?.includeTranscript;
+  const webhookContents = [
+    "Meeting details",
+    webhookActive?.includeSummary && "summary and action items",
+    webhookActive?.includeTranscript && "transcript text",
+  ].filter(Boolean).join(", ");
+  const webhookBase = row({
+    id: "webhook", title: "Webhook", tab: "webhook", tabLabel: "Webhook",
+    destination: webhookActive?.destination ?? (webhook?.enabled ? "Destination unavailable" : "Off"),
+    when: webhookActive ? (webhookTriggers ? `When ${webhookTriggers} or you export` : "When you export") : "Off",
+    tone: webhookActive ? (webhookLeaves ? (webhookAuto ? "warning" : "active") : "neutral") : "off",
+    detail: webhookActive ? webhookContents : "Sends meeting data to your automation endpoint",
+  });
+
   // Calendars
   const calendarsState: PrivacyState = blocked(input.microsoft, input.calendars);
   let calendarsBase = row({ id: "calendars", title: "Calendars", tab: "calendars", tabLabel: "Calendars" });
@@ -340,6 +366,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
     withheld(liveBase, liveState),
     withheld(handoffBase, blocked(input.handoff)),
     withheld(exportsBase, exportsState),
+    withheld(webhookBase, blocked(input.webhook)),
     withheld(calendarsBase, calendarsState),
     withheld(assistantBase, blocked(input.assistant)),
     updateRow,
@@ -354,7 +381,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       : { id: "audio", label: "Audio", value: "Stays on this PC", detail: null, tone: "neutral", state: "ready" };
 
   // An unreadable handoff setting must not be reported as "stays on this PC".
-  const textState = blocked(input.summary, input.handoff);
+  const textState = blocked(input.summary, input.handoff, input.webhook);
   let textFact: PrivacyFact;
   if (handoffOn) {
     const alsoProvider = summaryClass && textLeavesKind
@@ -371,8 +398,18 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       ? { id: "text", label: "Transcript text", value: "Leaves automatically", detail: where, tone: "warning", state: "ready" }
       : { id: "text", label: "Transcript text", value: "Leaves when you ask", detail: where, tone: "active", state: "ready" };
   }
+  if (webhookText) {
+    const automatic = webhookAuto || textFact.tone === "warning";
+    textFact = {
+      ...textFact,
+      value: automatic ? "Leaves automatically" : "Leaves when you ask",
+      detail: [textFact.detail, `Webhook on ${webhookHost}`].filter(Boolean).join(" · "),
+      tone: automatic ? "warning" : "active",
+      state: "ready",
+    };
+  }
 
-  const automaticState = input.autoSummary ? blocked(input.summary, input.handoff) : blocked(input.handoff);
+  const automaticState = input.autoSummary ? blocked(input.summary, input.handoff, input.webhook) : blocked(input.handoff, input.webhook);
   let automaticFact: PrivacyFact;
   if (handoffOn) {
     // Automatic summaries can add a second destination; name both.
@@ -386,6 +423,15 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "Transcript text", detail: summaryClass && summaryClass.kind === "unknown" ? UNKNOWN_DESTINATION : `To ${summaryClass?.label ?? ""}`, tone: "warning", state: "ready" };
   } else {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "None", detail: null, tone: "neutral", state: "ready" };
+  }
+  if (webhookAuto) {
+    automaticFact = {
+      ...automaticFact,
+      value: automaticFact.tone === "warning" || webhookText ? "Meeting details and transcript text" : "Meeting details",
+      detail: [automaticFact.detail, `${webhookContents} to ${webhookHost}`].filter(Boolean).join(" · "),
+      tone: "warning",
+      state: "ready",
+    };
   }
 
   return { facts: [audioFact, textFact, automaticFact], rows };

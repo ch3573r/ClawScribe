@@ -389,6 +389,10 @@ travels with portable backups. Inspect the original destination and choose
 item. ClawScribe checks the item and destination before saving the link.
 See [export recovery](docs/integrations/microsoft-graph.md#export-history-and-recovery).
 
+An optional outbound webhook sends saved meeting details, notes and selected
+transcript text to your automation endpoint. Configure it in **Settings →
+Webhook**. [Webhook setup and request format](docs/integrations/webhook.md)
+
 Private-network HTTP for OpenClaw, custom OpenAI endpoints, and Confluence requires
 an explicit unencrypted-HTTP opt-in in Settings. Existing private HTTP setups
 retain access on upgrade. Tailscale addresses and MagicDNS names are supported.

@@ -907,6 +907,7 @@ dependencies = [
  "ffmpeg-sidecar",
  "futures-channel",
  "futures-util",
+ "hmac",
  "keyring",
  "lazy_static",
  "libsqlite3-sys",

@@ -148,35 +148,57 @@ fn validate_addresses(addresses: &[SocketAddr]) -> Result<(), String> {
 /// Resolve immediately before sending, pin that resolution, and prohibit redirects
 /// and proxies for plaintext requests so a second resolution cannot bypass policy.
 pub(crate) async fn secret_client(
-    mut builder: reqwest::ClientBuilder,
+    builder: reqwest::ClientBuilder,
     value: &str,
     allow_unencrypted: bool,
 ) -> Result<reqwest::Client, String> {
-    validate_secret_destination(value, allow_unencrypted)?;
-    let url = Url::parse(value).map_err(|_| "Invalid endpoint")?;
+    build_secret_client(builder, value, allow_unencrypted)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SecretClientError {
+    #[error("{0}")]
+    Destination(String),
+    #[error("Endpoint lookup timed out")]
+    LookupTimeout,
+    #[error("Could not resolve the local-network endpoint")]
+    LookupFailed,
+    #[error("Could not create integration HTTP client")]
+    Build,
+}
+
+pub(crate) async fn build_secret_client(
+    mut builder: reqwest::ClientBuilder,
+    value: &str,
+    allow_unencrypted: bool,
+) -> Result<reqwest::Client, SecretClientError> {
+    use SecretClientError::{Destination, LookupFailed, LookupTimeout};
+    validate_secret_destination(value, allow_unencrypted).map_err(Destination)?;
+    let url = Url::parse(value).map_err(|_| Destination("Invalid endpoint".into()))?;
     builder = builder.redirect(reqwest::redirect::Policy::none());
     if url.scheme() == "http" {
         let host = url
             .host_str()
-            .ok_or("Missing endpoint host")?
+            .ok_or_else(|| Destination("Missing endpoint host".into()))?
             .trim_matches(['[', ']']);
         let addresses: Vec<_> = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             tokio::net::lookup_host((
                 host,
-                url.port_or_known_default().ok_or("Missing endpoint port")?,
+                url.port_or_known_default()
+                    .ok_or_else(|| Destination("Missing endpoint port".into()))?,
             )),
         )
         .await
-        .map_err(|_| "Endpoint lookup timed out")?
-        .map_err(|_| "Could not resolve the local-network endpoint")?
+        .map_err(|_| LookupTimeout)?
+        .map_err(|_| LookupFailed)?
         .collect();
-        validate_addresses(&addresses)?;
+        validate_addresses(&addresses).map_err(Destination)?;
         builder = builder.no_proxy().resolve_to_addrs(host, &addresses);
     }
-    builder
-        .build()
-        .map_err(|_| "Could not create integration HTTP client".into())
+    builder.build().map_err(|_| SecretClientError::Build)
 }
 
 #[cfg(test)]

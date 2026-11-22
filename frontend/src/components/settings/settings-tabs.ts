@@ -2,7 +2,7 @@
 export const SETTINGS_TABS = [
   "general", "privacy", "appearance", "recording", "shortcuts",
   "transcription", "summary", "memory",
-  "ms365", "calendars", "confluence", "assistant",
+  "ms365", "calendars", "confluence", "webhook", "assistant",
   "diagnostics",
 ] as const;
 

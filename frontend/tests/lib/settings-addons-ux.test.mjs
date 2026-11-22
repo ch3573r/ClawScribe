@@ -277,5 +277,5 @@ test('settings tabs keep deep links working and resolve the old names',()=>{
   assert.equal(resolveSettingsTab('beta'),'transcription');
   assert.equal(resolveSettingsTab('nope'),null);
   assert.equal(resolveSettingsTab(null),null);
-  assert.deepEqual([...SETTINGS_TABS],['general','privacy','appearance','recording','shortcuts','transcription','summary','memory','ms365','calendars','confluence','assistant','diagnostics']);
+  assert.deepEqual([...SETTINGS_TABS],['general','privacy','appearance','recording','shortcuts','transcription','summary','memory','ms365','calendars','confluence','webhook','assistant','diagnostics']);
 });
