@@ -113,11 +113,21 @@ or an actual mention of applause. Its final text normalization only collapses
 whitespace. This avoids deleting legitimate speech; it does not prove a model's
 output is correct. Check suspected hallucinations against the saved audio.
 
-Use a timestamp button to play the associated audio. Scroll back to review
-previous text without being pulled to the newest segment; **Jump to live
-transcript** resumes following during recording. Speaker-name edits report
-failures visibly and retain custom input for retry. A manually assigned speaker
-label is not independently verified speaker identity.
+Use a timestamp button to play the associated audio in a saved meeting.
+During recording, scrolling back holds your place while speech arrives.
+**Jump to live transcript** returns to the latest passage and resumes following.
+Reloading during active capture opens the restored transcript at the tail.
+Speaker-name edits report failures visibly and retain custom input for retry.
+A manually assigned speaker label is not independently verified speaker identity.
+
+Home uses one scroll area for the transcript and its controls. The list measures
+wrapped text and the space above its first row in that scroll area. Pause
+preserves your follow choice, and Stop ends live following.
+
+From `frontend`, run `node tests/browser/live-transcript-follow.mjs` to check
+scroll-back, jump, Stop, reload and saved playback navigation in headless Chromium
+with generated passages. It uses Microsoft Edge by default on Windows.
+Set `CLAWSCRIBE_TEST_BROWSER` to use another Chromium executable.
 
 Refreshing transcript rows does not interrupt the display of an arriving
 utterance; stopping shows its complete text. Reloading the interface restores an
