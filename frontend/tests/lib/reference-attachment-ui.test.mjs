@@ -144,9 +144,10 @@ test('Meeting memory exposes attachment beside Sources and includes the destinat
   });
   const render=()=>hooks.render(()=>KnowledgeArchive({meetings,projectFilter:{tags:[],mode:'any',untagged:false}}));
   try {
-    const tree=render(),sourcePanel=nodes(tree).find(node=>node.type==='fieldset');
+    const initialChat=nodes(render()).find(node=>node.type==='chat');
+    const sourcePanel=nodes(initialChat.props.secondary).find(node=>node.type==='fieldset');
     const action=nodes(sourcePanel).find(node=>node.type==='attach');
-    assert.ok(action,'Attach file must be available outside the conversation content');
+    assert.ok(action,'Attach file must be available alongside the source controls before a conversation starts');
     action.props.onAttached('two');
     const chat=nodes(render()).find(node=>node.type==='chat');
     assert.deepEqual([...chat.props.state.scope.filter.meeting_ids],['two']);

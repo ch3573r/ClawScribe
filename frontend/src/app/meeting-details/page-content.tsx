@@ -375,7 +375,7 @@ export default function PageContent({
       </div>}
       <EvidenceRoute token={evidenceToken} meetingId={meeting.id} audioReady={isAudioReady} audioStatus={audioStatus} audioError={audioPlayer.error} onReveal={revealEvidence} onPlay={playEvidence} />
       {savedSourceToken && <SavedSearchRoute key={savedSourceToken} token={savedSourceToken} meetingId={meeting.id} onBookmark={setFocusedBookmark} onPlay={isAudioReady ? playPassage : undefined} />}
-      <MeetingHeader key={meeting.id} meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
+      <MeetingHeader meeting={meeting} title={meetingData.meetingTitle} isEditing={meetingData.isEditingTitle}
         initialActionId={archiveAction === 'actions' ? actionId : null}
         initialSeriesOpen={archiveAction === 'series'}
         seriesDestination={series?.destination}
@@ -386,11 +386,10 @@ export default function PageContent({
         attendance={<SavedMeetingAttendance key={meeting.id} meetingId={meeting.id} createdAt={meeting.created_at}
           durationSeconds={audioPlayer.duration || undefined} disabled={summaryBusy}
           templates={templates.availableTemplates} remembered={templates.seriesTemplate} />} />
-      <OpenClawHandoff key={meeting.id} meetingId={meeting.id} />
+      <OpenClawHandoff meetingId={meeting.id} />
       {isAudioReady && (
         <SpeakerLaneTimeline
           bindings={playerBindings}
-          key={meeting.id}
           segments={timelineSegments ?? []}
           showSpeakerAttribution={showSpeakerAttribution}
           totalCount={totalCount}

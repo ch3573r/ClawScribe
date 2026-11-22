@@ -1087,8 +1087,10 @@ file paths in its URL, then re-resolves before using the existing paginated
 reveal/player callbacks. Group menus preserve the raw displayed citation group
 and every original ordinal. Literal links require the backend allowlist;
 separately labeled context links validate both map entries and resolve both
-canonical references independently. Native installed clicks remain a manual
-acceptance gate.
+canonical references independently. Dismissing an evidence preview returns focus
+to the citation or search result that opened it. Meeting memory scrolls its
+source controls and conversation together to leave room for the composer at
+short window heights. Native installed clicks remain a manual acceptance gate.
 Derived chunk IDs and SQLite rowids are never citation identities. Saved title,
 date and speaker labels describe the original answer snapshot. Editing a title
 or meeting date advances the source revision, invalidates pending answers and

@@ -3,7 +3,7 @@ import test from 'node:test';
 import {loadTsModule} from './load-ts-module.mjs';
 import {createHookHarness,flush} from './hook-harness.mjs';
 const jsx=(type,props)=>({type,props});
-const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children)]:[];
+const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props?.children),...nodes(node.props?.secondary)]:[];
 const text=node=>Array.isArray(node)?node.map(text).join(''):typeof node==='string'||typeof node==='number'?String(node):node?text(node.props?.children):'';
 const meetings=[{id:'a',title:'Launch review'},{id:'b',title:'Budget planning'}];
 function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic_ready:0},sidebar={}) {
@@ -177,7 +177,7 @@ test('asking from filtered saved hits prefills the question without including pe
   assert.equal(chat.props.state.scope.filter.from,'2026-02-01');
   assert.equal(chat.props.state.owner,undefined);
   assert.equal(chat.props.initialQuestion,'private phrase');
-  assert.match(text(tree),/Personal notes and bookmarks stay on this device/);
+  assert.match(text(chat.props.secondary),/Personal notes and bookmarks stay on this device/);
   actual.unmount();archive.unmount();
 });
 

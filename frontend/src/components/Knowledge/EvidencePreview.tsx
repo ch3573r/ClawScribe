@@ -21,6 +21,7 @@ export function EvidencePreview({state,onNavigate}:{state:KnowledgeSearchState;o
       const token=createEvidenceIntent(preview.reference,play,preview.contextReference);
       setCurrentMeeting({id:resolved.navigation.meeting_id,title:resolved.passage.title});
       router.push(`/meeting-details?id=${encodeURIComponent(resolved.navigation.meeting_id)}&evidence=${encodeURIComponent(token)}`);
+      state.previewTrigger.current = null;
       onNavigate?.();
       state.closePreview();
     }catch{if(current())void state.inspect(preview.reference,preview.metadata,preview.contextReference);}
@@ -29,7 +30,13 @@ export function EvidencePreview({state,onNavigate}:{state:KnowledgeSearchState;o
   const locator=resolved?.passage?.evidence?.locator ?? preview?.reference.locator;
   const document=locator?.kind==='document';
   return <Dialog open={!!preview} onOpenChange={open=>{if(!open)state.closePreview();}}>
-    <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl"><DialogHeader>
+    <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl" onCloseAutoFocus={event => {
+      const trigger = state.previewTrigger.current;
+      state.previewTrigger.current = null;
+      if (!trigger?.isConnected) return;
+      event.preventDefault();
+      trigger.focus();
+    }}><DialogHeader>
       <DialogTitle>{document?'Reference passage':'Source passage'}</DialogTitle><DialogDescription>{document?'Review the verified extracted text and its document anchor.':'Review the original evidence, then reveal the current transcript or play its saved recording.'}</DialogDescription>
     </DialogHeader>
     {preview&&<><h3 className="break-words font-semibold">{preview.metadata.title}</h3><p className="text-xs text-muted-foreground">Original source · {preview.metadata.date}{preview.metadata.speaker?` · ${preview.metadata.speaker}`:''}</p></>}
