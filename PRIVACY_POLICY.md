@@ -32,9 +32,9 @@ third party's terms.
 
 **Summary and meeting chat providers.** A remote provider receives transcript or
 meeting text and supplied context needed for the selected operation. OpenAI,
-OpenAI-compatible endpoints, Anthropic, Groq, OpenRouter, remote Ollama, managed
-OpenClaw, and the configured Codex path are not equivalent to local-only
-processing. A provider named Ollama is local only when its endpoint is local.
+OpenAI-compatible endpoints, Anthropic, Groq, OpenRouter, remote Ollama, and the
+configured Codex path can send this data off-device. Ollama processing stays on
+your device when its endpoint is local.
 
 **Personal notes in a library question.** Searching personal notes and bookmarks
 runs on your device. **Ask about these results** opens a question scoped to the
@@ -42,10 +42,6 @@ displayed meetings. To share a personal excerpt, select it, review the exact
 text, provider, model and destination, then confirm the question. Approval
 allows one send attempt. ClawScribe excludes that question and answer from
 the history it sends with later questions. A new attempt requires a new review.
-
-**OpenClaw handoff.** When enabled, completed recording artifacts are handed to
-the configured endpoint. OpenClaw is optional; it is not required for standalone
-local recording or transcription.
 
 **Microsoft Graph.** Signing in exchanges credentials with Microsoft and enables
 the delegated integration. Calendar features read meeting context and invited
@@ -82,12 +78,11 @@ Automatic update checks are not meeting-content uploads.
 
 ## Credential Storage
 
-Summary and hosted-transcription API keys, and the OpenClaw token, use Windows
-Credential Manager. If that store is unavailable on Windows, a current-user
-DPAPI-encrypted fallback is stored in SQLite for API keys or in the OpenClaw
-configuration file for its token. Legacy plaintext is migrated before use. If
-protected storage or migration fails, that provider cannot use the saved secret
-until protected storage is available; the old plaintext may remain pending migration.
+Summary and hosted-transcription API keys use Windows Credential Manager. If
+that store is unavailable on Windows, a current-user DPAPI-encrypted fallback is
+stored in SQLite. The app migrates legacy plaintext before use. If protected
+storage or migration fails, the provider cannot use the saved secret until
+protected storage is available. The old plaintext may remain pending migration.
 
 The bundled Codex provider uses an isolated profile and keyring-only ChatGPT
 sign-in, with no credential-file fallback. An old `auth.json` is removed after a
@@ -197,7 +192,6 @@ content can be inaccurate.
 - Microsoft tokens: `frontend/src-tauri/src/exports/token_store.rs`
 - Provider key settings: `frontend/src-tauri/src/database/repositories/setting.rs`
 - Protected provider credentials: `frontend/src-tauri/src/credentials.rs`
-- OpenClaw configuration: `frontend/src-tauri/src/openclaw.rs`
 - Confluence credentials: `frontend/src-tauri/src/exports/confluence.rs`
 - Codex sign-in and output cleanup: `frontend/src-tauri/src/summary/codex_provider.rs`
 - Database snapshots: `frontend/src-tauri/src/database/manager.rs`

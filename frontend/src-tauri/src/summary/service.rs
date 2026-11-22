@@ -13,7 +13,6 @@ use crate::summary::processor::{
     extract_meeting_name_from_markdown, generate_meeting_summary, language_name_from_code,
 };
 use crate::summary::templates::{self, Template};
-use crate::summary::CustomOpenAIConfig;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -799,7 +798,7 @@ impl SummaryService {
             }
         };
 
-        // Validate and setup api_key. Local/OpenClaw-managed providers do not use
+        // Validate and setup api_key. Local and operator-managed providers do not use
         // the standard provider API-key database column.
         let api_key = if let Some(execution) = execution {
             match execution {
@@ -812,7 +811,6 @@ impl SummaryService {
                 | LLMProvider::BuiltInAI
                 | LLMProvider::OpenAICompatible
                 | LLMProvider::CustomOpenAI
-                | LLMProvider::OpenClaw
                 | LLMProvider::Codex
                 | LLMProvider::ClaudeCode
         ) {
@@ -890,38 +888,12 @@ impl SummaryService {
                     return;
                 }
             }
-        } else if provider == LLMProvider::OpenClaw {
-            match crate::openclaw::load_config(&app) {
-                Ok(config) if config.enabled && !config.bearer_token.trim().is_empty() => {
-                    allow_unencrypted = config.allow_unencrypted;
-                    info!("Using the configured OpenClaw model endpoint");
-                    (
-                        Some(config.model_endpoint),
-                        Some(config.bearer_token),
-                        None,
-                        None,
-                        None,
-                    )
-                }
-                Ok(_) => {
-                    let err_msg =
-                        "OpenClaw provider selected but OpenClaw handoff is disabled or missing a bearer token";
-                    Self::update_process_failed(&pool, &meeting_id, err_msg).await;
-                    return;
-                }
-                Err(e) => {
-                    let err_msg = format!("Failed to load OpenClaw config: {}", e);
-                    Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
-                    return;
-                }
-            }
         } else {
             (None, None, None, None, None)
         };
 
         // For operator-managed OpenAI-compatible endpoints, use their configured token.
-        let final_api_key = if matches!(provider, LLMProvider::CustomOpenAI | LLMProvider::OpenClaw)
-        {
+        let final_api_key = if provider == LLMProvider::CustomOpenAI {
             custom_openai_api_key.unwrap_or_default()
         } else {
             api_key
@@ -976,7 +948,6 @@ impl SummaryService {
                 LLMProvider::OpenAI
                     | LLMProvider::OpenAICompatible
                     | LLMProvider::CustomOpenAI
-                    | LLMProvider::OpenClaw
                     | LLMProvider::Codex
             )
         {
@@ -997,7 +968,6 @@ impl SummaryService {
             LLMProvider::OpenAI
                 | LLMProvider::OpenAICompatible
                 | LLMProvider::CustomOpenAI
-                | LLMProvider::OpenClaw
                 | LLMProvider::Codex
         ) {
             let language = summary_language
@@ -1011,10 +981,7 @@ impl SummaryService {
 
         if matches!(
             provider,
-            LLMProvider::OpenAI
-                | LLMProvider::OpenAICompatible
-                | LLMProvider::CustomOpenAI
-                | LLMProvider::OpenClaw
+            LLMProvider::OpenAI | LLMProvider::OpenAICompatible | LLMProvider::CustomOpenAI
         ) {
             if cancellation_token.is_cancelled() {
                 if let Err(db_err) =
@@ -1108,20 +1075,6 @@ impl SummaryService {
                     LLMProvider::OpenAI => {
                         config_from_openai_api_key(Some(final_api_key.clone()), model_name.clone())
                     }
-                    LLMProvider::OpenClaw => config_from_custom_openai(CustomOpenAIConfig {
-                        destination_problem: None,
-                        allow_unencrypted,
-                        endpoint: custom_openai_endpoint.clone().unwrap_or_default(),
-                        api_key: Some(final_api_key.clone()),
-                        model: model_name.clone(),
-                        timeout_seconds: None,
-                        organization: None,
-                        project: None,
-                        max_tokens: None,
-                        context_window: None,
-                        temperature: None,
-                        top_p: None,
-                    }),
                     _ => unreachable!("provider checked above"),
                 };
                 OpenAICompatibleProcessingProvider::new(provider_config)

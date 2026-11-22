@@ -5,7 +5,7 @@ Enable **Summarize automatically** in **Settings → Summary**. Built-in AI and
 Ollama on this PC can use the local preference. Older local preferences are
 carried over once when the app first loads the setting.
 
-Remote Ollama, OpenAI, OpenAI-compatible endpoints, OpenClaw, OpenRouter, Claude,
+Remote Ollama, OpenAI, OpenAI-compatible endpoints, OpenRouter, Claude,
 and Groq require you to review the provider, model, and destination before
 ClawScribe sends transcript text and notes context. The review identifies
 unencrypted HTTP connections. Changes to the selected destination, model, or

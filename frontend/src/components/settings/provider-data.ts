@@ -26,7 +26,6 @@ const LABELS: Record<string, string> = {
   claude: "Claude",
   groq: "Groq",
   openrouter: "OpenRouter",
-  openclaw: "OpenClaw",
   codex: "Codex",
   "claude-code": "Claude Code",
 };
@@ -58,9 +57,6 @@ export function describeProviderData(provider: string, ollamaEndpoint?: string |
     { title: "Transcript text", detail: "When you generate a summary or ask a question", tone: "active" },
     { title: "Template and language", detail: "Sent with each summary request", tone: "active" },
   ];
-  if (provider === "openclaw") {
-    items.push({ title: "Completed meetings", detail: "Submitted to your gateway while handoff is on", tone: "active" });
-  }
   items.push(AUDIO);
   return { label, local: false, items };
 }

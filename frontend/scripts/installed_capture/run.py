@@ -339,8 +339,6 @@ def main():
     require(not (profile / "installed-capture-preferences").exists(), "Recover the previous preference backup first.")
     call_detection = profile.parent / "ClawScribe" / "call_detection.json"
     require(not call_detection.exists() or json_file(call_detection)["mode"] == "off", "Disable automatic call detection.")
-    handoff = profile / "openclaw.json"
-    require(not handoff.exists() or not json_file(handoff).get("enabled"), "Disable the OpenClaw handoff.")
     db = profile / "meeting_minutes.sqlite"
     baseline = library(db)
     runtime_version = args.version.split("-")[0]

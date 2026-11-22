@@ -18,7 +18,6 @@ const base = () => ({
   assistant: ready(false),
   updateCheck: false,
   semanticSearch: ready(true),
-  handoff: ready({ enabled: false, endpoint: null }),
   webhook: ready({ enabled: false, configured: false, destination: null }),
 });
 const derive = overrides => derivePrivacy({ ...base(), ...overrides });
@@ -109,10 +108,10 @@ test('providers are classified from their endpoint where the provider alone cann
   assert.equal(classifySummaryProvider('custom-openai', { customEndpoint: 'http://localhost:1234/v1' }).kind, 'local');
   assert.equal(classifySummaryProvider('custom-openai', { customEndpoint: 'https://api.openai.com/v1' }).kind, 'remote');
   assert.equal(classifySummaryProvider('custom-openai', {}).kind, 'unknown');
-  assert.equal(classifySummaryProvider('openclaw').kind, 'unknown');
+  assert.equal(classifySummaryProvider('unknown-provider').kind, 'unknown');
   assert.equal(classifySummaryProvider('something-new').kind, 'unknown');
   assert.equal(classifySummaryProvider(null).kind, 'none');
-  const unknown = derive({ summary: ready({ provider: 'openclaw', ollamaEndpoint: null, customEndpoint: null }) });
+  const unknown = derive({ summary: ready({ provider: 'unknown-provider', ollamaEndpoint: null, customEndpoint: null }) });
   assert.equal(rowOf(unknown, 'summary').destination, 'Depends on the provider');
 });
 
@@ -154,7 +153,7 @@ test('conversation metrics stay local even when live assistance shares transcrip
 test('every row links to the settings page that controls it', () => {
   const tabs = Object.fromEntries(derive({}).rows.map(row => [row.id, row.tab]));
   assert.deepEqual(tabs, {
-    recording: 'recording', transcription: 'transcription', conversation: 'recording', memory: 'memory', summary: 'summary', live: 'summary', handoff: 'summary',
+    recording: 'recording', transcription: 'transcription', conversation: 'recording', memory: 'memory', summary: 'summary', live: 'summary',
     exports: 'ms365', webhook: 'webhook', calendars: 'calendars', assistant: 'assistant', update: 'general',
   });
 });
@@ -174,27 +173,6 @@ test('loading and unreadable state is shown as such, never guessed', () => {
   assert.equal(factOf(autoOnly, 'automatic').value, 'Could not check');
   // Live sharing off does not need the provider.
   assert.equal(rowOf(derive({ summary: { status: 'error' } }), 'live').state, 'ready');
-});
-
-test('OpenClaw handoff sends the transcript after every recording, whatever the summary provider is', () => {
-  const model = derive({ handoff: ready({ enabled: true, endpoint: 'https://openclaw.example.com/hooks/meeting' }) });
-  assert.equal(rowOf(model, 'summary').when, 'Never leaves');
-  assert.equal(rowOf(model, 'handoff').tone, 'warning');
-  assert.equal(rowOf(model, 'handoff').destination, 'OpenClaw on openclaw.example.com');
-  assert.equal(rowOf(model, 'handoff').when, 'After every recording');
-  assert.equal(factOf(model, 'text').value, 'Leaves automatically');
-  assert.equal(factOf(model, 'text').tone, 'warning');
-  assert.equal(factOf(model, 'automatic').value, 'Transcript text');
-  assert.equal(rowOf(derive({}), 'handoff').tone, 'off');
-});
-
-test('an unreadable handoff setting is never reported as staying on this PC', () => {
-  for (const handoff of [{ status: 'loading' }, { status: 'error' }]) {
-    const model = derive({ handoff });
-    assert.notEqual(factOf(model, 'text').value, 'Stays on this PC');
-    assert.notEqual(factOf(model, 'automatic').value, 'None');
-    assert.notEqual(rowOf(model, 'handoff').state, 'ready');
-  }
 });
 
 test('built-in provider aliases count as local', () => {

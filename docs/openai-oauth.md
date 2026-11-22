@@ -5,12 +5,8 @@
 > to direct OpenAI API credentials: ClawScribe must not use private/raw OpenAI
 > OAuth endpoints or treat Codex tokens as generic API bearer tokens.
 
-This fork treats OpenAI auth as a production configuration contract for a
-distributable desktop app. OpenClaw is an optional integration, not the
-foundation for OpenAI auth.
-
 ClawScribe supports direct OpenAI API-key auth, custom OpenAI-compatible
-endpoints, and an optional OpenClaw managed endpoint. Public OpenAI OAuth PKCE
+endpoints. Public OpenAI OAuth PKCE
 metadata is kept as compatibility metadata only; it is not treated as a usable
 OpenAI API credential.
 
@@ -50,8 +46,6 @@ the backend owns OAuth/token refresh/secrets, exposes an OpenAI-compatible
 `/chat/completions` endpoint, and ClawScribe sends bearer-authenticated requests
 to that endpoint. The endpoint can be local, LAN, cloud, or vendor-hosted.
 
-This path does not require OpenClaw.
-
 Configuration shape:
 
 ```json
@@ -68,54 +62,6 @@ Related commands:
 - `api_save_custom_openai_config`
 - `api_get_custom_openai_config`
 - `api_test_custom_openai_connection`
-
-### Optional OpenClaw Managed Auth
-
-Status: supported and request-ready when an endpoint is configured.
-
-This mode represents an optional production handoff to an OpenClaw endpoint that
-owns ChatGPT/Codex-authenticated processing. ClawScribe stores only endpoint
-metadata and does not mint, accept, persist, refresh, or expose ChatGPT or Codex
-tokens.
-
-In an OpenClaw deployment, this endpoint can be the ingest service's
-OpenAI-compatible model bridge:
-
-```text
-http://openclaw.local:8765/v1/chat/completions
-```
-
-That bridge runs `openclaw infer model run --gateway --model openai/gpt-5.4` on
-the trusted OpenClaw host, using the existing OpenClaw/ChatGPT/Codex auth state
-there. This is one managed endpoint implementation, not a requirement for the
-desktop app.
-
-Configuration shape:
-
-```json
-{
-  "mode": "openclaw_codex_managed",
-  "openclawCodexManaged": {
-    "endpoint": "http://openclaw.local:8765/v1/chat/completions",
-    "statusEndpoint": "http://openclaw.local:8765/readyz",
-    "label": "OpenClaw managed auth bridge"
-  }
-}
-```
-
-Fields:
-
-- `endpoint`: required OpenClaw/local backend endpoint used for managed
-  ChatGPT/Codex-authenticated processing.
-- `statusEndpoint`: optional endpoint for backend sign-in/readiness checks.
-- `label`: optional operator-facing name for the configured backend.
-
-URLs must use `https`, except localhost and `127.0.0.1` endpoints may use
-`http` for local desktop backends.
-
-Related command:
-
-- `api_save_openai_auth_config` with `{ "mode": "openclaw_codex_managed" }`
 
 ## Public OpenAI OAuth PKCE Metadata
 
@@ -139,19 +85,15 @@ When no OpenAI auth metadata and no API key are present,
 
 Important fields:
 
-- `mode`: `disabled`, `api_key`, `openclaw_codex_managed`, or `oauth_pkce`.
+- `mode`: `disabled`, `api_key`, or `oauth_pkce`.
 - `configured`: whether the selected mode has enough local configuration.
 - `apiKeyPresent`: whether the OpenAI API key exists.
-- `openclawCodexManagedConfigured`: whether managed endpoint metadata exists.
-- `openclawCodexEndpointPresent`: whether the managed request endpoint exists.
 - `oauthPkceConfigured`: whether legacy public OAuth PKCE metadata exists.
 - `oauthBrowserLaunchReady`: false; legacy OAuth browser commands are not supported.
 - `oauthDeviceFlowConfigured`: whether a legacy device endpoint was configured.
-- `canAuthenticateRequests`: true for API-key auth with a stored key, or for
-  `openclaw_codex_managed` with an endpoint configured. Custom OpenAI-compatible
+- `canAuthenticateRequests`: true for API-key auth with a stored key. Custom OpenAI-compatible
   endpoint readiness is reported by the custom provider config/test commands.
 - `requestAuthentication`: `bearer_api_key`, `missing_api_key`,
-  `openclaw_codex_managed`, `missing_openclaw_codex_endpoint`,
   `unsupported_oauth_pkce`, `disabled`, or `not_configured`.
 - `unsupportedReason`: why legacy public OAuth PKCE cannot authenticate
   requests.
@@ -159,14 +101,13 @@ Important fields:
 
 ## Validation Notes
 
-The Rust unit tests cover legacy API-key compatibility, disabled mode, optional
-OpenClaw managed endpoint normalization and status capability fields, legacy
+The Rust unit tests cover legacy API-key compatibility, disabled mode, legacy
 public OAuth metadata handling, URL validation, and PKCE S256 authorization
 request compatibility.
 
 ## Local-network HTTP opt-in
 
-OpenClaw and custom OpenAI settings allow private-network HTTP only with
+Custom OpenAI settings allow private-network HTTP only with
 **Allow unencrypted HTTP to this local-network server** enabled. The token/key
 is sent without encryption. Prefer HTTPS. Loopback HTTP needs no opt-in; public
 HTTP is rejected on save/send; saved settings remain editable with a warning.
@@ -176,6 +117,5 @@ be loopback or private, and the connection uses that checked resolution without
 redirects or a proxy. Existing private HTTP configurations migrate to opted-in
 on their first load; explicit choices are preserved thereafter.
 
-The OpenClaw `allow_unencrypted` JSON flag covers both handoff and model
-endpoints. Custom OpenAI configuration has its own `allow_unencrypted` flag.
+Custom OpenAI configuration stores the choice in `allow_unencrypted`.
 Confluence stores the choice with the PAT's saved origin.

@@ -142,7 +142,7 @@ pub async fn get_automatic_summary_destination<R: Runtime>(
     state: tauri::State<'_, AppState>,
 ) -> Result<DestinationReview, String> {
     let _guard = ROUTE_CHANGE_LOCK.lock().await;
-    let mut review = AutomaticRequest::resolve(&app, state.db_manager.pool())
+    let mut review = AutomaticRequest::resolve(state.db_manager.pool())
         .await?
         .review();
     review.approved = with_preference(&app, |store| Ok(Preference::read(store).allows(&review)))?;
@@ -158,7 +158,7 @@ pub async fn set_automatic_summary_preference<R: Runtime>(
 ) -> Result<(), String> {
     let _guard = ROUTE_CHANGE_LOCK.lock().await;
     let external_fingerprint = if enabled {
-        let review = AutomaticRequest::resolve(&app, state.db_manager.pool())
+        let review = AutomaticRequest::resolve(state.db_manager.pool())
             .await?
             .review();
         if fingerprint
@@ -260,7 +260,7 @@ pub(crate) async fn prepare_import<R: Runtime>(
     use_automatic_preference: bool,
 ) -> Result<AuthorizedRequest, String> {
     let _guard = ROUTE_CHANGE_LOCK.lock().await;
-    let request = AutomaticRequest::resolve(app, pool).await?;
+    let request = AutomaticRequest::resolve(pool).await?;
     let review = request.review();
     validate_import_approval(&review, fingerprint, use_automatic_preference)?;
     let check: DispatchCheck = if use_automatic_preference {
@@ -415,7 +415,7 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
         return;
     }
     let route_guard = ROUTE_CHANGE_LOCK.lock().await;
-    let Ok(request) = AutomaticRequest::resolve(&app, &pool).await else {
+    let Ok(request) = AutomaticRequest::resolve(&pool).await else {
         return;
     };
     let review = request.review();
@@ -520,7 +520,7 @@ async fn launch<R: Runtime>(
     let authorized = if let Some(authorized) = prepared {
         authorized
     } else {
-        let request = match AutomaticRequest::resolve(&app, &pool).await {
+        let request = match AutomaticRequest::resolve(&pool).await {
             Ok(request) => request,
             Err(reason) => {
                 record_outcome(&app, &pool, &meeting, origin, &reason).await?;

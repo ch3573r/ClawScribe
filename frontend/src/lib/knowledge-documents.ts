@@ -36,7 +36,7 @@ export function knowledgeProviderLabel(provider?: string): string {
     'builtin-ai':'Built-in AI',
     'claude-code':'Claude Code',
     codex:'Codex', ollama:'Ollama', openai:'OpenAI', anthropic:'Anthropic', claude:'Claude', openrouter:'OpenRouter',
-    'custom-openai':'OpenAI-compatible provider', openclaw:'OpenClaw', groq:'Groq', gemini:'Gemini',
+    'custom-openai':'OpenAI-compatible provider', groq:'Groq', gemini:'Gemini',
   };
   return provider ? names[provider] ?? 'Configured provider' : 'No provider selected';
 }

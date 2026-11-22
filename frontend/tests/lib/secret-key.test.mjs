@@ -135,9 +135,9 @@ test('an address is the same ignoring case and a trailing slash, but never anoth
   assert.equal(secret.keepsAddress('https://gateway.example.com/v1', 'https://gateway.example.com/v2'), false);
   assert.equal(secret.keepsAddress('https://gateway.example.com/v1', 'http://gateway.example.com/v1'), false);
   // Moving from HTTP to HTTPS on the same host adds no recipient.
-  assert.equal(secret.keepsAddress('http://openclaw.example.com', 'https://openclaw.example.com'), true);
-  assert.equal(secret.keepsAddress('http://openclaw.example.com:8080/a', 'https://openclaw.example.com:9090/a'), false);
-  assert.equal(secret.keepsAddress('http://openclaw.example.com/a', 'https://openclaw.example.com/b'), false);
+  assert.equal(secret.keepsAddress('http://gateway.example.com', 'https://gateway.example.com'), true);
+  assert.equal(secret.keepsAddress('http://gateway.example.com:8080/a', 'https://gateway.example.com:9090/a'), false);
+  assert.equal(secret.keepsAddress('http://gateway.example.com/a', 'https://gateway.example.com/b'), false);
   assert.equal(secret.keepsAddress('not a url/', 'NOT A URL'), true);
   assert.equal(secret.keepsAddress('not a url', 'https://gateway.example.com'), false);
 });

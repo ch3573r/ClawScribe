@@ -18,7 +18,7 @@ static PREFERENCE_LOCK: Mutex<()> = Mutex::new(());
 // library backup). Rust owns every permit below. Nothing is parked in a
 // webview resource, so a page reload can neither strand nor release one.
 static WORK_INSTALL_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
-const BUSY_MESSAGE: &str = "Wait for recording, transcription, imports, summaries, answers, exports, or OpenClaw handoffs to finish before installing.";
+const BUSY_MESSAGE: &str = "Wait for recording, transcription, imports, summaries, answers, or exports to finish before installing.";
 
 /// Admission for durable or outbound work that an installer restart would cut off.
 pub(crate) fn admit_work() -> Result<tokio::sync::RwLockReadGuard<'static, ()>, String> {

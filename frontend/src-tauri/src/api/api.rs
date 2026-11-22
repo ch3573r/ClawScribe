@@ -501,7 +501,6 @@ pub async fn api_save_model_config<R: Runtime>(
     if let Some(key) = api_key {
         if !key.is_empty()
             && provider != "custom-openai"
-            && provider != "openclaw"
             && provider != "codex"
             && provider != "claude-code"
         {

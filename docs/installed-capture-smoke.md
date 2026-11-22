@@ -9,7 +9,7 @@ the runner service and GitHub Actions.
 ## Provision the test desktop once
 
 1. Use a dedicated Windows test account with a synthetic ClawScribe library.
-   Complete onboarding, turn off call detection and OpenClaw handoff, and
+   Complete onboarding, turn off call detection and webhooks, and
    disconnect calendars and providers. For an upgrade check, start with the
    older installed version and at least one saved synthetic meeting.
 2. In ClawScribe's recording settings, use the folder picker to choose an

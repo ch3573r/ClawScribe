@@ -1930,7 +1930,7 @@ fn codex_install_repair_plan() -> CodexInstallRepairPlan {
     CodexInstallRepairPlan {
         requires_confirmation: true,
         docs_url: "docs/auth/codex-auth.md".to_string(),
-        message: "Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe. This build will not use global codex.exe, PATH, WindowsApps, or user-browsed Store app internals. OpenAI API key and OpenClaw continue to work without Codex.".to_string(),
+        message: "Bundled Codex runtime is missing or damaged. Repair/reinstall ClawScribe. This build will not use global codex.exe, PATH, WindowsApps, or user-browsed Store app internals. OpenAI API-key authentication continues to work without Codex.".to_string(),
         recommended,
         alternatives: vec![],
     }
@@ -4210,7 +4210,6 @@ exit 2
         assert!(codex_runtime_required_for_provider("codex"));
         assert!(codex_runtime_required_for_provider("codex-login"));
         assert!(!codex_runtime_required_for_provider("openai"));
-        assert!(!codex_runtime_required_for_provider("openclaw"));
         assert!(!codex_runtime_required_for_provider("custom-openai"));
     }
 

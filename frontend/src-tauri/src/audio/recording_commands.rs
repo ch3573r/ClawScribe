@@ -2096,19 +2096,6 @@ async fn stop_recording_session<R: Runtime>(
         warn!("Could not notify the webview that recording stopped");
     }
 
-    if suspend_attempt.is_none()
-        && transcribes
-        && (!outcome.needs_recovery() || outcome.recording_files_incomplete)
-    {
-        if let Some(meeting_id) = meeting_id.clone() {
-            crate::openclaw::submit_completed_recording(
-                app.clone(),
-                meeting_id,
-                outcome.recording_files_incomplete,
-            );
-        }
-    }
-
     // Release the old job before admitting another start. Take the request
     // under the admission lock so a request racing the commit cannot vanish.
     RECORDING_JOB.lock().unwrap().take();

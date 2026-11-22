@@ -20,8 +20,8 @@ on Meetily Community Edition and is currently focused on the Tauri desktop app:
 - Rust/Tauri core in `frontend/src-tauri/src`
 - Local recording, audio processing, transcription, storage, and summarization
   through Tauri commands and events
-- Optional Microsoft Graph exports and optional OpenClaw/OpenAI-compatible
-  integrations configured by the user
+- Optional Microsoft Graph exports, outbound webhooks, and user-configured
+  OpenAI-compatible summary providers
 
 The historical Python/FastAPI backend has been removed. Do not reintroduce a
 separate backend runtime unless the project explicitly chooses that direction.
@@ -112,8 +112,8 @@ Tauri app, not through a separate web backend.
   private keys, certificates, local auth stores, logs, databases, or generated
   installer artifacts.
 - Keep `.env` files local. Commit only `.env.example` placeholders.
-- Use placeholders such as `https://openclaw.example.com` or
-  `http://openclaw.local:8765` in docs instead of private network addresses.
+- Use placeholders such as `https://gateway.example.com` or
+  `http://gateway.local:8765` in docs instead of private network addresses.
 - Redact credentials in logs, analytics, errors, tests, fixtures, screenshots,
   and documentation.
 - Store user credentials through the app's credential-storage path where

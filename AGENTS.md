@@ -203,7 +203,7 @@ length of the transcription backlog.
 ## Summary Providers And Meeting Chat
 
 - Keep provider credentials and connection states isolated. Microsoft,
-  OpenAI-compatible, OpenClaw, Codex, Ollama, and other providers must fail
+  OpenAI-compatible, Codex, Ollama, and other providers must fail
   independently.
 - A meeting-chat submission must produce exactly one assistant message. When a
   provider exposes streaming events, completed items, and a final RPC snapshot,

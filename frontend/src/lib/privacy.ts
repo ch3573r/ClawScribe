@@ -32,11 +32,6 @@ export interface PrivacyInput {
   /** "Check for updates automatically" on the General page. */
   updateCheck: boolean;
   semanticSearch: Loadable<boolean>;
-  /**
-   * OpenClaw handoff. When enabled, the app posts every finished recording,
-   * including its transcript, to the gateway, whatever the summary provider is.
-   */
-  handoff: Loadable<{ enabled: boolean; endpoint: string | null }>;
   webhook: Loadable<WebhookConfig>;
 }
 
@@ -100,8 +95,7 @@ export interface ProviderClass {
 
 /**
  * Where a summary provider sends text. "unknown" means the code cannot tell
- * from the provider alone (for example OpenClaw, which the user points at a
- * gateway), and the page then says so instead of guessing.
+ * from the provider alone, and the page then says so instead of guessing.
  */
 export function classifySummaryProvider(
   provider: string | null | undefined,
@@ -134,7 +128,6 @@ export function classifySummaryProvider(
     case "openrouter": return { kind: "remote", label: "OpenRouter" };
     case "groq": return { kind: "remote", label: "Groq" };
     case "gemini": return { kind: "remote", label: "Gemini" };
-    case "openclaw": return { kind: "unknown", label: "OpenClaw" };
     default: return { kind: "unknown", label: "Configured provider" };
   }
 }
@@ -271,21 +264,6 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
     }
   }
 
-  // Meeting handoff
-  const handoffOn = input.handoff.status === "ready" && input.handoff.value.enabled;
-  const handoffHost = input.handoff.status === "ready" ? endpointHost(input.handoff.value.endpoint) : null;
-  const handoffTarget = handoffHost ? `OpenClaw on ${handoffHost}` : "OpenClaw gateway";
-  const handoffBase = handoffOn
-    ? row({
-        id: "handoff", title: "Meeting handoff", tab: "summary", tabLabel: "Summary",
-        destination: handoffTarget, when: "After every recording", tone: "warning",
-        detail: "The full transcript and meeting details. Switch it off in the OpenClaw provider settings",
-      })
-    : row({
-        id: "handoff", title: "Meeting handoff", tab: "summary", tabLabel: "Summary",
-        destination: "Off", when: "Off", tone: "off", detail: "Sends finished meetings to an OpenClaw gateway",
-      });
-
   // Exports
   const exportTargets: string[] = [];
   if (input.microsoft.status === "ready" && input.microsoft.value.connected) exportTargets.push("Microsoft 365");
@@ -368,7 +346,6 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
     memoryRow,
     withheld(summaryBase, blocked(input.summary)),
     withheld(liveBase, liveState),
-    withheld(handoffBase, blocked(input.handoff)),
     withheld(exportsBase, exportsState),
     withheld(webhookBase, blocked(input.webhook)),
     withheld(calendarsBase, calendarsState),
@@ -384,15 +361,9 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       ? { id: "audio", label: "Audio", value: "Leaves this PC", detail: `Imports and Enhance use ${outcome.engine}`, tone: "warning", state: "ready" }
       : { id: "audio", label: "Audio", value: "Stays on this PC", detail: null, tone: "neutral", state: "ready" };
 
-  // An unreadable handoff setting must not be reported as "stays on this PC".
-  const textState = blocked(input.summary, input.handoff, input.webhook);
+  const textState = blocked(input.summary, input.webhook);
   let textFact: PrivacyFact;
-  if (handoffOn) {
-    const alsoProvider = summaryClass && textLeavesKind
-      ? `, and to ${summaryClass.kind === "unknown" ? "your summary provider" : summaryClass.label} for summaries`
-      : "";
-    textFact = { id: "text", label: "Transcript text", value: "Leaves automatically", detail: `To ${handoffTarget} after every recording${alsoProvider}`, tone: "warning", state: "ready" };
-  } else if (textState !== "ready" || !summaryClass) {
+  if (textState !== "ready" || !summaryClass) {
     textFact = { id: "text", label: "Transcript text", value: textState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: textState === "ready" ? "unavailable" : textState };
   } else if (summaryClass.kind === "none" || summaryClass.kind === "local") {
     textFact = { id: "text", label: "Transcript text", value: "Stays on this PC", detail: null, tone: "neutral", state: "ready" };
@@ -413,15 +384,9 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
     };
   }
 
-  const automaticState = input.autoSummary ? blocked(input.summary, input.handoff, input.webhook) : blocked(input.handoff, input.webhook);
+  const automaticState = input.autoSummary ? blocked(input.summary, input.webhook) : blocked(input.webhook);
   let automaticFact: PrivacyFact;
-  if (handoffOn) {
-    // Automatic summaries can add a second destination; name both.
-    const alsoSummaries = input.autoSummary && summaryClass && textLeavesKind
-      ? `, and to ${summaryClass.kind === "unknown" ? "your summary provider" : summaryClass.label} for summaries`
-      : "";
-    automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "Transcript text", detail: `To ${handoffTarget} after every recording${alsoSummaries}`, tone: "warning", state: "ready" };
-  } else if (automaticState !== "ready") {
+  if (automaticState !== "ready") {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: automaticState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: automaticState };
   } else if (input.autoSummary && textLeavesKind) {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "Transcript text", detail: summaryClass && summaryClass.kind === "unknown" ? UNKNOWN_DESTINATION : `To ${summaryClass?.label ?? ""}`, tone: "warning", state: "ready" };

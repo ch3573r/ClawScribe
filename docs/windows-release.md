@@ -595,6 +595,4 @@ version, audio devices, and result without publishing private meeting content.
    without real-device acceptance; that exception does not change this policy.
 
 Optional hosted-provider verification is documented in
-[hosted-transcription-smoke.md](hosted-transcription-smoke.md). OpenClaw handoff
-verification is in [openclaw-handoff.md](openclaw-handoff.md); it is not required
-for standalone local recording.
+[hosted-transcription-smoke.md](hosted-transcription-smoke.md).

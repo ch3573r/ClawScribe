@@ -10,7 +10,7 @@ import { TranscriptModelProps } from '@/components/TranscriptSettings';
 import { readSecretStatus, withoutSecrets, type SecretStatus } from '@/lib/secret-key';
 
 export interface ModelConfig {
-  provider: 'ollama' | 'groq' | 'claude' | 'claude-code' | 'openrouter' | 'openai' | 'builtin-ai' | 'custom-openai' | 'openclaw' | 'codex';
+  provider: 'ollama' | 'groq' | 'claude' | 'claude-code' | 'openrouter' | 'openai' | 'builtin-ai' | 'custom-openai' | 'codex';
   model: string;
   whisperModel: string;
   /**
