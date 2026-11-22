@@ -8,6 +8,7 @@
 - The OpenClaw meeting handoff and the OpenClaw managed auth summary provider are removed. Use the webhook to send meetings to your own automation. If OpenClaw was your summary provider, choose another under **Settings → Summary**; automatic notes wait until you do.
 - Notes generated on this PC show a reminder to check tasks, owners and dates against the transcript.
 - Floating controls are a compact bar that closes when the recording has saved. A recording without live text no longer leaves the window open. A recording that needs review keeps it, with **Open ClawScribe** and **Dismiss**.
+- The installers now include the Microsoft Visual C++ runtime. Earlier versions did not start on a Windows installation without it.
 - See the [release notes](docs/releases/0.67.0.md) for upgrade steps and remaining validation.
 
 ## 0.66.1 preview
