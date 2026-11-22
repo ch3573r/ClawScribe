@@ -38,15 +38,19 @@ function recordingSettings(t, { preferences, save }) {
   const hook = createHookHarness();
   t.after(() => hook.unmount());
   const calls = [];
+  let behavior = { showRecordingNotification: true, showConversationMetrics: true };
   const preferred = { micDevice: 'Desk mic (input)', systemDevice: null };
   const jsx = (type, props) => ({ type, props });
   const { RecordingSettings } = loadTsModule('src/components/RecordingSettings', {
-    react: hook.react,
+    react: { ...hook.react, useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot() },
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push([command, args]);
       if (command === 'get_recording_preferences') return preferences();
       if (command === 'set_recording_preferences') return save(args.preferences);
+      if (command === 'set_conversation_metrics_preference') {
+        behavior = { ...behavior, showConversationMetrics: args.enabled };
+      }
     } },
     '@/components/ui/switch': { Switch: 'Switch' },
     '@/components/ui/button': { Button: 'Button' },
@@ -58,7 +62,12 @@ function recordingSettings(t, { preferences, save }) {
     '@/components/settings/useAudioLevelFeed': { useAudioLevelFeed: () => ({}) },
     '@/lib/sourceAttribution': { setSourceAttribution: () => calls.push(['setSourceAttribution']) },
     '@/lib/analytics': { default: { track: () => {} }, __esModule: true },
-    '@/lib/behaviorSettings': { loadBehaviorSettings: async () => ({ showRecordingNotification: true }) },
+    '@/lib/behaviorSettings': {
+      loadBehaviorSettings: async () => behavior,
+      getBehaviorSettings: () => behavior,
+      subscribeBehaviorSettings: () => () => {},
+      refreshBehaviorSettings: async () => behavior,
+    },
     '@/contexts/ConfigContext': {
       useConfig: () => ({ selectedDevices: preferred, devicePreferencesStatus: 'ready', saveSelectedDevices }),
     },
@@ -98,6 +107,23 @@ test('Recording settings keeps audio-only saving read-only and uses the shared d
   assert.equal(devices().selectedDevices.micDevice, 'Desk mic (input)');
 });
 
+test('conversation metrics can be hidden in Recording settings', async t => {
+  const { calls, find, remount } = recordingSettings(t, {
+    preferences: () => recordingPreferences,
+    save() { assert.fail('Conversation visibility uses the behavior store'); },
+  });
+  const toggle = () => find(node => node.type === 'Switch' && node.props.id === 'show-conversation-metrics');
+  toggle();
+  await flush();
+  assert.equal(toggle().props.checked, true);
+  await toggle().props.onCheckedChange(false);
+  assert.equal(calls.filter(([command]) => command === 'set_conversation_metrics_preference').at(-1)[1].enabled, false);
+  remount();
+  toggle();
+  await flush();
+  assert.equal(toggle().props.checked, false);
+});
+
 test('automatic floating controls can be turned off in Recording settings and back on after reopening', async t => {
   let stored = { ...recordingPreferences, auto_open_floating_controls: true };
   const { find, remount } = recordingSettings(t, {
@@ -129,7 +155,7 @@ test('Home can change a disconnected device without leaving the signal path', as
   const jsx = (type, props) => ({ type, props });
   const stub = (...names) => Object.fromEntries(names.map(name => [name, name]));
   const { HomeDashboard } = loadTsModule('src/components/HomeDashboard', {
-    react: hook.react,
+    react: { ...hook.react, useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot() },
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@/components/ui/button': stub('Button'),
     '@/components/AudioDeviceSelect': stub('AudioDeviceSelect'),

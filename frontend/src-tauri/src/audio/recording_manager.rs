@@ -29,16 +29,22 @@ pub struct LiveTranscriptSink {
     pub recording_generation: crate::knowledge::live::RecordingGeneration,
     state: Arc<crate::knowledge::live::LiveState>,
     transcripts: Arc<RecordingTranscripts>,
+    pub(super) conversation: Arc<super::live_conversation::LiveConversation>,
     pub(crate) capture: Arc<RecordingState>,
 }
 impl LiveTranscriptSink {
-    pub(crate) fn ingest(&self, update: &super::transcription::TranscriptUpdate) -> bool {
+    pub(crate) fn ingest(
+        &self,
+        update: &super::transcription::TranscriptUpdate,
+        clear_source: bool,
+    ) -> bool {
         // A finished decode can be marked partial when some text was unreadable.
         // Keep the readable portion in the recording; live assistance filters it.
         if !self.transcripts.record_update(&self.session_id, update) {
             return false;
         }
         self.state.ingest(&self.session_id, update);
+        self.conversation.ingest(update, clear_source);
         true
     }
     pub(crate) fn snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
@@ -103,6 +109,7 @@ impl RecordingManager {
     ) -> LiveTranscriptSink {
         let sink = LiveTranscriptSink {
             transcripts: self.recording_saver.bind_transcript_session(&session_id),
+            conversation: Arc::new(super::live_conversation::LiveConversation::new(&session_id)),
             session_id,
             recording_generation,
             state,

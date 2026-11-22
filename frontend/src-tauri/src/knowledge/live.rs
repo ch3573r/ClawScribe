@@ -1097,13 +1097,16 @@ mod tests {
             state.snapshot(&id).unwrap().recording_generation,
         );
         let stale = producer_update(&old_id, 1, "Old producer must be excluded", false);
-        assert!(!old_sink.ingest(&stale));
-        assert!(!sink.ingest(&stale));
-        assert!(!old_sink.ingest(&producer_update(&id, 2, "Foreign session", false)));
+        assert!(!old_sink.ingest(&stale, true));
+        assert!(!sink.ingest(&stale, true));
+        assert!(!old_sink.ingest(&producer_update(&id, 2, "Foreign session", false), true));
         let mut unowned = producer_update(&id, 2, "Missing session", false);
         unowned.session_id = None;
-        assert!(!sink.ingest(&unowned));
-        assert!(sink.ingest(&producer_update(&id, 2, "Current finalized words", false)));
+        assert!(!sink.ingest(&unowned, true));
+        assert!(sink.ingest(
+            &producer_update(&id, 2, "Current finalized words", false),
+            true
+        ));
         let rows = manager.library_transcripts();
         assert_eq!(
             rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
@@ -1121,17 +1124,20 @@ mod tests {
             id.clone(),
             state.snapshot(&id).unwrap().recording_generation,
         );
-        assert!(sink.ingest(&producer_update(&id, 1, "Draft", true)));
+        assert!(sink.ingest(&producer_update(&id, 1, "Draft", true), true));
         assert!(state.snapshot(&id).unwrap().segments.is_empty());
         let _ = state.stop();
         // Stop owns the manager locally while it flushes streams. Live
         // assistance is already gone, but the worker must still save text.
         assert!(state.snapshot(&id).is_err());
-        assert!(sink.ingest(&producer_update(&id, 2, "Another partial", true)));
-        assert!(sink.ingest(&producer_update(&id, 1, "Ja", false)));
-        assert!(sink.ingest(&producer_update(&id, 3, "Last final segment", false)));
+        assert!(sink.ingest(&producer_update(&id, 2, "Another partial", true), true));
+        assert!(sink.ingest(&producer_update(&id, 1, "Ja", false), true));
+        assert!(sink.ingest(&producer_update(&id, 3, "Last final segment", false), true));
         manager.close_transcript_input();
-        assert!(!sink.ingest(&producer_update(&id, 4, "Past the drain deadline", false)));
+        assert!(!sink.ingest(
+            &producer_update(&id, 4, "Past the drain deadline", false),
+            true
+        ));
         let rows = manager.get_transcript_segments();
         assert_eq!(rows.last().unwrap().speaker.as_deref(), Some("Me"));
         assert_eq!(

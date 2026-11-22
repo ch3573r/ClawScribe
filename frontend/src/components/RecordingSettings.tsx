@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -16,7 +16,7 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { canEditLiveAudioSaving } from '@/lib/audioDevicePreferences';
 import { RecordingMode, useRecordingState } from '@/contexts/RecordingStateContext';
 import { errorText } from '@/lib/errorText';
-import { loadBehaviorSettings, refreshBehaviorSettings } from '@/lib/behaviorSettings';
+import { getBehaviorSettings, loadBehaviorSettings, refreshBehaviorSettings, subscribeBehaviorSettings } from '@/lib/behaviorSettings';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -56,6 +56,21 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const savingRef = useRef(false);
   const [preferencesFailed, setPreferencesFailed] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
+
+  const { showConversationMetrics } = useSyncExternalStore(subscribeBehaviorSettings, getBehaviorSettings, getBehaviorSettings);
+  const [savingMetrics, setSavingMetrics] = useState(false);
+
+  async function handleMetricsToggle(enabled: boolean) {
+    setSavingMetrics(true);
+    try {
+      await invoke('set_conversation_metrics_preference', { enabled });
+      await refreshBehaviorSettings();
+    } catch {
+      toast.error('Could not update conversation metrics');
+    } finally {
+      setSavingMetrics(false);
+    }
+  }
 
   // The signal check runs only while this page is open and nothing is being
   // recorded. The hook stops the native monitor when the page is left.
@@ -283,6 +298,14 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         <SettingsRow title="Remember floating controls position" htmlFor="remember-floating-position">
           <Switch id="remember-floating-position" checked={preferences.remember_floating_position} disabled={saving}
             onCheckedChange={enabled => void savePreferences({ ...preferences, remember_floating_position: enabled })} />
+        </SettingsRow>
+
+        <SettingsRow
+          title="Show conversation metrics"
+          htmlFor="show-conversation-metrics"
+          description="Show talk time, pace and questions during live transcription"
+        >
+          <Switch id="show-conversation-metrics" checked={showConversationMetrics} disabled={savingMetrics} onCheckedChange={handleMetricsToggle} />
         </SettingsRow>
 
         <SettingsRow
