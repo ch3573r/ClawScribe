@@ -174,7 +174,7 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
       </div></TooltipProvider>}
       {invalidDates && <p role="alert" className="text-sm text-destructive">The start date must be on or before the end date.</p>}
     </fieldset>;
-  return <section className="h-full min-h-0" aria-label="Meeting memory">
+  return <section className="h-full min-h-0 [container-name:meeting-memory] [container-type:size]" aria-label="Meeting memory">
     <KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model}
       secondary={<div className="space-y-4">{sources}{secondary}</div>}
       initialQuestion={initialMatches?.question} selectedNotes={excerptsSupported ? notes : undefined} reviewActive={active} destinationRevision={JSON.stringify([modelConfig?.ollamaEndpoint, modelConfig?.customOpenAIEndpoint, modelConfig?.organization, modelConfig?.project])}

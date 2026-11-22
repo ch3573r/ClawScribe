@@ -182,7 +182,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   };
   const questionInput = <Textarea ref={questionRef} id={`knowledge-question-${state.owner?.id ?? "library"}`} value={question} disabled={hasNotes && busy} onChange={event => setQuestion(event.target.value)} rows={1} placeholder={compact ? "Ask about this meeting…" : "Ask about decisions, action items or what was said"} className={`${compact ? "min-h-10" : "min-h-11"} resize-none`}
     onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); submit(); } }} />;
-  return <PageSection className="flex h-full min-h-0 flex-col overflow-hidden" aria-label={title}>
+  return <PageSection className={`flex h-full min-h-0 flex-col overflow-hidden ${compact ? "" : "meeting-memory-chat custom-scrollbar"}`} aria-label={title}>
     <header className={`flex shrink-0 items-center gap-2 border-b border-border py-3 ${compact ? "px-3" : "px-5"}`}>
       <h2 className={`min-w-0 flex-1 font-semibold ${compact ? "text-sm" : ""}`}>{title}</h2>
       <TooltipProvider><Tooltip><TooltipTrigger asChild><span tabIndex={0} className="max-w-48 truncate rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{friendlyModel(model)}</span></TooltipTrigger><TooltipContent>{model || "Choose a model"}</TooltipContent></Tooltip></TooltipProvider>
@@ -227,7 +227,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
       </div>
     </ConfirmationModal>}
     {compact && contextBar && <div className="shrink-0 border-b border-border px-3 py-1">{contextBar}</div>}
-    <ScrollArea className={`min-h-0 flex-1 [&_[data-radix-scroll-area-viewport]>div]:!block ${emptyState ? "[&_[data-radix-scroll-area-viewport]>div]:h-full" : ""}`}>
+    <ScrollArea className={`min-h-0 flex-1 [&_[data-radix-scroll-area-viewport]>div]:!block ${compact ? "" : "meeting-memory-conversation"} ${emptyState ? "[&_[data-radix-scroll-area-viewport]>div]:h-full" : ""}`}>
       <div className={`space-y-4 ${compact ? "p-3" : "p-5"} ${emptyState ? "flex h-full flex-col" : ""}`}>
         {!compact && secondary}
         <div className={`space-y-4 ${emptyState ? "flex flex-1 flex-col" : ""}`} aria-live="polite">
@@ -247,7 +247,7 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
     {hasNotes && <div className="flex shrink-0 items-center gap-2 px-5 text-xs text-muted-foreground">
       <span>{notesInScope ? "Review selected excerpts before asking." : "A selected excerpt is outside the current meeting selection."}</span>
       <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={clearNotes}>Remove all excerpts</Button></div>}
-    <form className={`sticky bottom-0 shrink-0 border-t border-border bg-card ${compact ? "space-y-2 p-3" : "space-y-3 p-5"}`} onSubmit={event => { event.preventDefault(); submit(); }}>
+    <form className={`shrink-0 border-t border-border bg-card ${compact ? "sticky bottom-0 space-y-2 p-3" : "space-y-3 p-5"}`} onSubmit={event => { event.preventDefault(); submit(); }}>
       <label className={compact ? "sr-only" : "block text-xs font-medium"} htmlFor={`knowledge-question-${state.owner?.id ?? "library"}`}>Question</label>
       {compact && attachments}
       {compact ? <div className="flex flex-wrap items-end gap-2">{composerStart}<div className="min-w-0 flex-1">{questionInput}</div></div> : <div className="flex items-end gap-3"><div className="min-w-0 flex-1">{questionInput}</div><Button type="submit" disabled={!ready || state.sending || !question.trim()}>{hasNotes ? "Review and ask" : "Ask"}</Button></div>}

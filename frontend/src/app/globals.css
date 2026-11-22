@@ -377,6 +377,57 @@
   }
 }
 
+/* App banners can leave too little room for both a fixed composer and the
+   conversation. Use the card's height so the entire card can scroll together. */
+@container meeting-memory (max-height: 22rem) {
+  .meeting-memory-chat {
+    overflow-y: auto;
+  }
+
+  .meeting-memory-conversation {
+    flex: none;
+    overflow: visible;
+  }
+
+  .meeting-memory-conversation > [data-radix-scroll-area-viewport] {
+    height: auto;
+    overflow: visible !important; /* Radix sets overflow inline. */
+  }
+
+  .meeting-memory-conversation > [data-radix-scroll-area-viewport] > div {
+    height: auto;
+  }
+
+  .meeting-memory-conversation > [data-orientation="vertical"] {
+    display: none;
+  }
+}
+
+/* Keep each review pane within reach of the outer scrollport when the header
+   and playback strip leave less room than the panes need. */
+@container meeting-details (max-height: 30rem) {
+  .meeting-details-review {
+    overflow-y: auto;
+  }
+
+  .meeting-details-panes {
+    flex: none;
+    overflow: visible;
+  }
+
+  .meeting-details-panes > [data-transcript-panel],
+  .meeting-details-panes > #meeting-summary-panel {
+    min-height: min(18rem, 100cqh);
+    max-height: 100cqh;
+  }
+
+  @media (min-width: 768px) {
+    .meeting-details-panes {
+      height: 100cqh;
+    }
+  }
+}
+
 @layer utilities {
   /* Brand signature — the claw gradient. Use sparingly: the recording/active
      state, the logo, one hero moment. Not a general accent (that's --primary). */

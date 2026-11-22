@@ -231,7 +231,7 @@ function MeetingDetailsContent() {
       <strong>Meeting needs review. </strong>{recoveryMessage}
     </div>}
     {capture?.meetingId === meetingId && capture && <RecordingCaptureDetails details={capture.details} />}
-    <div className="min-h-0 flex-1"><PageContent
+    <div className="min-h-0 flex-1 [container-name:meeting-details] [container-type:size]"><PageContent
     key={meetingDetails.id}
     meeting={meetingDetails}
     evidenceToken={evidenceToken}

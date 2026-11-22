@@ -1088,9 +1088,13 @@ reveal/player callbacks. Group menus preserve the raw displayed citation group
 and every original ordinal. Literal links require the backend allowlist;
 separately labeled context links validate both map entries and resolve both
 canonical references independently. Dismissing an evidence preview returns focus
-to the citation or search result that opened it. Meeting memory scrolls its
-source controls and conversation together to leave room for the composer at
-short window heights. Native installed clicks remain a manual acceptance gate.
+to the citation or search result that opened it. Meeting memory scrolls the
+sources and conversation together with the composer below. When the card has
+22 rem or less of vertical space, the header, sources, conversation and
+composer share one scrollport. At short heights the meeting detail view
+scrolls its header and playback strip with the review panes, keeping a cited
+transcript row reachable. The production-export browser test exercises short
+and tall layouts. Native installed clicks remain a manual acceptance gate.
 Derived chunk IDs and SQLite rowids are never citation identities. Saved title,
 date and speaker labels describe the original answer snapshot. Editing a title
 or meeting date advances the source revision, invalidates pending answers and

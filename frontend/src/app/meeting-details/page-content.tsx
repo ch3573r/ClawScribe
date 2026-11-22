@@ -146,6 +146,7 @@ export default function PageContent({
   const [isRecording] = useState(false);
   const [focusedSource, setFocusedSource] = useState<{ id: string; request: number }>();
   const evidenceFocusRequest = useRef(0);
+  const reviewRef = useRef<HTMLDivElement>(null);
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
   const [audioCheck, setAudioCheck] = useState(0);
@@ -158,13 +159,30 @@ export default function PageContent({
   const [bookmarkRequest, setBookmarkRequest] = useState(0);
   const stopFollowing = useCallback(() => setFollowPlayback(false), []);
   const isAudioReady = Boolean(audioStatus === 'found' && audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
+  const revealTranscriptPane = useCallback((keepFocus = false) => {
+    const review = reviewRef.current;
+    const panel = review?.querySelector<HTMLElement>('[data-transcript-panel]');
+    if (!review || !panel) return;
+    if (keepFocus && document.activeElement !== panel) return;
+    const scrolls = getComputedStyle(review).overflowY === 'auto';
+    if (scrolls) {
+      // The virtual list reveals the row inside the pane. Bring the whole pane
+      // into the available view first so the row can land anywhere within it.
+      review.scrollTop += panel.getBoundingClientRect().top - review.getBoundingClientRect().top;
+    }
+    if (!keepFocus) panel.focus({ preventScroll: scrolls });
+  }, []);
+  useEffect(() => {
+    // Loading the recording can insert the playback strip after the reveal.
+    if (isAudioReady && focusedSource) revealTranscriptPane(true);
+  }, [isAudioReady, focusedSource, revealTranscriptPane]);
   const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean) => {
     if (!onRevealTranscript || !current()) throw new Error('The transcript is not ready. Retry the citation.');
     await onRevealTranscript(id, index);
     if (!current()) return;
     setFocusedSource({ id, request: ++evidenceFocusRequest.current });
-    document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
-  }, [onRevealTranscript]);
+    revealTranscriptPane();
+  }, [onRevealTranscript, revealTranscriptPane]);
   const playEvidence = useCallback(async (seconds: number, current: () => boolean) => {
     if (!current()) return;
     if (!isAudioReady) throw new Error('Saved audio is missing or not ready. The transcript can still be reviewed.');
@@ -365,10 +383,11 @@ export default function PageContent({
 
   return (
     <motion.div
+      ref={reviewRef}
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: 'easeOut' }}
-      className="flex h-full flex-col bg-background"
+      className="meeting-details-review custom-scrollbar flex h-full flex-col bg-background"
     >
       {fromArchive && <div className="shrink-0 px-4 pt-2">
         <Button variant="ghost" size="sm" asChild><Link href="/meetings"><ChevronLeft />{archiveAction === 'actions' ? 'Back to open actions' : 'Back to archive'}</Link></Button>
@@ -407,7 +426,7 @@ export default function PageContent({
           bookmarks={bookmarks}
         />
       )}
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
+      <div className="meeting-details-panes flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
         <TranscriptPanel
           emptyLiveMessage={emptyLiveMessage}
           bindings={playerBindings}
@@ -457,7 +476,7 @@ export default function PageContent({
           onRevealSource={async (source) => {
             await onRevealTranscript?.(source.transcript_id, source.transcript_index);
             setFocusedSource({ id: source.transcript_id, request: Date.now() });
-            document.querySelector<HTMLElement>('[data-transcript-panel]')?.focus();
+            revealTranscriptPane();
           }}
           onPlaySource={isAudioReady ? async seconds => { await seek(seconds); if (!isPlaying) await play(); } : undefined}
           meeting={meeting}
