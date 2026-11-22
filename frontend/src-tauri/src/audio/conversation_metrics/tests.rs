@@ -70,7 +70,7 @@ fn monologue_bridges_small_gaps_but_stops_for_others_or_silence() {
     assert_eq!(sides.longest_monologue_seconds, 6.);
     assert_eq!(
         summary
-            .snapshot(15., true)
+            .snapshot(25., true)
             .sides
             .unwrap()
             .current_monologue_seconds,

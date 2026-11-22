@@ -159,7 +159,10 @@ mod tests {
         );
         assert!(state.publish(summary.snapshot(4.0, true)).is_none());
         assert_eq!(
-            state.publish(summary.snapshot(6.0, true)).unwrap().revision,
+            state
+                .publish(summary.snapshot(16.0, true))
+                .unwrap()
+                .revision,
             2
         );
         let snapshot = state.read().unwrap();

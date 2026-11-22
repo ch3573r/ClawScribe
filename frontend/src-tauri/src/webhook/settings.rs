@@ -232,6 +232,7 @@ fn update(
     let new_secret = changes
         .signing_secret
         .as_deref()
+        .map(str::trim)
         .filter(|secret| !secret.is_empty());
     if changes.remove_signing_secret && new_secret.is_some() {
         return Err("Choose whether to replace or remove the signing secret.".into());

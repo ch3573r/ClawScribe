@@ -5,6 +5,10 @@ use std::collections::{btree_map::Entry, BTreeMap};
 
 const MONOLOGUE_GAP_MS: u64 = 2_000;
 const RECENT_WINDOW_MS: u64 = 120_000;
+/// Finalized segments trail the live clock by the segment still being spoken
+/// plus its decoding, so a monologue stays current for this long after its
+/// last finalized speech.
+const FINALIZATION_LAG_MS: u64 = 10_000;
 /// Side metrics stay available while at most this share of speech time has no
 /// clear source. Crosstalk makes some unclear speech normal in a real meeting.
 const MAX_UNCLEAR_SHARE: f64 = 0.25;
@@ -231,7 +235,7 @@ impl Summary {
                 others_questions: self.others_questions,
                 current_monologue_seconds: self
                     .monologue
-                    .filter(|&(_, end)| now - end <= MONOLOGUE_GAP_MS)
+                    .filter(|&(_, end)| now - end <= MONOLOGUE_GAP_MS + FINALIZATION_LAG_MS)
                     .map_or(0.0, |(start, end)| seconds(end - start)),
                 longest_monologue_seconds: seconds(self.longest_ms),
             }
