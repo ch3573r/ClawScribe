@@ -70,7 +70,11 @@ export function bookmarkTime(seconds: number): string {
   return `${Math.floor(rounded / 3600).toString().padStart(2, '0')}:${Math.floor(rounded / 60 % 60).toString().padStart(2, '0')}:${(rounded % 60).toString().padStart(2, '0')}`;
 }
 
-export function safeDocumentName(title: string): string {
+export function safeDocumentName(title: string, extension: 'docx' | 'md' = 'docx', date?: string | null): string {
   const stem = title.replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '').slice(0, 120);
-  return `Meeting - ${stem || 'notes'}.docx`;
+  if (extension === 'docx') return `Meeting - ${stem || 'notes'}.docx`;
+  const suffix = date ? ` - ${date}.md` : '.md';
+  // The native save dialog limits suggestions to 120 characters.
+  const shortStem = [...(stem || 'notes')].slice(0, 120 - 'Meeting - '.length - suffix.length).join('').trimEnd();
+  return `Meeting - ${shortStem}${suffix}`;
 }

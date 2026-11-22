@@ -283,7 +283,7 @@ meeting are kept. Permanent deletion removes the reference from all attached
 meetings and invalidates dependent answers.
 Indexing status remains visible; retry a failed index from the reference actions.
 
-## Word documents
+## Local documents
 
 Open a saved meeting and select **Export → Word document (.docx)**. Choose the summary, the full
 transcript, or both, then save a `.docx` file. Speaker labels and timestamps are
@@ -294,31 +294,32 @@ connection. The summary uses the current editor contents; transcripts use the
 complete saved database snapshot rather than the visible page. Headings, bullets,
 paragraphs, and Markdown tables are supported; advanced editor formatting is not retained.
 
-The local main window's Tauri capability grants `dialog:allow-save` for Word
-export and backup destinations, and `dialog:allow-open` for restore archives.
-These permissions are required in the packaged app even though the dialog plugin
-is registered in Rust. The frontend regression suite checks the shipped capability;
-browser tests with mocked native calls cannot verify dialog access.
+Choose **Export → Markdown (.md)** to save the same selection as UTF-8 Markdown.
+The file also includes timestamped notes and bookmarks, plus saved duration,
+confirmed attendee names, and project tags when available.
+
+ClawScribe opens the native save dialog and authorizes the chosen path for that
+export. Local document exports require no Microsoft connection.
 
 ## Shared document export options
 
-The **Export** menu groups local Word, Confluence, OneNote, and OneDrive DOCX/PDF.
+The **Export** menu groups local Word and Markdown, Confluence, OneNote, and OneDrive DOCX/PDF.
 Each destination lets you choose **Summary only**, **Transcript only**, or
 **Summary and transcript**, with optional speaker labels and timestamps.
 **Timestamps** covers source times in the summary and line times in the transcript;
 turn it off to export a summary without them. **Speaker labels** applies only to
 transcript lines and is hidden for summary-only exports. Tables in the summary are
-exported as tables to Word, OneDrive DOCX, OneNote, and Confluence. The menu remains
+exported as tables to Word, Markdown, OneDrive DOCX, OneNote, and Confluence. The menu remains
 available without a summary so saved transcripts can be exported on their own.
 
-Local Word starts with both summary and transcript selected. Remote document
+Local Word and Markdown start with both summary and transcript selected. Remote document
 destinations start with summary only; select a transcript explicitly before
 copying or uploading it. Confluence and OneDrive show the options before export;
 OneNote includes them alongside the notebook and section fields. Planner and
 Microsoft To Do keep their action-item selection and editing previews.
 
 All document destinations use recording-relative transcript timestamps when
-available. The Word document date uses local date and time.
+available. Local document exports display the meeting date and time in the local time zone.
 Exports use current editor notes and the full saved transcript, independent of
 the visible transcript page. A transcript read failure stops the export instead
 of silently sending incomplete content. Confluence browser drafts, REST pages,

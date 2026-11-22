@@ -20,7 +20,7 @@ async function setup({ connected = true, rest = false, restFailure = false, rest
   const { MeetingExportButtons } = loadTsModule('src/components/MeetingDetails/MeetingExportButtons.tsx', {
     react: harness.react,
     'react/jsx-runtime': { jsx, jsxs: jsx },
-    'lucide-react': names('Loader2 Upload ChevronDown'),
+    'lucide-react': names('FileText Loader2 Upload ChevronDown'),
     '@/components/IntegrationIcons': names('ConfluenceIcon WordIcon OneNoteIcon OneDriveIcon PlannerIcon ToDoIcon'),
     '@/components/ui/button': names('Button'),
     '@/components/ui/input': names('Input'),
@@ -33,9 +33,9 @@ async function setup({ connected = true, rest = false, restFailure = false, rest
     './PlannerExportPreview': names('PlannerExportPreview'),
     './ToDoExportPreview': names('ToDoExportPreview'),
     '@tauri-apps/api/core': { invoke: async (command, args) => {
-      if (command === 'pick_word_save_path') {
+      if (command === 'pick_word_save_path' || command === 'pick_markdown_save_path') {
         // The core opens the dialog: this is the one place the user picks the file.
-        calls.push({ kind: 'save', args });
+        calls.push({ kind: 'save', command, args });
         return save();
       }
       calls.push({ kind: command, args });
@@ -79,6 +79,7 @@ async function setup({ connected = true, rest = false, restFailure = false, rest
 
 const destinations = [
   ['Word document (.docx)', 'Save as Word document', 'export_local_word'],
+  ['Markdown (.md)', 'Save as Markdown', 'export_local_markdown'],
   ['Confluence', 'Export to Confluence', 'clipboard'],
   ['OneDrive DOCX/PDF', 'Upload to OneDrive', 'onedrive'],
   ['OneNote', 'Export page', 'onenote'],
@@ -104,7 +105,12 @@ for (const [menuLabel, buttonLabel, kind] of destinations) {
       assert.equal(view.errors.length, 0);
       const result = view.calls.find(call => call.kind === kind);
       assert.ok(result, `No ${kind} export`);
-      if (kind === 'export_local_word') {
+      if (kind === 'export_local_word' || kind === 'export_local_markdown') {
+        if (kind === 'export_local_markdown') {
+          const save = view.calls.find(call => call.kind === 'save');
+          assert.equal(save.command, 'pick_markdown_save_path');
+          assert.equal(save.args.suggestedName, 'Meeting - Review - 2026-01-01.md');
+        }
         assert.equal(result.args.includeTranscript, content !== 'summary');
         assert.equal(result.args.markdown, content === 'transcript' ? '' : 'Edited notes');
         assert.equal(result.args.includeSpeakers, false);

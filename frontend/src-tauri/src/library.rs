@@ -6,6 +6,7 @@ pub mod calendar;
 pub mod context;
 pub(crate) mod file_cleanup;
 pub mod follow_through;
+mod markdown;
 pub mod pending_recording_notes;
 pub(crate) mod recording_calendar;
 pub(crate) mod saved_text;
@@ -127,12 +128,15 @@ pub async fn list_meeting_bookmarks(
     app: AppHandle,
     meeting_id: String,
 ) -> Result<Vec<Bookmark>, String> {
-    let state = app.state::<AppState>();
-    attach_bookmarks(state.db_manager.pool())
+    read_bookmarks(app.state::<AppState>().db_manager.pool(), &meeting_id).await
+}
+
+async fn read_bookmarks(pool: &SqlitePool, meeting_id: &str) -> Result<Vec<Bookmark>, String> {
+    attach_bookmarks(pool)
         .await
         .map_err(|_| "Could not load bookmarks.")?;
     sqlx::query_as("SELECT id, seconds, label FROM meeting_bookmarks WHERE meeting_id = ? ORDER BY seconds, id")
-        .bind(meeting_id).fetch_all(state.db_manager.pool()).await.map_err(|_| "Could not load bookmarks.".into())
+        .bind(meeting_id).fetch_all(pool).await.map_err(|_| "Could not load bookmarks.".into())
 }
 
 #[tauri::command]
@@ -416,11 +420,7 @@ async fn export_local_word_to(
         return Err("Choose a .docx file.".into());
     }
     let state = app.state::<AppState>();
-    let created: String = sqlx::query_scalar("SELECT created_at FROM meetings WHERE id = ?")
-        .bind(&meeting_id)
-        .fetch_one(state.db_manager.pool())
-        .await
-        .map_err(|_| "Meeting no longer exists.")?;
+    let created = read_export_date(state.db_manager.pool(), &meeting_id).await?;
     // Fetch the full saved transcript, independently of the UI's current page.
     let transcript = if include_transcript {
         Some(
@@ -448,6 +448,131 @@ async fn export_local_word_to(
     })
     .await
     .map_err(|_| "Word export was interrupted.")?
+}
+
+#[tauri::command]
+pub async fn export_local_markdown(
+    app: AppHandle,
+    meeting_id: String,
+    title: String,
+    markdown: String,
+    include_transcript: bool,
+    include_speakers: bool,
+    include_timestamps: bool,
+    path: String,
+) -> Result<(), String> {
+    let purpose = crate::file_grants::Purpose::MarkdownSave;
+    let granted = crate::file_grants::take(purpose, &path)?;
+    let state = app.state::<AppState>();
+    let result = export_local_markdown_to(
+        state.db_manager.pool(),
+        &meeting_id,
+        title,
+        markdown,
+        MarkdownOptions {
+            include_transcript,
+            include_speakers,
+            include_timestamps,
+        },
+        granted.path.clone(),
+    )
+    .await;
+    if result.is_err() {
+        crate::file_grants::give_back(purpose, &granted);
+    }
+    result
+}
+
+struct MarkdownOptions {
+    include_transcript: bool,
+    include_speakers: bool,
+    include_timestamps: bool,
+}
+
+async fn export_local_markdown_to(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    title: String,
+    summary: String,
+    options: MarkdownOptions,
+    path: std::path::PathBuf,
+) -> Result<(), String> {
+    crate::file_grants::save_target_parent_exists(&path)?;
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+    {
+        return Err("Choose a .md file.".into());
+    }
+
+    let created = read_export_date(pool, meeting_id).await?;
+    let (duration, calendar_link): (Option<f64>, Option<String>) =
+        sqlx::query_as("SELECT recording_duration_s, calendar_link FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| "Could not read meeting details.")?;
+    let attendees = calendar_link
+        .as_deref()
+        .and_then(|raw| calendar::decode(raw).ok().flatten())
+        .map(|link| {
+            link.confirmed_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let tags = sqlx::query_scalar("SELECT tag FROM meeting_tags WHERE meeting_id = ? ORDER BY tag")
+        .bind(meeting_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| "Could not read project tags.")?;
+    let bookmarks = read_bookmarks(pool, meeting_id)
+        .await?
+        .into_iter()
+        .map(|bookmark| (bookmark.seconds, bookmark.label))
+        .collect();
+    let metadata = markdown::Metadata {
+        duration,
+        attendees,
+        tags,
+        bookmarks,
+    };
+    let passages = if options.include_transcript {
+        read_export_transcript(pool, meeting_id).await?
+    } else {
+        Vec::new()
+    };
+    if summary.trim().is_empty()
+        && metadata.bookmarks.is_empty()
+        && passages
+            .iter()
+            .all(|passage| passage.text.trim().is_empty())
+    {
+        return Err("There are no notes or transcripts to export.".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        let rendered = markdown::render(
+            &title,
+            &export_meeting_date(&created),
+            &metadata,
+            &summary,
+            &passages,
+            options.include_speakers,
+            options.include_timestamps,
+        );
+        atomic_write(&path, rendered.as_bytes())
+    })
+    .await
+    .map_err(|_| "Markdown export was interrupted.")?
+}
+
+async fn read_export_date(pool: &SqlitePool, meeting_id: &str) -> Result<String, String> {
+    sqlx::query_scalar("SELECT created_at FROM meetings WHERE id = ?")
+        .bind(meeting_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| "Meeting no longer exists.".into())
 }
 
 fn export_timestamp(timestamp: &str, audio_start_time: Option<f64>) -> String {
@@ -482,44 +607,71 @@ fn export_meeting_date(created: &str) -> String {
     .unwrap_or_else(|| created.to_string())
 }
 
+#[derive(sqlx::FromRow)]
+struct TranscriptPassage {
+    timestamp: String,
+    audio_start_time: Option<f64>,
+    speaker: Option<String>,
+    text: String,
+}
+
+async fn read_export_transcript(
+    pool: &SqlitePool,
+    meeting_id: &str,
+) -> Result<Vec<TranscriptPassage>, String> {
+    // Use the current saved text and speaker, independently of the UI's current page.
+    sqlx::query_as(
+        "SELECT timestamp, audio_start_time, speaker, transcript AS text FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
+    )
+    .bind(meeting_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| "Could not read transcript.".into())
+}
+
 async fn read_word_transcript(
     pool: &SqlitePool,
     meeting_id: &str,
     speakers: bool,
     timestamps: bool,
 ) -> Result<String, String> {
-    let rows: Vec<(String, Option<f64>, Option<String>, String)> = sqlx::query_as(
-        "SELECT timestamp, audio_start_time, speaker, transcript FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id"
-    ).bind(meeting_id).fetch_all(pool).await.map_err(|_| "Could not read transcript.")?;
-    Ok(rows
+    Ok(read_export_transcript(pool, meeting_id)
+        .await?
         .into_iter()
-        .filter(|(_, _, _, text)| !text.trim().is_empty())
-        .map(|(time, start, speaker, text)| {
-            let time = if timestamps {
-                export_timestamp(&time, start)
-            } else {
-                String::new()
-            };
-            let speaker = if speakers {
-                speaker.unwrap_or_default().trim().to_string()
-            } else {
-                String::new()
-            };
-            format!(
-                "{}{}{}",
-                if time.is_empty() {
-                    String::new()
+        .filter(|passage| !passage.text.trim().is_empty())
+        .map(
+            |TranscriptPassage {
+                 timestamp,
+                 audio_start_time,
+                 speaker,
+                 text,
+             }| {
+                let time = if timestamps {
+                    export_timestamp(&timestamp, audio_start_time)
                 } else {
-                    format!("[{time}] ")
-                },
-                if speaker.is_empty() {
                     String::new()
+                };
+                let speaker = if speakers {
+                    speaker.unwrap_or_default().trim().to_string()
                 } else {
-                    format!("{speaker}: ")
-                },
-                text.trim()
-            )
-        })
+                    String::new()
+                };
+                format!(
+                    "{}{}{}",
+                    if time.is_empty() {
+                        String::new()
+                    } else {
+                        format!("[{time}] ")
+                    },
+                    if speaker.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{speaker}: ")
+                    },
+                    text.trim()
+                )
+            },
+        )
         .collect::<Vec<_>>()
         .join("\n\n"))
 }
@@ -592,6 +744,57 @@ mod tests {
             .unwrap()
             .starts_with("[2026-09-26T08:15:30+00:00]"));
     }
+
+    #[tokio::test]
+    async fn markdown_export_writes_current_saved_content() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query(
+            "UPDATE transcripts SET transcript = 'Korrigiert.', original_transcript = 'Old draft',
+             speaker = 'Änne' WHERE id = 'a'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO meeting_tags VALUES ('review-test', 'Planning')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO meeting_bookmarks (id, meeting_id, seconds, label)
+             VALUES ('bookmark-fixture', 'review-test', 12, 'Decision')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("meeting.md");
+        export_local_markdown_to(
+            &pool,
+            "review-test",
+            "Synthetic review".into(),
+            "- **Reviewed**".into(),
+            MarkdownOptions {
+                include_transcript: true,
+                include_speakers: true,
+                include_timestamps: true,
+            },
+            path.clone(),
+        )
+        .await
+        .unwrap();
+
+        let written = std::fs::read_to_string(path).unwrap();
+        assert!(written.contains("- Project tags: Planning"));
+        assert!(written.contains("## Summary\n\n- **Reviewed**"));
+        assert!(written.contains("## Notes and bookmarks\n\n- **[00:00:12]** Decision"));
+        assert!(written.contains("**[00:00:00] Änne:** Korrigiert."));
+        assert!(!written.contains("Old draft"));
+        assert!(!written.contains("review-test"));
+        assert!(!written.contains('\r'));
+        assert!(written.ends_with('\n'));
+    }
+
     #[test]
     fn labels_are_bounded_and_normalized() {
         assert_eq!(clean_label("  Project   Ä  ", 60).unwrap(), "Project Ä");

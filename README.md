@@ -262,7 +262,7 @@ Exact-build dual-source recording and comparable two-hour enabled/disabled
 Live performance acceptance remain pending. Stable **0.5.58** was published
 without these checks.
 
-- **Local Word export:** save a summary, full transcript, or both as `.docx`,
+- **Local document export:** save a summary, full transcript, or both as Word (`.docx`) or Markdown (`.md`),
   including tables, with optional speaker labels and recording-relative timestamps. Works offline without Microsoft
   sign-in or Word installed.
 - **Project tags:** choose existing labels from a searchable list or create new

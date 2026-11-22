@@ -4,7 +4,7 @@ import { openExternal } from '@/lib/openExternal';
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { Loader2, Upload, ChevronDown } from "lucide-react";
+import { FileText, Loader2, Upload, ChevronDown } from "lucide-react";
 import {
   ConfluenceIcon,
   WordIcon,
@@ -62,6 +62,7 @@ import { ToDoExportPreview } from "./ToDoExportPreview";
 import { ExportContentOptions } from "./ExportContentOptions";
 import { defaultExportOptions, prepareMeetingExport, readExportSummary } from "@/lib/meetingExportContent";
 import { safeDocumentName } from "@/lib/library";
+import { archiveDateKey } from "@/lib/archive-review";
 
 interface MeetingExportButtonsProps {
   meetingId: string;
@@ -75,11 +76,12 @@ interface MeetingExportButtonsProps {
   seriesDestination?: FollowUpDestination | null;
 }
 
-type DocumentDestination = "word" | "onedrive" | "confluence";
+type DocumentDestination = "word" | "markdown" | "onedrive" | "confluence";
 type Busy = DocumentDestination | "onenote" | null;
 
 const documentLabels: Record<DocumentDestination, { title: string; description: string; submit: string }> = {
   word: { title: "Export Word document", description: "Save an editable .docx on this computer. Microsoft sign-in is not required.", submit: "Save as Word document" },
+  markdown: { title: "Export Markdown", description: "Save a Markdown file on this computer.", submit: "Save as Markdown" },
   onedrive: { title: "Export to OneDrive", description: "Upload the selected content as DOCX and, if enabled in Settings, PDF to your saved OneDrive destination.", submit: "Upload to OneDrive" },
   confluence: { title: "Export to Confluence", description: "Copy the selected content as a browser draft or publish it using your configured Confluence connection.", submit: "Export to Confluence" },
 };
@@ -178,7 +180,7 @@ export function MeetingExportButtons({
   const [exportOptions, setExportOptions] = useState(() => defaultExportOptions());
 
   const openDocumentExport = (destination: DocumentDestination) => {
-    setExportOptions(defaultExportOptions(destination === "word" ? "both" : "summary"));
+    setExportOptions(defaultExportOptions(destination === "word" || destination === "markdown" ? "both" : "summary"));
     setDocumentDestination(destination);
   };
 
@@ -628,25 +630,28 @@ export function MeetingExportButtons({
     }
   }, [getMarkdown, exportOptions, meetingCreatedAt, meetingId, meetingTitle, openHistory]);
 
-  const exportWord = async () => {
+  const exportLocalDocument = async (destination: "word" | "markdown") => {
     if (pending.current) return;
     pending.current = true;
-    setBusy("word");
+    setBusy(destination);
+    const isMarkdown = destination === "markdown";
     try {
       const markdown = await readExportSummary(getMarkdown, exportOptions);
       // The core opens the save dialog and only accepts the path it chose here.
-      const path = await invoke<string | null>("pick_word_save_path", { suggestedName: safeDocumentName(meetingTitle) });
+      const path = await invoke<string | null>(isMarkdown ? "pick_markdown_save_path" : "pick_word_save_path", {
+        suggestedName: isMarkdown ? safeDocumentName(meetingTitle, "md", archiveDateKey(meetingCreatedAt)) : safeDocumentName(meetingTitle),
+      });
       if (!path) return;
-      await invoke("export_local_word", {
+      await invoke(isMarkdown ? "export_local_markdown" : "export_local_word", {
         meetingId, title: meetingTitle, markdown, path,
         includeTranscript: exportOptions.content !== "summary",
         includeSpeakers: exportOptions.speakers,
         includeTimestamps: exportOptions.timestamps,
       });
-      toast.success("Word document saved");
+      toast.success(isMarkdown ? "Markdown file saved" : "Word document saved");
       setDocumentDestination(null);
     } catch (error) {
-      toast.error("Word export failed", { description: errorText(error) });
+      toast.error(isMarkdown ? "Markdown export failed" : "Word export failed", { description: errorText(error) });
     } finally {
       pending.current = false;
       setBusy(null);
@@ -672,6 +677,10 @@ export function MeetingExportButtons({
           <DropdownMenuItem onClick={() => openDocumentExport("word")}>
             <WordIcon className="mr-2 h-4 w-4" />
             Word document (.docx)
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => openDocumentExport("markdown")}>
+            <FileText className="mr-2 h-4 w-4" />
+            Markdown (.md)
           </DropdownMenuItem>
           {connected && (
             <DropdownMenuItem onClick={openOneNote}>
@@ -715,7 +724,7 @@ export function MeetingExportButtons({
           <ExportContentOptions value={exportOptions} onChange={setExportOptions} disabled={busy !== null} />
           <DialogFooter>
             <Button variant="outline" disabled={busy !== null} onClick={() => setDocumentDestination(null)}>Cancel</Button>
-            <Button disabled={busy !== null} onClick={documentDestination === "word" ? exportWord : documentDestination === "onedrive" ? exportOneDrive : exportConfluence}>
+            <Button disabled={busy !== null} onClick={documentDestination === "word" || documentDestination === "markdown" ? () => exportLocalDocument(documentDestination) : documentDestination === "onedrive" ? exportOneDrive : exportConfluence}>
               {busy !== null ? "Exporting…" : documentDestination && documentLabels[documentDestination].submit}
             </Button>
           </DialogFooter>
