@@ -567,8 +567,9 @@
   --normal-bg-hover: hsl(var(--muted));
   --normal-border-hover: hsl(var(--border));
 
-  --info-bg: hsl(var(--primary) / 0.12);
-  --info-border: hsl(var(--primary) / 0.32);
+  /* Opaque, so a toast stacked behind another never shows through it. */
+  --info-bg: color-mix(in oklab, hsl(var(--primary)) 12%, hsl(var(--popover)));
+  --info-border: color-mix(in oklab, hsl(var(--primary)) 32%, hsl(var(--popover)));
   --info-text: hsl(var(--foreground));
 
   --success-bg: hsl(var(--theme-success-bg));
