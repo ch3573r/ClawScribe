@@ -95,6 +95,7 @@ target/
 
 frontend/src-tauri/binaries/*
 frontend/src-tauri/binaries/sherpa-onnx/
+frontend/src-tauri/binaries/vc-runtime/
 !frontend/src-tauri/binaries/codex-app-server-runtime.json
 !frontend/src-tauri/binaries/codex-app-server-runtime/
 frontend/src-tauri/binaries/codex-app-server-runtime/*
