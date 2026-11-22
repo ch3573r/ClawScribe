@@ -1558,7 +1558,7 @@ async fn stop_recording_session<R: Runtime>(
     }
     // Validate inside the shared stop-owner guard. A delayed call detector or
     // floating window request cannot take ownership of a later recording.
-    let active_seconds = {
+    let (active_seconds, session_id) = {
         let manager = RECORDING_MANAGER
             .lock()
             .map_err(|_| "Recording state unavailable")?;
@@ -1567,10 +1567,15 @@ async fn stop_recording_session<R: Runtime>(
         {
             return Ok(false);
         }
-        manager
+        let active_seconds = manager
             .as_ref()
             .and_then(|m| m.get_active_recording_duration())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let session_id = manager
+            .as_ref()
+            .and_then(|m| m.live_session_id())
+            .map(str::to_owned);
+        (active_seconds, session_id)
     };
     let stopped_live_identity = {
         let mut saving = SAVING_RECORDING.lock().unwrap();
@@ -1582,7 +1587,8 @@ async fn stop_recording_session<R: Runtime>(
             message: "Stopping audio capture…",
             session_id: identity
                 .as_ref()
-                .map(|identity| identity.session_id.clone()),
+                .map(|identity| identity.session_id.clone())
+                .or_else(|| session_id.clone()),
             start_requested: None,
         });
         identity
@@ -2035,15 +2041,12 @@ async fn stop_recording_session<R: Runtime>(
         _ => (None, 0),
     };
     let library_save_failed = meeting_id.is_none();
-    floating::remember_outcome(
-        stopped_live_identity.as_ref(),
-        library_save_failed
-            || outcome.needs_recovery()
-            || outcome
-                .capture_details
-                .as_ref()
-                .is_some_and(|details| details.empty_live_transcript.is_some()),
-    );
+    let floating_session = stopped_live_identity
+        .as_ref()
+        .map(|identity| identity.session_id.as_str())
+        .or(session_id.as_deref());
+    let floating_outcome = floating::Status::from_outcome(&outcome, library_save_failed);
+    floating_outcome.remember_outcome(floating_session);
 
     // Release the recording job only after the outcome is persisted.
     ACTIVE_CAPTURE.lock().unwrap().take();
@@ -2110,6 +2113,7 @@ async fn stop_recording_session<R: Runtime>(
     // under the admission lock so a request racing the commit cannot vanish.
     RECORDING_JOB.lock().unwrap().take();
     let queued = _stop_state.close();
+    floating_outcome.finish(&app, floating_session);
     if let Some(requested) = queued {
         if !library_save_failed
             && suspend_attempt.is_none()

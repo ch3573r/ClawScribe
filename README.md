@@ -44,9 +44,9 @@ to the current default. The saved meeting records quiet system-audio periods as
 diagnostics. A warning appears if a previously responsive microphone stops
 delivering samples for 15 seconds. Verify both sources in saved playback before
 relying on the recording.
-The recording bar and floating controls show capture warnings, queued speech,
-available disk space, and the observed recognition backend when available.
-The floating controls let you pause, resume, bookmark, and add notes.
+The recording bar shows capture warnings, queued speech, available disk space,
+and the observed recognition backend when available. The compact floating
+controls show capture warnings and let you pause, resume, bookmark, and add notes.
 During Stop, the window shows what is being saved. Choose **Start after saving**
 to request the next recording once the previous one is in the library.
 
@@ -73,9 +73,10 @@ is not brought to the front. See
 
 - Microphone and system-audio capture from the local Windows session.
 - Floating controls open when recording starts. The window shows elapsed time,
-  both audio levels, timestamped notes, and Stop. Close it to dismiss it for the
-  current recording. To keep it closed on future starts, turn off **Open floating
-  controls when recording starts** in **Settings → Recording → Capture**.
+  both audio levels, timestamped notes, and Stop. The window closes after a
+  successful save and offers to open ClawScribe if recovery is needed. You can
+  also close it while recording continues. To keep it closed on future starts,
+  turn off **Open floating controls when recording starts** in **Settings → Recording → Capture**.
   **Open floating controls** on the recording bar or tray can reopen it at any time during capture.
 - Customize saved-meeting playback keys in **Settings → Shortcuts**. The
   player's shortcut help shows your current bindings.

@@ -309,6 +309,11 @@
     height: 100%;
   }
 
+  body:has(.floating-controls) {
+    @apply bg-transparent;
+    font-family: var(--font-app-sans, system-ui, sans-serif);
+  }
+
   /* Make the window draggable */
   .titlebar {
     -webkit-app-region: drag;
