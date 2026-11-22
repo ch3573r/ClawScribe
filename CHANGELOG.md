@@ -5,6 +5,7 @@
 - Export a saved meeting as a Markdown file from **Export → Markdown (.md)**, with the summary, the edited transcript or both. It works offline.
 - **Conversation** shows talk time, speaking pace, questions and your longest uninterrupted stretch during a recording. Everything is computed on this PC. The split between you and others needs **Label lines as Me or Participants**. Hide the readout under **Settings → Recording**.
 - Send a finished meeting to your own automation with an optional webhook under **Settings → Webhook**. It is off by default, sends the summary and action items unless you also turn on the transcript, and can sign each request. See the [webhook guide](docs/integrations/webhook.md).
+- The OpenClaw meeting handoff and the OpenClaw managed auth summary provider are removed. Use the webhook to send meetings to your own automation. If OpenClaw was your summary provider, choose another under **Settings → Summary**; automatic notes wait until you do.
 - Floating controls are a compact bar that closes when the recording has saved. A recording without live text no longer leaves the window open. A recording that needs review keeps it, with **Open ClawScribe** and **Dismiss**.
 
 ## 0.66.1 preview
