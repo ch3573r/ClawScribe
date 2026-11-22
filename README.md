@@ -7,9 +7,9 @@ interviews, and recorded audio. It captures microphone and system audio from
 your own session, transcribes speech locally, and turns transcripts into
 reviewable meeting notes and action items. No meeting bot is required.
 
-**0.66.1 preview** adds recoverable imports, scheduled portable backups and reviewed
-follow-ups for recurring meetings. Recording controls retain the active session
-when a device reconnects. See the [release notes](docs/releases/0.66.1.md) and
+**0.67.0** adds Markdown export, live conversation metrics, an optional webhook
+and compact floating recording controls. The OpenClaw integration is removed.
+See the [release notes](docs/releases/0.67.0.md) and
 [download the latest stable Windows release](https://github.com/ch3573r/ClawScribe/releases/latest).
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and

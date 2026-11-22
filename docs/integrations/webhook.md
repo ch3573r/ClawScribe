@@ -62,7 +62,7 @@ ClawScribe sends an HTTP `POST` with these headers.
   "event": "summary.ready",
   "delivery_id": "00000000-0000-4000-8000-000000000001",
   "sent_at": "2026-01-01T12:10:00.000Z",
-  "app_version": "0.66.1",
+  "app_version": "0.67.0",
   "meeting": {
     "id": "example-meeting",
     "title": "Planning",
