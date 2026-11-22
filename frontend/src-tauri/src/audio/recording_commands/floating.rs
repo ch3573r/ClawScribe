@@ -475,8 +475,13 @@ pub(crate) fn floating_resize<R: Runtime>(
 #[tauri::command]
 pub(crate) async fn floating_open_main<R: Runtime>(window: WebviewWindow<R>) -> Result<(), String> {
     let id = session(window.label())?;
-    if !matches!(recording_status(id)?, Status::Review) {
-        return Err("This recording does not need review.".into());
+    // A later recording replaces the remembered review, so any finished
+    // session may bring the main window forward. Only a live one may not.
+    if matches!(
+        recording_status(id)?,
+        Status::Recording { .. } | Status::Saving { .. }
+    ) {
+        return Err("This recording is still in progress.".into());
     }
     let main = window
         .app_handle()
