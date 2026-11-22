@@ -23,7 +23,7 @@ import { Button } from '@/components/ui/button';
 import { Copy } from 'lucide-react';
 import { FollowUpEmail } from './FollowUpEmail';
 import { SavedLiveAnswers } from './SavedLiveAnswers';
-import type { summaryDetails } from '@/lib/meeting-summary';
+import { LOCAL_SUMMARY_HINT, type summaryDetails } from '@/lib/meeting-summary';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
 import { useRecentLanguages } from '@/hooks/useRecentLanguages';
@@ -434,8 +434,9 @@ export function SummaryPanel({
           summaryRef.current.replaceText(options, token);
           toast.success('Summary text replaced', { description: 'Changes save automatically. Use Ctrl+Z in the editor to undo.' });
         }} />
-      {aiSummary && details && (details.model || details.email || details.transcriptChanged || details.reduction?.passes || details.reduction?.limitRetries) && <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1 text-xs text-muted-foreground">
+      {aiSummary && details && (details.model || details.email || details.transcriptChanged || details.reduction?.passes || details.reduction?.limitRetries || details.localProvider) && <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1 text-xs text-muted-foreground">
         {details.model && <span>Generated with {details.model}{details.template && ` · ${details.template}`}</span>}
+        {details.localProvider && <span>{LOCAL_SUMMARY_HINT}</span>}
         {!!details.reduction?.passes && <span>{details.reduction.sourceExcerpts} excerpts condensed in {details.reduction.passes} {details.reduction.passes === 1 ? 'pass' : 'passes'}</span>}
         {!!details.reduction?.limitRetries && <span>Retried with a smaller model input</span>}
         {details.transcriptChanged && <span role="status" className="font-medium text-warning-foreground">Transcript changed since generation</span>}
