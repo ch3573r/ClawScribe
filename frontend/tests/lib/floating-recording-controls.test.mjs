@@ -32,10 +32,11 @@ function panel(t, initial = live) {
     react: hooks.react,
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     'next/head': 'Head',
-    'lucide-react': { BookmarkPlus: 'BookmarkPlus', Square: 'Square' },
+    'lucide-react': Object.fromEntries(['BookmarkPlus', 'Mic', 'MonitorSpeaker', 'Pause', 'Play', 'Square', 'X'].map(icon => [icon, icon])),
     '@/components/ui/button': { Button: 'Button' },
     '@/components/ui/input': { Input: 'Input' },
     '@/components/ui/progress': { Progress: 'Progress' },
+    '@/components/ui/tooltip': Object.fromEntries(['Tooltip', 'TooltipContent', 'TooltipProvider', 'TooltipTrigger'].map(primitive => [primitive, primitive])),
     '@/components/AudioLevelMeter': { SegmentedLevelMeter: 'Meter', levelToDb: n => n },
     '@/lib/theme': {
       applyAccent() {}, applyThemePreference() {}, DEFAULT_ACCENT_ID: 'claw',
@@ -51,6 +52,7 @@ function panel(t, initial = live) {
   return {
     render, calls, unmount: hooks.unmount,
     find: (type, prop, value) => render().find(n => n?.type === type && (!prop || n.props[prop] === value)),
+    control: label => render().find(n => n?.props?.label === label && n.props.onClick),
     setAction(value) { action = value; },
     async refresh(next) { snapshot = next; assert.ok(task); const fn = task; task = undefined; fn(); await flush(); },
     hasTimer: () => !!task,
@@ -61,10 +63,15 @@ test('the panel reads the active clock and both existing meters; Enter bookmarks
   const app = panel(t);
   await flush();
   assert.ok(app.render().includes('00:01:07'));
-  assert.deepEqual(app.render().filter(n => typeof n?.type === 'function').map(n => n.props.label), ['Microphone', 'System audio']);
+  for (const label of ['Microphone', 'System audio']) assert.ok(app.render().some(n => n?.props?.label === label));
+  assert.equal(app.find('Input'), undefined);
+  const openNote = () => app.control('Add note').props.onClick();
   const submit = () => app.find('form').props.onSubmit({ preventDefault() {} });
+  openNote();
   await submit();
   assert.equal(app.calls.at(-1).label, 'Review this');
+  assert.equal(app.find('Input'), undefined);
+  openNote();
   app.find('Input').props.onChange({ target: { value: '  Follow up  ' } });
   const saved = deferred();
   app.setAction(saved.promise);
@@ -74,14 +81,14 @@ test('the panel reads the active clock and both existing meters; Enter bookmarks
   assert.deepEqual(app.calls.at(-1), { name: 'floating_note', label: 'Follow up' });
   saved.resolve();
   await first;
-  assert.equal(app.find('Input').props.value, '');
+  assert.equal(app.find('Input'), undefined);
   assert.ok(app.render().includes('Note saved'));
 });
 
 test('Stop failures allow retry, external saving disables edits, and a clean finish closes the panel', async t => {
   const app = panel(t);
   await flush();
-  const stop = app.find('Button', 'variant', 'destructive');
+  const stop = app.control('Stop recording');
   const failure = deferred();
   app.setAction(failure.promise);
   const first = stop.props.onClick();
@@ -89,13 +96,14 @@ test('Stop failures allow retry, external saving disables edits, and a clean fin
   assert.equal(app.calls.filter(c => c.name === 'floating_stop').length, 1);
   failure.reject(new Error('device busy'));
   await first;
-  assert.equal(app.find('Button', 'variant', 'destructive').props.disabled, false);
+  assert.equal(app.control('Stop recording').props.disabled, false);
   assert.ok(app.render().includes('Could not stop the recording. Try Stop again.'));
   app.setAction(Promise.resolve());
   await app.refresh({ state: 'saving', seconds: 70, progress: 40, message: 'Finishing live transcription…' });
   assert.equal(app.find('Progress').props.value, 40);
   assert.equal(app.find('form'), undefined);
-  assert.equal(app.find('Button'), undefined);
+  assert.equal(app.control('Stop recording'), undefined);
+  assert.ok(app.control('Close controls'));
   await app.refresh({ state: 'ended' });
   assert.equal(app.calls.at(-1).name, 'dismiss_floating_controls');
   assert.equal(app.hasTimer(), false);
@@ -105,46 +113,56 @@ test('closing while paused leaves capture alone and stops polling', async t => {
   const paused = panel(t, { ...live, paused: true });
   await flush();
   assert.ok(paused.render().includes('Paused'));
+  await paused.control('Close controls').props.onClick();
   paused.unmount();
-  assert.deepEqual(paused.calls.map(c => c.name), ['floating_status']);
+  assert.deepEqual(paused.calls.map(c => c.name), ['floating_status', 'dismiss_floating_controls']);
   assert.equal(paused.hasTimer(), false);
 });
 
 test('pause and resume target the bound recording and preserve an unfinished note', async t => {
   const app = panel(t);
   await flush();
+  app.control('Add note').props.onClick();
   app.find('Input').props.onChange({ target: { value: 'Draft note' } });
-  await app.find('Button', 'children', 'Pause').props.onClick();
+  await app.control('Pause recording').props.onClick();
   assert.equal(app.calls.at(-1).paused, true);
   await app.refresh({ ...live, paused: true });
-  await app.find('Button', 'children', 'Resume').props.onClick();
+  await app.control('Resume recording').props.onClick();
   assert.equal(app.calls.at(-1).paused, false);
   assert.equal(app.find('Input').props.value, 'Draft note');
+  app.find('main').props.onKeyDown({ key: 'Escape', preventDefault() {} });
+  assert.equal(app.find('Input'), undefined);
 });
 
 test('checking a missing device leaves recording controls and notes usable', async t => {
   const app = panel(t);
   await flush();
+  app.control('Add note').props.onClick();
   await app.refresh({ ...live, health: {
     reconnecting: true, disconnected_devices: [{ name: 'Synthetic output', device_type: 'SystemAudio' }],
-    warnings: [], details: { dropped_samples: 0 },
+    warnings: ['Microphone is quiet.'], details: { dropped_samples: 0 },
   } });
   assert.equal(app.find('Input').props.readOnly, false);
-  assert.equal(app.find('Button', 'children', 'Pause').props.disabled, false);
-  assert.equal(app.find('Button', 'variant', 'destructive').props.disabled, false);
+  assert.equal(app.control('Pause recording').props.disabled, false);
+  assert.equal(app.control('Stop recording').props.disabled, false);
+  assert.ok(app.render().includes('Microphone is quiet.'));
   assert.equal(app.find('Button', 'children', 'Retry').props.disabled, true);
   await app.find('form').props.onSubmit({ preventDefault() {} });
   assert.equal(app.calls.at(-1).name, 'floating_note');
 });
 
-test('the panel can reopen during a save and keeps recovery directions visible', async t => {
+test('the panel can reopen during a save and offers review and dismissal actions', async t => {
   const app = panel(t, { state: 'saving', seconds: 70, progress: 90, message: 'Saving…' });
   await flush();
   assert.equal(app.find('Progress').props.value, 90);
   await app.refresh({ state: 'review' });
-  assert.ok(app.render().includes('Open ClawScribe to review the recording and its recovery options.'));
+  assert.ok(app.render().includes('This recording needs review.'));
   assert.equal(app.hasTimer(), false);
   assert.ok(app.calls.every(c => c.name === 'floating_status'));
+  await app.find('Button', 'children', 'Open ClawScribe').props.onClick();
+  assert.equal(app.calls.at(-1).name, 'floating_open_main');
+  await app.find('Button', 'children', 'Dismiss').props.onClick();
+  assert.equal(app.calls.at(-1).name, 'dismiss_floating_controls');
 });
 
 test('app and Windows capabilities grant no plugin access to the controls webview', () => {

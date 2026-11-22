@@ -1,14 +1,15 @@
 import Head from 'next/head';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type Ref, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { BookmarkPlus, Square } from 'lucide-react';
+import { BookmarkPlus, Mic, MonitorSpeaker, Pause, Play, Square, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { levelToDb, SegmentedLevelMeter } from '@/components/AudioLevelMeter';
 import type { RecordingLevelsPayload, SourceLevelPayload } from '@/lib/recording-levels';
 import { bookmarkTime } from '@/lib/library';
-import { deviceLabel, recordingHealthMetrics, recordingHealthWarnings, type MissingRecordingDevice, type RecordingHealth } from '@/lib/recording-health';
+import { deviceLabel, recordingHealthWarnings, type MissingRecordingDevice, type RecordingHealth } from '@/lib/recording-health';
 import { applyAccent, applyThemePreference, DEFAULT_ACCENT_ID, subscribeToSystemTheme, type ThemePreference } from '@/lib/theme';
 
 type Status =
@@ -19,19 +20,48 @@ type Status =
 type Snapshot = Status & { appearance: { theme: ThemePreference; accent: string | null } | null; health?: RecordingHealth | null };
 
 function Level({ label, reading, paused }: { label: string; reading?: SourceLevelPayload | null; paused: boolean }) {
-  return <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-    <span>{label}</span>
-    {paused || reading === null
-      ? <span>{paused ? 'Paused' : 'Not captured'}</span>
-      : <SegmentedLevelMeter size="mini" label={label + ' level'} db={reading ? levelToDb(reading.rms) : null}
-          peakDb={reading ? levelToDb(reading.peak) : null} />}
+  const Icon = label === 'Microphone' ? Mic : MonitorSpeaker;
+  const inactive = paused ? 'Paused' : reading === null ? 'Not captured' : null;
+  return <div title={inactive ? label + ': ' + inactive : label} className="flex h-4 items-center gap-1.5 text-xs text-muted-foreground">
+    <Icon aria-hidden="true" className="size-3 shrink-0" />
+    {inactive
+      ? <span aria-label={label + ': ' + inactive} className="whitespace-nowrap text-[10px] leading-none">{inactive}</span>
+      : <SegmentedLevelMeter size="mini" segments={9} className="!h-1.5 !w-14" label={label + ' level'}
+          db={reading ? levelToDb(reading.rms) : null} peakDb={reading ? levelToDb(reading.peak) : null} />}
   </div>;
+}
+
+function Control({ label, children, onClick, disabled, destructive, buttonRef, expanded, shortcut }: {
+  label: string;
+  children: ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  destructive?: boolean;
+  buttonRef?: Ref<HTMLButtonElement>;
+  expanded?: boolean;
+  shortcut?: string;
+}) {
+  return <Tooltip>
+    <TooltipTrigger asChild>
+      <Button ref={buttonRef} type="button" size="icon" variant={destructive ? 'destructive' : 'ghost'}
+        className="size-8 shrink-0" onClick={onClick} disabled={disabled} aria-label={label}
+        aria-expanded={expanded} aria-keyshortcuts={shortcut}>{children}</Button>
+    </TooltipTrigger>
+    <TooltipContent side="left" sideOffset={4} collisionPadding={2} className="pointer-events-none px-2 py-0.5">
+      {shortcut ? `${label} (${shortcut})` : label}
+    </TooltipContent>
+  </Tooltip>;
 }
 
 export default function FloatingControls() {
   const [status, setStatus] = useState<Snapshot | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [draft, setDraft] = useState('');
+  const [noteOpen, setNoteOpen] = useState(false);
+  const noteButton = useRef<HTMLButtonElement>(null);
+  const noteInput = useRef<HTMLInputElement>(null);
+  const returnNoteFocus = useRef(false);
+  const panel = useRef<HTMLDivElement>(null);
   const [pending, setPending] = useState<'note' | 'stop' | 'pause' | null>(null);
   const [retrying, setRetrying] = useState(false);
   const retryInFlight = useRef(false);
@@ -39,6 +69,8 @@ export default function FloatingControls() {
   const busy = useRef(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [openingMain, setOpeningMain] = useState(false);
+  const opening = useRef(false);
 
   const theme = status?.appearance?.theme ?? 'system';
   const accent = status?.appearance?.accent ?? DEFAULT_ACCENT_ID;
@@ -50,6 +82,23 @@ export default function FloatingControls() {
     appearance();
     return subscribeToSystemTheme(appearance);
   }, [theme, accent]);
+
+  useEffect(() => {
+    const content = panel.current;
+    if (!content) return;
+    // Measure the content independently of the native viewport being resized.
+    const observer = new ResizeObserver(() => {
+      void invoke('floating_resize', { height: Math.ceil(content.getBoundingClientRect().height) }).catch(() => {});
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(''), 1600);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   useEffect(() => {
     let disposed = false;
@@ -82,12 +131,73 @@ export default function FloatingControls() {
 
   const recording = status?.state === 'recording' ? status : null;
   const saving = status?.state === 'saving' ? status : null;
-  const health = status?.health;
+  const health = recording ? status?.health : null;
   const warnings = health ? recordingHealthWarnings(health) : [];
-  const metrics = health ? recordingHealthMetrics(health) : [];
   const canStop = !!recording && !unavailable && !pending;
   const canNote = canStop;
   const canRetry = canStop && !retrying && !health?.reconnecting;
+
+  useEffect(() => {
+    if (noteOpen) {
+      noteInput.current?.focus();
+    } else if (canNote && returnNoteFocus.current) {
+      returnNoteFocus.current = false;
+      noteButton.current?.focus();
+    }
+  }, [noteOpen, canNote]);
+
+  useEffect(() => {
+    if (noteOpen || !canNote) return;
+    function openNote(event: globalThis.KeyboardEvent) {
+      if (event.key.toLowerCase() === 'n' && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing) {
+        event.preventDefault();
+        setNoteOpen(true);
+      }
+    }
+    window.addEventListener('keydown', openNote);
+    return () => window.removeEventListener('keydown', openNote);
+  }, [noteOpen, canNote]);
+
+  function closeNote() {
+    returnNoteFocus.current = true;
+    setNoteOpen(false);
+  }
+
+  function handleKeys(event: KeyboardEvent<HTMLElement>) {
+    if (event.key === 'Escape' && noteOpen) {
+      event.preventDefault();
+      closeNote();
+    }
+  }
+
+  function drag(event: MouseEvent<HTMLElement>) {
+    if (event.button === 0 && !(event.target as Element).closest('[data-no-drag]')) {
+      void invoke('floating_drag').catch(() => {});
+    }
+  }
+
+  async function dismiss() {
+    try {
+      await invoke('dismiss_floating_controls');
+    } catch {
+      setError('Could not close controls. Press Alt+F4 to close the window.');
+    }
+  }
+
+  async function openMain() {
+    if (opening.current) return;
+    opening.current = true;
+    setOpeningMain(true);
+    setError('');
+    try {
+      await invoke('floating_open_main');
+    } catch {
+      setError('Could not open ClawScribe. Try again.');
+    } finally {
+      opening.current = false;
+      setOpeningMain(false);
+    }
+  }
 
   async function saveNote(event: FormEvent) {
     event.preventDefault();
@@ -101,6 +211,7 @@ export default function FloatingControls() {
       await invoke('floating_note', { label: text || 'Review this' });
       setDraft('');
       setNotice(text ? 'Note saved' : 'Bookmark saved');
+      closeNote();
     } catch {
       setError('Could not save this note. Check the recording and try again.');
     } finally {
@@ -157,6 +268,7 @@ export default function FloatingControls() {
   }
 
   const stopping = !!saving || pending === 'stop';
+  const review = status?.state === 'review';
   const title = saving ? 'Saving recording' : stopping ? 'Stopping recording'
     : recording ? (recording.paused ? 'Paused' : 'Recording')
     : status?.state === 'review' || status?.state === 'ended' ? 'Recording stopped'
@@ -168,51 +280,74 @@ export default function FloatingControls() {
       <title>Recording controls</title>
       <meta httpEquiv="Content-Security-Policy" content="frame-src 'none'; object-src 'none'; media-src 'none'; img-src 'self'; form-action 'none'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost" />
     </Head>
-    <main className="h-screen space-y-3 overflow-y-auto bg-background p-3 text-foreground" style={{ fontFamily: 'system-ui, sans-serif' }}>
-      <header className="flex items-center gap-2">
-        <div className="min-w-0 flex-1">
-          <h1 className="flex items-center gap-2 text-sm font-semibold">
-            {recording && <span aria-hidden="true" className={`size-2 rounded-full ${recording.paused ? 'bg-warning-foreground' : 'bg-destructive'}`} />}
-            {title}
-          </h1>
-          {seconds != null && <span role="timer" aria-label="Active recording time" className="text-lg font-medium tabular-nums">{bookmarkTime(seconds)}</span>}
-        </div>
-        {recording && <Button type="button" size="sm" variant="outline" disabled={!canNote} onClick={setPaused}>
-          {recording.paused ? 'Resume' : 'Pause'}
-        </Button>}
-        {recording && <Button type="button" size="sm" variant="destructive" disabled={!canStop} onClick={stop}>
-          <Square aria-hidden="true" className="fill-current" />Stop
-        </Button>}
-      </header>
-      {health?.reconnecting && <p role="status" className="text-xs">Checking audio device…</p>}
-      {warnings.length > 0 && <ul role="alert" className="space-y-1 text-xs text-warning-foreground">
-        {warnings.map(warning => <li key={warning}>{warning}</li>)}
-      </ul>}
-      {recording && health?.disconnected_devices.map(device => <div key={device.device_type} className="flex items-center justify-between gap-2 text-xs">
-        <span>{deviceLabel(device)} unavailable</span>
-        <Button type="button" size="sm" variant="outline" disabled={!canRetry} onClick={() => void reconnect(device)}>Retry</Button>
-      </div>)}
-      {recording && !!health?.disconnected_devices.length && retryError && <p role="alert" className="text-xs text-destructive">{retryError}</p>}
-      {saving ? <div className="space-y-2">
-        <p className="text-sm" role="status">{saving.message}</p>
-        <Progress value={saving.progress} aria-label="Recording save progress" aria-valuenow={saving.progress} />
-      </div> : recording && <>
-        <div role="group" aria-label="Recording levels" className="space-y-1.5 border-y border-border py-2">
-          <Level label="Microphone" paused={recording.paused} reading={recording.levels?.mic} />
-          <Level label="System audio" paused={recording.paused} reading={recording.levels?.system} />
-        </div>
-        <form onSubmit={saveNote} className="flex items-center gap-2">
-          <Input aria-label="Optional timestamped note" placeholder="Optional note" maxLength={160} autoComplete="off"
-            className="min-w-0 flex-1" value={draft} readOnly={!canNote} onChange={e => setDraft(e.target.value)} />
-          <Button size="sm" type="submit" variant="outline" disabled={!canNote}>
-            <BookmarkPlus aria-hidden="true" />{draft.trim() ? 'Save note' : 'Bookmark'}
-          </Button>
-        </form>
-      </>}
-      {metrics.length > 0 && <p className="text-xs text-muted-foreground">{metrics.join(' · ')}</p>}
-      {status?.state === 'review' && <p role="alert" className="text-sm">Open ClawScribe to review the recording and its recovery options.</p>}
-      {unavailable || (canStop && error) ? <p role="alert" className="text-xs text-destructive">{unavailable ? 'Recording status unavailable. Reconnecting…' : error}</p>
-        : <p role="status" className="text-xs text-muted-foreground">{recording && notice}</p>}
+    <main className="floating-controls h-dvh overflow-y-auto" aria-label="Recording controls" onKeyDown={handleKeys}>
+      <div ref={panel} className="p-1.5">
+        <TooltipProvider delayDuration={300}>
+          <div className="rounded-xl border border-border bg-card text-card-foreground shadow-md shadow-foreground/15">
+            <header className="flex h-12 select-none items-center gap-2.5 px-2.5" onMouseDown={drag}>
+              {recording && !stopping && <span aria-hidden="true" title={title}
+                className={`size-2 shrink-0 rounded-full ${recording.paused ? 'bg-warning-foreground' : 'bg-destructive motion-safe:animate-pulse'}`} />}
+              <h1 role="status" className={recording && !stopping ? 'sr-only' : 'text-sm font-semibold'}>{title}</h1>
+              {seconds != null && <span role="timer" aria-label="Active recording time" className="shrink-0 text-base font-semibold tabular-nums">{bookmarkTime(seconds)}</span>}
+              <div className="min-w-0 flex-1">
+                {recording && !stopping && !notice && <div role="group" aria-label="Recording levels">
+                  <Level label="Microphone" paused={recording.paused} reading={recording.levels?.mic} />
+                  <Level label="System audio" paused={recording.paused} reading={recording.levels?.system} />
+                </div>}
+                <div role="status" className="text-xs leading-tight text-muted-foreground">
+                  {recording && !stopping && notice}
+                </div>
+              </div>
+              <div data-no-drag className="flex shrink-0 items-center gap-1">
+                {recording && !stopping && <>
+                  <Control label={recording.paused ? 'Resume recording' : 'Pause recording'} disabled={!canNote} onClick={setPaused}>
+                    {recording.paused ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
+                  </Control>
+                  <Control label="Add note" buttonRef={noteButton} expanded={noteOpen} shortcut="N" disabled={!canNote}
+                    onClick={() => noteOpen ? closeNote() : setNoteOpen(true)}><BookmarkPlus aria-hidden="true" /></Control>
+                  <Control label="Stop recording" destructive disabled={!canStop} onClick={stop}>
+                    <Square aria-hidden="true" className="fill-current" />
+                  </Control>
+                </>}
+                {!review && <Control label="Close controls" onClick={dismiss}><X aria-hidden="true" /></Control>}
+              </div>
+            </header>
+            {recording && noteOpen && !stopping && <form onSubmit={saveNote} className="flex items-center gap-2 border-t border-border p-2">
+              <Input ref={noteInput} aria-label="Optional timestamped note" placeholder="Optional note" maxLength={160} autoComplete="off"
+                className="h-8 min-w-0 flex-1" value={draft} readOnly={!canNote} onChange={e => setDraft(e.target.value)} />
+              <Button className="h-8" size="sm" type="submit" variant="outline" disabled={!canNote}>
+                {draft.trim() ? 'Save note' : 'Bookmark'}
+              </Button>
+            </form>}
+            {(health?.reconnecting || warnings.length > 0 || !!health?.disconnected_devices.length) &&
+              <div className="space-y-1.5 border-t border-border px-3 py-2 text-xs">
+                {health?.reconnecting && <p role="status">Checking audio device…</p>}
+                {warnings.length > 0 && <ul role="alert" className="space-y-1 break-words text-warning-foreground">
+                  {warnings.map(warning => <li key={warning}>{warning}</li>)}
+                </ul>}
+                {health?.disconnected_devices.map(device => <div key={device.device_type} className="flex items-center justify-between gap-2">
+                  <span>{deviceLabel(device)} unavailable</span>
+                  <Button type="button" size="sm" variant="outline" disabled={!canRetry} onClick={() => void reconnect(device)}>Retry</Button>
+                </div>)}
+                {!!health?.disconnected_devices.length && retryError && <p role="alert" className="text-destructive">{retryError}</p>}
+              </div>}
+            {saving && <div className="space-y-2 border-t border-border px-3 py-2.5">
+              <p className="text-xs" role="status">{saving.message}</p>
+              <Progress value={saving.progress} aria-label="Recording save progress" aria-valuenow={saving.progress} />
+            </div>}
+            {review && <div className="space-y-2 border-t border-border px-3 py-2.5">
+              <p className="text-sm" role="alert">This recording needs review.</p>
+              <div className="flex gap-2">
+                <Button type="button" size="sm" disabled={openingMain} onClick={openMain}>Open ClawScribe</Button>
+                <Button type="button" size="sm" variant="outline" onClick={dismiss}>Dismiss</Button>
+              </div>
+            </div>}
+            {(unavailable || error) && <p role="alert" className="border-t border-border px-3 py-2 text-xs text-destructive">
+              {unavailable ? 'Recording status unavailable. Reconnecting…' : error}
+            </p>}
+          </div>
+        </TooltipProvider>
+      </div>
     </main>
   </>;
 }
