@@ -162,8 +162,8 @@ export default function PageContent({
   const revealTranscriptPane = useCallback((keepFocus = false) => {
     const review = reviewRef.current;
     const panel = review?.querySelector<HTMLElement>('[data-transcript-panel]');
-    if (!review || !panel) return;
-    if (keepFocus && document.activeElement !== panel) return;
+    if (!review || !panel) return false;
+    if (keepFocus && document.activeElement !== panel) return false;
     const scrolls = getComputedStyle(review).overflowY === 'auto';
     if (scrolls) {
       // The virtual list reveals the row inside the pane. Bring the whole pane
@@ -171,11 +171,15 @@ export default function PageContent({
       review.scrollTop += panel.getBoundingClientRect().top - review.getBoundingClientRect().top;
     }
     if (!keepFocus) panel.focus({ preventScroll: scrolls });
+    return true;
   }, []);
   useEffect(() => {
-    // Loading the recording can insert the playback strip after the reveal.
-    if (isAudioReady && focusedSource) revealTranscriptPane(true);
-  }, [isAudioReady, focusedSource, revealTranscriptPane]);
+    // The playback strip resizes the virtual list after a cold audio load.
+    if (isAudioReady && revealTranscriptPane(true)) {
+      const request = ++evidenceFocusRequest.current;
+      setFocusedSource(source => source && { id: source.id, request });
+    }
+  }, [isAudioReady, revealTranscriptPane]);
   const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean) => {
     if (!onRevealTranscript || !current()) throw new Error('The transcript is not ready. Retry the citation.');
     await onRevealTranscript(id, index);

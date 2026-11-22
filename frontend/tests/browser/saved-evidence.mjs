@@ -52,7 +52,8 @@ try {
         time = 0;
         get currentTime() { return this.time; }
         set currentTime(value) { this.time = value; log.seek.push(value); }
-        load() { setTimeout(() => this.dispatchEvent(new Event('loadedmetadata')), 75); }
+        // Exercise layout changes after the initial citation reveal.
+        load() { setTimeout(() => this.dispatchEvent(new Event('loadedmetadata')), 1500); }
         async play() { log.played++; this.dispatchEvent(new Event('playing')); }
         pause() { this.dispatchEvent(new Event('pause')); }
         removeAttribute() {}
