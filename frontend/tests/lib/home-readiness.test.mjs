@@ -185,7 +185,7 @@ test('Home can change a disconnected device without leaving the signal path', as
 
   const home = render();
   assert.match(text(home), /Live transcriptionParakeet/);
-  assert.match(text(home), /Microsoft AI · Hosted file transcription/);
+  assert.match(text(home), /Azure Speech · Hosted file transcription/);
   assert.match(text(home), /Only your microphone will be recorded/);
   assert.equal(nodes(home).find(node => node.type === 'RecordingControls').props.isRecordingDisabled, false);
 

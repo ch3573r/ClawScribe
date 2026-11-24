@@ -53,7 +53,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   groq: "Groq",
   openai: "OpenAI",
   "cloud-whisper": "Hosted Whisper",
-  "mai-transcribe": "Microsoft AI",
+  "mai-transcribe": "Azure Speech",
 };
 
 const LANGUAGE_LABELS: Record<string, string> = {

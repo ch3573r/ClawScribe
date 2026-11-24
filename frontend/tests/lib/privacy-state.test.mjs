@@ -62,7 +62,7 @@ test('cloud transcription with a cloud engine says audio leaves, with the warnin
   assert.equal(factOf(model, 'audio').tone, 'warning');
   assert.equal(factOf(model, 'audio').value, 'Leaves this PC');
   assert.equal(rowOf(model, 'transcription').tone, 'warning');
-  assert.equal(rowOf(model, 'transcription').destination, 'MAI-Transcribe');
+  assert.equal(rowOf(model, 'transcription').destination, 'Azure Speech');
 });
 
 test('a cloud engine with the cloud switch off, or the switch on with a local engine, keeps audio local', () => {

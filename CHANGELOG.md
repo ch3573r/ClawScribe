@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.68.0-preview.1
+
+- Replace MAI-Transcribe with standard Azure Speech for optional import and Enhance transcription. Requests no longer enable enhanced mode or select a MAI model, allowing standard Speech resources such as Germany West Central to work.
+- Keep saved Azure endpoints, regions, cloud opt-ins, and protected API keys. Existing MAI model settings resolve to standard Azure Speech automatically.
+- Preserve Azure word timestamps when supplied, map language hints such as German to full locale codes, and keep approximate timing for combined-only responses.
+- Remove the unsupported English translation option for Azure Speech. Use local Whisper when translating speech to English.
+- Windows GPU prerelease for manual evaluation. Stable updates remain on 0.67.0; enable **Include prereleases** to discover this preview. Runtime/updater version: 0.68.0.
+- Real dual-source capture, installed upgrade, real-speech Azure provider testing, and long-meeting acceptance have not been completed on this build. See the [preview notes](docs/releases/0.68.0-preview.1.md).
+
 ## 0.67.0
 
 - Export a saved meeting as a Markdown file from **Export → Markdown (.md)**, with the summary, the edited transcript or both. It works offline.

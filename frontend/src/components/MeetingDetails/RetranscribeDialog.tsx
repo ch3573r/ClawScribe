@@ -32,7 +32,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
-import { LANGUAGES } from '@/constants/languages';
+import { fileLanguageOptions } from '@/lib/transcription-language';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import Analytics from '@/lib/analytics';
 
@@ -148,10 +148,11 @@ export function RetranscribeDialog({
   const isParakeetModel = selectedModelDetails?.provider === 'parakeet';
 
   useEffect(() => {
-    if (isParakeetModel && selectedLang !== 'auto') {
+    if ((isParakeetModel && selectedLang !== 'auto')
+      || (selectedModelDetails?.provider === 'mai-transcribe' && selectedLang === 'auto-translate')) {
       setSelectedLang('auto');
     }
-  }, [isParakeetModel, selectedLang]);
+  }, [isParakeetModel, selectedModelDetails?.provider, selectedLang]);
 
   // Reset state only when dialog transitions from closed to open
   // This prevents re-initialization when config changes while dialog is already open
@@ -443,7 +444,7 @@ export function RetranscribeDialog({
                     <SelectValue placeholder="Select language" />
                   </SelectTrigger>
                   <SelectContent className="max-h-60">
-                    {LANGUAGES.map((lang) => (
+                    {fileLanguageOptions(selectedModelDetails?.provider).map((lang) => (
                       <SelectItem key={lang.code} value={lang.code}>
                         {lang.name}
                       </SelectItem>

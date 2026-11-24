@@ -8,7 +8,7 @@ The test is intentionally not part of normal CI because it reaches external
 APIs and requires real credentials. It does not print API keys.
 
 The installed app also exposes an interactive version under **Settings >
-Transcription**. Select Hosted Whisper or MAI-Transcribe, enter the provider
+Transcription**. Select Hosted Whisper or Azure Speech, enter the provider
 settings, then use **Test** to pick a short audio file and run the provider
 against that file.
 
@@ -19,13 +19,17 @@ The provider test accepts only existing non-empty audio files. It reuses a saved
 key only for the saved endpoint; testing another endpoint requires entering a
 new key. Loading a rejected legacy endpoint still lets you correct its settings.
 
+Standard Azure Speech omits enhanced mode and an explicit model. Existing
+MAI provider settings retain their endpoint and protected key. Use the Speech
+resource endpoint, not a Foundry project URL.
+
 ## What It Verifies
 
 - Hosted Whisper returns non-empty segments and real word timestamps.
 - Hosted Whisper word timestamps map to `timestamp_source: Real`.
-- MAI-Transcribe returns non-empty segments without word timestamps.
-- MAI-Transcribe output maps to `word_timestamps: None`.
-- MAI collapsed output is reported through `requires_local_timing_grid=true`
+- Azure Speech returns non-empty segments and preserves supplied word timestamps.
+- Azure Speech words map to `timestamp_source: Real`; phrase-only responses do not fabricate word timings.
+- Azure combined output is reported through `requires_local_timing_grid=true`
   so reviewers can see whether Azure returned usable phrase segmentation.
 - Hosted API errors are reported with the app's fallback category, such as
   `auth_config`, `transient`, or `upload_too_large`.
@@ -50,15 +54,14 @@ Hosted Whisper input:
 | `CLAWSCRIBE_SMOKE_OPENAI_BASE_URL` | Optional OpenAI-compatible base URL. Defaults to `https://api.openai.com/v1`. |
 | `CLAWSCRIBE_SMOKE_OPENAI_MODEL` | Optional model. Defaults to `whisper-1`. |
 
-MAI-Transcribe input:
+Azure Speech input:
 
 | Variable | Purpose |
 | --- | --- |
-| `CLAWSCRIBE_SMOKE_MAI_ENDPOINT` | Azure Speech endpoint, for example `https://example.cognitiveservices.azure.com`. |
-| `CLAWSCRIBE_SMOKE_MAI_API_KEY` | Azure Speech resource key. |
-| `CLAWSCRIBE_SMOKE_MAI_MODEL` | Optional model. Defaults to `mai-transcribe-1.5`. |
+| `CLAWSCRIBE_SMOKE_AZURE_SPEECH_ENDPOINT` | Azure Speech endpoint, for example `https://example.cognitiveservices.azure.com`. |
+| `CLAWSCRIBE_SMOKE_AZURE_SPEECH_API_KEY` | Azure Speech resource key. |
 
-Configure either Hosted Whisper, MAI-Transcribe, or both. MAI requires both the
+Configure either Hosted Whisper, Azure Speech, or both. Azure Speech requires both the
 endpoint and key.
 
 ## PowerShell Example
@@ -77,11 +80,9 @@ $env:CLAWSCRIBE_SMOKE_OPENAI_API_KEY = "<openai-or-compatible-key>"
 # $env:CLAWSCRIBE_SMOKE_OPENAI_BASE_URL = "https://api.openai.com/v1"
 # $env:CLAWSCRIBE_SMOKE_OPENAI_MODEL = "whisper-1"
 
-# MAI-Transcribe
-$env:CLAWSCRIBE_SMOKE_MAI_ENDPOINT = "https://example.cognitiveservices.azure.com"
-$env:CLAWSCRIBE_SMOKE_MAI_API_KEY = "<azure-speech-key>"
-# Optional:
-# $env:CLAWSCRIBE_SMOKE_MAI_MODEL = "mai-transcribe-1.5"
+# Azure Speech
+$env:CLAWSCRIBE_SMOKE_AZURE_SPEECH_ENDPOINT = "https://example.cognitiveservices.azure.com"
+$env:CLAWSCRIBE_SMOKE_AZURE_SPEECH_API_KEY = "<azure-speech-key>"
 
 pnpm run test:cloud-live
 ```
@@ -90,10 +91,10 @@ Expected output includes one summary line for each configured provider:
 
 ```text
 Hosted Whisper: segments=..., word_timestamps=..., requires_local_timing_grid=false
-MAI-Transcribe: segments=..., word_timestamps=0, requires_local_timing_grid=...
+Azure Speech: segments=..., word_timestamps=..., requires_local_timing_grid=...
 ```
 
-If MAI reports `requires_local_timing_grid=true`, Azure returned collapsed or
+If Azure Speech reports `requires_local_timing_grid=true`, Azure returned collapsed or
 single-phrase output. That is not automatically a failed smoke test, because
 ClawScribe can remap the cloud text to the local VAD timing grid, but it should
 be called out in release review.

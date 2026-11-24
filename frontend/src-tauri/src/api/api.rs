@@ -6,10 +6,11 @@ use tauri::{AppHandle, Emitter, Runtime};
 use crate::credentials::SecretStatus;
 use crate::{
     audio::transcription::cloud::{
-        mai_transcribe::MaiTranscribeProvider, mime_type_for_path,
-        openai_whisper::OpenAiWhisperProvider, transcribe_mai_file, validate_provider_upload_size,
-        CloudTranscriptSegment, CloudTranscriptionProvider, DEFAULT_CLOUD_WHISPER_MODEL,
-        DEFAULT_MAI_TRANSCRIBE_MODEL, PROVIDER_CLOUD_WHISPER, PROVIDER_MAI_TRANSCRIBE,
+        azure_speech::AzureSpeechProvider, mime_type_for_path,
+        openai_whisper::OpenAiWhisperProvider, transcribe_azure_file,
+        validate_provider_upload_size, CloudTranscriptSegment, CloudTranscriptionProvider,
+        DEFAULT_AZURE_SPEECH_MODEL, DEFAULT_CLOUD_WHISPER_MODEL, PROVIDER_AZURE_SPEECH,
+        PROVIDER_CLOUD_WHISPER,
     },
     database::{
         models::{MeetingModel, TranscriptTimelineRow},
@@ -614,7 +615,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
             clean_optional(base_url.as_deref()).unwrap_or("https://api.openai.com/v1"),
             allow_unencrypted,
         )?,
-        PROVIDER_MAI_TRANSCRIBE => crate::openai::secret_destination::validate_secret_destination(
+        PROVIDER_AZURE_SPEECH => crate::openai::secret_destination::validate_secret_destination(
             clean_optional(endpoint.as_deref()).unwrap_or(""),
             allow_unencrypted,
         )?,
@@ -811,7 +812,7 @@ async fn test_transcript_provider_with(
                     .as_deref()
                     .unwrap_or("https://api.openai.com/v1"),
             ),
-            PROVIDER_MAI_TRANSCRIBE => config.mai_transcribe_endpoint.as_deref(),
+            PROVIDER_AZURE_SPEECH => config.mai_transcribe_endpoint.as_deref(),
             _ => None,
         });
     let requested = match provider.as_str() {
@@ -820,7 +821,7 @@ async fn test_transcript_provider_with(
                 .is_none()
                 .then_some("https://api.openai.com/v1")
         }),
-        PROVIDER_MAI_TRANSCRIBE => clean_optional(endpoint.as_deref()),
+        PROVIDER_AZURE_SPEECH => clean_optional(endpoint.as_deref()),
         _ => return Err("Unsupported cloud transcription provider".into()),
     };
     let destination = crate::audio::transcription::cloud::test_destination(
@@ -895,23 +896,22 @@ async fn test_transcript_provider_with(
                 })?;
             build_cloud_test_result(PROVIDER_CLOUD_WHISPER, &model, &segments, true)
         }
-        PROVIDER_MAI_TRANSCRIBE => {
+        PROVIDER_AZURE_SPEECH => {
             let endpoint = destination;
-            let model = clean_string(Some(model))
-                .unwrap_or_else(|| DEFAULT_MAI_TRANSCRIBE_MODEL.to_string());
-            let provider_client = MaiTranscribeProvider::new(endpoint, api_key, model.clone())
-                .with_http_opt_in(allow_unencrypted);
+            let model = DEFAULT_AZURE_SPEECH_MODEL.to_string();
+            let provider_client =
+                AzureSpeechProvider::new(endpoint, api_key).with_http_opt_in(allow_unencrypted);
             let cancelled = std::sync::atomic::AtomicBool::new(false);
             let segments =
-                transcribe_mai_file(&provider_client, audio_path, language, &cancelled, false)
+                transcribe_azure_file(&provider_client, audio_path, language, &cancelled, false)
                     .await
                     .map_err(|error| {
                         format!(
-                            "MAI-Transcribe test failed ({}): {error}",
+                            "Azure Speech test failed ({}): {error}",
                             error.category().as_str()
                         )
                     })?;
-            build_cloud_test_result(PROVIDER_MAI_TRANSCRIBE, &model, &segments, false)
+            build_cloud_test_result(PROVIDER_AZURE_SPEECH, &model, &segments, false)
         }
         _ => Err(format!(
             "Provider '{}' does not support hosted transcription testing",
@@ -946,12 +946,6 @@ fn build_cloud_test_result(
                 .to_string(),
         );
     }
-    if !expect_word_timestamps && word_timestamp_count > 0 {
-        return Err(
-            "MAI-Transcribe returned word timestamps; ClawScribe must not promote them to Real"
-                .to_string(),
-        );
-    }
 
     Ok(TranscriptProviderTestResult {
         provider: provider.to_string(),
@@ -963,6 +957,43 @@ fn build_cloud_test_result(
             .any(|segment| segment.requires_local_timing_grid),
         preview_text: preview_text(segments),
     })
+}
+
+#[cfg(test)]
+mod azure_provider_test_results {
+    use super::*;
+
+    #[test]
+    fn standard_speech_test_accepts_real_words_and_phrase_only_responses() {
+        for words in [
+            None,
+            Some(vec![
+                crate::audio::transcription::cloud::CloudTranscriptWord {
+                    text: "Ja.".into(),
+                    start_seconds: 0.1,
+                    end_seconds: 0.4,
+                },
+            ]),
+        ] {
+            let expected_count = words.as_ref().map_or(0, Vec::len);
+            let segments = vec![CloudTranscriptSegment {
+                text: "Ja.".into(),
+                start_seconds: 0.1,
+                end_seconds: 0.5,
+                words,
+                requires_local_timing_grid: false,
+            }];
+            let result = build_cloud_test_result(
+                PROVIDER_AZURE_SPEECH,
+                DEFAULT_AZURE_SPEECH_MODEL,
+                &segments,
+                false,
+            )
+            .unwrap();
+            assert_eq!(result.model, "azure-speech");
+            assert_eq!(result.word_timestamp_count, expected_count);
+        }
+    }
 }
 
 fn preview_text(segments: &[CloudTranscriptSegment]) -> String {

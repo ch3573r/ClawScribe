@@ -12,6 +12,11 @@ and compact floating recording controls. The OpenClaw integration is removed.
 See the [release notes](docs/releases/0.67.0.md) and
 [download the latest stable Windows release](https://github.com/ch3573r/ClawScribe/releases/latest).
 
+**0.68.0-preview.1** replaces MAI-Transcribe with standard Azure Speech for
+optional cloud file transcription, preserving existing endpoints and protected
+keys. It is a prerelease for manual evaluation; the stable update stays on
+0.67.0. See the [preview notes](docs/releases/0.68.0-preview.1.md).
+
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
 and [LICENSE.md](LICENSE.md).
@@ -133,7 +138,7 @@ is not brought to the front. See
 | Whisper | Local whisper.cpp/whisper-rs engine with selectable models and Vulkan support in the Windows GPU build. |
 | Nemotron | Beta multilingual Nemotron 3.5 ASR path. fp16 is CPU-capable; int8 is intended for DirectML-capable builds. |
 | Hosted Whisper | Import and Enhance only (beta), through an opt-in OpenAI-compatible file-transcription API. |
-| MAI-Transcribe | Import and Enhance only (beta), through opt-in Azure Speech Fast Transcription; credentials are separate from Microsoft Graph sign-in. |
+| Azure Speech | Import and Enhance only (beta), through opt-in standard Azure Speech Fast Transcription; credentials are separate from Microsoft Graph sign-in. |
 
 **Run transcription in a separate process (beta).** With this switch on in the beta
 settings, Parakeet loads and transcribes in a separate process. If the speech

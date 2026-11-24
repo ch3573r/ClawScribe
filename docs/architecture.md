@@ -82,21 +82,26 @@ window titles are returned only when the settings diagnostics panel requests the
 - Hosted Whisper uses OpenAI-compatible file transcription. The official
   OpenAI endpoint currently limits uploads to 25 MB; larger uploads are reported
   as a size-limit fallback and transcribed locally.
-- MAI-Transcribe uses Azure Speech Fast Transcription with its own Cognitive
+- Azure Speech uses standard Fast Transcription without enhanced mode or an explicit
+  model, including in Germany West Central. It uses its own Cognitive
   Services key or Azure Speech credential. Microsoft Graph sign-in/export
   scopes are not reused for Azure Speech.
-- MAI-Transcribe streams WAV, MP3, and FLAC from disk. Other supported media
+- Azure Speech streams WAV, MP3, and FLAC from disk. Other supported media
   are converted to 16 kHz mono PCM16 WAV in an unnamed temporary file. The
   operating system removes it when its handle closes, including after a crash or
   kill, so no staging file persists and none is swept. Each upload attempt
   replays it from the start in 64 KiB positional reads. The 300 MB cap applies to
   the audio submitted to Azure. Cancelling stops local conversion or the
   multipart request and leaves the source audio intact.
-- MAI sentence-level timing is never promoted to word timestamps. If Azure
+- Azure word timestamps are preserved as real acoustic timing; phrase-only
+  timing is never promoted to word timestamps. If Azure
   returns a combined-only or single-phrase transcript, ClawScribe can remap the
   cloud text onto the local VAD speech grid for readable rows, but those row
   timings are approximate and speaker diarization stays on the conservative
   path.
+- The legacy `mai-transcribe` provider id and database/credential fields remain
+  compatibility identifiers. Saved endpoints and keys are preserved; legacy MAI
+  model choices resolve to standard Azure Speech and are never sent to Azure.
 - Cloud transcription calls upload the whole recording file once. They are not
   split into per-VAD-segment provider calls.
 - Summary generation can be local or external depending on the configured

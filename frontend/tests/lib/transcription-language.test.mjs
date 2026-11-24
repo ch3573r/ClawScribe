@@ -4,6 +4,13 @@ import { loadTsModule } from './load-ts-module.mjs';
 
 const language = loadTsModule('src/lib/transcription-language.ts');
 
+test('Azure file transcription offers autodetection and German, never English translation', () => {
+  const codes = language.fileLanguageOptions('mai-transcribe').map(option => option.code);
+  assert.ok(codes.includes('auto') && codes.includes('de'));
+  assert.ok(!codes.includes('auto-translate'));
+  assert.ok(language.fileLanguageOptions('whisper').some(option => option.code === 'auto-translate'));
+});
+
 test('each engine maps the way the core chooses its live engine', () => {
   assert.equal(language.languageSupport('localWhisper'), 'whisper');
   assert.equal(language.languageSupport('nemotron'), 'nemotron');

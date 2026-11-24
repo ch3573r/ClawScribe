@@ -1,6 +1,6 @@
 use super::{
     classify_status_with_body, should_retry_status, validate_provider_upload_size,
-    CloudTranscriptSegment, CloudTranscriptionError, PROVIDER_MAI_TRANSCRIBE,
+    CloudTranscriptSegment, CloudTranscriptWord, CloudTranscriptionError, PROVIDER_AZURE_SPEECH,
 };
 use reqwest::multipart::{Form, Part};
 use serde::Deserialize;
@@ -142,7 +142,7 @@ async fn open_audio_body(
     match source {
         UploadSource::Path(path) => open_path_body(path).await,
         UploadSource::Scratch(scratch) => {
-            validate_provider_upload_size(PROVIDER_MAI_TRANSCRIBE, None, scratch.length())?;
+            validate_provider_upload_size(PROVIDER_AZURE_SPEECH, None, scratch.length())?;
             Ok((
                 reqwest::Body::wrap_stream(scratch.stream()),
                 scratch.length(),
@@ -153,38 +153,36 @@ async fn open_audio_body(
 
 async fn open_path_body(path: &Path) -> Result<(reqwest::Body, u64), CloudTranscriptionError> {
     let file = tokio::fs::File::open(path).await.map_err(|_| {
-        CloudTranscriptionError::auth_config("Could not open audio for MAI-Transcribe")
+        CloudTranscriptionError::auth_config("Could not open audio for Azure Speech")
     })?;
     let metadata = file.metadata().await.map_err(|_| {
-        CloudTranscriptionError::auth_config("Could not inspect audio for MAI-Transcribe")
+        CloudTranscriptionError::auth_config("Could not inspect audio for Azure Speech")
     })?;
     if !metadata.is_file() || metadata.len() == 0 {
         return Err(CloudTranscriptionError::unsupported_media(
-            "MAI-Transcribe needs a non-empty audio file",
+            "Azure Speech needs a non-empty audio file",
         ));
     }
     let length = metadata.len();
-    validate_provider_upload_size(PROVIDER_MAI_TRANSCRIBE, None, length)?;
+    validate_provider_upload_size(PROVIDER_AZURE_SPEECH, None, length)?;
     let stream = ReaderStream::with_capacity(file.take(length), UPLOAD_BUFFER_BYTES);
     Ok((reqwest::Body::wrap_stream(stream), length))
 }
 
 #[derive(Clone)]
-pub struct MaiTranscribeProvider {
+pub struct AzureSpeechProvider {
     endpoint: String,
     api_key: String,
-    model: String,
     allow_unencrypted: bool,
 }
 
-crate::credentials::debug_without_secrets!(MaiTranscribeProvider { endpoint, model, allow_unencrypted; secret api_key });
+crate::credentials::debug_without_secrets!(AzureSpeechProvider { endpoint, allow_unencrypted; secret api_key });
 
-impl MaiTranscribeProvider {
-    pub fn new(endpoint: String, api_key: String, model: String) -> Self {
+impl AzureSpeechProvider {
+    pub fn new(endpoint: String, api_key: String) -> Self {
         Self {
             endpoint,
             api_key,
-            model,
             allow_unencrypted: false,
         }
     }
@@ -206,27 +204,27 @@ impl MaiTranscribeProvider {
         mime_type: &str,
         language: Option<&str>,
     ) -> Result<Form, CloudTranscriptionError> {
-        // MAI expects Content-Length on the multipart request.
+        // Azure expects Content-Length on the multipart request.
         let audio = Part::stream_with_length(body, length)
             .file_name(file_name.to_string())
             .mime_str(mime_type)
             .map_err(|e| {
                 CloudTranscriptionError::auth_config(format!("Invalid audio MIME type: {e}"))
             })?;
-        let mut definition = json!({
-            "enhancedMode": {
-                "enabled": true,
-                "model": self.model
-            }
-        });
-        if let Some(language) = language.map(str::trim).filter(|value| !value.is_empty()) {
-            definition["locales"] = json!([normalize_mai_locale(language)]);
+        // Omitting enhancedMode selects standard Azure Speech, including regions
+        // that cannot serve MAI or LLM Speech. Never forward a legacy MAI model.
+        let mut definition = json!({});
+        if let Some(language) = language
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !matches!(*value, "auto" | "auto-translate"))
+        {
+            definition["locales"] = json!([normalize_azure_locale(language)]);
         }
         let definition = Part::text(definition.to_string())
             .mime_str("application/json")
             .map_err(|e| {
                 CloudTranscriptionError::auth_config(format!(
-                    "Invalid MAI definition MIME type: {e}"
+                    "Invalid Azure Speech definition MIME type: {e}"
                 ))
             })?;
 
@@ -253,6 +251,7 @@ impl MaiTranscribeProvider {
         mime_type: &str,
         language: Option<&str>,
     ) -> Result<Vec<CloudTranscriptSegment>, CloudTranscriptionError> {
+        validate_language(language)?;
         for attempt in 1..=MAX_ATTEMPTS {
             // Reopen for each attempt. A failed request consumes its stream.
             let (body, length) = open_audio_body(&audio).await?;
@@ -311,6 +310,15 @@ impl MaiTranscribeProvider {
     }
 }
 
+pub(super) fn validate_language(language: Option<&str>) -> Result<(), CloudTranscriptionError> {
+    if language.map(str::trim) == Some("auto-translate") {
+        return Err(CloudTranscriptionError::auth_config(
+            "Standard Azure Speech does not translate to English. Choose Auto detect or a source language, or use local Whisper for translation.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn fast_transcription_endpoint(endpoint: &str) -> String {
     let trimmed = endpoint.trim().trim_end_matches('/');
     if trimmed.contains("/speechtotext/transcriptions:transcribe") {
@@ -324,12 +332,49 @@ pub fn fast_transcription_endpoint(endpoint: &str) -> String {
     }
 }
 
-fn normalize_mai_locale(language: &str) -> String {
-    language
-        .split(['-', '_'])
-        .next()
-        .unwrap_or(language)
-        .to_ascii_lowercase()
+fn normalize_azure_locale(language: &str) -> String {
+    let normalized = language.replace('_', "-");
+    // File dialogs use Whisper's ISO language codes. Standard Speech expects
+    // locale codes; preserve explicit regional choices such as en-GB or de-AT.
+    let locale = match normalized.to_ascii_lowercase().as_str() {
+        "en" => "en-US",
+        "zh" => "zh-CN",
+        "de" => "de-DE",
+        "es" => "es-ES",
+        "ru" => "ru-RU",
+        "ko" => "ko-KR",
+        "fr" => "fr-FR",
+        "ja" => "ja-JP",
+        "pt" => "pt-BR",
+        "tr" => "tr-TR",
+        "pl" => "pl-PL",
+        "ca" => "ca-ES",
+        "nl" => "nl-NL",
+        "ar" => "ar-SA",
+        "sv" => "sv-SE",
+        "it" => "it-IT",
+        "id" => "id-ID",
+        "hi" => "hi-IN",
+        "fi" => "fi-FI",
+        "vi" => "vi-VN",
+        "he" => "he-IL",
+        "uk" => "uk-UA",
+        "el" => "el-GR",
+        "ms" => "ms-MY",
+        "cs" => "cs-CZ",
+        "ro" => "ro-RO",
+        "da" => "da-DK",
+        "hu" => "hu-HU",
+        "ta" => "ta-IN",
+        "no" | "nb" => "nb-NO",
+        "th" => "th-TH",
+        "ur" => "ur-IN",
+        "hr" => "hr-HR",
+        "bg" => "bg-BG",
+        "lt" => "lt-LT",
+        _ => return normalized,
+    };
+    locale.to_string()
 }
 
 fn retry_delay(attempt: usize) -> Duration {
@@ -356,6 +401,15 @@ pub(crate) struct AzurePhrase {
     text: String,
     offset_milliseconds: f64,
     duration_milliseconds: f64,
+    words: Option<Vec<AzureWord>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AzureWord {
+    text: String,
+    offset_milliseconds: f64,
+    duration_milliseconds: f64,
 }
 
 pub(crate) fn parse_fast_transcription(
@@ -378,7 +432,24 @@ pub(crate) fn parse_fast_transcription(
                     text: phrase.text,
                     start_seconds,
                     end_seconds,
-                    words: None,
+                    words: phrase
+                        .words
+                        .map(|words| {
+                            words
+                                .into_iter()
+                                .filter(|word| !word.text.trim().is_empty())
+                                .map(|word| {
+                                    let start_seconds = word.offset_milliseconds / 1000.0;
+                                    CloudTranscriptWord {
+                                        text: word.text,
+                                        start_seconds,
+                                        end_seconds: start_seconds
+                                            + word.duration_milliseconds.max(0.0) / 1000.0,
+                                    }
+                                })
+                                .collect()
+                        })
+                        .filter(|words: &Vec<_>| !words.is_empty()),
                     requires_local_timing_grid: false,
                 }
             })
@@ -416,7 +487,10 @@ fn mark_single_long_phrase_for_local_timing_grid(segments: &mut [CloudTranscript
     let segment = &segments[0];
     let duration_seconds = (segment.end_seconds - segment.start_seconds).max(0.0);
     let words = word_count(&segment.text);
-    if duration_seconds >= MAX_SINGLE_PHRASE_SECONDS && words >= MAX_SINGLE_PHRASE_WORDS {
+    if segment.words.is_none()
+        && duration_seconds >= MAX_SINGLE_PHRASE_SECONDS
+        && words >= MAX_SINGLE_PHRASE_WORDS
+    {
         segments[0].requires_local_timing_grid = true;
     }
 }
@@ -433,14 +507,13 @@ mod tests {
 
     #[test]
     fn debug_output_never_contains_the_api_key() {
-        let provider = MaiTranscribeProvider::new(
+        let provider = AzureSpeechProvider::new(
             "https://speech.example.com".into(),
             "fake-provider-key-000000".into(),
-            "model-a".into(),
         );
         let shown = format!("{provider:?}");
         assert!(!shown.contains("fake-provider-key-000000"));
-        assert!(shown.contains("model-a"));
+        assert!(shown.contains("AzureSpeechProvider"));
     }
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -469,11 +542,13 @@ mod tests {
                     text: "hello there".to_string(),
                     offset_milliseconds: 1000.0,
                     duration_milliseconds: 900.0,
+                    words: None,
                 },
                 AzurePhrase {
                     text: "goodbye".to_string(),
                     offset_milliseconds: 2000.0,
                     duration_milliseconds: 500.0,
+                    words: None,
                 },
             ]),
         };
@@ -487,6 +562,86 @@ mod tests {
         assert!(parsed
             .iter()
             .all(|segment| !segment.requires_local_timing_grid));
+    }
+
+    #[test]
+    fn normalizes_language_hints_without_losing_regional_locales() {
+        for (input, expected) in [
+            ("de", "de-DE"),
+            ("en", "en-US"),
+            ("no", "nb-NO"),
+            ("de-DE", "de-DE"),
+            ("de_AT", "de-AT"),
+            ("en-GB", "en-GB"),
+        ] {
+            assert_eq!(normalize_azure_locale(input), expected);
+        }
+    }
+
+    #[test]
+    fn preserves_short_german_speech_and_real_word_timing() {
+        let payload = serde_json::from_value(json!({
+            "phrases": [{
+                "text": "Ja.", "offsetMilliseconds": 100, "durationMilliseconds": 400,
+                "words": [{"text": "Ja.", "offsetMilliseconds": 100, "durationMilliseconds": 300}]
+            }]
+        }))
+        .unwrap();
+        let parsed = parse_fast_transcription(payload).unwrap();
+        assert_eq!(parsed[0].text, "Ja.");
+        let words = parsed[0].words.as_ref().unwrap();
+        assert_eq!(words[0].text, "Ja.");
+        assert_eq!(words[0].start_seconds, 0.1);
+        assert_eq!(words[0].end_seconds, 0.4);
+        let mapped = super::super::cloud_segments_to_transcribed_segments(
+            &parsed,
+            super::super::CloudWordPolicy::Real,
+        );
+        assert_eq!(
+            mapped[0].word_timestamps.as_ref().unwrap()[0].timestamp_source,
+            Some(crate::api::TranscriptWordTimestampSource::Real)
+        );
+        assert!(!parsed[0].requires_local_timing_grid);
+    }
+
+    #[tokio::test]
+    async fn auto_detection_omits_locales_and_enhanced_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("synthetic.wav");
+        tokio::fs::write(&audio, b"synthetic-audio").await.unwrap();
+        for language in [None, Some("auto"), Some("  ")] {
+            let (endpoint, request_handle) = spawn_one_response_server(
+                "HTTP/1.1 200 OK",
+                r#"{"phrases":[{"text":"Ja.","offsetMilliseconds":0,"durationMilliseconds":500}]}"#,
+                "application/json",
+            )
+            .await;
+            let provider = AzureSpeechProvider::new(endpoint, "test-key".into());
+            provider
+                .transcribe_path(&audio, "synthetic.wav", "audio/wav", language)
+                .await
+                .unwrap();
+            let request = request_handle.await.unwrap();
+            assert!(!request.contains("locales"));
+            assert!(!request.contains("enhancedMode"));
+            assert!(!request.contains(r#""model""#));
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_translation_before_opening_or_uploading_audio() {
+        let provider =
+            AzureSpeechProvider::new("https://speech.example.com".into(), "test-key".into());
+        let error = provider
+            .transcribe_path(
+                Path::new("missing.wav"),
+                "missing.wav",
+                "audio/wav",
+                Some("auto-translate"),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("does not translate to English"));
     }
 
     #[test]
@@ -519,6 +674,7 @@ mod tests {
                     .join(" "),
                 offset_milliseconds: 0.0,
                 duration_milliseconds: 180_000.0,
+                words: None,
             }]),
         };
 
@@ -529,7 +685,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mocked_http_request_uses_fast_transcription_enhanced_mode() {
+    async fn mocked_http_request_uses_standard_fast_transcription() {
         let body = r#"{
             "durationMilliseconds": 1200,
             "phrases": [
@@ -542,11 +698,7 @@ mod tests {
         }"#;
         let (endpoint, request_handle) =
             spawn_one_response_server("HTTP/1.1 200 OK", body, "application/json").await;
-        let provider = MaiTranscribeProvider::new(
-            endpoint,
-            "speech-key".to_string(),
-            "mai-transcribe-1.5".to_string(),
-        );
+        let provider = AzureSpeechProvider::new(endpoint, "speech-key".to_string());
 
         let directory = tempfile::tempdir().unwrap();
         let audio = directory.path().join("synthetic.wav");
@@ -571,21 +723,18 @@ mod tests {
             .to_ascii_lowercase()
             .contains("transfer-encoding: chunked"));
         assert!(request.contains(r#"name="definition""#));
-        assert!(request.contains("enhancedMode"));
-        assert!(request.contains("mai-transcribe-1.5"));
+        assert!(!request.contains("enhancedMode"));
+        assert!(!request.contains("mai-transcribe"));
+        assert!(!request.contains(r#""model""#));
         assert!(request.contains("locales"));
-        assert!(request.contains("en"));
+        assert!(request.contains("en-US"));
     }
 
     #[tokio::test]
     async fn mocked_http_bad_request_is_auth_config() {
         let (endpoint, request_handle) =
             spawn_one_response_server("HTTP/1.1 400 Bad Request", "{}", "application/json").await;
-        let provider = MaiTranscribeProvider::new(
-            endpoint,
-            "speech-key".to_string(),
-            "mai-transcribe-1.5".to_string(),
-        );
+        let provider = AzureSpeechProvider::new(endpoint, "speech-key".to_string());
 
         let directory = tempfile::tempdir().unwrap();
         let audio = directory.path().join("synthetic.wav");
@@ -629,7 +778,7 @@ mod tests {
         let audio = directory.path().join("synthetic.mp3");
         let payload = b"synthetic audio content to replay".repeat(5_000);
         tokio::fs::write(&audio, &payload).await.unwrap();
-        let provider = MaiTranscribeProvider::new(endpoint, "test-key".into(), "test-model".into());
+        let provider = AzureSpeechProvider::new(endpoint, "test-key".into());
         let segments = tokio::time::timeout(
             Duration::from_secs(10),
             provider.transcribe_path(&audio, "synthetic.mp3", "audio/mpeg", None),
@@ -714,7 +863,7 @@ mod tests {
         });
         let payload = b"synthetic converted audio to replay".repeat(5_000);
         let scratch = scratch_with(&payload);
-        let provider = MaiTranscribeProvider::new(endpoint, "test-key".into(), "test-model".into());
+        let provider = AzureSpeechProvider::new(endpoint, "test-key".into());
         let segments = tokio::time::timeout(
             Duration::from_secs(10),
             provider.transcribe_source(
@@ -752,7 +901,7 @@ mod tests {
             assert!(request_complete(&request));
         });
         let scratch = scratch_with(b"synthetic converted audio");
-        let provider = MaiTranscribeProvider::new(endpoint, "test-key".into(), "test-model".into());
+        let provider = AzureSpeechProvider::new(endpoint, "test-key".into());
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
             crate::audio::batch_audio::unless_cancelled(
@@ -790,10 +939,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let audio = directory.path().join("synthetic.wav");
         tokio::fs::write(&audio, b"synthetic audio").await.unwrap();
-        let provider = MaiTranscribeProvider::new(endpoint, "test-key".into(), "test-model".into());
+        let provider = AzureSpeechProvider::new(endpoint, "test-key".into());
         let error = tokio::time::timeout(
             Duration::from_secs(5),
-            super::super::transcribe_mai_file(&provider, &audio, None, &cancelled, false),
+            super::super::transcribe_azure_file(&provider, &audio, None, &cancelled, false),
         )
         .await
         .unwrap()

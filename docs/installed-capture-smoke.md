@@ -60,7 +60,7 @@ output. The checkout must contain the release commit. Run the asset/signature
 checks described in [Windows releases](windows-release.md) for staged releases.
 
 ```powershell
-$version = '0.67.0'
+$version = '0.68.0-preview.1'
 $assets = '<local artifact directory>'
 $routes = '<private route JSON path>'
 $commit = '<40-character release commit>'

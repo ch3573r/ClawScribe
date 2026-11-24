@@ -214,10 +214,17 @@ impl SettingsRepository {
     pub async fn get_transcript_config(
         pool: &SqlitePool,
     ) -> std::result::Result<Option<TranscriptSetting>, sqlx::Error> {
-        let setting =
+        let mut setting =
             sqlx::query_as::<_, TranscriptSetting>("SELECT * FROM transcript_settings LIMIT 1")
                 .fetch_optional(pool)
                 .await?;
+        // Keep the legacy provider/credential id and destination, but report the
+        // standard model actually used after replacing MAI-Transcribe.
+        if let Some(config) = setting.as_mut() {
+            if config.provider == "mai-transcribe" {
+                config.model = "azure-speech".into();
+            }
+        }
         Ok(setting)
     }
 
@@ -236,7 +243,11 @@ impl SettingsRepository {
             "#,
         )
         .bind(provider)
-        .bind(model)
+        .bind(if provider == "mai-transcribe" {
+            "azure-speech"
+        } else {
+            model
+        })
         .execute(pool)
         .await?;
 
@@ -285,7 +296,7 @@ impl SettingsRepository {
                 sqlx::query(
                     r#"
                     INSERT INTO transcript_settings (id, provider, model, maiTranscribeEndpoint, maiTranscribeRegion, maiTranscribeAllowUnencrypted)
-                    VALUES ('1', 'mai-transcribe', 'mai-transcribe-1.5', $1, $2, $3)
+                    VALUES ('1', 'mai-transcribe', 'azure-speech', $1, $2, $3)
                     ON CONFLICT(id) DO UPDATE SET
                         maiTranscribeEndpoint = $1,
                         maiTranscribeRegion = $2, maiTranscribeAllowUnencrypted = $3
@@ -1589,6 +1600,48 @@ mod secret_tests {
                 .await
                 .as_deref(),
             a
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_mai_settings_use_standard_speech_without_moving_the_key_or_endpoint() {
+        let pool = pool().await;
+        let (_memory, store) = fixture();
+        sqlx::query("INSERT INTO transcript_settings (id, provider, model, maiTranscribeEndpoint, maiTranscribeRegion, maiTranscribeAllowUnencrypted) VALUES ('1', 'mai-transcribe', 'mai-transcribe-1.5', 'https://speech.example.com', 'germanywestcentral', 0)")
+            .execute(&pool).await.unwrap();
+        SettingsRepository::save_transcript_api_key_with(&store, &pool, "mai-transcribe", KEY_ONE)
+            .await
+            .unwrap();
+        let config = SettingsRepository::get_transcript_config(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.provider, "mai-transcribe");
+        assert_eq!(config.model, "azure-speech");
+        assert_eq!(
+            config.mai_transcribe_endpoint.as_deref(),
+            Some("https://speech.example.com")
+        );
+        assert_eq!(
+            config.mai_transcribe_region.as_deref(),
+            Some("germanywestcentral")
+        );
+        assert!(!config.cloud_http_opt_in("mai-transcribe"));
+        assert_eq!(
+            SettingsRepository::get_transcript_api_key_with(&store, &pool, "mai-transcribe")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(KEY_ONE)
+        );
+        SettingsRepository::save_transcript_config(&pool, "mai-transcribe", "mai-transcribe-1.5")
+            .await
+            .unwrap();
+        assert_eq!(
+            column(&pool, "transcript_settings", "model")
+                .await
+                .as_deref(),
+            Some("azure-speech")
         );
     }
 

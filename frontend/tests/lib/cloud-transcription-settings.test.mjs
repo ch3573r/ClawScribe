@@ -44,6 +44,11 @@ for (const provider of ['cloud-whisper', 'mai-transcribe']) {
     const keyRow = () => nodes(render()).find(node => node.type === 'SecretKeyRow');
     render();
     await new Promise(resolve => setTimeout(resolve, 0));
+    if (provider === 'mai-transcribe') {
+      assert.match(text(render()), /Azure Speech/);
+      assert.doesNotMatch(text(render()), /MAI-Transcribe/);
+      assert.equal(nodes(render()).some(node => node.props?.id === 'mai-model'), false);
+    }
     assert.equal(nodes(render()).find(node => node.type === 'UnencryptedHttpOptIn').props.checked, true);
     // The stored key is never loaded into the field: it only reports that one is stored.
     assert.equal(keyRow().props.status.stored, true);
@@ -56,11 +61,13 @@ for (const provider of ['cloud-whisper', 'mai-transcribe']) {
     assert.equal(calls.at(-1).args.apiKey, null, 'no key is sent unless one was typed; the core binds the stored key to its endpoint');
     assert.equal(calls.at(-1).args.audioPath, 'test.wav', 'the file is the one the core chose in its own dialog');
     assert.equal(calls.at(-1).args.allowUnencrypted, true);
+    if (provider === 'mai-transcribe') assert.equal(calls.at(-1).args.model, 'azure-speech');
     keyRow().props.onDraftChange('test-token');
     await button('Test').props.onClick();
     assert.equal(calls.at(-1).args.apiKey, 'test-token', 'an explicitly entered key can test an edited endpoint');
     await button('Save').props.onClick();
     assert.equal(calls.at(-1).command, 'api_save_transcript_config');
+    if (provider === 'mai-transcribe') assert.equal(calls.at(-1).args.model, 'azure-speech');
     assert.equal(calls.at(-1).args.apiKey, 'test-token');
     assert.equal(calls.at(-1).args.allowUnencrypted, true);
     assert.equal(config.apiKey ?? null, null, 'a saved key is not kept in the shared configuration');

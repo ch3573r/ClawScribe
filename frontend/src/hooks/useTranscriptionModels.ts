@@ -99,17 +99,18 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
   const availableModels = useMemo(() => {
     if (!loaded || !enabled) return localModels;
     const hostedWhisper = provider === 'cloud-whisper' && model ? model : 'whisper-1';
-    const mai = provider === 'mai-transcribe' && model ? model : 'mai-transcribe-1.5';
     return [
       ...localModels,
       { provider: 'cloud-whisper' as const, name: hostedWhisper, displayName: `Hosted Whisper · ${hostedWhisper}`, size_mb: 0 },
-      { provider: 'mai-transcribe' as const, name: mai, displayName: `MAI-Transcribe · ${mai}`, size_mb: 0 },
+      // Keep the legacy provider id so saved endpoints and credentials survive.
+      { provider: 'mai-transcribe' as const, name: 'azure-speech', displayName: 'Azure Speech', size_mb: 0 },
     ];
   }, [localModels, loaded, enabled, provider, model]);
 
   const keyOf = (option: ModelOption) => `${option.provider}:${option.name}`;
   const preferred = availableModels.find(option =>
-    option.provider === (provider === 'localWhisper' ? 'whisper' : provider) && option.name === model);
+    option.provider === (provider === 'localWhisper' ? 'whisper' : provider)
+      && (provider === 'mai-transcribe' || option.name === model));
   const selected = availableModels.find(option => keyOf(option) === manualSelection) ?? preferred ?? localModels[0];
   const selectedModelKey = selected ? keyOf(selected) : '';
   const resetSelection = useCallback(() => setManualSelection(''), []);
