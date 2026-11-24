@@ -16,6 +16,8 @@ See the [release notes](docs/releases/0.67.0.md) and
 optional cloud file transcription, preserving existing endpoints and protected
 keys. It is a prerelease for manual evaluation; the stable update stays on
 0.67.0. See the [preview notes](docs/releases/0.68.0-preview.1.md).
+Its installer filenames use numeric version `0.68.0`, as required by existing
+preview updaters. The original suffixed download aliases contain identical bytes.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),

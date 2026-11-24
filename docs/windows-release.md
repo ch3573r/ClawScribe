@@ -449,8 +449,8 @@ commit separately instead of relabeling the binaries.
 For source version 0.68.0-preview.1, installer filenames are:
 
 ```text
-ClawScribe_0.68.0-preview.1_x64-setup.exe
-ClawScribe_0.68.0-preview.1_x64_en-US.msi
+ClawScribe_0.68.0_x64-setup.exe
+ClawScribe_0.68.0_x64_en-US.msi
 ```
 
 Published installers include detached Tauri updater signatures (`.sig`).
@@ -497,9 +497,13 @@ local files only. Passing the verifier does not replace the acceptance checks
 below.
 
 Use the full source version for `--version`, including any prerelease suffix.
-Asset filenames, the release tag and download URL retain that suffix; the
-verifier derives the numeric installer/runtime version for build metadata and
-`latest.json`, matching the release workflow. The supplied GitHub release must
+The release tag retains that suffix. Installer filenames and the filename in
+`latest.json` use the numeric runtime version: installed preview updaters derive
+that exact filename when discovering candidates. The verifier rejects a
+suffixed-only layout even when its checksums and signatures are valid. It also
+checks the numeric installer/runtime version in build metadata and `latest.json`.
+Existing suffixed public download aliases may remain only when their bytes are
+identical to the canonical installer or signature. The supplied GitHub release must
 use the corresponding `v<source-version>` tag. Signature verification also
 requires the Minisign trusted-comment prefix accepted by installed updaters.
 
@@ -555,6 +559,12 @@ to the installer; selecting a channel does not bypass Windows security blocks.
 To distribute a preview, stage a draft, verify its assets, then publish it as a
 GitHub prerelease without marking it latest. The workflow's direct `publish`
 path remains the stable channel.
+
+The release workflow verifies the numeric installer names, manifest URL,
+checksums and pinned-key signatures before uploading a draft or stable release.
+Check discovery against the installed client's rules, not only the manifest's
+version. A newer valid manifest can still be invisible if the required installer
+filename is absent from the public release feed.
 
 Public prereleases remain outside the stable channel. Apps released before the
 opt-in feature need a stable update or manual installation to gain it. Do not

@@ -20,13 +20,18 @@ const OPTIONAL_ASSETS = ['VERIFICATION.json', 'RELEASE-VERIFICATION.json', 'STAB
 
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
-export function releaseAssetNames(version) {
+function assetNames(version) {
   return {
     setup: `ClawScribe_${version}_x64-setup.exe`,
     setupSig: `ClawScribe_${version}_x64-setup.exe.sig`,
     msi: `ClawScribe_${version}_x64_en-US.msi`,
     msiSig: `ClawScribe_${version}_x64_en-US.msi.sig`,
   };
+}
+
+export function releaseAssetNames(version) {
+  // Installed preview updaters derive filenames from the numeric runtime.
+  return assetNames(version.replace(/[-+].*$/, ''));
 }
 
 // A minisign public key is base64 of "untrusted comment: ...\n<base64 of 'Ed' + key id(8) + key(32)>\n".
@@ -70,23 +75,33 @@ export function verifyAssets({ dir, version, expectedCommit, tauriConf, repo, re
   const checks = [];
   const check = (name, ok, detail = '') => { checks.push({ name, ok: Boolean(ok), detail }); };
   const names = releaseAssetNames(version);
-  // Match the release workflow: asset names and tags retain the source suffix,
-  // while Windows installer metadata and the updater use the numeric version.
-  const runtimeVersion = version.replace(/-.*$/, '');
+  // Tags retain the source suffix; installer filenames and manifests use the
+  // numeric runtime so already-installed clients can discover the update.
+  const runtimeVersion = version.replace(/[-+].*$/, '');
   const required = ['BUILD-METADATA.txt', 'BUILD-METRICS.json', 'SHA256SUMS.txt', 'latest.json', ...Object.values(names)];
+  // Keep existing public links working after repairing an older suffixed
+  // release. Aliases are allowed only when their bytes equal the canonical file.
+  const sourceNames = assetNames(version);
+  const aliases = Object.fromEntries(Object.keys(names)
+    .filter(key => sourceNames[key] !== names[key])
+    .map(key => [sourceNames[key], names[key]]));
   const present = fs.readdirSync(dir);
   for (const name of required) check(`asset present: ${name}`, present.includes(name));
-  const extras = present.filter(name => !required.includes(name) && !OPTIONAL_ASSETS.includes(name));
+  const extras = present.filter(name => !required.includes(name) && !OPTIONAL_ASSETS.includes(name) && !Object.hasOwn(aliases, name));
   check('no unexpected extra assets', extras.length === 0, extras.join(', '));
 
   const missing = required.filter(name => !present.includes(name));
   const digests = {};
-  for (const name of present.filter(entry => required.includes(entry) || OPTIONAL_ASSETS.includes(entry))) digests[name] = sha256(path.join(dir, name));
+  for (const name of present.filter(entry => required.includes(entry) || OPTIONAL_ASSETS.includes(entry) || Object.hasOwn(aliases, entry))) digests[name] = sha256(path.join(dir, name));
   const result = () => {
     const failures = checks.filter(entry => !entry.ok);
     return { ok: failures.length === 0, version, expectedCommit, checked: checks.length, failed: failures.length, digests, signatureResults: {}, failures, checks };
   };
   if (missing.length) return result();
+
+  for (const [alias, canonical] of Object.entries(aliases)) {
+    if (present.includes(alias)) check(`compatibility alias has identical bytes: ${alias}`, digests[alias] === digests[canonical]);
+  }
 
   const sums = fs.readFileSync(path.join(dir, 'SHA256SUMS.txt'), 'utf8').split(/\r?\n/).filter(Boolean)
     .map(line => { const [hash, file = ''] = line.split(/\s+/); return { hash: hash.toLowerCase(), base: path.basename(file.replace(/^\*/, '')) }; });
