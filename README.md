@@ -12,6 +12,11 @@ and compact floating recording controls. The OpenClaw integration is removed.
 See the [release notes](docs/releases/0.67.0.md) and
 [download the latest stable Windows release](https://github.com/ch3573r/ClawScribe/releases/latest).
 
+**0.68.0-preview.1** replaces MAI-Transcribe with standard Azure Speech for
+optional cloud file transcription, preserving existing endpoints and protected
+keys. It is a prerelease for manual evaluation; the stable update stays on
+0.67.0. See the [preview notes](docs/releases/0.68.0-preview.1.md).
+
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
 and [LICENSE.md](LICENSE.md).
