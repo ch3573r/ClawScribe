@@ -264,7 +264,8 @@ test('file transcription pickers follow opt-in and only default to an explicitly
   assert.equal(render().availableModels.length, 2);
   assert.equal(render().selectedModelKey, '', 'enabling cloud does not select a hosted model');
   config = { provider: 'mai-transcribe', model: 'saved-model' };
-  assert.equal(render().selectedModelKey, 'mai-transcribe:saved-model');
+  assert.equal(render().selectedModelKey, 'mai-transcribe:azure-speech');
+  assert.equal(render().availableModels.find(option => option.provider === 'mai-transcribe').displayName, 'Azure Speech');
   render().setSelectedModelKey('cloud-whisper:whisper-1');
   assert.equal(render().selectedModelKey, 'cloud-whisper:whisper-1');
   permission = { loaded: true, enabled: false };

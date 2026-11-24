@@ -9,7 +9,7 @@ import { importSummarySelection, useSummaryDestination, type ImportSummaryChoice
 import { useImportQueue, type AudioFileInfo, type ImportQueueItem } from '@/hooks/useImportAudio';
 import { errorText } from '@/lib/errorText';
 import { readPinnedSummaryLanguageDefault } from '@/lib/summary-language-preferences';
-import { LANGUAGES } from '@/constants/languages';
+import { fileLanguageOptions } from '@/lib/transcription-language';
 import { providerLabel } from '@/components/settings/provider-data';
 import { Button } from '../ui/button';
 import { Checkbox } from '../ui/checkbox';
@@ -50,6 +50,9 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
   const summary = importSummarySelection(summaryChoice, isAutoSummary, summaryDestination);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [language, setLanguage] = useState(selectedLanguage || 'auto');
+  useEffect(() => {
+    if (model?.provider === 'mai-transcribe' && language === 'auto-translate') setLanguage('auto');
+  }, [model?.provider, language]);
   const [meetingDate, setMeetingDate] = useState('');
   const [useFileDate, setUseFileDate] = useState(false);
   const [destination, setDestination] = useState<CloudDestination | null>(null);
@@ -244,7 +247,7 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
                   <label htmlFor="import-language">Language</label>
                   <Select value={model?.provider === 'parakeet' ? 'auto' : language} onValueChange={setLanguage} disabled={model?.provider === 'parakeet'}>
                     <SelectTrigger id="import-language"><SelectValue /></SelectTrigger>
-                    <SelectContent>{LANGUAGES.map(option => <SelectItem key={option.code} value={option.code}>{option.name}</SelectItem>)}</SelectContent>
+                    <SelectContent>{fileLanguageOptions(model?.provider).map(option => <SelectItem key={option.code} value={option.code}>{option.name}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>
               </div>

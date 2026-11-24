@@ -105,7 +105,7 @@ turn/start
 
 Codex remains a Summary provider. It is not offered as a transcription engine;
 the transcription model picker continues to manage Whisper, Parakeet,
-Nemotron, Hosted Whisper, and MAI-Transcribe independently.
+Nemotron, Hosted Whisper, and Azure Speech independently.
 
 Each meeting must use a fresh thread/turn. The only meeting content sent to
 Codex is the normalized transcript, metadata, and strict output instructions.

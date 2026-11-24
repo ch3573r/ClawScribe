@@ -70,7 +70,7 @@ const ENGINE_NAMES: Record<string, string> = {
   parakeet: "Parakeet",
   nemotron: "Nemotron",
   "cloud-whisper": "Hosted Whisper",
-  "mai-transcribe": "MAI-Transcribe",
+  "mai-transcribe": "Azure Speech",
   deepgram: "Deepgram",
   elevenLabs: "ElevenLabs",
   groq: "Groq",

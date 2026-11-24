@@ -1,4 +1,4 @@
-pub mod mai_transcribe;
+pub mod azure_speech;
 pub mod openai_whisper;
 
 use crate::api::{TranscriptWord, TranscriptWordTimestampSource};
@@ -18,15 +18,15 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 pub const PROVIDER_CLOUD_WHISPER: &str = "cloud-whisper";
-pub const PROVIDER_MAI_TRANSCRIBE: &str = "mai-transcribe";
+// Compatibility id: preserve existing settings, credential-store entries, and meeting metadata.
+pub const PROVIDER_AZURE_SPEECH: &str = "mai-transcribe";
 pub const DEFAULT_CLOUD_WHISPER_MODEL: &str = "whisper-1";
-pub const DEFAULT_MAI_TRANSCRIBE_MODEL: &str = "mai-transcribe-1.5";
+pub const DEFAULT_AZURE_SPEECH_MODEL: &str = "azure-speech";
 const OPENAI_HOSTED_WHISPER_MAX_UPLOAD_BYTES: u64 = 25_000_000;
-/// Azure MAI-Transcribe (LLM Speech) documented upload cap.
-const MAI_TRANSCRIBE_MAX_UPLOAD_BYTES: u64 = 300_000_000;
-/// Containers Azure MAI-Transcribe accepts natively. Other formats (M4A/MP4,
-/// OGG, WMA, ...) are rejected by the service and must be converted first.
-const MAI_NATIVE_EXTENSIONS: &[&str] = &["wav", "mp3", "flac"];
+/// Conservative upload cap retained for bounded audio conversion and uploads.
+const AZURE_SPEECH_MAX_UPLOAD_BYTES: u64 = 300_000_000;
+/// Containers sent directly; other media retain the existing PCM conversion path.
+const AZURE_NATIVE_EXTENSIONS: &[&str] = &["wav", "mp3", "flac"];
 const WAV_HEADER_BYTES: u64 = 44;
 
 #[derive(Debug, Clone)]
@@ -143,7 +143,7 @@ pub trait CloudTranscriptionProvider {
 pub fn is_cloud_provider(provider: Option<&str>) -> bool {
     matches!(
         provider,
-        Some(PROVIDER_CLOUD_WHISPER) | Some(PROVIDER_MAI_TRANSCRIBE)
+        Some(PROVIDER_CLOUD_WHISPER) | Some(PROVIDER_AZURE_SPEECH)
     )
 }
 
@@ -297,34 +297,19 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
                     .any(|segment| segment.requires_local_timing_grid),
             })
         }
-        PROVIDER_MAI_TRANSCRIBE => {
+        PROVIDER_AZURE_SPEECH => {
             let endpoint = config
                 .mai_transcribe_endpoint
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| {
-                    CloudTranscriptionError::auth_config(
-                        "Azure Speech endpoint is missing for MAI transcription",
-                    )
+                    CloudTranscriptionError::auth_config("Azure Speech endpoint is missing")
                 })?;
-            let model = requested_model
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .or_else(|| {
-                    (config.provider == PROVIDER_MAI_TRANSCRIBE)
-                        .then_some(config.model.as_str())
-                        .filter(|value| !value.trim().is_empty())
-                })
-                .unwrap_or(DEFAULT_MAI_TRANSCRIBE_MODEL)
-                .to_string();
-            let client = mai_transcribe::MaiTranscribeProvider::new(
-                endpoint.to_string(),
-                api_key,
-                model.clone(),
-            )
-            .with_http_opt_in(config.cloud_http_opt_in(provider));
-            let cloud_segments = transcribe_mai_file(
+            let model = DEFAULT_AZURE_SPEECH_MODEL.to_string();
+            let client = azure_speech::AzureSpeechProvider::new(endpoint.to_string(), api_key)
+                .with_http_opt_in(config.cloud_http_opt_in(provider));
+            let cloud_segments = transcribe_azure_file(
                 &client,
                 audio_path,
                 language,
@@ -333,11 +318,11 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
             )
             .await?;
             Ok(CloudTranscriptionOutcome {
-                provider: PROVIDER_MAI_TRANSCRIBE.to_string(),
+                provider: PROVIDER_AZURE_SPEECH.to_string(),
                 model,
                 segments: cloud_segments_to_transcribed_segments(
                     &cloud_segments,
-                    CloudWordPolicy::None,
+                    CloudWordPolicy::Real,
                 ),
                 requires_local_timing_grid: cloud_segments
                     .iter()
@@ -379,7 +364,7 @@ fn destination_for_config(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or("https://api.openai.com/v1"),
-        PROVIDER_MAI_TRANSCRIBE => config
+        PROVIDER_AZURE_SPEECH => config
             .mai_transcribe_endpoint
             .as_deref()
             .map(str::trim)
@@ -416,14 +401,15 @@ fn cloud_cancelled() -> CloudTranscriptionError {
     CloudTranscriptionError::transient("Cloud transcription cancelled")
 }
 
-pub(crate) async fn transcribe_mai_file(
-    client: &mai_transcribe::MaiTranscribeProvider,
+pub(crate) async fn transcribe_azure_file(
+    client: &azure_speech::AzureSpeechProvider,
     audio_path: &Path,
     language: Option<&str>,
     cancelled: &AtomicBool,
     import_consent_required: bool,
 ) -> Result<Vec<CloudTranscriptSegment>, CloudTranscriptionError> {
-    if mai_supports_container(audio_path) {
+    azure_speech::validate_language(language)?;
+    if azure_supports_container(audio_path) {
         check_import_upload_opt_in(import_consent_required)?;
         return unless_cancelled(
             client.transcribe_path(
@@ -438,12 +424,12 @@ pub(crate) async fn transcribe_mai_file(
         .ok_or_else(cloud_cancelled)?;
     }
 
-    info!("Preparing temporary audio for MAI-Transcribe");
-    let scratch = convert_to_mai_scratch(audio_path, cancelled).await?;
+    info!("Preparing temporary audio for Azure Speech");
+    let scratch = convert_to_azure_scratch(audio_path, cancelled).await?;
     check_import_upload_opt_in(import_consent_required)?;
     unless_cancelled(
         client.transcribe_source(
-            mai_transcribe::UploadSource::Scratch(&scratch),
+            azure_speech::UploadSource::Scratch(&scratch),
             "audio.wav",
             "audio/wav",
             language,
@@ -468,19 +454,19 @@ fn check_import_upload_opt_in(
 /// Converts into an unnamed temporary file. It has no path to leave behind: the
 /// operating system deletes it when the last handle closes, even if the process
 /// is killed mid-conversion or mid-upload.
-async fn convert_to_mai_scratch(
+async fn convert_to_azure_scratch(
     audio_path: &Path,
     cancelled: &AtomicBool,
-) -> Result<mai_transcribe::ScratchAudio, CloudTranscriptionError> {
+) -> Result<azure_speech::ScratchAudio, CloudTranscriptionError> {
     if cancelled.load(std::sync::atomic::Ordering::Acquire) {
         return Err(cloud_cancelled());
     }
     let file = tempfile::tempfile().map_err(|_| {
-        CloudTranscriptionError::transient("Could not create temporary audio for MAI-Transcribe")
+        CloudTranscriptionError::transient("Could not create temporary audio for Azure Speech")
     })?;
     let mut wav = tokio::fs::File::from_std(file);
-    let length = transcode_to_mai_wav(audio_path, &mut wav, cancelled).await?;
-    Ok(mai_transcribe::ScratchAudio::new(
+    let length = transcode_to_azure_wav(audio_path, &mut wav, cancelled).await?;
+    Ok(azure_speech::ScratchAudio::new(
         wav.into_std().await,
         length,
     ))
@@ -632,9 +618,9 @@ pub(crate) fn validate_provider_upload_size(
         )));
     }
 
-    if provider == PROVIDER_MAI_TRANSCRIBE && file_size_bytes > MAI_TRANSCRIBE_MAX_UPLOAD_BYTES {
+    if provider == PROVIDER_AZURE_SPEECH && file_size_bytes > AZURE_SPEECH_MAX_UPLOAD_BYTES {
         return Err(CloudTranscriptionError::upload_too_large(format!(
-            "Azure MAI-Transcribe accepts audio uploads up to 300 MB; this file is {}",
+            "ClawScribe limits Azure Speech uploads to 300 MB; this file is {}",
             format_megabytes(file_size_bytes)
         )));
     }
@@ -642,18 +628,18 @@ pub(crate) fn validate_provider_upload_size(
     Ok(())
 }
 
-fn mai_supports_container(path: &Path) -> bool {
+fn azure_supports_container(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .map(|extension| {
             let extension = extension.to_ascii_lowercase();
-            MAI_NATIVE_EXTENSIONS.contains(&extension.as_str())
+            AZURE_NATIVE_EXTENSIONS.contains(&extension.as_str())
         })
         .unwrap_or(false)
 }
 
 /// Streams the decoder's PCM into `wav` and returns the finished WAV length.
-async fn transcode_to_mai_wav(
+async fn transcode_to_azure_wav(
     audio_path: &Path,
     wav: &mut tokio::fs::File,
     cancelled: &AtomicBool,
@@ -667,14 +653,14 @@ async fn transcode_to_mai_wav(
         .args(["-f", "s16le", "-c:a", "pcm_s16le", "pipe:1"])
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .map_err(mai_wav_io_error)?;
+        .map_err(azure_wav_io_error)?;
     let stdout = child.stdout.take().expect("decoder stdout was piped");
     let work = async {
-        let length = write_mai_wav(stdout, &mut *wav, MAI_TRANSCRIBE_MAX_UPLOAD_BYTES).await?;
-        let status = child.wait().await.map_err(mai_wav_io_error)?;
+        let length = write_azure_wav(stdout, &mut *wav, AZURE_SPEECH_MAX_UPLOAD_BYTES).await?;
+        let status = child.wait().await.map_err(azure_wav_io_error)?;
         if !status.success() {
             return Err(CloudTranscriptionError::unsupported_media(
-                "Could not decode audio for MAI-Transcribe",
+                "Could not decode audio for Azure Speech",
             ));
         }
         Ok(length)
@@ -687,7 +673,7 @@ async fn transcode_to_mai_wav(
     {
         Some(Ok(result)) => result,
         Some(Err(_)) => Err(CloudTranscriptionError::transient(
-            "MAI-Transcribe audio preparation timed out",
+            "Azure Speech audio preparation timed out",
         )),
         None => Err(cloud_cancelled()),
     };
@@ -700,11 +686,11 @@ async fn transcode_to_mai_wav(
     result
 }
 
-fn mai_wav_io_error(_: std::io::Error) -> CloudTranscriptionError {
-    CloudTranscriptionError::transient("Could not prepare temporary audio for MAI-Transcribe")
+fn azure_wav_io_error(_: std::io::Error) -> CloudTranscriptionError {
+    CloudTranscriptionError::transient("Could not prepare temporary audio for Azure Speech")
 }
 
-async fn write_mai_wav(
+async fn write_azure_wav(
     pcm: impl AsyncRead + Unpin,
     wav: &mut tokio::fs::File,
     max_bytes: u64,
@@ -712,29 +698,29 @@ async fn write_mai_wav(
     let max_pcm_bytes = max_bytes - WAV_HEADER_BYTES;
     wav.write_all(&[0; WAV_HEADER_BYTES as usize])
         .await
-        .map_err(mai_wav_io_error)?;
+        .map_err(azure_wav_io_error)?;
     let pcm_bytes = tokio::io::copy(&mut pcm.take(max_pcm_bytes + 1), wav)
         .await
-        .map_err(mai_wav_io_error)?;
+        .map_err(azure_wav_io_error)?;
     if pcm_bytes > max_pcm_bytes {
-        wav.flush().await.map_err(mai_wav_io_error)?;
+        wav.flush().await.map_err(azure_wav_io_error)?;
         return Err(CloudTranscriptionError::upload_too_large(format!(
-            "Audio converted to WAV for MAI-Transcribe exceeds the {} upload limit",
+            "Audio converted to WAV for Azure Speech exceeds the {} upload limit",
             format_megabytes(max_bytes)
         )));
     }
     if pcm_bytes == 0 || pcm_bytes % 2 != 0 {
         return Err(CloudTranscriptionError::unsupported_media(
-            "Audio decoder produced no complete PCM audio for MAI-Transcribe",
+            "Audio decoder produced no complete PCM audio for Azure Speech",
         ));
     }
     wav.seek(std::io::SeekFrom::Start(0))
         .await
-        .map_err(mai_wav_io_error)?;
+        .map_err(azure_wav_io_error)?;
     wav.write_all(&pcm16_wav_header(pcm_bytes as u32))
         .await
-        .map_err(mai_wav_io_error)?;
-    wav.flush().await.map_err(mai_wav_io_error)?;
+        .map_err(azure_wav_io_error)?;
+    wav.flush().await.map_err(azure_wav_io_error)?;
     Ok(WAV_HEADER_BYTES + pcm_bytes)
 }
 
@@ -888,7 +874,7 @@ mod tests {
         let limit = 44 + 8;
         let decoded = [1, 0, 2, 0, 3, 0, 4, 0];
         let mut output = tokio::fs::File::create(&wav).await.unwrap();
-        let written = write_mai_wav(&decoded[..], &mut output, limit)
+        let written = write_azure_wav(&decoded[..], &mut output, limit)
             .await
             .unwrap();
         assert_eq!(written, 52);
@@ -903,7 +889,7 @@ mod tests {
 
         let oversized = [0_u8; 256];
         let mut output = tokio::fs::File::create(&wav).await.unwrap();
-        let error = write_mai_wav(&oversized[..], &mut output, limit)
+        let error = write_azure_wav(&oversized[..], &mut output, limit)
             .await
             .unwrap_err();
         assert_eq!(
@@ -920,9 +906,9 @@ mod tests {
         let cancelled = AtomicBool::new(true);
         let audio = encode_wav_pcm16_mono_16k(&[0.25; 16_000]);
         tokio::fs::write(&input, &audio).await.unwrap();
-        assert!(convert_to_mai_scratch(&input, &cancelled).await.is_err());
+        assert!(convert_to_azure_scratch(&input, &cancelled).await.is_err());
         cancelled.store(false, std::sync::atomic::Ordering::Release);
-        let scratch = convert_to_mai_scratch(&input, &cancelled).await.unwrap();
+        let scratch = convert_to_azure_scratch(&input, &cancelled).await.unwrap();
         assert_eq!(scratch.length(), audio.len() as u64);
         assert_eq!(scratch.read_all().await, audio);
         assert_eq!(tokio::fs::read(&input).await.unwrap(), audio);
@@ -953,7 +939,7 @@ mod tests {
             .unwrap();
         let before = named_mai_staging_files();
         // Decoder failure: the container is unreadable.
-        let error = convert_to_mai_scratch(&broken, &AtomicBool::new(false))
+        let error = convert_to_azure_scratch(&broken, &AtomicBool::new(false))
             .await
             .err()
             .unwrap();
@@ -962,7 +948,7 @@ mod tests {
             CloudFallbackReasonCategory::UnsupportedMedia
         );
         // Cancellation before any decoder starts.
-        let error = convert_to_mai_scratch(&broken, &AtomicBool::new(true))
+        let error = convert_to_azure_scratch(&broken, &AtomicBool::new(true))
             .await
             .err()
             .unwrap();
@@ -978,7 +964,7 @@ mod tests {
     async fn mai_wav_writer_rejects_empty_and_partial_pcm_without_a_header() {
         for decoded in [&[][..], &[1_u8, 2, 3][..]] {
             let mut output = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
-            let error = write_mai_wav(decoded, &mut output, MAI_TRANSCRIBE_MAX_UPLOAD_BYTES)
+            let error = write_azure_wav(decoded, &mut output, AZURE_SPEECH_MAX_UPLOAD_BYTES)
                 .await
                 .unwrap_err();
             assert_eq!(
@@ -1017,10 +1003,10 @@ mod tests {
     #[tokio::test]
     async fn decoder_death_mid_stream_is_a_retryable_error_not_a_short_upload() {
         let mut output = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
-        let error = write_mai_wav(
+        let error = write_azure_wav(
             DiesAfterSomePcm(false),
             &mut output,
-            MAI_TRANSCRIBE_MAX_UPLOAD_BYTES,
+            AZURE_SPEECH_MAX_UPLOAD_BYTES,
         )
         .await
         .unwrap_err();
@@ -1132,7 +1118,7 @@ mod tests {
 
         // Current path: unnamed scratch handle, then bounded positional-read stream.
         let (scratch, elapsed, resident, private) =
-            measured(convert_to_mai_scratch(&source, &AtomicBool::new(false))).await;
+            measured(convert_to_azure_scratch(&source, &AtomicBool::new(false))).await;
         let scratch = scratch.unwrap();
         report(
             "convert_scratch",
@@ -1164,7 +1150,7 @@ mod tests {
             .unwrap();
         let (length, elapsed, resident, private) = measured(async {
             let mut wav = tokio::fs::File::create(named.path()).await.unwrap();
-            transcode_to_mai_wav(&source, &mut wav, &AtomicBool::new(false))
+            transcode_to_azure_wav(&source, &mut wav, &AtomicBool::new(false))
                 .await
                 .unwrap()
         })
@@ -1177,7 +1163,7 @@ mod tests {
             private,
         );
         let ((streamed, _), elapsed, resident, private) =
-            measured(mai_transcribe::drain_path(named.path())).await;
+            measured(azure_speech::drain_path(named.path())).await;
         report(
             "baseline_named_file_stream",
             streamed,
@@ -1219,7 +1205,7 @@ mod tests {
                 cancelled.store(true, std::sync::atomic::Ordering::Release);
             })
         };
-        let outcome = convert_to_mai_scratch(&source, &cancelled).await;
+        let outcome = convert_to_azure_scratch(&source, &cancelled).await;
         let returned = std::time::Instant::now();
         trigger.await.unwrap();
         match outcome {
@@ -1271,10 +1257,9 @@ mod tests {
             "test-model".into(),
         )
         .with_http_opt_in(true);
-        let mai = mai_transcribe::MaiTranscribeProvider::new(
+        let mai = azure_speech::AzureSpeechProvider::new(
             "http://speech.example.com".into(),
             "test-token".into(),
-            "test-model".into(),
         )
         .with_http_opt_in(true);
         let directory = tempfile::tempdir().unwrap();
@@ -1284,7 +1269,7 @@ mod tests {
             .transcribe_file(vec![0; 44], "synthetic.wav", "audio/wav", None)
             .await
             .unwrap_err();
-        let mai_error = transcribe_mai_file(&mai, &audio, None, &AtomicBool::new(false), false)
+        let mai_error = transcribe_azure_file(&mai, &audio, None, &AtomicBool::new(false), false)
             .await
             .unwrap_err();
         for error in [whisper_error, mai_error] {
@@ -1359,7 +1344,7 @@ mod tests {
             .unwrap();
             SettingsRepository::save_transcript_provider_config(
                 &pool,
-                PROVIDER_MAI_TRANSCRIBE,
+                PROVIDER_AZURE_SPEECH,
                 None,
                 Some("https://speech.example.com"),
                 None,
@@ -1480,7 +1465,7 @@ mod tests {
         )
         .is_ok());
         assert!(validate_provider_upload_size(
-            PROVIDER_MAI_TRANSCRIBE,
+            PROVIDER_AZURE_SPEECH,
             Some("https://example.cognitiveservices.azure.com"),
             250_000_000,
         )
@@ -1490,7 +1475,7 @@ mod tests {
     #[test]
     fn mai_upload_preflight_rejects_files_over_300_mb() {
         let error = validate_provider_upload_size(
-            PROVIDER_MAI_TRANSCRIBE,
+            PROVIDER_AZURE_SPEECH,
             Some("https://example.cognitiveservices.azure.com"),
             300_000_001,
         )
@@ -1562,13 +1547,13 @@ mod tests {
 
     #[test]
     fn mai_container_support_matches_azure_supported_formats() {
-        assert!(mai_supports_container(Path::new("C:/rec/audio.mp3")));
-        assert!(mai_supports_container(Path::new("C:/rec/audio.WAV")));
-        assert!(mai_supports_container(Path::new("C:/rec/audio.flac")));
-        assert!(!mai_supports_container(Path::new("C:/rec/audio.m4a")));
-        assert!(!mai_supports_container(Path::new("C:/rec/audio.mp4")));
-        assert!(!mai_supports_container(Path::new("C:/rec/audio.ogg")));
-        assert!(!mai_supports_container(Path::new("C:/rec/audio")));
+        assert!(azure_supports_container(Path::new("C:/rec/audio.mp3")));
+        assert!(azure_supports_container(Path::new("C:/rec/audio.WAV")));
+        assert!(azure_supports_container(Path::new("C:/rec/audio.flac")));
+        assert!(!azure_supports_container(Path::new("C:/rec/audio.m4a")));
+        assert!(!azure_supports_container(Path::new("C:/rec/audio.mp4")));
+        assert!(!azure_supports_container(Path::new("C:/rec/audio.ogg")));
+        assert!(!azure_supports_container(Path::new("C:/rec/audio")));
     }
 
     #[test]
@@ -1600,11 +1585,10 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod live_smoke {
     use super::{
-        cloud_segments_to_transcribed_segments, mai_transcribe::MaiTranscribeProvider,
-        mime_type_for_path, openai_whisper::OpenAiWhisperProvider, transcribe_mai_file,
+        azure_speech::AzureSpeechProvider, cloud_segments_to_transcribed_segments,
+        mime_type_for_path, openai_whisper::OpenAiWhisperProvider, transcribe_azure_file,
         validate_provider_upload_size, CloudTranscriptSegment, CloudTranscriptionProvider,
-        CloudWordPolicy, DEFAULT_CLOUD_WHISPER_MODEL, DEFAULT_MAI_TRANSCRIBE_MODEL,
-        PROVIDER_CLOUD_WHISPER,
+        CloudWordPolicy, DEFAULT_CLOUD_WHISPER_MODEL, PROVIDER_CLOUD_WHISPER,
     };
     use crate::api::TranscriptWordTimestampSource;
     use std::{
@@ -1618,9 +1602,8 @@ pub(crate) mod live_smoke {
     const ENV_OPENAI_API_KEY: &str = "CLAWSCRIBE_SMOKE_OPENAI_API_KEY";
     const ENV_OPENAI_BASE_URL: &str = "CLAWSCRIBE_SMOKE_OPENAI_BASE_URL";
     const ENV_OPENAI_MODEL: &str = "CLAWSCRIBE_SMOKE_OPENAI_MODEL";
-    const ENV_MAI_API_KEY: &str = "CLAWSCRIBE_SMOKE_MAI_API_KEY";
-    const ENV_MAI_ENDPOINT: &str = "CLAWSCRIBE_SMOKE_MAI_ENDPOINT";
-    const ENV_MAI_MODEL: &str = "CLAWSCRIBE_SMOKE_MAI_MODEL";
+    const ENV_AZURE_API_KEY: &str = "CLAWSCRIBE_SMOKE_AZURE_SPEECH_API_KEY";
+    const ENV_AZURE_ENDPOINT: &str = "CLAWSCRIBE_SMOKE_AZURE_SPEECH_ENDPOINT";
 
     #[tokio::test]
     #[ignore = "requires hosted transcription credentials and a short real audio file"]
@@ -1671,15 +1654,13 @@ pub(crate) mod live_smoke {
         }
 
         match (
-            optional_env(ENV_MAI_ENDPOINT),
-            optional_env(ENV_MAI_API_KEY),
+            optional_env(ENV_AZURE_ENDPOINT),
+            optional_env(ENV_AZURE_API_KEY),
         ) {
             (Some(endpoint), Some(api_key)) => {
                 providers_run += 1;
-                let model = optional_env(ENV_MAI_MODEL)
-                    .unwrap_or_else(|| DEFAULT_MAI_TRANSCRIBE_MODEL.into());
-                let provider = MaiTranscribeProvider::new(endpoint, api_key, model);
-                let segments = transcribe_mai_file(
+                let provider = AzureSpeechProvider::new(endpoint, api_key);
+                let segments = transcribe_azure_file(
                     &provider,
                     &audio_path,
                     language,
@@ -1689,23 +1670,27 @@ pub(crate) mod live_smoke {
                 .await
                 .unwrap_or_else(|error| {
                     panic!(
-                        "MAI-Transcribe smoke failed: category={}, error={error}",
+                        "Azure Speech smoke failed: category={}, error={error}",
                         error.category().as_str()
                     )
                 });
 
-                assert_basic_segments("MAI-Transcribe", &segments);
-                assert_mai_never_emits_word_timestamps(&segments);
-                print_summary("MAI-Transcribe", &segments);
+                assert_basic_segments("Azure Speech", &segments);
+                assert_azure_word_timestamps(&segments);
+                print_summary("Azure Speech", &segments);
             }
-            (Some(_), None) => panic!("{ENV_MAI_ENDPOINT} is set but {ENV_MAI_API_KEY} is missing"),
-            (None, Some(_)) => panic!("{ENV_MAI_API_KEY} is set but {ENV_MAI_ENDPOINT} is missing"),
+            (Some(_), None) => {
+                panic!("{ENV_AZURE_ENDPOINT} is set but {ENV_AZURE_API_KEY} is missing")
+            }
+            (None, Some(_)) => {
+                panic!("{ENV_AZURE_API_KEY} is set but {ENV_AZURE_ENDPOINT} is missing")
+            }
             (None, None) => {}
         }
 
         assert!(
             providers_run > 0,
-            "set {ENV_OPENAI_API_KEY} and/or both {ENV_MAI_ENDPOINT} + {ENV_MAI_API_KEY}"
+            "set {ENV_OPENAI_API_KEY} and/or both {ENV_AZURE_ENDPOINT} + {ENV_AZURE_API_KEY}"
         );
     }
 
@@ -1778,18 +1763,17 @@ pub(crate) mod live_smoke {
         }
     }
 
-    fn assert_mai_never_emits_word_timestamps(segments: &[CloudTranscriptSegment]) {
-        assert!(
-            segments.iter().all(|segment| segment.words.is_none()),
-            "MAI-Transcribe returned word timestamps; mapping must not promote them to Real"
-        );
-        let mapped = cloud_segments_to_transcribed_segments(segments, CloudWordPolicy::None);
-        assert!(
-            mapped
-                .iter()
-                .all(|segment| segment.word_timestamps.is_none()),
-            "MAI-Transcribe mapped output must keep word_timestamps empty"
-        );
+    fn assert_azure_word_timestamps(segments: &[CloudTranscriptSegment]) {
+        let mapped = cloud_segments_to_transcribed_segments(segments, CloudWordPolicy::Real);
+        for segment in mapped {
+            for word in segment.word_timestamps.into_iter().flatten() {
+                assert_eq!(
+                    word.timestamp_source,
+                    Some(TranscriptWordTimestampSource::Real)
+                );
+                assert!(word.end >= word.start);
+            }
+        }
     }
 
     fn print_summary(label: &str, segments: &[CloudTranscriptSegment]) {
