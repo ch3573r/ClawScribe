@@ -26,6 +26,16 @@ const selfTestProduction = selfTest
   .filter(line => !line.trim().startsWith('//'))
   .join('\n');
 
+test('release publication preserves numeric updater filenames and verifies signed assets first', () => {
+  assert.ok(releaseWorkflow.includes('$nsisName = "ClawScribe_${manifestVersion}_x64-setup.exe"'));
+  assert.ok(releaseWorkflow.includes('bundle/nsis/ClawScribe_${{ env.CLAWSCRIBE_INSTALLER_VERSION }}_x64-setup.exe'));
+  assert.ok(!releaseWorkflow.includes('$nsisName = $nsisName.Replace($installerVersion, $sourceVersion)'));
+  const verification = releaseWorkflow.indexOf('- name: Verify updater compatibility and signed release assets');
+  assert.ok(verification > releaseWorkflow.indexOf('- name: Generate updater manifest (latest.json)'));
+  assert.ok(verification < releaseWorkflow.indexOf('- name: Publish GitHub Release'));
+  assert.match(releaseWorkflow.slice(verification), /node scripts\/verify-release-assets\.mjs --dir/);
+});
+
 test('native library tests run for trusted pull requests and main pushes on the local runner', () => {
   assert.deepEqual(workflowPolicyErrors('native-library-tests.yml', nativeWorkflow), []);
   assert.match(nativeWorkflow, /^on:\n  pull_request:\n/m);

@@ -454,10 +454,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $bundleRoot "nsis") | Out-Null
           $msiName = $sourceMsi.Name
           $nsisName = $sourceNsis.Name
-          if ($sourceVersion -ne $installerVersion) {
-            $msiName = $msiName.Replace($installerVersion, $sourceVersion)
-            $nsisName = $nsisName.Replace($installerVersion, $sourceVersion)
-          }
+          # Installed preview clients derive filenames from the numeric runtime.
+          # Keep the source suffix in the tag and metadata, never in filenames.
           $destMsi = Join-Path $bundleRoot "msi\$msiName"
           $destNsis = Join-Path $bundleRoot "nsis\$nsisName"
           $destMsiFull = [System.IO.Path]::GetFullPath($destMsi)
@@ -605,8 +603,8 @@ jobs:
             "- The app updater downloads the NSIS setup installer.",
             "",
             "### Install",
-            "- Recommended: ``ClawScribe_${version}_x64-setup.exe``",
-            "- Alternative: ``ClawScribe_${version}_x64_en-US.msi``",
+            "- Recommended: ``ClawScribe_${runtimeVersion}_x64-setup.exe``",
+            "- Alternative: ``ClawScribe_${runtimeVersion}_x64_en-US.msi``",
             "",
             "### SHA-256 checksums",
             "",
@@ -625,15 +623,13 @@ jobs:
           $bundleRoot = "frontend\src-tauri\target\release\bundle"
           $sourceVersion = $env:CLAWSCRIBE_SOURCE_VERSION
           $manifestVersion = $env:CLAWSCRIBE_INSTALLER_VERSION
-          # Published installer is the source-version-named NSIS setup (renamed by
-          # the metadata step). Its signature signs the file bytes, so the .sig from
-          # the original-named artifact is valid for the renamed copy too.
+          # Match the numeric installer name required by installed preview clients.
           #
           # The updater manifest version must match the stripped Windows/Tauri
           # runtime version. MSI ProductVersion cannot carry prerelease metadata,
           # so advertising 0.5.0-alpha.N makes an installed 0.5.0 runtime compare
           # as newer and report "latest".
-          $nsisName = "ClawScribe_${sourceVersion}_x64-setup.exe"
+          $nsisName = "ClawScribe_${manifestVersion}_x64-setup.exe"
           $sig = Get-ChildItem -Path (Join-Path $bundleRoot "nsis") -Filter "${nsisName}.sig" |
             Select-Object -First 1
           if (-not $sig) {
@@ -651,6 +647,29 @@ jobs:
             }
           }
           $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $bundleRoot "latest.json") -Encoding utf8
+
+      - name: Verify updater compatibility and signed release assets
+        if: ${{ (inputs.publish || inputs['draft-release']) && !inputs['check-only'] }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $bundleRoot = "frontend\src-tauri\target\release\bundle"
+          $runtimeVersion = $env:CLAWSCRIBE_INSTALLER_VERSION
+          $verifyDirectory = Join-Path $env:RUNNER_TEMP ("clawscribe-release-verify-" + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $verifyDirectory | Out-Null
+          $files = @(
+            "msi/ClawScribe_${runtimeVersion}_x64_en-US.msi",
+            "msi/ClawScribe_${runtimeVersion}_x64_en-US.msi.sig",
+            "nsis/ClawScribe_${runtimeVersion}_x64-setup.exe",
+            "nsis/ClawScribe_${runtimeVersion}_x64-setup.exe.sig",
+            "latest.json", "SHA256SUMS.txt", "BUILD-METADATA.txt", "BUILD-METRICS.json"
+          )
+          foreach ($file in $files) {
+            Copy-Item -LiteralPath (Join-Path $bundleRoot $file) -Destination $verifyDirectory
+          }
+          $commit = (git rev-parse HEAD).Trim()
+          node scripts/verify-release-assets.mjs --dir $verifyDirectory --version $env:CLAWSCRIBE_SOURCE_VERSION --commit $commit --repo '${{ github.repository }}'
 
       - name: Refuse to turn a published version into a draft
         if: ${{ inputs['draft-release'] && !inputs['check-only'] }}
@@ -684,10 +703,10 @@ jobs:
           make_latest: ${{ inputs['draft-release'] && 'false' || 'true' }}
           fail_on_unmatched_files: true
           files: |
-            frontend/src-tauri/target/release/bundle/msi/ClawScribe_${{ env.CLAWSCRIBE_SOURCE_VERSION }}_x64_en-US.msi
-            frontend/src-tauri/target/release/bundle/msi/ClawScribe_${{ env.CLAWSCRIBE_SOURCE_VERSION }}_x64_en-US.msi.sig
-            frontend/src-tauri/target/release/bundle/nsis/ClawScribe_${{ env.CLAWSCRIBE_SOURCE_VERSION }}_x64-setup.exe
-            frontend/src-tauri/target/release/bundle/nsis/ClawScribe_${{ env.CLAWSCRIBE_SOURCE_VERSION }}_x64-setup.exe.sig
+            frontend/src-tauri/target/release/bundle/msi/ClawScribe_${{ env.CLAWSCRIBE_INSTALLER_VERSION }}_x64_en-US.msi
+            frontend/src-tauri/target/release/bundle/msi/ClawScribe_${{ env.CLAWSCRIBE_INSTALLER_VERSION }}_x64_en-US.msi.sig
+            frontend/src-tauri/target/release/bundle/nsis/ClawScribe_${{ env.CLAWSCRIBE_INSTALLER_VERSION }}_x64-setup.exe
+            frontend/src-tauri/target/release/bundle/nsis/ClawScribe_${{ env.CLAWSCRIBE_INSTALLER_VERSION }}_x64-setup.exe.sig
             frontend/src-tauri/target/release/bundle/latest.json
             frontend/src-tauri/target/release/bundle/SHA256SUMS.txt
             frontend/src-tauri/target/release/bundle/BUILD-METADATA.txt

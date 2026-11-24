@@ -55,6 +55,31 @@ function stage(t, sourceVersion = version, runtimeVersion = sourceVersion) {
 
 const failedNames = outcome => outcome.failures.map(entry => entry.name);
 
+test('prerelease installers use numeric filenames recognized by installed updaters', () => {
+  assert.deepEqual(releaseAssetNames('1.2.4-preview.1'), {
+    setup: 'ClawScribe_1.2.4_x64-setup.exe',
+    setupSig: 'ClawScribe_1.2.4_x64-setup.exe.sig',
+    msi: 'ClawScribe_1.2.4_x64_en-US.msi',
+    msiSig: 'ClawScribe_1.2.4_x64_en-US.msi.sig',
+  });
+});
+
+test('release verification rejects a suffix-only layout that 0.67.0 silently skips', t => {
+  const staged = stage(t, '1.2.4-preview.1', '1.2.4');
+  for (const name of fs.readdirSync(staged.dir)) {
+    if (name.startsWith('ClawScribe_1.2.4_')) {
+      fs.renameSync(path.join(staged.dir, name), path.join(staged.dir, name.replace('1.2.4_', '1.2.4-preview.1_')));
+    }
+  }
+  staged.write('SHA256SUMS.txt', staged.read('SHA256SUMS.txt').toString().replaceAll('ClawScribe_1.2.4_', 'ClawScribe_1.2.4-preview.1_'));
+  const latest = JSON.parse(staged.read('latest.json'));
+  latest.platforms['windows-x86_64'].url = `https://github.com/${repo}/releases/download/v1.2.4-preview.1/ClawScribe_1.2.4-preview.1_x64-setup.exe`;
+  staged.write('latest.json', JSON.stringify(latest));
+  const outcome = verifyAssets(staged.options);
+  assert.equal(outcome.ok, false, 'A manifest and signed assets are insufficient if installed clients cannot discover them');
+  assert.ok(failedNames(outcome).includes('asset present: ClawScribe_1.2.4_x64-setup.exe'));
+});
+
 test('detached signatures verify and reject tampering, foreign keys and unknown algorithms', () => {
   const key = newKey();
   const publicKey = parsePublicKey(key.publicKeyBase64);
@@ -113,7 +138,7 @@ test('release verification rejects a malformed signature even when the manifest 
   assert.ok(outcome.failures.some(entry => /signature/.test(entry.name) && /trusted comment/.test(entry.detail)));
 });
 
-test('source prereleases retain asset identity while metadata and updater use the numeric runtime version', t => {
+test('source prereleases retain their tag while filenames, metadata and updater use the numeric runtime version', t => {
   const staged = stage(t, '1.2.4-beta.1', '1.2.4');
   const outcome = verifyAssets(staged.options);
   assert.deepEqual(failedNames(outcome), []);
@@ -130,6 +155,24 @@ test('source prereleases retain asset identity while metadata and updater use th
     staged.write('BUILD-METADATA.txt', metadata.replace('installer_product_version=1.2.4\n', `installer_product_version=${invalidVersion}\n`));
     assert.ok(failedNames(verifyAssets(staged.options)).includes('metadata installer_product_version'));
   }
+});
+
+test('repaired prereleases may retain suffixed aliases only for identical installer and signature bytes', t => {
+  const staged = stage(t, '1.2.4-preview.1', '1.2.4');
+  const canonical = releaseAssetNames('1.2.4-preview.1');
+  for (const name of Object.values(canonical)) staged.write(name.replace('1.2.4_', '1.2.4-preview.1_'), staged.read(name));
+  assert.equal(verifyAssets(staged.options).ok, true);
+  const alias = canonical.setup.replace('1.2.4_', '1.2.4-preview.1_');
+  staged.write(alias, crypto.randomBytes(4096));
+  assert.ok(failedNames(verifyAssets(staged.options)).includes(`compatibility alias has identical bytes: ${alias}`));
+});
+
+test('numeric candidate assets require a numeric installer URL in the prerelease manifest', t => {
+  const staged = stage(t, '1.2.4-preview.1', '1.2.4');
+  const latest = JSON.parse(staged.read('latest.json'));
+  latest.platforms['windows-x86_64'].url = `https://github.com/${repo}/releases/download/v1.2.4-preview.1/ClawScribe_1.2.4-preview.1_x64-setup.exe`;
+  staged.write('latest.json', JSON.stringify(latest));
+  assert.ok(failedNames(verifyAssets(staged.options)).includes('latest.json installer URL names this version and installer'));
 });
 
 test('a tampered installer fails its checksum and signature checks', t => {
