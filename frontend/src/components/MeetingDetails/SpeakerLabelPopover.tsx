@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useId, useRef, useState, type KeyboardEvent } from "react";
-import { Check } from "lucide-react";
+import { Check, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -67,9 +67,9 @@ export function RenameSpeakerPopover({ speaker, catalog, onRename, onOpenChange 
   return <Popover open={open} onOpenChange={next => { if (!saving) { setOpen(next); onOpenChange?.(next); } }}>
     <PopoverTrigger asChild>
       <Button ref={trigger} variant="ghost" type="button" disabled={saving} aria-label={`Rename ${speaker}`}
-        data-speaker-lane-name={speaker} title={speaker}
-        className="h-auto min-w-0 justify-start gap-2 px-1 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:bg-muted data-[state=open]:bg-muted data-[state=open]:text-foreground">
-        <SpeakerDot color={getSpeakerColor(catalog, speaker)} /><span className="truncate">{speaker}</span>
+        data-speaker-lane-name={speaker} title={`Rename ${speaker}`}
+        className="h-6 w-6 shrink-0 p-0 text-muted-foreground hover:text-foreground [&_svg]:size-3">
+        <Pencil aria-hidden="true" />
       </Button>
     </PopoverTrigger>
     <PopoverContent align="start" aria-label={`Rename ${speaker}`} onOpenAutoFocus={event => event.preventDefault()}
@@ -88,9 +88,10 @@ export function RenameSpeakerPopover({ speaker, catalog, onRename, onOpenChange 
   </Popover>;
 }
 
-export function SpeakerLabelPopover({ segmentId, timestamp, speaker, catalog, sourceAttributionEnabled = false, onSpeakerChange, onRename }: {
+export function SpeakerLabelPopover({ segmentId, timestamp, speaker, catalog, sourceAttributionEnabled = false, attendeeNames, onSpeakerChange, onRename }: {
   segmentId: string; timestamp: string; speaker?: string;
   catalog: readonly SpeakerDetails[]; sourceAttributionEnabled?: boolean;
+  attendeeNames?: readonly string[];
   onSpeakerChange: (id: string, name: string | null) => Promise<void> | void;
   onRename?: RenameSpeaker;
 }) {
@@ -101,8 +102,8 @@ export function SpeakerLabelPopover({ segmentId, timestamp, speaker, catalog, so
   const trigger = useRef<HTMLButtonElement>(null);
   const id = useId();
   const { saving, save } = useSpeakerSave();
-  const options = getSpeakerOptions(catalog, sourceAttributionEnabled);
-  const nextName = resolveSpeakerName(catalog, value, sourceAttributionEnabled);
+  const options = getSpeakerOptions(catalog, sourceAttributionEnabled, attendeeNames);
+  const nextName = resolveSpeakerName(catalog, value, sourceAttributionEnabled, attendeeNames);
   const close = () => { setOpen(false); setValue(""); };
   const assign = (name: string | null) => save(() => onSpeakerChange(segmentId, name), close);
   const moveOption = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -130,14 +131,15 @@ export function SpeakerLabelPopover({ segmentId, timestamp, speaker, catalog, so
       {renaming && onRename ? <RenameSpeakerForm speaker={renaming} catalog={catalog} saving={saving}
         onBack={() => setRenaming(null)}
         onRename={name => void save(() => onRename(renaming, name), close)} /> : <>
-        <div role="group" aria-label="Meeting speakers" className="max-h-52 space-y-1 overflow-y-auto" onKeyDown={moveOption}>
+        {options.length > 0 && <div role="group" aria-label="Meeting speakers and confirmed attendees" className="max-h-52 space-y-1 overflow-y-auto" onKeyDown={moveOption}>
           {options.map(name => <Button key={name} variant="ghost" type="button" disabled={saving}
             aria-label={`Assign ${name}`} aria-pressed={name === current} onClick={() => void assign(name)}
             className="h-auto w-full justify-start gap-2 px-2 py-1.5 text-sm">
             <SpeakerDot color={getSpeakerColor(catalog, name)} /><span className="min-w-0 flex-1 truncate text-left">{name}</span>
+            {attendeeNames?.includes(name) && <span className="text-xs text-muted-foreground">Attendee</span>}
             {name === current && <Check aria-hidden="true" className="h-4 w-4 shrink-0" />}
           </Button>)}
-        </div>
+        </div>}
         <form className="mt-3 space-y-1.5" onSubmit={event => { event.preventDefault(); if (nextName) void assign(nextName); }}>
           <label htmlFor={id} className="text-xs font-medium">New speaker</label>
           <div className="flex gap-2">

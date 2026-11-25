@@ -35,3 +35,13 @@ test('a late seek reads logarithmically many ranges', () => {
   assert.equal(activePlaybackSegment(watchedRanges, 2 * (count - 1)), String(count - 1));
   assert.ok(reads <= Math.ceil(Math.log2(count)) + 1, `read ${reads} ranges`);
 });
+test('saved positions are clamped and ignored near the end of long and short recordings', () => {
+  const { resumablePlaybackPosition } = loadTsModule('src/hooks/transcript-playback.ts');
+  assert.equal(resumablePlaybackPosition(18, 120), 18);
+  assert.equal(resumablePlaybackPosition(115, 120), 0);
+  assert.equal(resumablePlaybackPosition(150, 120), 0);
+  assert.equal(resumablePlaybackPosition(4, 5), 4);
+  assert.equal(resumablePlaybackPosition(4.9, 5), 0);
+  assert.equal(resumablePlaybackPosition(-4, 5), 0);
+  assert.equal(resumablePlaybackPosition(Number.NaN, 5), 0);
+});

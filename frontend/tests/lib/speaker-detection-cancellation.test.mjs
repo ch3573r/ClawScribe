@@ -101,6 +101,7 @@ test('a background detection can be cancelled from the meeting toolbar after nav
     react: hooks.react,
     '@/components/ui/button': { Button: 'Button' },
     './ActionIcon': { ActionIcon: 'icon-button' },
+    '@/components/ui/dialog': names(['Dialog', 'DialogContent', 'DialogHeader', 'DialogFooter', 'DialogTitle', 'DialogDescription']),
     '@/components/ui/dropdown-menu': names(['DropdownMenu', 'DropdownMenuContent', 'DropdownMenuItem', 'DropdownMenuLabel', 'DropdownMenuSeparator', 'DropdownMenuTrigger']),
     '@/components/ui/tooltip': names(['Tooltip', 'TooltipTrigger', 'TooltipContent']),
     'lucide-react': {},

@@ -75,3 +75,60 @@ test('citation playback can distinguish native media rejection from successful p
     hooks.unmount();
   } finally { globalThis.window = previousWindow; }
 });
+
+test('player resumes each meeting once metadata is ready, remembers seeks, and keeps mute independent of volume', async () => {
+  const previousWindow = globalThis.window;
+  const elements = [];
+  const positions = new Map([['clawscribe.playbackPosition.first', '40'], ['clawscribe.playbackPosition.second', '99']]);
+  const windowEvents = new Map();
+  class Audio {
+    duration = NaN;
+    currentTime = 0;
+    handlers = new Map();
+    constructor() { elements.push(this); }
+    load() {} pause() {} removeAttribute() {}
+    addEventListener(name, handler) { this.handlers.set(name, handler); }
+    removeEventListener(name) { this.handlers.delete(name); }
+    emit(name) { this.handlers.get(name)?.(); }
+  }
+  globalThis.window = { Audio, localStorage: {
+    getItem: key => positions.get(key) ?? null, setItem: (key, value) => positions.set(key, value),
+  }, addEventListener: (event, handler) => windowEvents.set(event, handler), removeEventListener: event => windowEvents.delete(event) };
+  const hooks = createHookHarness();
+  try {
+    const { useAudioPlayer } = loadTsModule('src/hooks/useAudioPlayer.ts', { react: hooks.react, '@tauri-apps/api/core': { convertFileSrc: path => path } });
+    let id = 'first';
+    const render = () => hooks.render(() => useAudioPlayer(`${id}.wav`, id));
+    render();
+    elements[0].duration = 100;
+    elements[0].emit('loadedmetadata');
+    assert.equal(elements[0].currentTime, 40);
+    await render().seekBy(10);
+    elements[0].emit('durationchange');
+    assert.equal(render().clock.getSnapshot(), 50, 'metadata refresh does not reset playback');
+    render().setVolume(0.4);
+    render().toggleMute();
+    assert.equal(elements[0].volume, 0.4);
+    assert.equal(elements[0].muted, true);
+    assert.equal(render().muted, true);
+    id = 'second'; render();
+    assert.equal(positions.get('clawscribe.playbackPosition.first'), '50');
+    assert.equal(elements[1].volume, 0.4);
+    assert.equal(elements[1].muted, true);
+    render().toggleMute();
+    elements[1].duration = 100;
+    elements[1].emit('loadedmetadata');
+    assert.equal(elements[1].currentTime, 0, 'starts at the beginning near the end');
+    assert.equal(elements[1].muted, false);
+    await render().seek(15);
+    windowEvents.get('pagehide')?.();
+    assert.equal(positions.get('clawscribe.playbackPosition.second'), '15');
+    elements[1].emit('ended');
+    assert.equal(positions.get('clawscribe.playbackPosition.second'), '0');
+    id = 'first'; render();
+    await render().seek(4);
+    elements[2].duration = 100;
+    elements[2].emit('loadedmetadata');
+    assert.equal(elements[2].currentTime, 4, 'an explicit early seek wins over the remembered position');
+  } finally { hooks.unmount(); globalThis.window = previousWindow; }
+});

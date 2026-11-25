@@ -82,6 +82,26 @@ test('native timestamp button is keyboard accessible without nesting speaker con
   assert.ok(nodes.some(node => node.type === 'label' && node.props.htmlFor === input.props.id));
 });
 
+test('speaker highlighting keeps other rows visible and confirmed attendees can label an unlabeled segment', async () => {
+  const assigned = [];
+  const view = createView({
+    segments: [
+      { id: 'one', timestamp: 12, text: 'One.', speaker: ' Ada ' },
+      { id: 'two', timestamp: 14, text: 'Two.' },
+    ],
+    sourceAttributionEnabled: false, highlightedSpeaker: 'Ada', attendeeNames: ['Grace Hopper'],
+    onSpeakerChange: async (id, name) => { assigned.push([id, name]); },
+  });
+  const nodes = view.render();
+  assert.equal(find(nodes, node => node.props.id === 'segment-one').props['data-speaker-highlighted'], true);
+  assert.equal(find(nodes, node => node.props.id === 'segment-two').props['data-speaker-highlighted'], undefined);
+  const second = find(nodes, node => node.props['aria-label']?.includes('00:14, currently unlabeled'));
+  assert.equal(second.props.children[1].props.children, 'Add speaker');
+  const attendeeOptions = nodes.filter(node => node.props['aria-label'] === 'Assign Grace Hopper');
+  await attendeeOptions.at(-1).props.onClick();
+  assert.deepEqual(assigned, [['two', 'Grace Hopper']]);
+});
+
 test('failed custom speaker save preserves the input and shows an actionable error', async () => {
   const view = createView({ onSpeakerChange: async () => { throw new Error('simulated failure'); } });
   let nodes = view.render();
@@ -195,7 +215,7 @@ test('saving disables every speaker control and a failure leaves the popover ope
 
 test('speaker option arrows move focus without handling keys from the text input', () => {
   const nodes = createView().render();
-  const group = find(nodes, node => node.props['aria-label'] === 'Meeting speakers');
+  const group = find(nodes, node => node.props['aria-label'] === 'Meeting speakers and confirmed attendees');
   const focused = [];
   const buttons = [0, 1].map(index => ({ focus: () => focused.push(index) }));
   let prevented = 0;

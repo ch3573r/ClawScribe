@@ -1,3 +1,5 @@
+import type { MeetingCalendarAttendee } from "@/lib/meetingCalendar";
+
 type SpeakerRow = { speaker?: string | null; timestamp?: number };
 
 export interface SpeakerDetails {
@@ -45,21 +47,34 @@ export function getSpeakerColor(catalog: readonly SpeakerDetails[], name: string
   return catalog.find(entry => entry.name === speakerLabel(name))?.color ?? NEUTRAL_COLOR;
 }
 
-export function getSpeakerOptions(catalog: readonly SpeakerDetails[], sourceAttributionEnabled: boolean): string[] {
-  const names = catalog.flatMap(entry => entry.name ? [entry.name] : []);
-  if (sourceAttributionEnabled || names.some(name => SOURCE_SPEAKERS.includes(name))) {
-    for (const name of SOURCE_SPEAKERS) if (!names.includes(name)) names.push(name);
+const sameName = (left: string, right: string) => left.toLocaleLowerCase() === right.toLocaleLowerCase();
+
+export function getConfirmedAttendeeNames(attendees: readonly MeetingCalendarAttendee[]): string[] {
+  const names: string[] = [];
+  for (const attendee of attendees) {
+    if (attendee.attendance !== "present" || !attendee.name) continue;
+    const name = normalizeSpeakerName(attendee.name);
+    if (name && !names.some(existing => sameName(existing, name))) names.push(name);
   }
   return names;
 }
 
-const sameName = (left: string, right: string) => left.toLocaleLowerCase() === right.toLocaleLowerCase();
+export function getSpeakerOptions(catalog: readonly SpeakerDetails[], sourceAttributionEnabled: boolean, attendeeNames: readonly string[] = []): string[] {
+  const names = catalog.flatMap(entry => entry.name ? [entry.name] : []);
+  if (sourceAttributionEnabled || names.some(name => SOURCE_SPEAKERS.includes(name))) {
+    for (const name of SOURCE_SPEAKERS) if (!names.includes(name)) names.push(name);
+  }
+  for (const name of attendeeNames) {
+    if (!names.some(existing => sameName(existing, name))) names.push(name);
+  }
+  return names;
+}
 
 /** Resolve a typed name to an existing speaker's spelling, ignoring case, so "alice" joins "Alice". */
-export function resolveSpeakerName(catalog: readonly SpeakerDetails[], value: string, sourceAttributionEnabled = false): string | null {
+export function resolveSpeakerName(catalog: readonly SpeakerDetails[], value: string, sourceAttributionEnabled = false, attendeeNames: readonly string[] = []): string | null {
   const name = normalizeSpeakerName(value);
   if (!name) return null;
-  return getSpeakerOptions(catalog, sourceAttributionEnabled).find(option => sameName(option, name)) ?? name;
+  return getSpeakerOptions(catalog, sourceAttributionEnabled, attendeeNames).find(option => sameName(option, name)) ?? name;
 }
 
 export function getSpeakerRename(catalog: readonly SpeakerDetails[], from: string, value: string) {

@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo, useSyncExternalStore } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { DEFAULT_PLAYBACK_RATE, PLAYBACK_RATE_STORAGE_KEY, normalizePlaybackRate } from '@/lib/playback-controls';
+import { resumablePlaybackPosition } from './transcript-playback';
+
+const POSITION_WRITE_INTERVAL_MS = 5_000;
 
 // The chosen speed is a per-viewer convenience; the player works without storage.
 function storedRate(): number {
@@ -38,7 +41,7 @@ function createPlaybackClock() {
   return { clock, setTime };
 }
 
-export const useAudioPlayer = (audioPath: string | null) => {
+export const useAudioPlayer = (audioPath: string | null, meetingId?: string) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [{ clock, setTime }] = useState(createPlaybackClock);
   const [duration, setDuration] = useState(0);
@@ -47,6 +50,10 @@ export const useAudioPlayer = (audioPath: string | null) => {
   const pendingSeek = useRef<number | null>(null);
   const [rate, setRateState] = useState(storedRate);
   const rateRef = useRef(rate);
+  const [volume, setVolumeState] = useState(1);
+  const volumeRef = useRef(volume);
+  const [muted, setMuted] = useState(false);
+  const mutedRef = useRef(muted);
 
   useEffect(() => {
     setIsPlaying(false); setTime(0); setDuration(0); setError(null);
@@ -60,33 +67,58 @@ export const useAudioPlayer = (audioPath: string | null) => {
     audio.preload = 'metadata';
     audio.playbackRate = rateRef.current;
     audio.preservesPitch = true;
-    const metadata = () => {
-      if (Number.isFinite(audio.duration)) {
-        setDuration(audio.duration);
-        if (pendingSeek.current !== null) {
-          audio.currentTime = Math.min(pendingSeek.current, audio.duration);
-          pendingSeek.current = null;
-          setTime(audio.currentTime);
-        }
-      }
+    audio.volume = volumeRef.current;
+    audio.muted = mutedRef.current;
+    const positionKey = meetingId ? `clawscribe.playbackPosition.${meetingId}` : null;
+    let positionReady = false;
+    let savedSeconds = 0;
+    let lastWriteAt = Date.now();
+    const savePosition = () => {
+      if (!positionKey || !positionReady || !Number.isFinite(audio.currentTime)) return;
+      const seconds = audio.currentTime;
+      if (savedSeconds === seconds) return;
+      try { window.localStorage.setItem(positionKey, String(seconds)); } catch { /* Playback works without storage. */ }
+      savedSeconds = seconds;
+      lastWriteAt = Date.now();
     };
-    const time = () => setTime(audio.currentTime);
+    const metadata = () => {
+      if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+      setDuration(audio.duration);
+      if (positionReady) return;
+      positionReady = true;
+      if (positionKey) {
+        try { savedSeconds = Number(window.localStorage.getItem(positionKey)); } catch { /* Start at the beginning. */ }
+      }
+      const position = pendingSeek.current === null
+        ? resumablePlaybackPosition(savedSeconds, audio.duration)
+        : Math.min(pendingSeek.current, audio.duration);
+      pendingSeek.current = null;
+      if (position !== audio.currentTime) audio.currentTime = position;
+      setTime(audio.currentTime);
+    };
+    const time = () => {
+      setTime(audio.currentTime);
+      if (positionKey && Date.now() - lastWriteAt >= POSITION_WRITE_INTERVAL_MS) savePosition();
+    };
     const playing = () => { setIsPlaying(true); setError(null); };
-    const paused = () => setIsPlaying(false);
-    const ended = () => { setIsPlaying(false); audio.currentTime = 0; setTime(0); };
+    const paused = () => { setIsPlaying(false); savePosition(); };
+    const ended = () => { setIsPlaying(false); audio.currentTime = 0; setTime(0); savePosition(); };
     const failed = () => { setIsPlaying(false); setError('Failed to load audio file'); };
     const handlers = { loadedmetadata: metadata, durationchange: metadata, timeupdate: time, playing, pause: paused, ended, error: failed };
     for (const [event, handler] of Object.entries(handlers)) audio.addEventListener(event, handler);
+    if (positionKey) window.addEventListener('pagehide', savePosition);
     audio.src = convertFileSrc(audioPath);
     audio.load();
     return () => {
+      if (positionKey) window.removeEventListener('pagehide', savePosition);
+      savePosition();
       for (const [event, handler] of Object.entries(handlers)) audio.removeEventListener(event, handler);
       audioRef.current = null;
       audio.pause();
       audio.removeAttribute('src');
       audio.load();
     };
-  }, [audioPath, setTime]);
+  }, [audioPath, meetingId, setTime]);
 
   const play = useCallback(async () => {
     const audio = audioRef.current;
@@ -127,6 +159,21 @@ export const useAudioPlayer = (audioPath: string | null) => {
     try { window.localStorage?.setItem(PLAYBACK_RATE_STORAGE_KEY, String(next)); } catch { /* not remembered */ }
   }, []);
 
-  return useMemo(() => ({ isPlaying, clock, duration, error, rate, play, pause, seek, seekBy, setRate }),
-    [isPlaying, clock, duration, error, rate, play, pause, seek, seekBy, setRate]);
+  const setVolume = useCallback((value: number) => {
+    if (!Number.isFinite(value)) return;
+    const next = Math.max(0, Math.min(1, value));
+    volumeRef.current = next;
+    if (audioRef.current) audioRef.current.volume = next;
+    setVolumeState(next);
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    const next = !mutedRef.current;
+    mutedRef.current = next;
+    if (audioRef.current) audioRef.current.muted = next;
+    setMuted(next);
+  }, []);
+
+  return useMemo(() => ({ isPlaying, clock, duration, error, rate, volume, muted, play, pause, seek, seekBy, setRate, setVolume, toggleMute }),
+    [isPlaying, clock, duration, error, rate, volume, muted, play, pause, seek, seekBy, setRate, setVolume, toggleMute]);
 };

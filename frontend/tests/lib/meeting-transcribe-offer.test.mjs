@@ -86,6 +86,14 @@ test('audio lookup shows loading without an offer or a missing-audio flash', () 
   view.hooks.unmount();
 });
 
+test('an untrusted recordings folder explains why saved audio cannot open', () => {
+  const reason = "This meeting's folder is not one of your recordings folders. Choose that folder again in Settings to play its audio.";
+  const view = panel({ audioStatus: 'missing', audioUnavailableReason: reason, transcripts: [{ id: 'segment-one', text: 'Synthetic speech.' }] });
+  assert.match(text(view.render()), /not one of your recordings folders/);
+  assert.doesNotMatch(text(view.render()), /Saved audio is unavailable/);
+  view.hooks.unmount();
+});
+
 test('meeting without a folder explains that no recording is attached', () => {
   const view = panel({ audioStatus: 'missing', meetingFolderPath: null });
   const empty = find(view.render(), 'VirtualizedTranscriptView').props.emptyState;
@@ -146,6 +154,7 @@ test('toolbar opens and closes the controlled transcription dialog', () => {
     '@tauri-apps/api/event': { listen: async () => () => {} },
     '@/lib/analytics': { trackButtonClick() {} },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/dialog': stubs(['Dialog', 'DialogContent', 'DialogHeader', 'DialogFooter', 'DialogTitle', 'DialogDescription']),
     '@/components/ui/textarea': { Textarea: 'textarea' },
     '@/components/ui/button-group': stubs(['ButtonGroup']),
     '@/components/ui/dropdown-menu': {},

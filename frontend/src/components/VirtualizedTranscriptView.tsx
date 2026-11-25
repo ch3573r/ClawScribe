@@ -20,6 +20,8 @@ import { activePlaybackSegment, indexPlaybackRanges } from "@/hooks/transcript-p
 export interface VirtualizedTranscriptViewProps {
     speakerSegments?: TranscriptSegmentData[];
     sourceAttributionEnabled?: boolean;
+    attendeeNames?: readonly string[];
+    highlightedSpeaker?: string | null;
     focusedSource?: { id: string; request: number };
     onEditSegment?: (id: string) => void;
     /** Transcript segments to display */
@@ -99,6 +101,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onApplySpeakerToMatching,
     speakerCatalog,
     sourceAttributionEnabled,
+    attendeeNames,
+    isSpeakerHighlighted,
     isActive,
     onSeekToTime,
     onEdit,
@@ -122,6 +126,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number> | number | void;
     speakerCatalog: readonly SpeakerDetails[];
     sourceAttributionEnabled: boolean;
+    attendeeNames?: readonly string[];
+    isSpeakerHighlighted: boolean;
     /** Whether playback is currently inside this segment. Computed by the
      * parent so a clock tick only re-renders the rows whose state flips. */
     isActive: boolean;
@@ -145,7 +151,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div
             id={`segment-${id}`}
-            className={`group/segment relative mb-3 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isFindCurrent ? "bg-primary/10 ring-2 ring-ring" : isActive ? "bg-primary/10 ring-1 ring-primary/30" : ""}`}
+            data-speaker-highlighted={isSpeakerHighlighted || undefined}
+            className={`group/segment relative mb-3 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isSpeakerHighlighted ? "before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:rounded-sm before:bg-primary" : ""} ${isFindCurrent ? "bg-primary/10 ring-2 ring-ring" : isActive ? "bg-primary/10 ring-1 ring-primary/30" : isSpeakerHighlighted ? "bg-accent/55" : ""}`}
         >
             <div className="flex items-start gap-3">
                 <Tooltip>
@@ -170,7 +177,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                 <div className="min-w-0 flex-1 pr-7">
                     {showSpeakerLabels && onSpeakerChange ? (
                         <SpeakerLabelPopover segmentId={id} timestamp={formatRecordingTime(timestamp).slice(1, -1)}
-                            speaker={speaker} catalog={speakerCatalog} sourceAttributionEnabled={sourceAttributionEnabled}
+                            speaker={speaker} catalog={speakerCatalog} sourceAttributionEnabled={sourceAttributionEnabled} attendeeNames={attendeeNames}
                             onSpeakerChange={onSpeakerChange} onRename={onApplySpeakerToMatching} />
                     ) : showSpeakerLabels && currentSpeaker && (
                         <span className="mb-0.5 inline-flex items-center gap-1.5 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-foreground">
@@ -200,6 +207,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     onEditSegment,
     speakerSegments,
     sourceAttributionEnabled = false,
+    attendeeNames,
+    highlightedSpeaker,
     focusedSource,
     segments,
     emptyState,
@@ -292,6 +301,15 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         else scrollRef.current?.querySelectorAll('[data-segment-id]')[index]?.scrollIntoView({ block: align === 'center' ? 'center' : 'nearest' });
         return true;
     };
+
+    const scrolledSpeaker = useRef<string | null | undefined>(undefined);
+    useEffect(() => {
+        if (highlightedSpeaker === undefined) { scrolledSpeaker.current = undefined; return; }
+        if (scrolledSpeaker.current === highlightedSpeaker) return;
+        const first = segments.find(segment => speakerLabel(segment.speaker) === highlightedSpeaker);
+        if (first && scrollToSegment(first.id, 'center')) scrolledSpeaker.current = highlightedSpeaker;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [highlightedSpeaker, segments]);
 
     // Find in transcript: bring the current match into view once per request,
     // waiting for its page to load if it is not loaded yet.
@@ -502,6 +520,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
                                         speakerCatalog={speakerCatalog}
                                         sourceAttributionEnabled={sourceAttributionEnabled}
+                                        attendeeNames={attendeeNames}
+                                        isSpeakerHighlighted={highlightedSpeaker !== undefined && speakerLabel(segment.speaker) === highlightedSpeaker}
                                         isActive={segment.id === activeSegmentId || segment.id === focusedSource?.id}
                                         onSeekToTime={onSeekToTime}
                                         highlight={findQuery}
@@ -572,6 +592,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
                                         speakerCatalog={speakerCatalog}
                                         sourceAttributionEnabled={sourceAttributionEnabled}
+                                        attendeeNames={attendeeNames}
+                                        isSpeakerHighlighted={highlightedSpeaker !== undefined && speakerLabel(segment.speaker) === highlightedSpeaker}
                                         isActive={segment.id === activeSegmentId || segment.id === focusedSource?.id}
                                         onSeekToTime={onSeekToTime}
                                         highlight={findQuery}

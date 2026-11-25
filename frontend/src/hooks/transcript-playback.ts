@@ -1,5 +1,12 @@
 import type { TranscriptSegmentData } from '@/types';
 
+export function resumablePlaybackPosition(seconds: number, duration: number): number {
+  if (!Number.isFinite(seconds) || !Number.isFinite(duration) || duration <= 0) return 0;
+  const position = Math.max(0, Math.min(seconds, duration));
+  const endWindow = Math.min(10, duration * 0.05);
+  return duration - position <= endWindow ? 0 : position;
+}
+
 interface PlaybackRange {
   id: string;
   start: number;

@@ -230,6 +230,8 @@ test('bookmarks appear as keyboard-reachable markers on the timeline and seek wh
     react: { ...hooks.react, memo: component => component },
     'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/popover': names('Popover PopoverContent PopoverTrigger'),
+    '@/components/ui/slider': { Slider: 'slider' },
     './SpeakerLabelPopover': { RenameSpeakerPopover: 'RenameSpeakerPopover' },
     './PlaybackOptions': { PlaybackOptions: 'PlaybackOptions' },
     '@/components/ui/tooltip': names('Tooltip TooltipTrigger TooltipContent'),
@@ -468,6 +470,25 @@ test('playback follows a late passage without fetching transcript pages the time
   assert.equal(props.loadedCount, 206);
   view.unmount();
   ui.hooks.unmount();
+});
+
+test('saved transcripts can add a speaker with Beta off and clear a lane highlight', () => {
+  const onUpdateTranscriptSpeaker = async () => {};
+  let cleared = false;
+  const ui = panel({
+    sourceAttributionEnabled: false, showSpeakerAttribution: false, onUpdateTranscriptSpeaker,
+    highlightedSpeaker: 'Grace Hopper', attendeeNames: ['Grace Hopper'], onClearSpeakerHighlight: () => { cleared = true; },
+  });
+  try {
+    const nodes = ui.render();
+    const view = ui.view(nodes);
+    assert.equal(view.showSpeakerLabels, true);
+    assert.equal(view.onSpeakerChange, onUpdateTranscriptSpeaker);
+    assert.deepEqual(view.attendeeNames, ['Grace Hopper']);
+    assert.equal(view.highlightedSpeaker, 'Grace Hopper');
+    nodes.find(node => node.type === 'button' && node.props.children === 'Clear highlight').props.onClick();
+    assert.equal(cleared, true);
+  } finally { ui.hooks.unmount(); }
 });
 
 test('Ctrl+F opens the find bar; typing goes to the first match; stepping wraps and loads the page first', async () => {

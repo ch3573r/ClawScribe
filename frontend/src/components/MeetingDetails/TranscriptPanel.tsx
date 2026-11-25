@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button';
 import type { PlayerBindings } from '@/lib/player-bindings';
 import type { TranscriptTextPatch } from '@/lib/meetingTranscripts';
 import { usePlaybackTime, type PlaybackClock } from '@/hooks/useAudioPlayer';
+import { hasSavedSpeakerLabels } from '@/lib/speaker-attribution';
 
 interface TranscriptPanelProps {
   bindings?: PlayerBindings;
@@ -22,6 +23,9 @@ interface TranscriptPanelProps {
   speakerSegments?: TranscriptSegmentData[];
   timelineComplete?: boolean;
   sourceAttributionEnabled?: boolean;
+  attendeeNames?: readonly string[];
+  highlightedSpeaker?: string | null;
+  onClearSpeakerHighlight?: () => void;
   focusedSource?: { id: string; request: number };
   transcripts: Transcript[];
   onCopyTranscript: () => void;
@@ -44,6 +48,7 @@ interface TranscriptPanelProps {
   meetingId?: string;
   meetingFolderPath?: string | null;
   audioStatus: 'loading' | 'found' | 'missing';
+  audioUnavailableReason?: string | null;
   audioError?: string | null;
   onRetryAudio?: () => void;
   showSpeakerAttribution?: boolean;
@@ -73,6 +78,9 @@ export function TranscriptPanel({
   speakerSegments,
   timelineComplete,
   sourceAttributionEnabled,
+  attendeeNames,
+  highlightedSpeaker,
+  onClearSpeakerHighlight,
   transcripts,
   onCopyTranscript,
   onOpenMeetingFolder,
@@ -90,6 +98,7 @@ export function TranscriptPanel({
   meetingId,
   meetingFolderPath,
   audioStatus,
+  audioUnavailableReason = null,
   audioError,
   onRetryAudio,
   showSpeakerAttribution = true,
@@ -108,6 +117,7 @@ export function TranscriptPanel({
   onBookmarksChange,
 }: TranscriptPanelProps) {
   const activeTime = usePlaybackTime(playbackClock) ?? initialTime;
+  const panelRef = useRef<HTMLDivElement>(null);
   const [bookmarkOpen, setBookmarkOpen] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
@@ -159,6 +169,8 @@ export function TranscriptPanel({
   const searchable = completeTimeline ?? (speakerSegments?.length ? speakerSegments : convertedSegments);
   const searchComplete = !usePagination || timelineComplete === true ||
     (totalCount !== undefined && searchable.length === totalCount);
+  const hasSpeakerLabels = useMemo(() => hasSavedSpeakerLabels(speakerSegments, displayedSegments), [speakerSegments, displayedSegments]);
+  const canEditSpeakers = Boolean(meetingId && !isRecording && onUpdateTranscriptSpeaker);
   const findMatches = useMemo(() => findOpen ? findTranscriptMatches(searchable, findQuery) : [], [findOpen, searchable, findQuery]);
   const matchesRef = useRef(findMatches);
   matchesRef.current = findMatches;
@@ -224,7 +236,7 @@ export function TranscriptPanel({
         <h2 className="text-sm font-semibold text-foreground">Transcript</h2>
         <TranscriptButtonGroup bindings={bindings} transcriptCount={transcriptCount} transcribeOpen={transcribeOpen} onTranscribeOpenChange={setTranscribeOpen}
           onCopyTranscript={onCopyTranscript} onOpenMeetingFolder={onOpenMeetingFolder} meetingId={meetingId} meetingFolderPath={meetingFolderPath}
-          audioAvailable={audioStatus === 'found'}
+          audioAvailable={audioStatus === 'found'} hasSpeakerLabels={hasSpeakerLabels} speakerLabelsComplete={searchComplete}
           onRefetchTranscripts={onRefetchTranscripts} onFindReplace={meetingId ? openReplace : undefined}
           onFind={meetingId ? openFind : undefined}
           onAddBookmark={meetingId ? () => setBookmarkOpen(true) : undefined} correctionActions={actions} />
@@ -232,7 +244,7 @@ export function TranscriptPanel({
   );
 
   return (
-    <div data-transcript-panel tabIndex={0} onKeyDown={event => {
+    <div ref={panelRef} data-transcript-panel tabIndex={0} onKeyDown={event => {
       if (meetingId && transcriptCount > 0 && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h') { event.preventDefault(); event.stopPropagation(); openReplace(); }
     }} className="flex h-[26rem] min-h-[18rem] min-w-0 md:h-auto shrink-0 flex-col border-r border-border bg-card md:w-[38%] md:min-w-[18rem] md:max-w-[30rem] xl:w-[clamp(420px,36%,560px)] xl:min-w-[420px] xl:max-w-[560px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
       {meetingId ? <TranscriptCorrections key={meetingId} meetingId={meetingId} editing={editing} onClose={() => setEditing(null)}
@@ -242,8 +254,19 @@ export function TranscriptPanel({
       {findOpen && <TranscriptFind bindings={bindings} query={findQuery} onQueryChange={setFindQuery} current={findIndex} total={findMatches.length} complete={searchComplete} focusRequest={findFocus}
         onStep={direction => void goToMatch(stepMatch(findIndex, findMatches.length, direction))} onClose={closeFind}
         onReplace={meetingId && transcriptCount > 0 ? openReplace : undefined} />}
+      {highlightedSpeaker !== undefined && onClearSpeakerHighlight && (
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-1 text-xs">
+          <p role="status" className="min-w-0 truncate" title={highlightedSpeaker ?? undefined}>
+            {highlightedSpeaker === null ? 'Highlighting unlabeled segments' : `Highlighting ${highlightedSpeaker}`}
+          </p>
+          <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => {
+            onClearSpeakerHighlight();
+            panelRef.current?.focus();
+          }}>Clear highlight</Button>
+        </div>
+      )}
       {transcriptCount > 0 && (audioStatus === 'missing' || audioError) && <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2 text-xs text-muted-foreground">
-        <p role="status">{audioError ? 'Saved audio could not be played.' : 'Saved audio is unavailable.'} You can still read and correct the transcript.</p>
+        <p role="status">{audioError ? 'Saved audio could not be played.' : audioUnavailableReason ?? 'Saved audio is unavailable.'} You can still read and correct the transcript.</p>
         {onRetryAudio && <Button variant="outline" size="sm" onClick={onRetryAudio}>Check again</Button>}
       </div>}
       {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} focusedBookmark={focusedBookmark} currentTime={activeTime} onSeek={onSeekToTime} addOpen={bookmarkOpen} onAddOpenChange={setBookmarkOpen} onBookmarksChange={onBookmarksChange} />}
@@ -253,6 +276,8 @@ export function TranscriptPanel({
           focusedSource={focusedSource}
           speakerSegments={speakerSegments}
           sourceAttributionEnabled={sourceAttributionEnabled}
+          attendeeNames={attendeeNames}
+          highlightedSpeaker={highlightedSpeaker}
           onEditSegment={meetingId && !isRecording ? editSegment : undefined}
           segments={displayedSegments}
           emptyState={emptyState}
@@ -268,7 +293,7 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={completeTimeline?.length ?? loadedCount}
           onLoadMore={onLoadMore}
-          showSpeakerLabels={showSpeakerAttribution}
+          showSpeakerLabels={showSpeakerAttribution || canEditSpeakers}
           activeTime={activeTime}
           onSeekToTime={onSeekToTime}
           followPlayback={followPlayback}
@@ -276,8 +301,8 @@ export function TranscriptPanel({
           findQuery={findOpen ? normalizeFindQuery(findQuery) : undefined}
           activeFindId={activeFindId}
           findRequest={findScroll}
-          onSpeakerChange={showSpeakerAttribution ? onUpdateTranscriptSpeaker : undefined}
-          onApplySpeakerToMatching={showSpeakerAttribution ? onApplySpeakerToMatching : undefined}
+          onSpeakerChange={canEditSpeakers ? onUpdateTranscriptSpeaker : undefined}
+          onApplySpeakerToMatching={canEditSpeakers ? onApplySpeakerToMatching : undefined}
         />
       </div>
     </div>
