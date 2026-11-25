@@ -6,7 +6,7 @@ import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { useTranscripts } from '@/contexts/TranscriptContext';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useTranscriptionConfig } from '@/contexts/ConfigContext';
 import { useLiveAssistanceOwner } from '@/contexts/LiveAssistanceContext';
 import { StatusOverlays } from '@/app/_components/StatusOverlays';
 import Analytics from '@/lib/analytics';
@@ -33,7 +33,7 @@ export default function Home() {
 
   // Use contexts for state management
   const { meetingTitle, transcripts } = useTranscripts();
-  const { transcriptModelConfig, selectedDevices } = useConfig();
+  const { transcriptModelConfig, selectedDevices } = useTranscriptionConfig();
   const recordingState = useRecordingState();
   const liveAssistance = useLiveAssistanceOwner();
 

@@ -192,7 +192,7 @@ test('welcome distinguishes loading audio preferences from unavailable devices',
     '../OnboardingContainer': { OnboardingContainer: 'OnboardingContainer' },
     '@/contexts/OnboardingContext': { useOnboarding: () => ({ goNext() {} }) },
     '@/hooks/usePlatform': { usePlatform: () => 'windows' },
-    '@/contexts/ConfigContext': { useConfig: () => ({
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
       selectedDevices: { micDevice: null, systemDevice: null },
       devicePreferencesStatus: status,
     }) },

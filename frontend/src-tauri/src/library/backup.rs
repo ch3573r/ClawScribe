@@ -195,6 +195,8 @@ struct Manifest {
     follow_through: archive_follow_through::Portable,
     // Index into the meetings array -> leaf filenames. Never contains source paths.
     files: BTreeMap<usize, Vec<String>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    audio_excluded: bool,
     // Optional in V1; omissions remain visible when this archive is restored.
     #[serde(default)]
     incomplete_audio: BTreeMap<usize, IncompleteAudio>,
@@ -225,6 +227,7 @@ pub struct BackupReport {
     pub meetings: usize,
     pub skipped: usize,
     pub files: usize,
+    pub audio_excluded: bool,
     /// Meetings restored without a calendar link that could not be read.
     pub unreadable_calendar_links: usize,
     pub skipped_template_items: usize,
@@ -513,6 +516,7 @@ async fn snapshot_tables_impl(
             portable,
             follow_through,
             files: BTreeMap::new(),
+            audio_excluded: false,
             incomplete_audio: BTreeMap::new(),
             document_files: BTreeMap::new(),
             export_ledgers: BTreeMap::new(),
@@ -600,6 +604,7 @@ fn prepare_archive(
         meetings: manifest.tables["meetings"].len(),
         skipped: 0,
         files,
+        audio_excluded: manifest.audio_excluded,
         unreadable_calendar_links: 0,
         skipped_template_items: 0,
         incomplete_meetings: incomplete_meetings(&manifest, None),
@@ -618,6 +623,7 @@ fn write_archive_contents(
     exclude_audio: bool,
 ) -> Result<usize, String> {
     backup_checkpoint(scheduled)?;
+    manifest.audio_excluded = exclude_audio;
     archive_documents::set_file_references(manifest)?;
     let documents = archive_documents::validate(manifest)?;
     manifest.portable.validate(&manifest.tables["meetings"])?;
@@ -1970,6 +1976,7 @@ async fn import_manifest_impl(
         meetings: selected.len(),
         skipped,
         files: files + document_files,
+        audio_excluded: manifest.audio_excluded,
         unreadable_calendar_links,
         skipped_template_items,
         incomplete_meetings: incomplete_meetings(&manifest, Some(&selected)),
@@ -4017,6 +4024,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query("INSERT INTO recording_outcomes (meeting_id) VALUES ('audio-only')")
+            .execute(&pool)
+            .await
+            .unwrap();
         let target = tempfile::tempdir().unwrap();
         let records = records::SnapshotFiles::temporary(target.path()).unwrap();
         let (manifest, folders) = snapshot_for_backup(&pool, &records, None).await.unwrap();
@@ -4034,9 +4045,11 @@ mod tests {
         .publish(&archive, false)
         .unwrap();
         assert_eq!(report.files, 1);
+        assert!(report.audio_excluded);
         assert!(report.incomplete_meetings.is_empty());
 
         let (manifest, stage) = unpack(&archive, target.path(), &HashSet::new()).unwrap();
+        assert!(manifest.audio_excluded);
         let restored_pool = crate::database::transcript_edits::tests::fixture().await;
         sqlx::query("DELETE FROM meetings")
             .execute(&restored_pool)
@@ -4046,6 +4059,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.meetings, 2);
+        assert!(report.audio_excluded);
         let transcript: String =
             sqlx::query_scalar("SELECT transcript FROM transcripts WHERE id = 'b'")
                 .fetch_one(&restored_pool)
@@ -4058,6 +4072,13 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(folder, None);
+        let outcome: (bool, bool) = sqlx::query_as(
+            "SELECT audio_save_failed, recovery_files_elsewhere FROM recording_outcomes WHERE meeting_id = 'audio-only'",
+        )
+        .fetch_one(&restored_pool)
+        .await
+        .unwrap();
+        assert_eq!(outcome, (false, false));
         let restored: String =
             sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = 'review-test'")
                 .fetch_one(&restored_pool)
@@ -4523,18 +4544,20 @@ mod tests {
         manifest.tables.remove("meeting_bookmarks");
         manifest.tables.remove("meeting_summary_bookmarks");
         write_archive(&archive, manifest, folders).unwrap();
+        let mut zip = zip::ZipArchive::new(File::open(&archive).unwrap()).unwrap();
+        let legacy_json: Value =
+            serde_json::from_reader(zip.by_name("manifest.json").unwrap()).unwrap();
+        assert!(legacy_json.get("audio_excluded").is_none());
+        drop(zip);
         let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+        assert!(!manifest.audio_excluded);
         sqlx::query("DELETE FROM meetings")
             .execute(&pool)
             .await
             .unwrap();
-        assert_eq!(
-            import_manifest(&pool, manifest, stage)
-                .await
-                .unwrap()
-                .meetings,
-            1
-        );
+        let report = import_manifest(&pool, manifest, stage).await.unwrap();
+        assert_eq!(report.meetings, 1);
+        assert!(!report.audio_excluded);
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM transcripts")
                 .fetch_one(&pool)

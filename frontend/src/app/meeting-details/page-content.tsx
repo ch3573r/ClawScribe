@@ -21,7 +21,7 @@ import { useSummaryGeneration } from '@/hooks/meeting-details/useSummaryGenerati
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useSummaryConfig } from '@/contexts/ConfigContext';
 import { useSourceAttribution } from '@/hooks/useSourceAttribution';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import type { TranscriptTextPatch } from '@/lib/meetingTranscripts';
@@ -207,7 +207,7 @@ export default function PageContent({
   // Sidebar context
 
   // Get model config from ConfigContext
-  const { modelConfig, setModelConfig } = useConfig();
+  const { modelConfig, setModelConfig } = useSummaryConfig();
   const sourceAttributionEnabled = useSourceAttribution();
   // Audio actions operate on the recording folder. The player/timeline waits for
   // a resolved media file, which can lag behind freshly saved recordings.

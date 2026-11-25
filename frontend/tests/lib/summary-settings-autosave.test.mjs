@@ -213,7 +213,7 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
     './Sidebar/SidebarProvider': { useSidebar: () => ({ serverAddress: null }) },
     '@/contexts/OllamaDownloadContext': { useOllamaDownload: () => downloads ?? ({ isDownloading: () => false, getProgress: () => undefined, downloadingModels: new Set() }) },
     '@/components/BuiltInModelManager': { BuiltInModelManager: 'built-in-models' },
-    '@/contexts/ConfigContext': { useConfig: () => context },
+    '@/contexts/ConfigContext': { useSummaryConfig: () => context },
     '@/components/ClaudeCodeProviderCard': {
       ClaudeCodeProviderCard: 'claude-code-card', CLAUDE_CODE_MODELS: ['sonnet', 'opus', 'haiku'],
       useClaudeCodeSettings: () => ({ status: null, programPath: '', setProgramPath() {}, busy: false, check: async () => {}, save: async () => {} }),
@@ -455,6 +455,43 @@ test('an API key is saved by committing the field and a half-typed key is never 
   assert.equal(app.calls.filter(([command]) => command === 'get_anthropic_models').length, 1, 'the committed key loads the model list');
   app.hooks.unmount();
 });
+
+for (const [provider, command] of [['claude', 'get_anthropic_models'], ['groq', 'get_groq_models']]) {
+  test(`${provider} sends a typed key only when the user checks it`, async t => {
+    const app = modalHarness({ provider, stored: false, autosave: false, responses: { [command]: [{ id: 'fixture-model' }] } });
+    t.after(() => app.hooks.unmount());
+    app.render(); await flush();
+    const catalogCalls = () => app.calls.filter(([name]) => name === command);
+    for (const draft of [KEY.slice(0, 10), KEY.slice(0, 14), '', KEY]) {
+      nodes(app.render()).find(node => node.props.id === 'legacy-api-key').props.onDraftChange(draft);
+      app.render(); await flush();
+      assert.equal(catalogCalls().length, 0);
+    }
+    const check = nodes(app.render()).find(node => node.type === 'button' && text(node) === 'Check again');
+    assert.equal(check.props.disabled, false);
+    check.props.onClick();
+    await flush();
+    assert.equal(catalogCalls().length, 1);
+    assert.equal(catalogCalls()[0][1].apiKey, KEY);
+    assert.match(text(app.render()), /Model list verified with this key/);
+  });
+
+  test(`${provider} loads a saved key once and makes no requests while editing its replacement`, async t => {
+    const app = modalHarness({ provider, autosave: false, responses: { [command]: [{ id: 'fixture-model' }] } });
+    t.after(() => app.hooks.unmount());
+    app.context.providerKeyStatus[provider] = { stored: true, hint: null };
+    app.render(); await flush();
+    const catalogCalls = () => app.calls.filter(([name]) => name === command);
+    assert.equal(catalogCalls().length, 1);
+    assert.equal(catalogCalls()[0][1].apiKey, null);
+    for (const draft of [KEY.slice(0, 10), '', KEY]) {
+      nodes(app.render()).find(node => node.props.id === 'legacy-api-key').props.onDraftChange(draft);
+      app.render(); await flush();
+      assert.equal(catalogCalls().length, 1);
+    }
+    assert.doesNotMatch(text(app.render()), /Model list verified with this key/);
+  });
+}
 
 test('switching providers in the explicit-save dialog discards the previous provider’s typed key before model discovery', async () => {
   const app = modalHarness({ provider: 'claude', autosave: false });

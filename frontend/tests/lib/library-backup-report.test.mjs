@@ -41,7 +41,7 @@ for (const restore of [false, true]) {
         if (invokeFails) throw new Error('Synthetic archive failure');
         return report;
       } },
-      sonner: { toast: Object.fromEntries(['success', 'warning', 'error'].map(kind => [kind, title => notifications.push({ kind, title })])) },
+      sonner: { toast: Object.fromEntries(['success', 'warning', 'error'].map(kind => [kind, (title, options) => notifications.push({ kind, title, ...options })])) },
     });
     const render = () => hooks.render(() => LibraryBackup());
     const run = (nextRestore = restore) => {
@@ -77,6 +77,11 @@ for (const restore of [false, true]) {
     await run();
     assert.equal(notifications.at(-1).kind, 'warning');
     assert.match(text(flatten(render()).find(node => node.props?.role === 'alert')), /1 saved live answer was excluded/);
+    report = { meetings: 3, files: 0, skipped: 0, audio_excluded: true };
+    await run();
+    const excluded = flatten(render()).find(node => node.props?.role === 'alert');
+    assert.match(text(excluded), /This backup does not include recording audio/);
+    assert.match(notifications.at(-1).description, /This backup does not include recording audio/);
     // A later complete operation replaces the old warning instead of leaving it stale.
     report = { meetings: 3, files: 3, skipped: 0, incomplete_meetings: [] };
     await run();

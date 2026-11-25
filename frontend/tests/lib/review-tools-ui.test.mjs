@@ -634,7 +634,7 @@ async function meetingPage({ audioReady = true } = {}) {
     sonner: { toast: { error() {}, warning() {}, info() {}, success() {} } },
     '@tauri-apps/api/core': { invoke: async () => 'synthetic/audio.wav' },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({}) },
-    '@/contexts/ConfigContext': { useConfig: () => ({ modelConfig: {} }) },
+    '@/contexts/ConfigContext': { useSummaryConfig: () => ({ modelConfig: {} }) },
     '@/hooks/useSourceAttribution': { useSourceAttribution: () => false },
     '@/hooks/useAudioPlayer': { useAudioPlayer: () => audio },
     '@/hooks/usePlaybackShortcuts': { usePlaybackShortcuts: handlers => { shortcuts = handlers; } },

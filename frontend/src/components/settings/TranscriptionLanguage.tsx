@@ -7,7 +7,7 @@ import { ROW_SELECT } from "@/components/settings/settings-parts";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Meta, SettingsCard, SettingsRow } from "@/components/ui/settings-layout";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useTranscriptionConfig } from "@/contexts/ConfigContext";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import {
   isAutoLanguage,
@@ -25,7 +25,7 @@ const DESCRIPTIONS = {
 
 /** The transcription language, shown only for engines that use it. */
 export function TranscriptionLanguage() {
-  const { transcriptModelConfig, selectedLanguage, setSelectedLanguage } = useConfig();
+  const { transcriptModelConfig, selectedLanguage, setSelectedLanguage } = useTranscriptionConfig();
   const recording = useRecordingState();
   const busy = recording.isRecording || recording.isStarting || recording.isStopping;
   const support = languageSupport(transcriptModelConfig.provider);

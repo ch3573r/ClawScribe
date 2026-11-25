@@ -19,7 +19,7 @@ import { AttachReferenceButton } from "./AttachReferenceButton";
 import { useKnowledgeSearch } from "@/hooks/useKnowledgeSearch";
 import { useKnowledgeIndexStatus } from "@/hooks/useKnowledgeIndexStatus";
 import { archiveDateKey } from "@/lib/archive-review";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useSummaryConfig } from "@/contexts/ConfigContext";
 import { classifySummaryProvider } from "@/lib/privacy";
 import { knowledgeSearchMode, libraryScope, scopeReady } from "@/lib/knowledge-state";
 import { matchesProjectFilter, type ProjectFilter } from "@/lib/library";
@@ -36,7 +36,7 @@ export function MeetingChat({
   dockTarget?: HTMLDivElement | null;
   onDockOpenChange?: (open: boolean) => void;
 }) {
-  const { modelConfig } = useConfig();
+  const { modelConfig } = useSummaryConfig();
   const destination = classifySummaryProvider(provider, {
     ollamaEndpoint: modelConfig?.ollamaEndpoint, customEndpoint: modelConfig?.customOpenAIEndpoint,
   });

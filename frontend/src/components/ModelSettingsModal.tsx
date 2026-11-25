@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
 import { Meta, SettingsFooter, SettingsRow, StatusText } from '@/components/ui/settings-layout';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { useConfig, type KeyProvider } from '@/contexts/ConfigContext';
+import { useSummaryConfig, type KeyProvider } from '@/contexts/ConfigContext';
 import { ROW_SELECT } from '@/components/settings/settings-parts';
 import { providerLabel } from '@/components/settings/provider-data';
 import { SaveMark, withError } from '@/components/settings/summary-provider-parts';
@@ -46,7 +46,7 @@ export function ModelSettingsModal({
   modelConfig: propsModelConfig, setModelConfig: propsSetModelConfig, onSave,
   skipInitialFetch = false, layout = 'inline', autosave = false,
 }: ModelSettingsModalProps) {
-  const context = useConfig();
+  const context = useSummaryConfig();
   const shared = context?.modelConfig ?? propsModelConfig;
   const setShared = context?.setModelConfig ?? propsSetModelConfig;
   const refreshKeyStatus = context?.refreshProviderKeyStatus;

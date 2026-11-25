@@ -44,6 +44,8 @@ struct Schedule {
     #[serde(default)]
     exclude_audio: bool,
     last_success: Option<i64>,
+    #[serde(default)]
+    last_backup_audio_excluded: bool,
     last_failure: Option<i64>,
     last_error: Option<String>,
     incomplete_meetings: usize,
@@ -69,6 +71,7 @@ pub(crate) struct ScheduleStatus {
     running: bool,
     destination: Option<PathBuf>,
     last_success: Option<i64>,
+    last_backup_audio_excluded: bool,
     last_error: Option<String>,
     incomplete_meetings: usize,
     skipped_template_items: usize,
@@ -83,6 +86,7 @@ impl Schedule {
             enabled: true,
             exclude_audio: false,
             last_success: None,
+            last_backup_audio_excluded: false,
             last_failure: None,
             last_error: None,
             incomplete_meetings: 0,
@@ -245,6 +249,9 @@ pub(crate) async fn scheduled_backup_status(app: AppHandle) -> Result<ScheduleSt
             running: RUNNING.load(Ordering::Acquire),
             destination: schedule.as_ref().map(Schedule::folder),
             last_success: schedule.as_ref().and_then(|schedule| schedule.last_success),
+            last_backup_audio_excluded: schedule
+                .as_ref()
+                .is_some_and(|schedule| schedule.last_backup_audio_excluded),
             last_error: schedule
                 .as_ref()
                 .and_then(|schedule| schedule.last_error.clone()),
@@ -330,22 +337,29 @@ pub(crate) async fn set_scheduled_backups(
     let settings = settings_path(&app)?;
     tokio::task::spawn_blocking(move || {
         let _job = job;
-        let mut schedule =
-            read(&settings)?.ok_or("Choose a folder for scheduled backups first.")?;
-        if let Some(enabled) = enabled {
-            schedule.enabled = enabled;
-        }
-        if let Some(exclude_audio) = exclude_audio {
-            schedule.exclude_audio = exclude_audio;
-        }
-        schedule.last_failure = None;
-        schedule.last_error = None;
-        save(&settings, &schedule)
+        update_schedule(&settings, enabled, exclude_audio)
     })
     .await
     .map_err(|_| SETTINGS_ERROR)??;
     let _ = app.emit(CHANGED, ());
     Ok(())
+}
+
+fn update_schedule(
+    settings: &Path,
+    enabled: Option<bool>,
+    exclude_audio: Option<bool>,
+) -> Result<(), String> {
+    let mut schedule = read(settings)?.ok_or("Choose a folder for scheduled backups first.")?;
+    if let Some(enabled) = enabled {
+        schedule.enabled = enabled;
+        schedule.last_failure = None;
+        schedule.last_error = None;
+    }
+    if let Some(exclude_audio) = exclude_audio {
+        schedule.exclude_audio = exclude_audio;
+    }
+    save(settings, &schedule)
 }
 
 pub(crate) fn start(app: AppHandle) {
@@ -477,6 +491,7 @@ async fn run_backup(
 
     schedule.files.push(OwnedArchive { id, identity });
     schedule.last_success = Some(chrono::Utc::now().timestamp());
+    schedule.last_backup_audio_excluded = report.audio_excluded;
     schedule.last_failure = None;
     schedule.last_error = None;
     schedule.incomplete_meetings = report.incomplete_meetings.len();
@@ -554,6 +569,29 @@ mod tests {
         assert!(schedule.due(87400));
         schedule.enabled = false;
         assert!(!schedule.due(87400));
+    }
+
+    #[test]
+    fn changing_audio_exclusion_preserves_failure_until_enabled_is_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("schedule.json");
+        let mut schedule = Schedule::new(temp.path().to_owned());
+        schedule.last_failure = Some(100);
+        schedule.last_error = Some("Backup failed".into());
+        save(&settings, &schedule).unwrap();
+
+        update_schedule(&settings, None, Some(true)).unwrap();
+        let updated = read(&settings).unwrap().unwrap();
+        assert!(updated.enabled && updated.exclude_audio);
+        assert_eq!(updated.last_failure, Some(100));
+        assert_eq!(updated.last_error.as_deref(), Some("Backup failed"));
+        assert!(!updated.due(999));
+
+        update_schedule(&settings, Some(false), None).unwrap();
+        let updated = read(&settings).unwrap().unwrap();
+        assert!(!updated.enabled && updated.exclude_audio);
+        assert_eq!(updated.last_failure, None);
+        assert_eq!(updated.last_error, None);
     }
 
     #[test]

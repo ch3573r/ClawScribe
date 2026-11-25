@@ -227,7 +227,7 @@ test('a joined call keeps the saved devices and leaves a separate manual calenda
   const { useStartRecordingSession } = loadTsModule('src/hooks/useRecordingStart.ts', {
     react: hooks.react, '@/lib/meetingCalendar': links,
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ setIsMeetingActive: noop }) },
-    '@/contexts/ConfigContext': { useConfig: () => ({
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
       selectedDevices: { micDevice: 'Chosen input', systemDevice: 'Chosen output' }, devicePreferencesStatus: 'ready',
     }) },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ setStatus: noop }), RecordingStatus: { STARTING: 'starting' } },
@@ -510,7 +510,7 @@ test('capture starts before calendar lookup and a late match cannot bind the rep
     '@/lib/meetingCalendar': links,
     '@/services/recordingCalendarService': api,
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ setIsMeetingActive: noop }) },
-    '@/contexts/ConfigContext': { useConfig: () => config },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => config },
     '@/contexts/RecordingStateContext': { useRecordingState: () => state, RecordingStatus: { STARTING: 'starting', ERROR: 'error' } },
     '@/services/recordingService': { recordingService: { startRecordingWithDevices: (...args) => {
       calls.push(['start', ...args]);
@@ -568,7 +568,7 @@ test('sign-out during startup keeps a stale Microsoft calendar subject out of th
       resolveRecordingCalendar: () => assert.fail('Explicit selection must never start calendar lookup'),
     },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ setIsMeetingActive: noop }) },
-    '@/contexts/ConfigContext': { useConfig: () => ({ selectedDevices: { micDevice: null, systemDevice: null }, devicePreferencesStatus: 'ready' }) },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({ selectedDevices: { micDevice: null, systemDevice: null }, devicePreferencesStatus: 'ready' }) },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ setStatus: noop }), RecordingStatus: { STARTING: 'starting' } },
     '@/services/recordingService': { recordingService: { startRecordingWithDevices: (...args) => {
       calls.push(args);

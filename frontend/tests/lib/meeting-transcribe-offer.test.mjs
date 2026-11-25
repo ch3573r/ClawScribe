@@ -99,6 +99,19 @@ test('meeting without a folder explains that no recording is attached', () => {
   view.hooks.unmount();
 });
 
+test('a restored transcript without a recording folder shows missing audio without recovery actions', () => {
+  const view = panel({
+    audioStatus: 'missing',
+    meetingFolderPath: null,
+    transcripts: [{ id: 'restored-segment', text: 'Synthetic restored speech.' }],
+  });
+  const tree = view.render();
+  assert.match(text(tree), /Saved audio is unavailable\. You can still read and correct the transcript\./);
+  assert.doesNotMatch(text(tree), /recover|transcribe now|check again/i);
+  assert.equal(find(tree, 'TranscriptButtonGroup').props.audioAvailable, false);
+  view.hooks.unmount();
+});
+
 for (const props of [
   { transcripts: [{ id: 'segment-one', text: 'Synthetic speech.' }] },
   { usePagination: true, segments: [], totalCount: 12 },

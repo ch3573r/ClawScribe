@@ -2,7 +2,7 @@ import { useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { TranscriptSettings } from "@/components/TranscriptSettings";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useTranscriptionConfig } from "@/contexts/ConfigContext";
 
 type modalType = "modelSelector" | "errorAlert" | "chunkDropWarning";
 
@@ -31,7 +31,7 @@ export function SettingsModals({
   messages,
   onClose,
 }: SettingsModalsProps) {
-  const { transcriptModelConfig, setTranscriptModelConfig } = useConfig();
+  const { transcriptModelConfig, setTranscriptModelConfig } = useTranscriptionConfig();
 
   const previousFocus = useRef<HTMLElement | null>(null);
   const activeModal = modals.chunkDropWarning ? "chunkDropWarning"

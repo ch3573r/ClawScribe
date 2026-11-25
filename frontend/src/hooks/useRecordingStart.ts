@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useTranscriptionConfig } from '@/contexts/ConfigContext';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
 import Analytics from '@/lib/analytics';
@@ -71,7 +71,7 @@ function meetingTitleAt(timestamp: number): string {
 }
 
 export function useStartRecordingSession(setIsMeetingActive?: (active: boolean) => void) {
-  const { selectedDevices, devicePreferencesStatus, isSavingDevicePreferences } = useConfig();
+  const { selectedDevices, devicePreferencesStatus, isSavingDevicePreferences } = useTranscriptionConfig();
   const { setStatus, isRecording, isStarting, isStopping, isProcessing, isSaving } = useRecordingState();
 
   const start = useCallback(async (source: StartSource, requestId?: string, title?: string): Promise<string> => {

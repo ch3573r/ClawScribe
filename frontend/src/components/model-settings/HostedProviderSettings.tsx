@@ -29,28 +29,26 @@ export async function saveOpenAIAuthMode() {
 }
 
 export function useHostedProviderSettings(provider: ModelConfig['provider'], keyStatus: SecretStatus) {
-  const [draft, setDraft] = useState({ provider, value: '' });
+  const [draft, setDraft] = useState({ provider, value: '', revision: 0 });
   const [keyRevision, setKeyRevision] = useState(0);
-  const [draftRevision, setDraftRevision] = useState(0);
   const [publicCatalog, setPublicCatalog] = useState<{ models: string[]; loading: boolean; failed: boolean }>({
     models: [], loading: false, failed: false,
   });
   const key = draft.provider === provider ? draft.value : '';
+  const draftRevision = draft.provider === provider ? draft.revision : 0;
   const setKey = (value: string) => {
-    setDraft({ provider, value });
-    if (provider === 'openai') setDraftRevision(revision => revision + 1);
+    setDraft(previous => ({ provider, value, revision: previous.revision + 1 }));
   };
   useEffect(() => {
-    setDraft(previous => previous.provider === provider ? previous : { provider, value: '' });
+    setDraft(previous => previous.provider === provider ? previous : { provider, value: '', revision: 0 });
   }, [provider]);
 
   const keyedProvider = provider === 'openai' || provider === 'claude' || provider === 'groq' ? provider : undefined;
   const usable = hasUsableKey(key, keyStatus);
-  // OpenAI drafts are used only when the user requests verification.
-  const auto = keyedProvider === 'openai' ? keyStatus.stored && !key.trim() : !!keyedProvider && usable;
+  // Catalogs can load automatically with a stored key. Drafts require an explicit check.
+  const auto = !!keyedProvider && keyStatus.stored && (provider === 'openai' ? !key.trim() : draftRevision === 0);
   const scope = `${provider}:${keyStatus.stored}:${keyRevision}:${draftRevision}`;
-  const { catalog, refresh } = useModelCatalog(keyedProvider && CATALOG_COMMANDS[keyedProvider], scope, auto,
-    keyedProvider === 'openai' ? null : newKeyPayload(key));
+  const { catalog, refresh } = useModelCatalog(keyedProvider && CATALOG_COMMANDS[keyedProvider], scope, auto);
 
   const loadPublicCatalog = useCallback(async () => {
     setPublicCatalog(previous => ({ ...previous, loading: true, failed: false }));
@@ -68,7 +66,7 @@ export function useHostedProviderSettings(provider: ModelConfig['provider'], key
     if (usable && !keyProblem(key)) await refresh(newKeyPayload(key));
   };
   const markKeyChanged = () => {
-    setKey('');
+    setDraft({ provider, value: '', revision: 0 });
     setKeyRevision(revision => revision + 1);
   };
   const remove = async () => {

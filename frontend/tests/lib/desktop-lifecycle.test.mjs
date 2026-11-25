@@ -126,7 +126,7 @@ test('Home keeps recovery open for the next interrupted recording and clears its
     '@/components/ui/dialog': components('Dialog', 'DialogContent', 'DialogDescription', 'DialogFooter', 'DialogHeader', 'DialogTitle'),
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ status: 'idle' }), RecordingStatus: {} },
     '@/contexts/TranscriptContext': { useTranscripts: () => ({ transcripts: [] }) },
-    '@/contexts/ConfigContext': { useConfig: () => ({ transcriptModelConfig: {} }) },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({ transcriptModelConfig: {} }) },
     '@/hooks/usePermissionCheck': { usePermissionCheck: () => ({}) },
     '@/hooks/useModalState': { useModalState: () => ({ modelStartFailure: null }) },
     '@/hooks/useRecordingStart': { useRecordingStart: () => ({}) },

@@ -6,11 +6,11 @@ import { TranscriptionLanguage } from "@/components/settings/TranscriptionLangua
 import { TranscriptionOptions } from "@/components/settings/TranscriptionOptions";
 import { Button } from "@/components/ui/button";
 import { SettingsCard, SettingsColumns, SettingsRow, SettingsStack } from "@/components/ui/settings-layout";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useTranscriptionConfig } from "@/contexts/ConfigContext";
 
 // The Transcription settings page: engine and models on top, language and options beside custom vocabulary below.
 export function TranscriptionSettingsPage() {
-  const { transcriptModelConfig, setTranscriptModelConfig, transcriptConfigStatus, loadTranscriptConfig } = useConfig();
+  const { transcriptModelConfig, setTranscriptModelConfig, transcriptConfigStatus, loadTranscriptConfig } = useTranscriptionConfig();
   return (
     <SettingsStack wide>
       {transcriptConfigStatus === "ready" ? (

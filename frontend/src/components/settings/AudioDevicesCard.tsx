@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, type ReactNode } from "react";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useTranscriptionConfig } from "@/contexts/ConfigContext";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AudioDeviceSelect } from "@/components/AudioDeviceSelect";
@@ -42,7 +42,7 @@ function DeviceRow({ id, title, defaultLabel, emptyText, value, options, disable
 
 /** Microphone and system audio devices used for new recordings. */
 export function AudioDevicesCard({ selectedDevices, onDeviceChange, disabled = false, microphoneLevel }: AudioDevicesCardProps) {
-  const { audioDeviceInventory, devicePreferencesStatus, refreshDevicePreferences } = useConfig();
+  const { audioDeviceInventory, devicePreferencesStatus, refreshDevicePreferences } = useTranscriptionConfig();
   const { data, status, refresh } = audioDeviceInventory;
   useEffect(() => { void refresh(); }, [refresh]);
   const reload = () => {

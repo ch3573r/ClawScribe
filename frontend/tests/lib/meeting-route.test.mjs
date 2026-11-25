@@ -66,6 +66,16 @@ for (const incomplete of [false, true]) {
   });
 }
 
+test('a restored meeting with a successful recording outcome and no folder has no recovery warning', async t => {
+  const view = createView({ outcome: { audio_save_failed: false, transcription_incomplete: false } });
+  t.after(view.unmount);
+  view.render();
+  view.loadMetadata();
+  await flush();
+  assert.equal(view.content().meeting.folder_path, undefined);
+  assert.equal(view.render().props.children.some(child => child?.props?.role === 'alert'), false);
+});
+
 test('a summary that arrives after navigation cannot appear in or overwrite the next meeting', async () => {
   const view = createView();
   view.render();

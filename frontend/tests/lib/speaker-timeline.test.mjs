@@ -259,7 +259,7 @@ async function page(attribution, segments, updatedSegments, { playback, toastErr
       return 'synthetic/audio.wav';
     } },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({}) },
-    '@/contexts/ConfigContext': { useConfig: () => ({ modelConfig: {} }) },
+    '@/contexts/ConfigContext': { useSummaryConfig: () => ({ modelConfig: {} }) },
     '@/hooks/useSourceAttribution': { useSourceAttribution: () => attribution },
     '@/hooks/useAudioPlayer': { useAudioPlayer: () => audio },
     '@/hooks/meeting-details/useMeetingData': { useMeetingData: () => ({ transcripts: [], blockNoteSummaryRef: { current: null } }) },

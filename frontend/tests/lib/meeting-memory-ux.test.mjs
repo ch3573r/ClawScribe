@@ -14,7 +14,7 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
     '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsLoading:false,projectTagsError:null,...sidebar})},
     '@/contexts/ImportDialogContext':{useImportDialog:()=>({openImportDialog:sidebar.openImportDialog})},
     '@/contexts/RecordingStateContext':{useRecordingState:()=>({})},
-    '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'fixture',model:'fixture'}})},
+    '@/contexts/ConfigContext':{useSummaryConfig:()=>({modelConfig:{provider:'fixture',model:'fixture'}})},
     '@/components/LibraryBackup':{LibraryBackup:'backup'},'@/components/Knowledge/KnowledgeArchive':{KnowledgeArchive:'memory'},
     '@/components/Archive/ArchiveMeetingRows':{ArchiveMeetingRows:'archive-rows',useArchiveMetadata:()=>({metadata:sidebar.metadata??null,error:false,refresh:async()=>{}})},'@/components/Archive/ArchiveStorageButton':{ArchiveStorageButton:'storage'},
     '@/components/Archive/OpenMeetingActions':{OpenMeetingActions:'open-actions'},

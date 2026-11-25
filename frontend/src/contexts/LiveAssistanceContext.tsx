@@ -2,7 +2,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useSummaryConfig } from '@/contexts/ConfigContext';
 import { knowledgeService } from '@/services/knowledgeService';
 import { createLiveAssistanceStore } from '@/lib/live-assistance-state';
 
@@ -11,7 +11,7 @@ const LiveAssistanceContext = createContext<ReturnType<typeof createLiveAssistan
 /** Mounted once in RootLayout, outside route and panel lifetimes. */
 export function LiveAssistanceProvider({ children }: { children: ReactNode }) {
   const { status, subscribeLifecycle } = useRecordingState();
-  const { modelConfig } = useConfig();
+  const { modelConfig } = useSummaryConfig();
   const [owner] = useState(() => createLiveAssistanceStore({
     service: knowledgeService,
     listen: (event, callback) => listen<{ session_id?: string; recording_generation?: string; recording_mode?: string }>(event, message => callback(message.payload)),

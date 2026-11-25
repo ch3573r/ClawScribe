@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronDown, X } from "lucide-react";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useSummaryConfig } from "@/contexts/ConfigContext";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -32,7 +32,7 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
   initialMatches?: MatchScope;
   active?: boolean; meetings: { id: string; title: string; created_at?: string }[]; meetingTitles?: { id: string; title: string }[]; projectFilter: ProjectFilter; setProjectFilter?: (filter: ProjectFilter) => void; projectControl?: ReactNode;
 }) {
-  const { modelConfig } = useConfig();
+  const { modelConfig } = useSummaryConfig();
   const destination = classifySummaryProvider(modelConfig?.provider, {
     ollamaEndpoint: modelConfig?.ollamaEndpoint, customEndpoint: modelConfig?.customOpenAIEndpoint,
   });

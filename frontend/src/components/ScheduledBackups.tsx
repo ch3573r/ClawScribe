@@ -13,6 +13,7 @@ interface ScheduleStatus {
   running: boolean;
   destination: string | null;
   last_success: number | null;
+  last_backup_audio_excluded: boolean;
   last_error: string | null;
   incomplete_meetings: number;
   skipped_template_items: number;
@@ -108,12 +109,13 @@ export function ScheduledBackups({ disabled }: { disabled: boolean }) {
       {!status && !error && <p role="status" className="text-sm">Loading scheduled backup settings…</p>}
       {status && <>
         <div className="flex items-center gap-2">
-          <Switch id={excludeId} checked={excludeAudio} disabled={unavailable} onCheckedChange={checked => {
+          <Switch id={excludeId} aria-describedby={`${excludeId}-retention`} checked={excludeAudio} disabled={unavailable} onCheckedChange={checked => {
             if (status.destination) void change({ excludeAudio: checked });
             else setExcludeBeforeChoosingFolder(checked);
           }} />
           <label htmlFor={excludeId} className="text-sm">Exclude recording audio</label>
         </div>
+        <p id={`${excludeId}-retention`} className="text-sm text-muted-foreground">Older scheduled copies with audio rotate out after three new backups with audio excluded.</p>
         <p role="status" className="text-sm text-muted-foreground">
           {disabled ? 'Size estimate available when the library is idle.'
             : estimate !== null ? `Estimated size per backup is ${formatArchiveBytes(estimate)}.`
@@ -132,6 +134,7 @@ export function ScheduledBackups({ disabled }: { disabled: boolean }) {
           {status.running ? 'Saving a scheduled backup…' : status.last_success === null
             ? (status.enabled ? 'Waiting for the first backup.' : 'No scheduled backups saved yet.')
             : `Last saved ${new Date(status.last_success * 1000).toLocaleString()}.`}
+          {!status.running && status.last_backup_audio_excluded && ' The last backup does not include recording audio.'}
           {!status.running && status.incomplete_meetings > 0 && ` Incomplete audio in ${status.incomplete_meetings} meetings.`}
           {!status.running && status.skipped_template_items > 0 && ` Skipped ${status.skipped_template_items} template ${status.skipped_template_items === 1 ? 'item' : 'items'}.`}
           {!status.running && status.omitted_saved_live_answers > 0 && ` Excluded ${status.omitted_saved_live_answers} saved live ${status.omitted_saved_live_answers === 1 ? 'answer' : 'answers'}.`}

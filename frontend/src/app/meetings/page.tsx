@@ -17,7 +17,7 @@ import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useSummaryConfig } from "@/contexts/ConfigContext";
 import { LibraryBackup } from "@/components/LibraryBackup";
 import { ArchiveMeetingRows, useArchiveMetadata } from "@/components/Archive/ArchiveMeetingRows";
 import { ArchiveStorageButton } from "@/components/Archive/ArchiveStorageButton";
@@ -64,7 +64,7 @@ export default function MeetingsPage() {
   const router = useRouter();
   const { openImportDialog } = useImportDialog();
   const recording = useRecordingState();
-  const { modelConfig } = useConfig();
+  const { modelConfig } = useSummaryConfig();
   const {
     meetings,
     meetingsError,

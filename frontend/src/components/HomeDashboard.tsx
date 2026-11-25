@@ -23,7 +23,7 @@ import { RecordingModeSelect } from '@/components/RecordingModeSelect';
 import { UpcomingMeetings } from "@/components/UpcomingMeetings";
 import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useTranscriptionConfig } from "@/contexts/ConfigContext";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
 import { RecordingStatus, useRecordingState } from "@/contexts/RecordingStateContext";
 import {
@@ -97,7 +97,7 @@ export function HomeDashboard({
     isSavingDevicePreferences,
     refreshDevicePreferences,
     saveSelectedDevices,
-  } = useConfig();
+  } = useTranscriptionConfig();
   const { openImportDialog } = useImportDialog();
   const recordingState = useRecordingState();
   const router = useRouter();

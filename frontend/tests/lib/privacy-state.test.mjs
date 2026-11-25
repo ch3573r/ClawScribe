@@ -127,7 +127,7 @@ test('Privacy uses the shared recording mode and the current automatic destinati
       list_ical_sources: [],
       get_mcp_access: {},
     })[command] },
-    '@/contexts/ConfigContext': { useConfig: () => ({ isAutoSummary: true, modelConfig }) },
+    '@/contexts/ConfigContext': { useSummaryConfig: () => ({ isAutoSummary: true, modelConfig }) },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ recordingMode }) },
     '@/hooks/useSummaryDestination': { useSummaryDestination: (_active, config) => ({ destination: { provider: config.provider, approved } }) },
     '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ loaded: true, enabled: false }) },

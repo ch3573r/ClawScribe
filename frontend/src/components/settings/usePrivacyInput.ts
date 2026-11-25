@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useSummaryConfig } from "@/contexts/ConfigContext";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { useCloudTranscription } from "@/hooks/useCloudTranscription";
 import { useSummaryDestination } from "@/hooks/useSummaryDestination";
@@ -33,7 +33,7 @@ function useLoadable<T>(load: () => Promise<T>, tick: number): Loadable<T> {
 }
 
 export function usePrivacyInput(): PrivacyInput {
-  const { isAutoSummary, modelConfig } = useConfig();
+  const { isAutoSummary, modelConfig } = useSummaryConfig();
   const { recordingMode } = useRecordingState();
   const { destination, error: destinationError } = useSummaryDestination(isAutoSummary, modelConfig, isAutoSummary);
   const cloud = useCloudTranscription();

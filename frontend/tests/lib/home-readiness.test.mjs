@@ -117,7 +117,7 @@ function recordingSettings(t, { preferences, save }) {
       refreshBehaviorSettings: async () => behavior,
     },
     '@/contexts/ConfigContext': {
-      useConfig: () => ({ selectedDevices: preferred, devicePreferencesStatus: 'ready', saveSelectedDevices }),
+      useTranscriptionConfig: () => ({ selectedDevices: preferred, devicePreferencesStatus: 'ready', saveSelectedDevices }),
     },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ recordingMode: 'audio_only' }) },
     sonner: { toast: { error: message => calls.push(['error', message]), success: () => {} } },
@@ -218,7 +218,7 @@ test('Home can change a disconnected device without leaving the signal path', as
       recordingActionReason: state.status === 'error' ? 'Could not check audio devices'
         : preferred.micDevice === 'Unplugged mic (input)' ? 'Preferred microphone unavailable' : null,
     }) },
-    '@/contexts/ConfigContext': { useConfig: () => ({
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
       selectedDevices: preferred, selectedLanguage: 'auto', audioDeviceInventory: state, devicePreferencesStatus: 'ready',
       saveSelectedDevices: async devices => { savedDevices.push(devices); Object.assign(preferred, devices); },
     }) },

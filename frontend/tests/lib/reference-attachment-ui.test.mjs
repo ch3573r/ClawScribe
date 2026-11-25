@@ -133,7 +133,7 @@ test('Meeting memory attaches beside Sources and selects the imported file witho
   const {KnowledgeArchive}=loadTsModule('src/components/Knowledge/KnowledgeArchive.tsx',{
     ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
     'lucide-react':{ChevronDown:'down',X:'x'},
-    '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'ollama',model:'fixture'}})},
+    '@/contexts/ConfigContext':{useSummaryConfig:()=>({modelConfig:{provider:'ollama',model:'fixture'}})},
     '@/hooks/useKnowledgeSearch':{useKnowledgeSearch:scope=>({scope,documents:[],messages:[],selectedDocumentIds:[],selectImportedDocument:file=>imports.push(file)})},
     '@/services/knowledgeService':{knowledgeService:{indexStatus:async()=>({})}},
     '@/components/MeetingDetails/AttachReferenceButton':{AttachReferenceButton:'attach'},
@@ -171,7 +171,7 @@ function cornerChat(service, options = {}) {
     ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
     'react-dom':{createPortal:(children,container)=>jsx('portal',{children,container})},
     'lucide-react':{MessageSquare:'chat-icon',X:'close',ChevronDown:'down'},
-    '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{}})},
+    '@/contexts/ConfigContext':{useSummaryConfig:()=>({modelConfig:{}})},
     '@/hooks/useKnowledgeSearch':{useKnowledgeSearch},
     '@/hooks/useKnowledgeIndexStatus':{useKnowledgeIndexStatus:()=>({semanticReady:indexReady()})},
     '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsError:null,projectTagsLoading:false})},

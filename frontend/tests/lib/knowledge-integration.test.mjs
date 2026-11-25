@@ -83,7 +83,7 @@ function component(file, name, props, invoke) {
       }),
     },
     "@/contexts/ConfigContext": {
-      useConfig: () => ({
+      useSummaryConfig: () => ({
         modelConfig: { provider: "fixture", model: "fixture" },
       }),
     },

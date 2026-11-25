@@ -42,7 +42,7 @@ import {
 import { toast } from "sonner";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useSummaryConfig } from "@/contexts/ConfigContext";
 import { useResultNotes } from "@/hooks/useResultNotes";
 import { useLibrarySearch } from "@/hooks/useLibrarySearch";
 import { openMatchScope, savedPassageUrl, sourceLabel, supportsPersonalExcerpts, type SavedHit } from "@/lib/archive-search";
@@ -84,7 +84,7 @@ interface SidebarItem {
 
 const Sidebar: React.FC = () => {
   const router = useRouter();
-  const { modelConfig } = useConfig();
+  const { modelConfig } = useSummaryConfig();
   const pathname = usePathname();
   const {
     deleteTarget, setDeleteTarget,

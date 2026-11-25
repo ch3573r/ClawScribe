@@ -24,7 +24,7 @@ function card(t, { provider, language, recording = false }) {
     '@/components/ui/button': names('Button'),
     '@/components/ui/select': names('Select SelectContent SelectItem SelectTrigger SelectValue'),
     '@/components/ui/settings-layout': names('Meta SettingsCard SettingsRow'),
-    '@/contexts/ConfigContext': { useConfig: () => ({
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
       transcriptModelConfig: { provider }, selectedLanguage: language, setSelectedLanguage: value => changes.push(value),
     }) },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ isRecording: recording, isStarting: false, isStopping: false }) },

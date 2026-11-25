@@ -179,7 +179,7 @@ test('global Live provider connects once across subscribers and receives synchro
   const { LiveAssistanceProvider } = loadTsModule('src/contexts/LiveAssistanceContext.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ status: 'recording', subscribeLifecycle }) },
-    '@/contexts/ConfigContext': { useConfig: () => ({ modelConfig: { provider: 'custom-openai', model: 'selected-model' } }) },
+    '@/contexts/ConfigContext': { useSummaryConfig: () => ({ modelConfig: { provider: 'custom-openai', model: 'selected-model' } }) },
     '@tauri-apps/api/event': { listen: async (event, callback) => { subscriptions++; events.set(event, callback); return () => { released++; events.delete(event); }; } },
     '@/services/knowledgeService': { knowledgeService: {
       liveSnapshot: async () => liveSnapshot, liveSharing: async () => true, documentSharing: async () => false,

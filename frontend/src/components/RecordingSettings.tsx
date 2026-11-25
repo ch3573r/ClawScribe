@@ -14,7 +14,7 @@ import { usePlatform } from '@/hooks/usePlatform';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { setSourceAttribution } from '@/lib/sourceAttribution';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useTranscriptionConfig } from '@/contexts/ConfigContext';
 import { canEditLiveAudioSaving } from '@/lib/audioDevicePreferences';
 import { RecordingMode, useRecordingState } from '@/contexts/RecordingStateContext';
 import { errorText } from '@/lib/errorText';
@@ -39,7 +39,7 @@ interface RecordingSettingsProps {
 const UNSELECTED_RECORDING_MODE = '__unset_recording_mode__';
 
 export function RecordingSettings({ onSave }: RecordingSettingsProps) {
-  const { selectedDevices, saveSelectedDevices, devicePreferencesStatus, isSavingDevicePreferences } = useConfig();
+  const { selectedDevices, saveSelectedDevices, devicePreferencesStatus, isSavingDevicePreferences } = useTranscriptionConfig();
   const recording = useRecordingState();
   const { recordingMode } = recording;
   const audioOnly = recordingMode === 'audio_only';

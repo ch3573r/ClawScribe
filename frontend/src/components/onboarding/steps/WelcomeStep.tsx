@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 import { usePlatform } from '@/hooks/usePlatform';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useTranscriptionConfig } from '@/contexts/ConfigContext';
 import { SignalCheck } from '@/components/settings/SignalCheck';
 import { useSignalCheck } from '@/components/settings/useSignalCheck';
 
@@ -15,7 +15,7 @@ export function WelcomeStep({ onRecordAudio, finishing, error }: {
 }) {
   const { goNext } = useOnboarding();
   const windows = usePlatform() === 'windows';
-  const { selectedDevices, devicePreferencesStatus } = useConfig();
+  const { selectedDevices, devicePreferencesStatus } = useTranscriptionConfig();
   const feed = useSignalCheck(windows && devicePreferencesStatus === 'ready' && !finishing,
     selectedDevices.micDevice, selectedDevices.systemDevice);
 

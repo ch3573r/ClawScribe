@@ -13,13 +13,17 @@ test('the first scheduled backup can exclude audio and previews the selected siz
   const hooks = createHookHarness();
   t.after(hooks.unmount);
   const calls = [];
-  let status = { enabled: false, destination: null, exclude_audio: false };
+  let status = { enabled: false, destination: null, exclude_audio: false, last_success: null };
+  let onScheduleChanged;
   const { ScheduledBackups } = loadTsModule('src/components/ScheduledBackups.tsx', {
     react: { ...hooks.react, useId: () => 'field' },
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' },
     '@/components/ui/button': { Button: 'button' },
     '@/components/ui/switch': { Switch: 'switch' },
-    '@tauri-apps/api/event': { listen: async () => () => {} },
+    '@tauri-apps/api/event': { listen: async (_event, callback) => {
+      onScheduleChanged = callback;
+      return () => {};
+    } },
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push([command, args]);
       if (command === 'scheduled_backup_status') return status;
@@ -27,7 +31,7 @@ test('the first scheduled backup can exclude audio and previews the selected siz
         return { saved_audio_bytes: 65 * 1024, database_bytes: 1024, reference_bytes: 1024, partial: false, unavailable_folders: 0 };
       }
       assert.equal(command, 'choose_scheduled_backup_folder');
-      status = { enabled: true, destination: 'Backups', exclude_audio: args.excludeAudio };
+      status = { ...status, enabled: true, destination: 'Backups', exclude_audio: args.excludeAudio ?? status.exclude_audio };
     } },
   });
   const render = () => hooks.render(() => ScheduledBackups({ disabled: false }));
@@ -35,8 +39,13 @@ test('the first scheduled backup can exclude audio and previews the selected siz
   assert.match(copy(render()), /Estimated size per backup.*67 KiB/);
   nodes(render()).find(node => node.type === 'switch').props.onCheckedChange(true);
   assert.match(copy(render()), /Estimated size per backup.*2 KiB/);
+  assert.match(copy(render()), /Older scheduled copies with audio rotate out after three new backups/);
   await nodes(render()).find(node => node.type === 'button').props.onClick();
   await flush();
   assert.equal(calls.find(([command]) => command === 'choose_scheduled_backup_folder')[1].excludeAudio, true);
   assert.match(copy(render()), /Backups/);
+  status = { ...status, exclude_audio: false, last_success: 100, last_backup_audio_excluded: true };
+  onScheduleChanged();
+  await flush();
+  assert.match(copy(render()), /The last backup does not include recording audio/);
 });

@@ -134,7 +134,7 @@ test('Home modals have shared dialog titles, descriptions and controlled dismiss
     react: hooks.react,
     '@/components/TranscriptSettings': names('TranscriptSettings'),
     '@/components/ui/alert': names('Alert AlertDescription AlertTitle'),
-    '@/contexts/ConfigContext': { useConfig: () => ({}) },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({}) },
   });
   for (const name of ['modelSelector', 'errorAlert', 'chunkDropWarning']) {
     const closed = [];
