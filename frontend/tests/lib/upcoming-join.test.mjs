@@ -34,7 +34,7 @@ test('the call panel uses the selected appearance and answers only the displayed
   t.mock.method(globalThis, 'setTimeout', fn => { scheduled = fn; return 1; });
   t.mock.method(globalThis, 'clearTimeout', () => {});
   let pending = { provider: 'teams', key: 'active-prompt', eventTitle: 'Planning', retry: false };
-  const replies = [], themes = [], accents = [];
+  const replies = [], dismissals = [], themes = [], accents = [];
   const jsx = (type, props) => ({ type, props });
   const Prompt = loadTsModule('src/pages/call-recording-prompt.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
@@ -47,22 +47,39 @@ test('the call panel uses the selected appearance and answers only the displayed
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       if (command === 'recording_window_appearance') return { theme: 'dark', accent: 'violet' };
       if (command === 'get_pending_call_prompt') return pending;
+      if (command === 'dismiss_call_detection_prompt') {
+        dismissals.push(args.key);
+        pending = null;
+        return true;
+      }
       assert.equal(command, 'confirm_call_detection_prompt');
       replies.push(args.key);
       pending = null;
     } },
   }).default;
   const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node?.props ? [node, ...nodes(node.props.children)] : [];
-  const button = () => nodes(hooks.render(Prompt)).find(node => node.type === 'button');
-  assert.equal(button(), undefined);
+  const button = label => nodes(hooks.render(Prompt)).find(node => node.type === 'button' && node.props.children === label);
+  assert.equal(button('Record'), undefined);
   await flush();
-  button().props.onClick();
+  button('Record').props.onClick();
   assert.equal(themes.at(-1), 'dark');
   assert.equal(accents.at(-1), 'violet');
   assert.deepEqual(replies, ['active-prompt']);
   scheduled();
   await flush();
-  assert.equal(button(), undefined);
+  assert.equal(button('Record'), undefined);
+
+  pending = { provider: 'teams', key: 'next-prompt', eventTitle: null, retry: false };
+  scheduled();
+  await flush();
+  const decline = button('Not now');
+  assert.equal(decline.props.variant, 'outline');
+  decline.props.onClick();
+  decline.props.onClick();
+  await flush();
+  assert.deepEqual(dismissals, ['next-prompt']);
+  assert.equal(button('Not now'), undefined);
+  assert.deepEqual(replies, ['active-prompt']);
 });
 
 test('Upcoming opens plain Join independently and binds a double click to one unreviewed invitation', async t => {

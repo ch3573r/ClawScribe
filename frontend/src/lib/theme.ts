@@ -230,11 +230,8 @@ export interface AccentColor {
 
 export const DEFAULT_ACCENT_ID = "claw"
 
-// Each swatch is an explicit accent applied in BOTH light and dark, so the
-// choice always shows (no falling back to a theme default). Values are tuned to
-// read on light and dark backgrounds with the given foreground. "claw" is the
-// ClawScribe brand accent (the electric cyan-azure of the mark) and the default;
-// the rest stay so the accent picker keeps its full range.
+// Non-default swatches override the primary color in both themes. The Claw
+// swatch previews the brand accent; selecting it restores the stylesheet tokens.
 export const accentColors: AccentColor[] = [
   { id: "claw", name: "Claw", primary: "186 96% 50%", foreground: "195 70% 8%" },
   { id: "blue", name: "Blue", primary: "218 92% 56%", foreground: "0 0% 100%" },
@@ -256,13 +253,20 @@ export function getStoredAccentId(): string {
 
 export function applyAccent(id: string): void {
   if (typeof document === "undefined") return
-  const root = document.documentElement
-  const accent =
-    accentColors.find((a) => a.id === id) ??
-    accentColors.find((a) => a.id === DEFAULT_ACCENT_ID)!
-  root.style.setProperty("--primary", accent.primary)
-  root.style.setProperty("--primary-foreground", accent.foreground)
-  root.style.setProperty("--ring", accent.primary)
+  const { style } = document.documentElement
+  const accent = accentColors.find((a) => a.id === id)
+  if (!accent || id === DEFAULT_ACCENT_ID) {
+    for (const token of ["--primary", "--primary-foreground", "--ring", "--accent", "--accent-foreground"]) {
+      style.removeProperty(token)
+    }
+    return
+  }
+  const [hue, saturation] = accent.primary.split(" ")
+  style.setProperty("--primary", accent.primary)
+  style.setProperty("--primary-foreground", accent.foreground)
+  style.setProperty("--ring", accent.primary)
+  style.setProperty("--accent", `${hue} ${saturation} var(--selected-accent-lightness)`)
+  style.setProperty("--accent-foreground", `${hue} 45% var(--selected-accent-foreground-lightness)`)
 }
 
 export function setAccent(id: string): void {

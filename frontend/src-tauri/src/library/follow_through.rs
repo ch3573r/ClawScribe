@@ -522,15 +522,41 @@ pub(crate) async fn get_reviewed_follow_up_draft(
     })
 }
 
+/// A typed address limited to characters that cannot add mailto headers or
+/// further recipients (no `?`, `&`, `,`, `;`, whitespace or percent escapes).
+fn is_plain_email(address: &str) -> bool {
+    let Some((local, domain)) = address.split_once('@') else {
+        return false;
+    };
+    let label_ok = |label: &str| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    };
+    address.len() <= 254
+        && !local.is_empty()
+        && local.len() <= 64
+        && !local.starts_with('.')
+        && !local.ends_with('.')
+        && !local.contains("..")
+        && local
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._+'-".contains(c))
+        && domain.contains('.')
+        && domain.split('.').all(label_ok)
+}
+
 fn compose_uri(
     allowed: &[DraftRecipient],
     recipients: &[String],
+    manual: &[String],
     subject: &str,
     body: &str,
 ) -> Result<String, String> {
     let mut unique = HashSet::new();
-    if recipients.is_empty()
-        || recipients.len() > 25
+    if recipients.len() + manual.len() > 25
         || !recipients.iter().all(|email| {
             unique.insert(email.to_ascii_lowercase())
                 && allowed.iter().any(|person| person.email == *email)
@@ -538,6 +564,19 @@ fn compose_uri(
     {
         return Err("Select up to 25 currently confirmed attendee addresses.".into());
     }
+    if !manual.iter().all(|email| is_plain_email(email)) {
+        return Err("Enter valid email addresses separated by commas or semicolons.".into());
+    }
+    let recipients: Vec<String> = recipients
+        .iter()
+        .cloned()
+        .chain(
+            manual
+                .iter()
+                .filter(|email| unique.insert(email.to_ascii_lowercase()))
+                .cloned(),
+        )
+        .collect();
     if subject.trim().is_empty()
         || subject.chars().count() > 220
         || subject.chars().any(char::is_control)
@@ -576,6 +615,7 @@ pub(crate) async fn open_reviewed_follow_up_draft(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     recipients: Vec<String>,
+    manual_recipients: Option<Vec<String>>,
     subject: String,
     body: String,
 ) -> Result<(), String> {
@@ -583,6 +623,7 @@ pub(crate) async fn open_reviewed_follow_up_draft(
     let uri = compose_uri(
         &draft_recipients(link.as_ref()),
         &recipients,
+        manual_recipients.as_deref().unwrap_or_default(),
         &subject,
         &body,
     )?;
@@ -847,12 +888,46 @@ mod tests {
         let allowed = draft_recipients(Some(&link));
         let selected = vec!["present+project@example.com".to_string()];
         assert_eq!(allowed.len(), 1);
-        assert!(compose_uri(&allowed, &[], "Subject", "Body").is_err());
-        assert!(compose_uri(&allowed, &["absent@example.com".into()], "Subject", "Body").is_err());
-        assert!(compose_uri(&allowed, &selected, "Subject\r\nBcc: injected", "Body").is_err());
+        // Ad-hoc meetings may open a draft with no recipients.
+        assert!(compose_uri(&allowed, &[], &[], "Subject", "Body")
+            .unwrap()
+            .starts_with("mailto:?subject="));
+        let manual = compose_uri(
+            &allowed,
+            &[],
+            &["guest.name+team@example.org".into()],
+            "Subject",
+            "Body",
+        )
+        .unwrap();
+        assert!(manual.starts_with("mailto:guest.name%2Bteam@example.org?"));
+        for injected in [
+            "a@example.com?bcc=x@example.com",
+            "a@example.com,b@example.com",
+            "a b@example.com",
+            "a%40@example.com",
+            "a@example",
+            "a@-example.com",
+            "",
+        ] {
+            assert!(
+                compose_uri(&allowed, &[], &[injected.into()], "Subject", "Body").is_err(),
+                "{injected}"
+            );
+        }
+        assert!(compose_uri(
+            &allowed,
+            &["absent@example.com".into()],
+            &[],
+            "Subject",
+            "Body"
+        )
+        .is_err());
+        assert!(compose_uri(&allowed, &selected, &[], "Subject\r\nBcc: injected", "Body").is_err());
         let url = compose_uri(
             &allowed,
             &selected,
+            &[],
             "Review & decide",
             "Line one\nBcc: harmless",
         )

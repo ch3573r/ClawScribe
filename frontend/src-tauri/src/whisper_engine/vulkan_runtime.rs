@@ -10,8 +10,6 @@
 
 use std::sync::OnceLock;
 
-use super::acceleration::WhisperCompiledBackend;
-
 /// User-facing explanation when Whisper cannot run in this build.
 pub const VULKAN_RUNTIME_MISSING_MESSAGE: &str =
     "Whisper in this GPU build needs the Vulkan runtime, which isn't installed on this PC. \
@@ -32,18 +30,17 @@ pub enum VulkanRuntime {
 pub fn vulkan_runtime() -> VulkanRuntime {
     static PROBE: OnceLock<VulkanRuntime> = OnceLock::new();
     *PROBE.get_or_init(|| {
-        classify(
-            WhisperCompiledBackend::current() == WhisperCompiledBackend::Vulkan,
-            || {
-                let available = probe_loader();
-                if !available {
-                    log::warn!(
-                        "Vulkan loader (vulkan-1.dll) not found; Whisper is unavailable in this build"
-                    );
-                }
-                available
-            },
-        )
+        // Match build.rs exactly: every `vulkan` build delay-loads the loader,
+        // whichever backend a combined feature set reports first.
+        classify(cfg!(feature = "vulkan"), || {
+            let available = probe_loader();
+            if !available {
+                log::warn!(
+                    "Vulkan loader (vulkan-1.dll) not found; Whisper is unavailable in this build"
+                );
+            }
+            available
+        })
     })
 }
 
@@ -69,15 +66,42 @@ fn runtime_result(runtime: VulkanRuntime) -> Result<(), String> {
     }
 }
 
+/// ggml-vulkan creates its instance with Vulkan API 1.2.
+const REQUIRED_API_VERSION: u32 = (1 << 22) | (2 << 12);
+
+/// A loader older than 1.1 lacks exports that ggml-vulkan imports; the
+/// delay-load helper would then fail at the first such call.
+fn loader_supports(api_version: Option<u32>) -> bool {
+    api_version.is_some_and(|version| version >= REQUIRED_API_VERSION)
+}
+
 #[cfg(all(windows, feature = "vulkan"))]
 fn probe_loader() -> bool {
-    use windows::core::w;
-    use windows::Win32::System::LibraryLoader::{LoadLibraryExW, LOAD_LIBRARY_FLAGS};
+    use windows::core::{s, w};
+    use windows::Win32::System::LibraryLoader::{
+        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_FLAGS,
+    };
 
     // Same default search order the MSVC delay-load helper uses. The handle is
     // intentionally never freed so the delay-load helper reuses this module.
     // SAFETY: the argument is a static NUL-terminated wide string.
-    unsafe { LoadLibraryExW(w!("vulkan-1.dll"), None, LOAD_LIBRARY_FLAGS(0)) }.is_ok()
+    let Ok(module) = (unsafe { LoadLibraryExW(w!("vulkan-1.dll"), None, LOAD_LIBRARY_FLAGS(0)) })
+    else {
+        return false;
+    };
+    // SAFETY: valid module handle and static NUL-terminated export names.
+    let enumerate = unsafe { GetProcAddress(module, s!("vkEnumerateInstanceVersion")) };
+    let features2 = unsafe { GetProcAddress(module, s!("vkGetPhysicalDeviceFeatures2")) };
+    let (Some(enumerate), Some(_)) = (enumerate, features2) else {
+        return false;
+    };
+    type EnumerateInstanceVersion = unsafe extern "system" fn(*mut u32) -> i32;
+    // SAFETY: the export has the documented vkEnumerateInstanceVersion
+    // signature; it writes one u32 and returns a VkResult (0 = VK_SUCCESS).
+    let enumerate: EnumerateInstanceVersion = unsafe { std::mem::transmute(enumerate) };
+    let mut version = 0u32;
+    let result = unsafe { enumerate(&mut version) };
+    loader_supports((result == 0).then_some(version))
 }
 
 #[cfg(not(all(windows, feature = "vulkan")))]
@@ -105,6 +129,15 @@ mod tests {
         let err = runtime_result(runtime).unwrap_err();
         assert!(err.contains("Vulkan runtime"));
         assert!(err.contains("Parakeet"));
+    }
+
+    #[test]
+    fn loaders_older_than_vulkan_1_2_are_rejected() {
+        assert!(!loader_supports(None));
+        assert!(!loader_supports(Some(1 << 22)));
+        assert!(!loader_supports(Some((1 << 22) | (1 << 12) | 200)));
+        assert!(loader_supports(Some(REQUIRED_API_VERSION)));
+        assert!(loader_supports(Some((1 << 22) | (3 << 12) | 250)));
     }
 
     #[test]

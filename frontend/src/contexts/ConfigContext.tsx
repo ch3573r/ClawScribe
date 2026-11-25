@@ -3,7 +3,7 @@
 import { UNCONFIGURED_SUMMARY_MODEL, DEFAULT_PARAKEET_MODEL } from '@/constants/modelDefaults';
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode, useRef } from 'react';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
-import { configService, ModelConfig } from '@/services/configService';
+import { configService, customOpenAIModelFields, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import { NO_SECRET, withRefreshedKeyStatus, withoutSecrets, type SecretStatus } from '@/lib/secret-key';
 import { loadBehaviorSettings, mirrorLegacyBehavior, refreshBehaviorSettings } from '@/lib/behaviorSettings';
@@ -215,49 +215,18 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
           if (data.provider === 'custom-openai') {
             try {
               const customConfig = await configService.getCustomOpenAIConfig();
-              if (customConfig) {
-                // Merge custom config fields into modelConfig
-                console.log('[ConfigContext] Loading custom OpenAI config:', {
-                  endpoint: customConfig.endpoint,
-                  model: customConfig.model,
-                });
-                const resolvedModel = customConfig.model || data.model || '';
-                setModelConfig(prev => ({
-                  ...prev,
-                  provider: data.provider,
-                  model: resolvedModel || prev.model,
-                  whisperModel: data.whisperModel || prev.whisperModel,
-                  customOpenAIEndpoint: customConfig.endpoint,
-                  customOpenAIModel: customConfig.model,
-                  customOpenAIKeyStatus: customConfig.apiKeyStatus,
-                  maxTokens: customConfig.maxTokens,
-                  contextWindow: customConfig.contextWindow,
-                  temperature: customConfig.temperature,
-                  topP: customConfig.topP,
-                }));
-
-                // Seed per-provider model cache from DB
-                if (resolvedModel) {
-                  const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
-                  map[data.provider] = resolvedModel;
-                  localStorage.setItem('providerModelMap', JSON.stringify(map));
-                }
-
-                return; // Early return
-              }
+              Object.assign(data, customOpenAIModelFields(customConfig));
+              data.model = customConfig?.model || data.model;
             } catch (err) {
               console.error('[ConfigContext] Failed to fetch custom OpenAI config:', err);
             }
           }
 
-          // For non-custom-openai providers, just set base config
           setModelConfig(prev => ({
             ...prev,
-            provider: data.provider,
+            ...data,
             model: data.model || prev.model,
             whisperModel: data.whisperModel || prev.whisperModel,
-            ollamaEndpoint: data.ollamaEndpoint,
-            apiKeyStatus: data.apiKeyStatus,
           }));
 
           // Seed per-provider model cache from DB

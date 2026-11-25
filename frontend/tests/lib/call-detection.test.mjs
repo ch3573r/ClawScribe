@@ -73,7 +73,12 @@ function app(options = {}) {
   render();
   return {
     render, hooks, prefs, state, statuses, starts, answers, toasts, dismissed, confirmed, failures, corePushed, navigation,
-    emit: async (name, payload) => { await handlers.get(name)({ payload }); await flush(); },
+    emit: async (name, payload, fallback = payload) => {
+      if (name === 'call-detection-prompt') options.pendingPrompt = fallback ?? null;
+      if (name === 'call-detection-prompt-cleared') options.pendingPrompt = null;
+      await handlers.get(name)({ payload });
+      await flush();
+    },
     has: name => handlers.has(name), unlistened,
   };
 }
@@ -178,7 +183,7 @@ test('a call prompt asks first, goes through the core and goes away with the cal
   prompt.action.onClick();
   await flush();
   assert.deepEqual(window_.confirmed, ['room-a']);
-  await window_.emit('call-detection-prompt-cleared');
+  await window_.emit('call-detection-prompt-cleared', 'room-a');
   assert.equal(window_.dismissed.length >= 1, true);
   // An answer to a prompt that is no longer showing does nothing.
   prompt.action.onClick();
@@ -195,6 +200,32 @@ test('a failed automatic start offers to try again', async () => {
   assert.equal(prompt.title, 'Could not record the Microsoft Teams call');
   assert.equal(prompt.action.label, 'Try again');
   window_.hooks.unmount();
+});
+
+test('a native prompt produces no toast and a fallback prompt is only shown once', async t => {
+  const view = app();
+  t.after(view.hooks.unmount);
+  await flush();
+  // The native event is a change signal. The main window can only fetch toast fallbacks.
+  await view.emit('call-detection-prompt', { key: 'native', provider: 'teams', retry: false }, null);
+  assert.deepEqual(view.toasts, []);
+
+  const fallback = { key: 'fallback', provider: 'teams', retry: false };
+  await view.emit('call-detection-prompt', fallback);
+  await view.emit('call-detection-prompt', fallback);
+  assert.equal(view.toasts.length, 1);
+  assert.equal(view.toasts[0].duration, 20_000);
+});
+
+test('a delayed prompt snapshot cannot restore a dismissed toast', async t => {
+  const stale = deferred();
+  const view = app({ pendingPrompt: stale.promise });
+  t.after(view.hooks.unmount);
+  await flush();
+  await view.emit('call-detection-prompt-cleared', 'dismissed');
+  stale.resolve({ key: 'dismissed', provider: 'teams', retry: false });
+  await flush();
+  assert.deepEqual(view.toasts, []);
 });
 
 test('notices from the core say what happened to the call recording', async () => {

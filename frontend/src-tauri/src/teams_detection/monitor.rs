@@ -25,7 +25,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Runtime, WebviewWindow};
 
 use super::calls::{CallScan, CallWindow, Provider};
 use crate::library::calendar::CalendarLink;
@@ -111,6 +111,7 @@ fn desktop_teams_continuation(call: &CallWindow, active: &CallWindow) -> bool {
 struct Observed {
     call: CallWindow,
     misses: u8,
+    dismissed: bool,
     /// Which observation this is. A call remembered again gets a new serial, so
     /// a start decided on the earlier observation can tell it is out of date.
     serial: u64,
@@ -146,6 +147,7 @@ impl ObservedCalls {
             Observed {
                 call: call.clone(),
                 misses: 0,
+                dismissed: false,
                 serial,
             },
         );
@@ -196,8 +198,15 @@ pub struct Prompt {
     pub call: CallWindow,
     serial: u64,
     key: String,
+    surface: Option<PromptSurface>,
     /// True when an automatic start failed and the user may try again.
     pub retry: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptSurface {
+    Native,
+    Toast,
 }
 
 /// What the rest of the app looks like to the monitor.
@@ -358,6 +367,11 @@ impl Tracker {
                 .seen
                 .serial(&call.key)
                 .is_some_and(|serial| serial > baseline)
+            || self.seen.calls.values().any(|observed| {
+                observed.dismissed
+                    && observed.serial > baseline
+                    && same_observed_call(&observed.call, call)
+            })
         {
             return Decision::Nothing;
         }
@@ -380,7 +394,8 @@ impl Tracker {
                 self.prompt = Some(Prompt {
                     call: call.clone(),
                     serial,
-                    key: self.prompt_key(call, serial),
+                    key: uuid::Uuid::new_v4().to_string(),
+                    surface: None,
                     retry: false,
                 });
                 Decision::Prompt
@@ -430,13 +445,6 @@ impl Tracker {
         }
     }
 
-    fn prompt_key(&self, call: &CallWindow, serial: u64) -> String {
-        self.join.as_ref().map_or_else(
-            || format!("{}-{serial}", call.key),
-            |join| format!("{}-{serial}", join.id),
-        )
-    }
-
     /// Whether a start decided earlier may still go ahead. An automatic start
     /// needs automatic mode; one the user confirmed needs only that detection is
     /// still on for the call's app.
@@ -460,6 +468,18 @@ impl Tracker {
     pub fn confirm(&mut self, key: &str) -> Option<(CallWindow, u64, u64)> {
         let prompt = self.prompt.take_if(|prompt| prompt.key == key)?;
         Some((prompt.call, prompt.serial, self.revision))
+    }
+
+    fn dismiss(&mut self, key: &str) -> bool {
+        let Some(prompt) = self.prompt.take_if(|prompt| prompt.key == key) else {
+            return false;
+        };
+        // Keep the observation until the call ends, including if Windows
+        // reports the same identified Teams room in a different window.
+        if let Some(observed) = self.seen.calls.get_mut(&prompt.call.key) {
+            observed.dismissed = true;
+        }
+        true
     }
 
     /// The recording this call started is running; remember it for stopping.
@@ -491,7 +511,8 @@ impl Tracker {
             self.prompt = Some(Prompt {
                 call: call.clone(),
                 serial,
-                key: self.prompt_key(call, serial),
+                key: uuid::Uuid::new_v4().to_string(),
+                surface: None,
                 retry: true,
             });
         }
@@ -565,6 +586,29 @@ impl Tracker {
                 .map(|join| join.link.subject().unwrap_or("Untitled event").into()),
         })
     }
+
+    fn select_prompt_surface(&mut self, key: &str, surface: PromptSurface) -> Option<PromptView> {
+        let prompt = self.prompt.as_mut()?;
+        if prompt.key != key || prompt.surface.is_some() {
+            return None;
+        }
+        prompt.surface = Some(surface);
+        self.prompt_view()
+    }
+
+    fn toast_prompt(&self) -> Option<PromptView> {
+        self.prompt()
+            .filter(|prompt| prompt.surface == Some(PromptSurface::Toast))?;
+        self.prompt_view()
+    }
+
+    fn native_prompt(&self, key: &str) -> Option<PromptView> {
+        let prompt = self.prompt()?;
+        if prompt.key != key || prompt.surface == Some(PromptSurface::Toast) {
+            return None;
+        }
+        self.prompt_view()
+    }
 }
 
 /// The prompt waiting for an answer, if any.
@@ -598,13 +642,8 @@ fn sync_prompt<R: Runtime>(
     {
         let _ = app.emit("join-recording-changed", ());
     }
-    match &after {
-        Some(view) => {
-            let _ = app.emit("call-detection-prompt", view.clone());
-        }
-        None => {
-            let _ = app.emit("call-detection-prompt-cleared", ());
-        }
+    if let Some(previous) = before {
+        let _ = app.emit("call-detection-prompt-cleared", previous.key);
     }
     crate::tray::update_tray_menu(app);
     prompt_window::refresh(app);
@@ -877,6 +916,19 @@ pub(crate) async fn confirm_prompt<R: Runtime>(app: &AppHandle<R>, key: &str) {
     begin(app, call, serial, revision, true).await;
 }
 
+fn dismiss_prompt<R: Runtime>(app: &AppHandle<R>, key: &str) -> bool {
+    let before = {
+        let mut tracker = tracker();
+        let before = tracker.prompt_view();
+        if !tracker.dismiss(key) {
+            return false;
+        }
+        before
+    };
+    sync_prompt(app, before, None);
+    true
+}
+
 // ── Commands ──────────────────────────────────────────────────────────────
 
 /// The settings the core holds, or `None` when it has none yet (the window then
@@ -904,8 +956,16 @@ pub fn set_call_detection_settings<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn get_pending_call_prompt() -> Option<PromptView> {
-    pending_prompt()
+pub fn get_pending_call_prompt<R: Runtime>(window: WebviewWindow<R>) -> Option<PromptView> {
+    if window.label() == prompt_window::LABEL {
+        let url = window.url().ok()?;
+        let key = url
+            .query_pairs()
+            .find_map(|(name, value)| (name == "key").then_some(value))?;
+        tracker().native_prompt(&key)
+    } else {
+        tracker().toast_prompt()
+    }
 }
 
 #[tauri::command]
@@ -915,6 +975,11 @@ pub async fn confirm_call_detection_prompt<R: Runtime>(
 ) -> Result<(), String> {
     confirm_prompt(&app, &key).await;
     Ok(())
+}
+
+#[tauri::command]
+pub fn dismiss_call_detection_prompt<R: Runtime>(app: AppHandle<R>, key: String) -> bool {
+    dismiss_prompt(&app, &key)
 }
 
 #[cfg(test)]
@@ -957,6 +1022,123 @@ mod tests {
         idle: true,
         recording: false,
     };
+
+    #[test]
+    fn dismissing_a_prompt_keeps_the_call_suppressed_until_it_ends() {
+        let mut tracker = Tracker::new(settings(Mode::Prompt, false));
+        let call = meet();
+        let active = snapshot(std::slice::from_ref(&call), &[&call.window], &[]);
+        let revision = tracker.revision();
+        assert_eq!(
+            tracker.observe(revision, Some(&active), IDLE),
+            Decision::Prompt
+        );
+        let key = tracker.prompt_view().unwrap().key;
+
+        assert!(!tracker.dismiss("another-prompt"));
+        assert!(tracker.dismiss(&key));
+        assert!(tracker.prompt_view().is_none());
+        assert!(tracker.confirm(&key).is_none());
+        tracker.observe(revision, None, IDLE);
+        assert_eq!(
+            tracker.observe(revision, Some(&active), IDLE),
+            Decision::Nothing
+        );
+
+        let ended = snapshot(&[], &[], &[]);
+        for _ in 0..MISSES_TO_END {
+            tracker.observe(revision, Some(&ended), IDLE);
+        }
+        assert_eq!(
+            tracker.observe(revision, Some(&active), IDLE),
+            Decision::Prompt
+        );
+        assert!(!tracker.dismiss(&key));
+    }
+
+    #[test]
+    fn a_dismissed_teams_room_stays_suppressed_in_a_different_window() {
+        let mut tracker = Tracker::new(CallSettings {
+            mode: Mode::Prompt,
+            ..Default::default()
+        });
+        let first = CallWindow {
+            teams_room: Some([1; 32]),
+            ..call(Provider::Teams, "window-a", "key-a")
+        };
+        let moved = CallWindow {
+            teams_room: Some([1; 32]),
+            ..call(Provider::Teams, "window-b", "key-b")
+        };
+        let revision = tracker.revision();
+        let scan = snapshot(&[first], &["window-a"], &[]);
+        assert_eq!(
+            tracker.observe(revision, Some(&scan), IDLE),
+            Decision::Prompt
+        );
+        let key = tracker.prompt_view().unwrap().key;
+        assert!(tracker.dismiss(&key));
+        let scan = snapshot(&[moved], &["window-b"], &[]);
+        assert_eq!(
+            tracker.observe(revision, Some(&scan), IDLE),
+            Decision::Nothing
+        );
+    }
+
+    #[test]
+    fn only_one_presentation_is_selected_for_each_prompt() {
+        for (selected, other) in [
+            (PromptSurface::Native, PromptSurface::Toast),
+            (PromptSurface::Toast, PromptSurface::Native),
+        ] {
+            let mut tracker = Tracker::new(settings(Mode::Prompt, false));
+            let revision = tracker.revision();
+            let call = meet();
+            let scan = snapshot(std::slice::from_ref(&call), &[&call.window], &[]);
+            assert_eq!(
+                tracker.observe(revision, Some(&scan), IDLE),
+                Decision::Prompt
+            );
+            let key = tracker.prompt_view().unwrap().key;
+            assert!(tracker.toast_prompt().is_none());
+            assert!(tracker.native_prompt("stale-key").is_none());
+            assert!(tracker
+                .select_prompt_surface("stale-key", selected)
+                .is_none());
+            assert!(tracker.select_prompt_surface(&key, selected).is_some());
+            assert!(tracker.select_prompt_surface(&key, other).is_none());
+            assert_eq!(
+                tracker.toast_prompt().is_some(),
+                selected == PromptSurface::Toast
+            );
+            assert_eq!(
+                tracker.native_prompt(&key).is_some(),
+                selected == PromptSurface::Native
+            );
+            assert!(tracker.dismiss(&key));
+            assert!(tracker.select_prompt_surface(&key, other).is_none());
+        }
+    }
+
+    #[test]
+    fn closing_an_older_prompt_cannot_dismiss_a_retry() {
+        let mut tracker = Tracker::new(settings(Mode::Prompt, false));
+        let call = meet();
+        let revision = tracker.revision();
+        let scan = snapshot(std::slice::from_ref(&call), &[&call.window], &[]);
+        assert_eq!(
+            tracker.observe(revision, Some(&scan), IDLE),
+            Decision::Prompt
+        );
+        let first = tracker.prompt_view().unwrap().key;
+        let (call, serial, revision) = tracker.confirm(&first).unwrap();
+        tracker.start_failed(&call, serial, revision, true);
+        let retry = tracker.prompt_view().unwrap();
+        assert!(retry.retry);
+        assert_ne!(retry.key, first);
+        assert!(!tracker.dismiss(&first));
+        assert!(tracker.dismiss(&retry.key));
+    }
 
     #[test]
     fn settings_keep_the_listed_order_and_each_app_once() {

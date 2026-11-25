@@ -11,10 +11,10 @@ import { ReviewedActions } from './ReviewedActions';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { formatArchiveDate } from '@/lib/archive-review';
 import type { FollowUpDestination } from '@/lib/meeting-follow-through';
-import { FollowUpEmail } from './FollowUpEmail';
+import { FollowUpEmail, type FollowUpEmailDraft } from './FollowUpEmail';
 import { SavedSeriesReview } from './SeriesPreparation';
 
-export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFinishEditing, onChange, duration, segmentCount, disabled, getMarkdown, onOpenFolder, attendance, initialActionId, initialSeriesOpen, seriesDestination }: {
+export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFinishEditing, onChange, duration, segmentCount, disabled, getMarkdown, onOpenFolder, attendance, initialActionId, initialSeriesOpen, seriesDestination, emailDraft }: {
   meeting: { id: string; created_at: string; folder_path?: string | null };
   title: string; isEditing: boolean; onStartEditing: () => void; onFinishEditing: () => void;
   onChange: (title: string) => void; duration?: number; segmentCount: number; disabled: boolean;
@@ -23,6 +23,7 @@ export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFin
   initialActionId?: string | null;
   initialSeriesOpen?: boolean;
   seriesDestination?: FollowUpDestination | null;
+  emailDraft?: FollowUpEmailDraft | null;
 }) {
   const [actionsOpen, setActionsOpen] = useState(!!initialActionId);
   const [seriesOpen, setSeriesOpen] = useState(!!initialSeriesOpen);
@@ -68,6 +69,6 @@ export function MeetingHeader({ meeting, title, isEditing, onStartEditing, onFin
     <ReviewedActions key={meeting.id} open={actionsOpen} onOpenChange={setActionsOpen} meetingId={meeting.id} targetActionId={initialActionId}
       getMarkdown={getMarkdown} onReturnFocus={() => overflowRef.current?.focus()} />
     {seriesOpen && <SavedSeriesReview meetingId={meeting.id} close={() => { setSeriesOpen(false); overflowRef.current?.focus(); }} />}
-    {emailOpen && <FollowUpEmail meetingId={meeting.id} close={() => setEmailOpen(false)} />}
+    {emailOpen && <FollowUpEmail meetingId={meeting.id} initialDraft={emailDraft} close={() => setEmailOpen(false)} />}
   </header>;
 }

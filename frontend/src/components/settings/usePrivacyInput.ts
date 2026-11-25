@@ -3,7 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfig } from "@/contexts/ConfigContext";
+import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { useCloudTranscription } from "@/hooks/useCloudTranscription";
+import { useSummaryDestination } from "@/hooks/useSummaryDestination";
 import { useWebhookSettings } from "@/hooks/useWebhookSettings";
 import { getExportDestinations } from "@/lib/exportDestinations";
 import type { Loadable, PrivacyInput } from "@/lib/privacy";
@@ -31,7 +33,9 @@ function useLoadable<T>(load: () => Promise<T>, tick: number): Loadable<T> {
 }
 
 export function usePrivacyInput(): PrivacyInput {
-  const { isAutoSummary } = useConfig();
+  const { isAutoSummary, modelConfig } = useConfig();
+  const { recordingMode } = useRecordingState();
+  const { destination } = useSummaryDestination(isAutoSummary, modelConfig, isAutoSummary);
   const cloud = useCloudTranscription();
   const webhook = useWebhookSettings();
   const [tick, setTick] = useState(0);
@@ -107,11 +111,14 @@ export function usePrivacyInput(): PrivacyInput {
   }, tick);
   const semanticSearch = useLoadable(async () => (await knowledgeService.modelStatus()).enabled, tick);
   return {
-    recording,
+    recording: recording.status === "ready" && recordingMode === "audio_only"
+      ? { status: "ready", value: { ...recording.value, saveAudio: true } }
+      : recording,
     transcription: cloud.loaded ? transcription : { status: "loading" },
     cloudTranscription: cloud.enabled,
     summary,
     autoSummary: isAutoSummary,
+    automaticSummaryApproved: destination?.approved === true && summary.status === "ready" && destination.provider === summary.value.provider,
     liveSharing,
     microsoft,
     confluenceRest,

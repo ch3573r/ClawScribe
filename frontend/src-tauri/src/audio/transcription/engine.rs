@@ -58,6 +58,8 @@ pub enum LiveModelFailure {
     Downloading,
     LoadFailed,
     UnsupportedProvider,
+    /// Whisper in a Vulkan build needs the Vulkan runtime, which is missing.
+    VulkanRuntimeMissing,
 }
 
 impl LiveModelFailure {
@@ -67,6 +69,7 @@ impl LiveModelFailure {
             Self::Downloading => "downloading",
             Self::LoadFailed => "load_failed",
             Self::UnsupportedProvider => "unsupported_provider",
+            Self::VulkanRuntimeMissing => "vulkan_runtime_missing",
         };
         format!("live_model:{kind}")
     }

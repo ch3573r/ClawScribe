@@ -11,10 +11,12 @@ interface Appearance {
   accent: string | null;
 }
 
+const CHECK_FAILED = 'Could not check the call. You can also answer from the tray.';
+
 export default function CallRecordingPrompt() {
   const [prompt, setPrompt] = useState<CallPrompt | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [appearance, setAppearance] = useState<Appearance | null>(null);
   const answering = useRef(false);
 
@@ -43,12 +45,12 @@ export default function CallRecordingPrompt() {
         const next = await invoke<CallPrompt | null>('get_pending_call_prompt');
         if (!disposed) {
           setPrompt(next);
-          setError(false);
+          setError(current => current === CHECK_FAILED ? null : current);
         }
       } catch {
         if (!disposed) {
           setPrompt(null);
-          setError(true);
+          setError(CHECK_FAILED);
         }
       }
       if (!disposed) timer = setTimeout(refresh, 1000);
@@ -57,14 +59,16 @@ export default function CallRecordingPrompt() {
     return () => { disposed = true; clearTimeout(timer); };
   }, []);
 
-  async function confirm(key: string) {
+  async function answer(key: string, dismiss: boolean) {
     if (answering.current) return;
     answering.current = true;
     setBusy(true);
+    setError(null);
     try {
-      await invoke('confirm_call_detection_prompt', { key });
+      await invoke(dismiss ? 'dismiss_call_detection_prompt' : 'confirm_call_detection_prompt', { key });
+      setPrompt(null);
     } catch {
-      setError(true);
+      setError(dismiss ? 'Could not dismiss the prompt. Try again.' : 'Could not start recording. You can also answer from the tray.');
     } finally {
       answering.current = false;
       setBusy(false);
@@ -80,9 +84,12 @@ export default function CallRecordingPrompt() {
       {prompt && <>
         <h1 className="font-semibold">{prompt.retry ? 'Could not start recording' : `${CALL_PROVIDERS[prompt.provider]} call detected`}</h1>
         <p className="line-clamp-2 break-words text-sm">{prompt.eventTitle ? `Is this the call for “${prompt.eventTitle}”?` : 'Start recording this call?'}</p>
-        <Button disabled={busy} onClick={() => void confirm(prompt.key)}>{prompt.retry ? 'Try again' : 'Record'}</Button>
+        <div className="flex gap-2">
+          <Button disabled={busy} onClick={() => void answer(prompt.key, false)}>{prompt.retry ? 'Try again' : 'Record'}</Button>
+          <Button variant="outline" disabled={busy} onClick={() => void answer(prompt.key, true)}>Not now</Button>
+        </div>
       </>}
-      {error && <p role="alert" className="text-sm text-destructive">Could not check the call. You can also answer from the tray.</p>}
+      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     </main>
   </>;
 }

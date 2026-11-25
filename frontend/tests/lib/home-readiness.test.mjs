@@ -9,6 +9,52 @@ const devices = [
 ];
 const inventory = { devices, defaultMicrophone: 'Desk mic', defaultOutput: null };
 
+test('focus refreshes device and live readiness without hiding the previous results', async t => {
+  const previousWindow = globalThis.window;
+  const window = globalThis.window = new EventTarget();
+  const deviceHooks = createHookHarness();
+  const liveHooks = createHookHarness();
+  t.after(() => {
+    deviceHooks.unmount();
+    liveHooks.unmount();
+    globalThis.window = previousWindow;
+  });
+  const deviceRefresh = deferred();
+  const liveRefresh = deferred();
+  const ready = { provider: 'parakeet', hostedBatchProvider: null, modelIssue: null };
+  let deviceReads = 0, liveReads = 0;
+  const { useAudioDeviceInventory } = loadTsModule('src/hooks/useAudioDeviceInventory', {
+    react: deviceHooks.react,
+    '@tauri-apps/api/core': { invoke: () => ++deviceReads === 1 ? Promise.resolve(inventory) : deviceRefresh.promise },
+  });
+  const { useLiveTranscriptionReadiness } = loadTsModule('src/hooks/useLiveTranscriptionReadiness', {
+    react: liveHooks.react,
+    '@tauri-apps/api/core': { invoke: () => ++liveReads === 1 ? Promise.resolve(ready) : liveRefresh.promise },
+    '@tauri-apps/api/event': { listen: async () => () => {} },
+  });
+  const renderDevice = () => deviceHooks.render(useAudioDeviceInventory);
+  const renderLive = (model = 'default') => liveHooks.render(() => useLiveTranscriptionReadiness(true, 'parakeet', model));
+  renderLive();
+  await renderDevice().refresh();
+  await flush();
+  assert.equal(renderDevice().data, inventory);
+  assert.equal(renderLive().data, ready);
+
+  window.dispatchEvent(new Event('focus'));
+  assert.equal(deviceReads, 2);
+  assert.equal(liveReads, 2);
+  assert.equal(renderDevice().status, 'ready');
+  assert.equal(renderDevice().data, inventory);
+  assert.equal(renderLive().data, ready);
+  assert.equal(renderLive('different-model').data, null, 'another model needs its own result');
+
+  deviceRefresh.resolve({ ...inventory, devices: [] });
+  liveRefresh.reject(new Error('Fixture readiness failure'));
+  await flush();
+  assert.equal(renderDevice().data.devices.length, 0);
+  assert.equal(renderLive('different-model').error, true);
+});
+
 test('a preferred device can disappear without changing the saved preference', () => {
   const { audioSourceReadiness } = loadTsModule('src/lib/audioDevicePreferences');
   assert.equal(audioSourceReadiness(inventory, 'Input', 'Headset (input)'), 'preferred_unavailable');
@@ -31,6 +77,7 @@ test('start remediation uses native error codes, not words in raw error text', (
   assert.equal(liveModelStartFailure('live_model:missing'), 'missing');
   assert.equal(liveModelStartFailure('live_model:load_failed'), 'load_failed');
   assert.equal(liveModelStartFailure('live_model:unsupported_provider'), 'unsupported_provider');
+  assert.equal(liveModelStartFailure('live_model:vulkan_runtime_missing'), 'vulkan_runtime_missing');
   assert.equal(liveModelStartFailure('live_model:unknown'), null);
 });
 

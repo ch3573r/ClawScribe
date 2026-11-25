@@ -10,6 +10,7 @@ const text = node => typeof node === 'string' || typeof node === 'number' ? Stri
   : node && typeof node === 'object' ? [node.props?.title, node.props?.description, node.props?.children].map(text).join('') : '';
 
 const KEY = 'synthetic-placeholder-key-0001';
+const { customOpenAIModelFields } = loadTsModule('src/services/configService');
 
 // ---- useCommitField and useSaveFeedback -------------------------------------------------
 
@@ -164,7 +165,7 @@ test('See everything in Privacy opens the Privacy tab', () => {
 
 // ---- Model settings: immediate-save mode versus the explicit Save button ----------------
 
-function modalHarness({ provider = 'claude', stored = false, onSave, catalogResponse, autosave = true, model = 'claude-sonnet-5' } = {}) {
+function modalHarness({ provider = 'claude', stored = false, onSave, catalogResponse, autosave = true, model = 'claude-sonnet-5', responses = {}, skipInitialFetch = true } = {}) {
   const hooks = createHookHarness();
   const calls = [];
   // The core never returns a stored key: the settings only know whether one is stored.
@@ -180,6 +181,7 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' },
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push([command, args]);
+      if (Object.hasOwn(responses, command)) return responses[command];
       if (command === 'get_anthropic_models') return catalogResponse ? catalogResponse() : [{ id: 'claude-sonnet-5' }];
       if (command === 'get_groq_models') return [];
       if (command === 'codex_get_config') return {};
@@ -203,7 +205,7 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
     '@/components/ui/popover': { Popover: 'popover', PopoverContent: 'popover-content', PopoverTrigger: 'popover-trigger' },
     '@/components/ui/command': { Command: 'command', CommandEmpty: 'command-empty', CommandGroup: 'command-group', CommandInput: 'command-input', CommandItem: 'command-item', CommandList: 'command-list' },
     '@/components/settings/SecretKeyControl': { SecretKeyControl: 'secret-key-control', SecretKeyRow: 'secret-key-row' },
-    '@/services/configService': { configService: { clearApiKey: async () => {}, clearCustomOpenAIApiKey: async () => {}, getCustomOpenAIConfig: async () => null } },
+    '@/services/configService': { configService: { clearApiKey: async () => {}, clearCustomOpenAIApiKey: async () => {}, getCustomOpenAIConfig: async () => null }, customOpenAIModelFields },
     '@/components/settings/settings-parts': { NoteRow: 'note-row', ROW_SELECT: 'w-60' },
     '@/components/settings/summary-provider-parts': {
       CommitInputRow: 'commit-input-row', CopyCommandRow: 'copy-command-row', SaveMark: 'save-mark',
@@ -215,12 +217,99 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
   const { ModelSettingsModal } = loadTsModule('src/components/ModelSettingsModal.tsx', mocks);
   const saves = [];
   const props = {
-    modelConfig: config, setModelConfig: context.setModelConfig, skipInitialFetch: true, autosave,
+    modelConfig: config, setModelConfig: context.setModelConfig, skipInitialFetch, autosave,
     onSave: onSave ?? (async next => { saves.push(next); }),
   };
   const render = () => hooks.render(() => ModelSettingsModal(props));
   return { hooks, calls, saves, context, render };
 }
+
+const customOpenAI = {
+  endpoint: 'http://gateway.example.com/v1', model: 'fixture-model', apiKeyStatus: { stored: true, hint: null },
+  maxTokens: 255, contextWindow: 16384, temperature: 0, topP: 0.5,
+  timeoutSeconds: 150, organization: 'fixture-org', project: 'fixture-project',
+  allow_unencrypted: true, destination_problem: 'Fixture destination warning',
+};
+
+test('ConfigContext hydrates the stored compatible provider fields together', async t => {
+  const hooks = createHookHarness();
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null, setItem() {} } });
+  t.after(() => {
+    if (previousStorage) Object.defineProperty(globalThis, 'localStorage', previousStorage);
+    else delete globalThis.localStorage;
+  });
+  const invoke = async command => ({
+    api_get_model_config: { provider: 'custom-openai', model: 'old-model', whisperModel: 'large-v3' },
+    api_get_custom_openai_config: customOpenAI,
+  })[command] ?? null;
+  const core = { invoke };
+  const { ConfigProvider } = loadTsModule('src/contexts/ConfigContext.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@tauri-apps/api/core': core,
+    '@tauri-apps/api/event': { listen: async () => () => {} },
+    '@/hooks/useAudioDeviceInventory': { useAudioDeviceInventory: () => ({}) },
+    '@/hooks/useRecordingDevicePreferences': { useRecordingDevicePreferences: () => ({}) },
+    '@/lib/behaviorSettings': { loadBehaviorSettings: async () => ({ language: 'auto' }) },
+  });
+  t.after(() => hooks.unmount());
+  const render = () => hooks.render(() => ConfigProvider({})).props.value.modelConfig;
+  render(); await flush();
+  const config = render();
+  assert.equal(config.model, customOpenAI.model);
+  for (const field of ['timeoutSeconds', 'organization', 'project', 'allow_unencrypted', 'destination_problem']) {
+    assert.equal(config[field], customOpenAI[field], field);
+  }
+});
+
+test('fetched compatible provider settings survive a rerender and an unrelated autosave', async () => {
+  const app = modalHarness({ skipInitialFetch: false, responses: {
+    api_get_model_config: { provider: 'custom-openai', model: customOpenAI.model, whisperModel: 'large-v3' },
+    api_get_custom_openai_config: customOpenAI,
+  } });
+  try {
+    app.render(); await flush(); app.render(); await flush();
+    const tree = app.render();
+    const http = nodes(tree).find(node => node.type === 'http-opt-in');
+    assert.equal(http.props.destinationProblem, customOpenAI.destination_problem);
+    assert.equal(http.props.checked, true);
+    const model = nodes(tree).find(node => node.type === 'commit-input-row' && node.props.value === customOpenAI.model);
+    assert.ok(model, 'the model row uses the fetched compatible settings');
+    await model.props.onCommit('another-model');
+    const saved = app.calls.find(([command]) => command === 'api_save_custom_openai_config')?.[1];
+    assert.ok(saved);
+    for (const field of ['timeoutSeconds', 'organization', 'project', 'temperature']) assert.equal(saved[field], customOpenAI[field]);
+    assert.equal(saved.allowUnencrypted, true);
+  } finally { app.hooks.unmount(); }
+});
+
+test('Codex preview checks the stored setup without writing it and disables sign-out when signed out', async () => {
+  const responses = {
+    codex_get_config: { processing: { codex: { model: 'fixture-codex', timeoutSeconds: 900 } } },
+    codex_check_installation: { found: true, authStatus: 'unauthenticated' },
+    codex_list_models: [{ id: 'fixture-codex', displayName: 'Fixture Codex', isDefault: true }],
+  };
+  const app = modalHarness({ stored: true, responses });
+  const button = label => nodes(app.render()).find(node => node.type === 'button' && text(node) === label);
+  try {
+    app.render(); await flush();
+    nodes(app.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('codex');
+    app.render(); await flush(); app.render();
+    const codexCalls = () => app.calls.map(([command]) => command).filter(command => command.startsWith('codex_'));
+    assert.deepEqual(codexCalls(), ['codex_get_config']);
+    assert.equal(button('Sign in with ChatGPT').props.disabled, true);
+    assert.equal(button('Check again').props.disabled, true);
+    button('Check again').props.onClick();
+    await flush();
+    assert.deepEqual(codexCalls(), ['codex_get_config']);
+    button('Use Codex').props.onClick();
+    await flush(); app.render(); await flush();
+    assert.ok(codexCalls().includes('codex_check_installation'));
+    assert.ok(!codexCalls().includes('codex_save_config'));
+    assert.equal(button('Sign in with ChatGPT').props.disabled, false);
+    assert.equal(button('Sign out').props.disabled, true);
+  } finally { app.hooks.unmount(); }
+});
 
 test('choosing another provider only previews it; the saved provider stays in use until the user switches', async () => {
   const app = modalHarness({ provider: 'claude', stored: true });

@@ -973,6 +973,7 @@ pub fn run() {
             teams_detection::monitor::set_call_detection_settings,
             teams_detection::monitor::get_pending_call_prompt,
             teams_detection::monitor::confirm_call_detection_prompt,
+            teams_detection::monitor::dismiss_call_detection_prompt,
             teams_detection::monitor::join::join_and_record,
             teams_detection::monitor::join::cancel_join_recording,
             teams_detection::monitor::join::get_join_recording,

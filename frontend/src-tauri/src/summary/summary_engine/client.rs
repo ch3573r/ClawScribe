@@ -292,8 +292,12 @@ pub async fn force_shutdown_sidecar() -> Result<()> {
 
     if let Some(manager) = manager_opt {
         log::info!("Force shutting down sidecar for app exit");
-        // Call shutdown() directly - sends shutdown command and force kills after 3s
-        manager.shutdown().await?;
+        // shutdown() is bounded internally; this outer limit guarantees app
+        // exit can never wait on the helper indefinitely.
+        match tokio::time::timeout(std::time::Duration::from_secs(15), manager.shutdown()).await {
+            Ok(result) => result?,
+            Err(_) => log::error!("Local summary helper shutdown exceeded the exit limit"),
+        }
     }
 
     Ok(())

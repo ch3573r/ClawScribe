@@ -462,6 +462,12 @@ impl ModelState {
                 eprintln!("✓ Reached max_tokens limit");
                 break;
             }
+            // Stop at the context window and keep the text generated so far,
+            // instead of failing the next decode with no KV slot left.
+            if n_cur as u64 >= self.context_size as u64 {
+                eprintln!("✓ Reached the context window limit");
+                break;
+            }
 
             let token = sampler.as_mut().sample(&ctx, batch.n_tokens() - 1);
             sampler.as_mut().accept(token);

@@ -401,6 +401,7 @@ export default function PageContent({
         initialActionId={archiveAction === 'actions' ? actionId : null}
         initialSeriesOpen={archiveAction === 'series'}
         seriesDestination={series?.destination}
+        emailDraft={meetingData.details?.email}
         onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}
         duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
         disabled={summaryBusy}

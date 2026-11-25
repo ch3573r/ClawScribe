@@ -57,7 +57,7 @@ pub(crate) enum LiveIntent {
     Targeted,
     /// A recap of the window: use every finalized segment that fits.
     Summary,
-    /// Open questions across the window: every segment, questions favoured.
+    /// Open questions across the window: every segment that fits.
     OpenQuestions,
 }
 
@@ -82,26 +82,31 @@ pub(crate) fn intent(query: &str) -> LiveIntent {
         "ungeklärt",
         "unbeantwortet",
     ];
-    const SUMMARY: &[&str] = &[
-        "summar",
-        "recap",
-        "overview",
-        "what happened",
-        "what was discussed",
-        "so far",
+    // A recap needs both a summarising verb and a whole-window scope, so a
+    // targeted "summarize what Peter said about the budget" stays targeted.
+    const SUMMARY_VERB: &[&str] = &["summar", "recap", "zusammenfass", "überblick"];
+    const WINDOW_SCOPE: &[&str] = &[
         "last 10 minutes",
         "last ten minutes",
-        "zusammenfass",
-        "fasse",
-        "überblick",
-        "was wurde besprochen",
-        "bisher",
+        "so far",
+        "the conversation",
+        "the meeting",
+        "the discussion",
+        "everything",
         "letzten 10 minuten",
         "letzten zehn minuten",
+        "bisher",
+        "das gespräch",
+        "das meeting",
+        "die besprechung",
+        "alles",
     ];
+    let summarises = SUMMARY_VERB.iter().any(|verb| query.contains(verb))
+        || (query.contains("fasse ") && query.contains("zusammen"));
+    let whole_window = WINDOW_SCOPE.iter().any(|scope| query.contains(scope));
     if OPEN.iter().any(|needle| query.contains(needle)) {
         LiveIntent::OpenQuestions
-    } else if SUMMARY.iter().any(|needle| query.contains(needle)) {
+    } else if summarises && whole_window {
         LiveIntent::Summary
     } else {
         LiveIntent::Targeted
@@ -141,9 +146,9 @@ fn query_terms(query: &str) -> Vec<String> {
 
 /// Whole-word matches count double; a prefix match (for inflections such as
 /// "supplier"/"suppliers" or "Lieferant"/"Lieferanten") counts once.
-fn relevance(terms: &[String], text: &str, favour_questions: bool) -> usize {
+fn relevance(terms: &[String], text: &str) -> usize {
     let segment: Vec<String> = words(text).collect();
-    let mut score = terms
+    terms
         .iter()
         .map(|term| {
             if segment.iter().any(|word| word == term) {
@@ -156,11 +161,7 @@ fn relevance(terms: &[String], text: &str, favour_questions: bool) -> usize {
                 0
             }
         })
-        .sum::<usize>();
-    if favour_questions && text.contains('?') {
-        score += 3;
-    }
-    score
+        .sum::<usize>()
 }
 
 /// Every finalized segment of the rolling window in chronological order,
@@ -176,32 +177,46 @@ pub(crate) fn window(snapshot: &LiveSnapshot) -> Vec<Passage> {
         .collect()
 }
 
-/// Keep the newest window segments that fit `budget`, returned in
-/// chronological order. A recap of "the last 10 minutes" must lose the oldest
-/// speech first when the model budget cannot hold the whole window.
+/// Bytes reserved per row for the `preceding_question_tag` field that
+/// `build_prompt` may add (`,"preceding_question_tag":1024`).
+const CONTEXT_FIELD_RESERVE: usize = 32;
+
+/// Linear check that `rows` fit `budget` in one prompt, with room for the
+/// per-row context field.
+pub(crate) fn fits(question: &str, rows: &[Passage], budget: usize) -> Result<bool, String> {
+    let reserved = budget.saturating_sub(CONTEXT_FIELD_RESERVE * rows.len());
+    let (prompt, accepted) = super::answers::build_prompt(question, rows, "", reserved)?;
+    Ok(accepted.len() == rows.len() && prompt.len() <= reserved)
+}
+
+/// Keep the longest contiguous run of the newest window segments that fits
+/// `budget`, in chronological order. A recap of "the last 10 minutes" loses
+/// the oldest speech first and never leaves gaps inside the kept run.
 pub(crate) fn fit_newest(
-    snapshot: &LiveSnapshot,
     question: &str,
     window: &[Passage],
     budget: usize,
 ) -> Result<Vec<Passage>, String> {
-    let newest_first: Vec<Passage> = window.iter().rev().cloned().collect();
-    let (_, accepted, _) = build_prompt(snapshot, question, &newest_first, budget)?;
-    Ok(window
-        .iter()
-        .filter(|row| accepted.iter().any(|kept| kept.evidence == row.evidence))
-        .cloned()
-        .collect())
+    // Prompt size grows with the number of kept rows, so binary search the cut.
+    let (mut low, mut high) = (0usize, window.len());
+    while low < high {
+        let mid = (low + high + 1) / 2;
+        if fits(question, &window[window.len() - mid..], budget)? {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    Ok(window[window.len() - low..].to_vec())
 }
 
 pub(crate) fn lexical(snapshot: &LiveSnapshot, query: &str, limit: usize) -> Vec<Passage> {
     let terms = query_terms(query);
-    let favour_questions = intent(query) == LiveIntent::OpenQuestions;
     let mut ranked: Vec<_> = snapshot
         .segments
         .iter()
         .map(|segment| {
-            let score = relevance(&terms, &segment.text, favour_questions);
+            let score = relevance(&terms, &segment.text);
             (score, segment.sequence_id, segment)
         })
         .collect();
@@ -264,6 +279,51 @@ fn preceding_question(snapshot: &LiveSnapshot, row: &Passage) -> Option<Evidence
         .map(|segment| passage(snapshot, segment).evidence)
 }
 
+/// Serialize `rows` with their preceding-question context tags, or `None`
+/// when the result does not fit `budget`.
+fn assemble(
+    snapshot: &LiveSnapshot,
+    question: &str,
+    rows: &[Passage],
+    budget: usize,
+) -> Result<Option<(String, Vec<Passage>, Vec<Option<usize>>)>, String> {
+    let (prompt, accepted) = super::answers::build_prompt(question, rows, "", budget)?;
+    if accepted.len() != rows.len() {
+        return Ok(None);
+    }
+    let contexts: Vec<_> = accepted
+        .iter()
+        .map(|row| {
+            preceding_question(snapshot, row)
+                .and_then(|reference| {
+                    accepted
+                        .iter()
+                        .position(|source| source.evidence == reference)
+                })
+                .map(|index| index + 1)
+        })
+        .collect();
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&prompt).map_err(|_| "Invalid live evidence prompt")?;
+    for row in envelope["transcript_evidence"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        let index = row["tag"]
+            .as_str()
+            .and_then(|tag| tag.strip_prefix("[K"))
+            .and_then(|tag| tag.strip_suffix(']'))
+            .and_then(|tag| tag.parse::<usize>().ok())
+            .and_then(|tag| tag.checked_sub(1));
+        if let Some(context) = index.and_then(|index| contexts.get(index)) {
+            row["preceding_question_tag"] = serde_json::json!(context);
+        }
+    }
+    let prompt = envelope.to_string();
+    Ok((prompt.len() <= budget).then_some((prompt, accepted, contexts)))
+}
+
 /// Keep positional short-reply context atomic through the final byte budget.
 /// Reuse saved-answer serialization without changing its selection behavior.
 pub(crate) fn build_prompt(
@@ -282,6 +342,13 @@ pub(crate) fn build_prompt(
             })
         })
         .collect();
+    // Fast path: everything fits at once (the window path guarantees this).
+    // Avoids the quadratic incremental check below for large live windows.
+    if fits(question, passages, budget)? {
+        if let Some(result) = assemble(snapshot, question, passages, budget)? {
+            return Ok(result);
+        }
+    }
     let (mut prompt, mut selected) = super::answers::build_prompt(question, &[], "", budget)?;
     let mut contexts = vec![];
     let mut handled = vec![false; passages.len()];
@@ -389,6 +456,18 @@ mod tests {
             LiveIntent::Summary
         );
         assert_eq!(
+            intent("Summarize what Peter said about the budget"),
+            LiveIntent::Targeted
+        );
+        assert_eq!(
+            intent("Was hat Peter bisher zum Budget gesagt?"),
+            LiveIntent::Targeted
+        );
+        assert_eq!(
+            intent("Wer soll den Bericht verfassen?"),
+            LiveIntent::Targeted
+        );
+        assert_eq!(
             intent("Welche Fragen sind noch offen?"),
             LiveIntent::OpenQuestions
         );
@@ -411,8 +490,7 @@ mod tests {
         let snapshot = snapshot_of(segments);
         let window = window(&snapshot);
         assert_eq!(window.len(), 120);
-        let kept =
-            fit_newest(&snapshot, "Summarize the last 10 minutes", &window, 200_000).unwrap();
+        let kept = fit_newest("Summarize the last 10 minutes", &window, 200_000).unwrap();
         assert_eq!(
             kept.len(),
             120,
@@ -434,7 +512,7 @@ mod tests {
             .collect();
         let snapshot = snapshot_of(segments);
         let window = window(&snapshot);
-        let kept = fit_newest(&snapshot, "Summarize", &window, 4_000).unwrap();
+        let kept = fit_newest("Summarize", &window, 4_000).unwrap();
         assert!(!kept.is_empty() && kept.len() < 80);
         assert!(kept.last().unwrap().text.contains("item 80 "));
         let numbers: Vec<u32> = kept
@@ -453,6 +531,41 @@ mod tests {
     }
 
     #[test]
+    fn uneven_segments_keep_a_contiguous_newest_run() {
+        let mut segments = Vec::new();
+        for id in 1..=40u64 {
+            let text = if id == 38 {
+                format!("Item {id} {}", "long detail ".repeat(60))
+            } else {
+                format!("Item {id} short.")
+            };
+            segments.push(segment(id, &text));
+        }
+        let snapshot = snapshot_of(segments);
+        let window = window(&snapshot);
+        let kept = fit_newest("Summarize", &window, 3_000).unwrap();
+        let ids: Vec<u64> = kept
+            .iter()
+            .map(|p| {
+                p.text
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .trim_end_matches('.')
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(*ids.last().unwrap(), 40);
+        for pair in ids.windows(2) {
+            assert_eq!(pair[1], pair[0] + 1, "no gaps inside the kept run");
+        }
+        // The final prompt accepts exactly the fitted set.
+        let (_, selected, _) = build_prompt(&snapshot, "Summarize", &kept, 3_000).unwrap();
+        assert_eq!(selected.len(), kept.len());
+    }
+
+    #[test]
     fn stopwords_do_not_drive_lexical_ranking() {
         let snapshot = snapshot_of(vec![
             segment(1, "The supplier contract is approved by legal."),
@@ -465,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn word_boundaries_and_question_boost_shape_ranking() {
+    fn word_boundaries_shape_ranking() {
         let snapshot = snapshot_of(vec![
             segment(1, "We still need a cat sitter for the office."),
             segment(2, "Category planning continues next week."),
@@ -477,8 +590,6 @@ mod tests {
             cat[0].text.contains("cat sitter"),
             "substring matches must not outrank words"
         );
-        let open = lexical(&snapshot, "List open questions about the budget", 1);
-        assert_eq!(open[0].text, "Who approves the budget?");
     }
     #[test]
     fn bounded_live_retrieval_keeps_a_short_reply_with_its_source_question() {

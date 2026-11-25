@@ -38,11 +38,7 @@ impl Invitation {
         let end = chrono::DateTime::parse_from_rfc3339(end)
             .map_err(|_| "The event end time is unavailable.")?
             .timestamp_millis();
-        if end <= now
-            || start >= end
-            || link.source() != CalendarSource::Microsoft
-            || link.is_reviewed()
-        {
+        if end <= now || start >= end || link.is_reviewed() {
             return Err("Choose a current Teams invitation from Upcoming.".into());
         }
         let wait = (end - now).min(WAIT_MS);
@@ -203,6 +199,17 @@ pub(crate) fn cancel_microsoft_pending<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+fn prepare_invitation(
+    url: &str,
+    link: CalendarLink,
+    end: &str,
+) -> Result<(url::Url, Invitation), String> {
+    let url = url::Url::parse(url).map_err(|_| "Invalid Teams meeting link.")?;
+    let room = teams_room(&url).ok_or("Unsupported Teams meeting link.")?;
+    let invitation = Invitation::new(link.normalized()?, room, end)?;
+    Ok((url, invitation))
+}
+
 #[tauri::command]
 pub async fn join_and_record<R: Runtime>(
     app: AppHandle<R>,
@@ -210,9 +217,7 @@ pub async fn join_and_record<R: Runtime>(
     link: CalendarLink,
     end: String,
 ) -> Result<(), String> {
-    let url = url::Url::parse(&url).map_err(|_| "Invalid Teams meeting link.")?;
-    let room = teams_room(&url).ok_or("Unsupported Teams meeting link.")?;
-    let mut join = Invitation::new(link.normalized()?, room, &end)?;
+    let (url, mut join) = prepare_invitation(&url, link, &end)?;
     let id = join.id.clone();
     let deadline = join.deadline;
     let (timeout, removed) = tokio::sync::oneshot::channel();
@@ -288,6 +293,64 @@ mod tests {
         idle: true,
         recording: false,
     };
+
+    #[test]
+    fn both_calendar_sources_can_prepare_only_allowlisted_teams_links() {
+        let now = Utc::now();
+        let end = (now + chrono::Duration::hours(1)).to_rfc3339();
+        for (source, source_id) in [("microsoft", None), ("ical", Some("calendar-feed"))] {
+            let link: CalendarLink = serde_json::from_value(serde_json::json!({
+                "source": source, "sourceId": source_id, "eventId": "selected",
+                "start": now.to_rfc3339(), "attendees": [{ "name": "Invitee" }]
+            }))
+            .unwrap();
+            for url in [
+                "https://teams.microsoft.com/meet/123456",
+                "https://teams.cloud.microsoft/l/meetup-join/19%3ameeting_example%40thread.v2/0",
+                "https://teams.live.com/meet/123456",
+            ] {
+                let (accepted, invitation) = prepare_invitation(url, link.clone(), &end).unwrap();
+                assert_eq!(accepted.as_str(), url);
+                assert_eq!(invitation.link.source(), link.source());
+                assert!(!invitation.link.is_reviewed());
+                assert_eq!(invitation.room, teams_room(&accepted).unwrap());
+            }
+            for url in [
+                "not a URL",
+                "https://meet.google.com/abc-defg-hij",
+                "https://teams.microsoft.com.example.com/meet/123456",
+                "http://teams.microsoft.com/meet/123456",
+                "https://user@teams.microsoft.com/meet/123456",
+                "https://teams.microsoft.com:444/meet/123456",
+                "https://teams.microsoft.com/",
+                "https://teams.microsoft.com/l/meetup-join/thread%2fother/0",
+            ] {
+                assert!(
+                    prepare_invitation(url, link.clone(), &end).is_err(),
+                    "{url}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ical_still_requires_a_valid_source_and_current_unreviewed_invitation() {
+        let now = Utc::now();
+        let end = (now + chrono::Duration::hours(1)).to_rfc3339();
+        let url = "https://teams.microsoft.com/meet/123456";
+        for (source_id, reviewed, event_end) in [
+            (None, false, end.as_str()),
+            (Some("calendar-feed"), true, end.as_str()),
+            (Some("calendar-feed"), false, "2020-01-01T00:00:00Z"),
+        ] {
+            let link = serde_json::from_value(serde_json::json!({
+                "source": "ical", "sourceId": source_id, "eventId": "selected",
+                "start": now.to_rfc3339(), "reviewed": reviewed,
+            }))
+            .unwrap();
+            assert!(prepare_invitation(url, link, event_end).is_err());
+        }
+    }
 
     fn invitation() -> Invitation {
         let now = Utc::now();
@@ -463,6 +526,29 @@ mod tests {
         tracker.reserve_join(join).unwrap();
         tracker.launch_join(&id, Some(baseline), || Ok(())).unwrap();
         id
+    }
+
+    #[test]
+    fn dismissing_a_calendar_prompt_skips_that_call_and_keeps_the_invitation() {
+        let mut tracker = Tracker::new(CallSettings::default());
+        arm(&mut tracker, &snapshot(vec![]));
+        let scan = snapshot(vec![call("desktop Teams", None)]);
+        assert_eq!(
+            tracker.observe(tracker.revision(), Some(&scan), IDLE),
+            Decision::Prompt
+        );
+        let key = tracker.prompt_view().unwrap().key;
+        assert!(tracker.dismiss(&key));
+        assert!(tracker.prompt_view().is_none());
+        assert_eq!(
+            tracker.observe(tracker.revision(), Some(&scan), IDLE),
+            Decision::Nothing
+        );
+        let matching = snapshot(vec![call("new matching window", Some([1; 32]))]);
+        assert!(matches!(
+            tracker.observe(tracker.revision(), Some(&matching), IDLE),
+            Decision::Start { .. }
+        ));
     }
 
     #[test]

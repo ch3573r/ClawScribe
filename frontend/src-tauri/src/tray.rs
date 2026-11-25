@@ -79,7 +79,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
         "settings" => {
             focus_main_window(app);
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.eval("window.location.assign('/settings')");
+                let _ = window.eval("if (typeof window.openSettings === 'undefined') window.location.assign('/settings'); else window.openSettings?.();");
             }
         }
         "check_updates" => check_updates_handler(app),

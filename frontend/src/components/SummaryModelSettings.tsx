@@ -7,7 +7,7 @@ import { toast } from 'sonner';
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
 import { SettingsCard } from '@/components/ui/settings-layout';
 import { readSecretStatus, withoutSecrets } from '@/lib/secret-key';
-import type { CustomOpenAIConfig } from '@/services/configService';
+import { customOpenAIModelFields, type CustomOpenAIConfig } from '@/services/configService';
 
 interface SummaryModelSettingsProps {
   refetchTrigger?: number; // Change this to trigger refetch
@@ -27,20 +27,8 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
         if (data.provider === 'custom-openai') {
           try {
             const customConfig = await invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config');
-            if (customConfig) {
-              data.customOpenAIEndpoint = customConfig.endpoint || null;
-              data.customOpenAIModel = customConfig.model || null;
-              data.customOpenAIKeyStatus = readSecretStatus(customConfig.apiKeyStatus);
-              data.maxTokens = customConfig.maxTokens || null;
-              data.contextWindow = customConfig.contextWindow || null;
-              data.temperature = customConfig.temperature || null;
-              data.topP = customConfig.topP || null;
-              data.timeoutSeconds = customConfig.timeoutSeconds || null;
-              data.organization = customConfig.organization || null;
-              data.project = customConfig.project || null;
-              // For custom-openai, model field should match customOpenAIModel
-              data.model = customConfig.model || data.model;
-            }
+            Object.assign(data, customOpenAIModelFields(customConfig));
+            data.model = customConfig?.model || data.model;
           } catch (err) {
             console.error('Failed to fetch custom OpenAI config:', err);
           }

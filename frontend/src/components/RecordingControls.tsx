@@ -192,7 +192,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   }, [isRecording, isPaused, isResuming]);
 
   useEffect(() => {
-    let unsubscribes: (() => void)[] = [];
+    const unsubscribes: (() => void)[] = [];
+    let disposed = false;
 
     const setupListeners = async () => {
       try {
@@ -200,6 +201,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         const transcriptErrorUnsubscribe = await listen(
           'transcript-error',
           (event) => {
+            if (disposed) return;
             console.error("Transcription error received:");
             const errorMessage = event.payload as string;
 
@@ -211,11 +213,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             }
           },
         );
+        if (disposed) return transcriptErrorUnsubscribe();
+        unsubscribes.push(transcriptErrorUnsubscribe);
 
         // Transcription error listener - handles structured error objects with actionable flag
         const transcriptionErrorUnsubscribe = await listen(
           'transcription-error',
           (event) => {
+            if (disposed) return;
             console.error("Transcription error received:");
 
             let errorMessage: string;
@@ -240,10 +245,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           },
         );
 
-        unsubscribes = [
-          transcriptErrorUnsubscribe,
-          transcriptionErrorUnsubscribe,
-        ];
+        if (disposed) return transcriptionErrorUnsubscribe();
+        unsubscribes.push(transcriptionErrorUnsubscribe);
       } catch {
         console.error("Failed to set up recording event listeners:");
       }
@@ -252,11 +255,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     setupListeners();
 
     return () => {
-      unsubscribes.forEach((unsubscribe) => {
-        if (unsubscribe && typeof unsubscribe === 'function') {
-          unsubscribe();
-        }
-      });
+      disposed = true;
+      unsubscribes.forEach(unsubscribe => unsubscribe());
     };
   }, [onTranscriptionError]);
 
@@ -418,6 +418,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button variant="ghost" size="icon"
+                        aria-label="Stop recording"
                         onClick={() => {
                           Analytics.trackButtonClick(
                             'stop_recording',

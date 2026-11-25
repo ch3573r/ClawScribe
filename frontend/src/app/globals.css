@@ -172,6 +172,8 @@
     --muted-foreground: 214 13% 42%;
     --accent: 193 90% 46%;
     --accent-foreground: 205 45% 9%;
+    --selected-accent-lightness: 84%;
+    --selected-accent-foreground-lightness: 16%;
     --destructive: 353 78% 46%;
     --destructive-text: 353 72% 40%;
     --destructive-foreground: 0 0% 100%;
@@ -244,6 +246,8 @@
     --muted-foreground: 214 10% 60%;
     --accent: 193 90% 50%;
     --accent-foreground: 205 50% 8%;
+    --selected-accent-lightness: 25%;
+    --selected-accent-foreground-lightness: 94%;
     --destructive: 0 62.8% 30.6%;
     --destructive-text: 353 88% 78%;
     --destructive-foreground: 0 0% 98%;

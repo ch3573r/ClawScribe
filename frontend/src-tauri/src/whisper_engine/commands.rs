@@ -399,6 +399,9 @@ pub(crate) async fn whisper_validate_model_ready_for(
             available_models[0].name.clone()
         };
 
+        if crate::whisper_engine::vulkan_runtime::ensure_whisper_runtime().is_err() {
+            return Err(LiveModelFailure::VulkanRuntimeMissing);
+        }
         engine.load_model(&model_name).await.map_err(|error| {
             log::warn!("Live model load failed: {error}");
             LiveModelFailure::LoadFailed

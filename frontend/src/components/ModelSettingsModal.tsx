@@ -40,36 +40,14 @@ import { SaveError, safeMessage, useSaveFeedback, type CommitResult } from '@/co
 import { CommitInputRow, CopyCommandRow, SaveMark, withError } from '@/components/settings/summary-provider-parts';
 import { providerLabel as summaryProviderLabel } from '@/components/settings/provider-data';
 import { SecretKeyControl, SecretKeyRow } from '@/components/settings/SecretKeyControl';
-import { configService, type CustomOpenAIConfig } from '@/services/configService';
+import { configService, customOpenAIModelFields, type CustomOpenAIConfig, type ModelConfig } from '@/services/configService';
 import {
   KEY_REQUIRED_FOR_NEW_ADDRESS, NO_SECRET, hasUsableKey, keyProblem, keyRequiredForAddress, newKeyPayload, readSecretStatus,
   removalNeedsConfirmation, withoutSecrets, type SecretStatus,
 } from '@/lib/secret-key';
 import type { KeyProvider } from '@/contexts/ConfigContext';
 
-export interface ModelConfig {
-  provider: 'ollama' | 'groq' | 'claude' | 'claude-code' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai' | 'codex';
-  model: string;
-  whisperModel: string;
-  /** A key the user has just typed, held only until it is saved. Never loaded from the core. */
-  apiKey?: string | null;
-  /** Whether the provider has a stored key, with a short hint. */
-  apiKeyStatus?: SecretStatus;
-  ollamaEndpoint?: string | null;
-  // Custom OpenAI fields
-  customOpenAIEndpoint?: string | null;
-  customOpenAIModel?: string | null;
-  /** A key just typed for the custom provider, held only until it is saved. */
-  customOpenAIApiKey?: string | null;
-  customOpenAIKeyStatus?: SecretStatus;
-  maxTokens?: number | null;
-  contextWindow?: number | null;
-  temperature?: number | null;
-  topP?: number | null;
-  timeoutSeconds?: number | null;
-  organization?: string | null;
-  project?: string | null;
-}
+export type { ModelConfig } from '@/services/configService';
 
 interface OllamaModel {
   name: string;
@@ -310,6 +288,7 @@ export function ModelSettingsModal({
     setPreviewConfig(next);
   }, []);
   const modelConfig = (autosave && previewConfig) || sharedModelConfig;
+  const codexPreview = previewConfig?.provider === 'codex';
   const setModelConfig = useCallback((next: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => {
     const preview = previewRef.current;
     if (preview) setPreview(typeof next === 'function' ? next(preview) : next);
@@ -343,8 +322,8 @@ export function ModelSettingsModal({
   const [ollamaNotInstalled, setOllamaNotInstalled] = useState<boolean>(false); // Track if Ollama is not installed
 
   // Custom OpenAI state
-  const [customDestinationProblem, setCustomDestinationProblem] = useState<string | null>(null);
-  const [customAllowUnencrypted, setCustomAllowUnencrypted] = useState(false);
+  const [customDestinationProblem, setCustomDestinationProblem] = useState<string | null>(modelConfig.destination_problem ?? null);
+  const [customAllowUnencrypted, setCustomAllowUnencrypted] = useState(modelConfig.allow_unencrypted ?? false);
   const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
   const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
   // A key typed for the custom provider; the stored one is only reported as a status.
@@ -356,7 +335,7 @@ export function ModelSettingsModal({
   const [customMaxTokens, setCustomMaxTokens] = useState<string>(modelConfig.maxTokens?.toString() || '');
   const [customTemperature, setCustomTemperature] = useState<string>(modelConfig.temperature?.toString() || '');
   const [customTopP, setCustomTopP] = useState<string>(modelConfig.topP?.toString() || '');
-  const [customTimeoutSeconds, setCustomTimeoutSeconds] = useState<string>(modelConfig.timeoutSeconds?.toString() || DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS);
+  const [customTimeoutSeconds, setCustomTimeoutSeconds] = useState<string>(modelConfig.timeoutSeconds?.toString() ?? '');
   const [customOrganization, setCustomOrganization] = useState<string>(modelConfig.organization || '');
   const [customProject, setCustomProject] = useState<string>(modelConfig.project || '');
   const [isCustomOpenAIAdvancedOpen, setIsCustomOpenAIAdvancedOpen] = useState<boolean>(false);
@@ -379,6 +358,8 @@ export function ModelSettingsModal({
     timeoutSeconds: 600,
   });
   const [codexStatus, setCodexStatus] = useState<CodexInstallationStatus | null>(null);
+  const codexSignedIn = Boolean(codexStatus?.accountEmail)
+    || ['authenticated', 'chatgpt', 'apikey', 'chatgptauthtokens'].includes(codexStatus?.authStatus?.toLowerCase() ?? '');
   const [codexLastResult, setCodexLastResult] = useState<string>('');
   const [isCodexBusy, setIsCodexBusy] = useState<boolean>(false);
   // Only the live app-server catalog is offered; a stale built-in list would hide new models.
@@ -470,9 +451,9 @@ export function ModelSettingsModal({
 
   // Custom OpenAI validation
   const isCustomOpenAIInvalid = modelConfig.provider === 'custom-openai' && (
+    modelConfig.customOpenAIEndpoint === undefined ||
     !customOpenAIEndpoint.trim() ||
-    !customOpenAIModel.trim() ||
-    !customTimeoutSeconds.trim()
+    !customOpenAIModel.trim()
   );
 
   // A stored key goes only to the address it was saved for: changing the
@@ -489,51 +470,27 @@ export function ModelSettingsModal({
     typedKeyProblem !== null;
 
   useEffect(() => {
+    if (skipInitialFetch) return;
+    let active = true;
     const fetchModelConfig = async () => {
-      if (skipInitialFetch) return;
-
       try {
         const data = await invoke<ModelConfig | null>('api_get_model_config');
-        if (data && data.provider !== null) {
-          setModelConfig({ ...withoutSecrets(data), apiKeyStatus: readSecretStatus(data.apiKeyStatus) });
-
-          // Sync ollamaEndpoint state with fetched config
-          if (data.ollamaEndpoint) {
-            setOllamaEndpoint(data.ollamaEndpoint);
-            // Don't set lastFetchedEndpoint here - it will be set after successful model fetch
-          }
-
-          // Fetch Custom OpenAI config if that's the active provider
-          if (data.provider === 'custom-openai') {
-            try {
-              const customConfig = await invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config');
-              if (customConfig) {
-                setCustomOpenAIEndpoint(customConfig.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
-                setCustomOpenAIModel(customConfig.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
-                setCustomAllowUnencrypted(customConfig.allow_unencrypted ?? false);
-                setCustomDestinationProblem(customConfig.destination_problem ?? null);
-                setCustomKeyStatus(readSecretStatus(customConfig.apiKeyStatus));
-                setSavedCustomEndpoint(customConfig.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
-                setCustomMaxTokens(customConfig.maxTokens?.toString() || '');
-                setCustomContextWindow(customConfig.contextWindow?.toString() || '8192');
-                setCustomTemperature(customConfig.temperature?.toString() || '');
-                setCustomTopP(customConfig.topP?.toString() || '');
-                setCustomTimeoutSeconds(customConfig.timeoutSeconds?.toString() || DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS);
-                setCustomOrganization(customConfig.organization || '');
-                setCustomProject(customConfig.project || '');
-              }
-            } catch (err) {
-              console.error('Failed to fetch custom OpenAI config:', err);
-            }
-          }
+        if (!active || !data?.provider) return;
+        const next = { ...withoutSecrets(data), apiKeyStatus: readSecretStatus(data.apiKeyStatus) };
+        if (data.provider === 'custom-openai') {
+          const custom = await invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config');
+          Object.assign(next, customOpenAIModelFields(custom));
+          next.model = custom?.model || next.model;
         }
+        if (active) setSharedModelConfig(next);
       } catch (error) {
         console.error('Failed to fetch model config:', error);
       }
     };
 
-    fetchModelConfig();
-  }, [skipInitialFetch, setModelConfig]);
+    void fetchModelConfig();
+    return () => { active = false; };
+  }, [skipInitialFetch, setSharedModelConfig]);
 
   // Sync ollamaEndpoint state when modelConfig.ollamaEndpoint changes from parent
   useEffect(() => {
@@ -542,22 +499,18 @@ export function ModelSettingsModal({
 
   // Sync custom OpenAI state from modelConfig (context or props)
   useEffect(() => {
-    if (modelConfig.provider === 'custom-openai') {
-      console.log('Syncing custom OpenAI fields from ConfigContext:', {
-        endpoint: modelConfig.customOpenAIEndpoint,
-        model: modelConfig.customOpenAIModel,
-        hasStoredKey: !!modelConfig.customOpenAIKeyStatus?.stored,
-      });
-
-      // Always sync from modelConfig (which comes from context if available)
+    if (modelConfig.provider === 'custom-openai' && modelConfig.customOpenAIEndpoint !== undefined) {
       setCustomOpenAIEndpoint(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
+      setSavedCustomEndpoint(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
       setCustomOpenAIModel(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
-      if (modelConfig.customOpenAIKeyStatus) setCustomKeyStatus(modelConfig.customOpenAIKeyStatus);
+      setCustomKeyStatus(modelConfig.customOpenAIKeyStatus ?? NO_SECRET);
+      setCustomAllowUnencrypted(modelConfig.allow_unencrypted ?? false);
+      setCustomDestinationProblem(modelConfig.destination_problem ?? null);
       setCustomMaxTokens(modelConfig.maxTokens?.toString() || '');
       setCustomContextWindow(modelConfig.contextWindow?.toString() || '8192');
       setCustomTemperature(modelConfig.temperature?.toString() || '');
       setCustomTopP(modelConfig.topP?.toString() || '');
-      setCustomTimeoutSeconds(modelConfig.timeoutSeconds?.toString() || DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS);
+      setCustomTimeoutSeconds(modelConfig.timeoutSeconds?.toString() ?? '');
       setCustomOrganization(modelConfig.organization || '');
       setCustomProject(modelConfig.project || '');
     }
@@ -566,6 +519,8 @@ export function ModelSettingsModal({
     modelConfig.customOpenAIEndpoint,
     modelConfig.customOpenAIModel,
     modelConfig.customOpenAIKeyStatus,
+    modelConfig.allow_unencrypted,
+    modelConfig.destination_problem,
     modelConfig.maxTokens,
     modelConfig.contextWindow,
     modelConfig.temperature,
@@ -753,6 +708,7 @@ export function ModelSettingsModal({
   }, []);
 
   const saveCodexConfig = useCallback(async (nextConfig: CodexProviderConfig) => {
+    if (previewRef.current?.provider === 'codex') throw new SaveError('Select Use Codex before saving Codex settings');
     const normalized = {
       ...nextConfig,
       codexHomeMode: 'clawscribe-isolated' as const,
@@ -769,6 +725,8 @@ export function ModelSettingsModal({
   }, []);
 
   const checkCodexInstallation = useCallback(async (nextConfig?: CodexProviderConfig) => {
+    // Starting the bundled runtime can initialize its isolated profile.
+    if (previewRef.current?.provider === 'codex') return;
     setIsCodexBusy(true);
     try {
       if (nextConfig) await saveCodexConfig(nextConfig);
@@ -791,6 +749,7 @@ export function ModelSettingsModal({
   }, [loadCodexModels, saveCodexConfig]);
 
   const findCodexAutomatically = async () => {
+    if (previewRef.current?.provider === 'codex') return;
     setIsCodexBusy(true);
     try {
       await saveCodexConfig({ ...codexConfig, codexBinaryPath: null });
@@ -839,6 +798,7 @@ export function ModelSettingsModal({
   };
 
   const runCodexAction = async (command: 'codex_login_browser' | 'codex_login_device' | 'codex_logout' | 'codex_test_app_server' | 'codex_test_processing') => {
+    if (previewRef.current?.provider === 'codex') return;
     setIsCodexBusy(true);
     try {
       await saveCodexConfig(codexConfig);
@@ -885,11 +845,11 @@ export function ModelSettingsModal({
         console.error('Failed to load Codex config:', err);
         setCodexLastResult(err instanceof Error ? err.message : String(err));
       }
-      await checkCodexInstallation(codex);
+      await checkCodexInstallation();
     };
     void load();
     return () => { active = false; };
-  }, [modelConfig.provider, setModelConfig, checkCodexInstallation]);
+  }, [modelConfig.provider, codexPreview, setModelConfig, checkCodexInstallation]);
 
   // Auto-fetch Claude models when provider is claude and we have an API key
   // Restore cached model when async model lists become available
@@ -951,6 +911,8 @@ export function ModelSettingsModal({
       customOpenAIEndpoint: modelConfig.provider === 'custom-openai' ? (customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT) : null,
       customOpenAIModel: modelConfig.provider === 'custom-openai' ? (customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL) : null,
       customOpenAIApiKey: modelConfig.provider === 'custom-openai' ? newKeyPayload(customOpenAIApiKey) : null,
+      allow_unencrypted: modelConfig.provider === 'custom-openai' ? customAllowUnencrypted : undefined,
+      destination_problem: modelConfig.provider === 'custom-openai' ? null : undefined,
       contextWindow: modelConfig.provider === 'custom-openai' ? Number(customContextWindow) || 8192 : null,
       maxTokens: modelConfig.provider === 'custom-openai' && customMaxTokens ? parseInt(customMaxTokens, 10) : null,
       temperature: modelConfig.provider === 'custom-openai' && customTemperature ? parseFloat(customTemperature) : null,
@@ -1227,7 +1189,6 @@ export function ModelSettingsModal({
     }
     if (provider === modelConfig.provider) return;
     {
-      if (!previewRef.current && sharedModelConfig.model) rememberModel(sharedModelConfig.provider, sharedModelConfig.model);
       const saved = readModelMap()[provider];
       const options = modelOptions[provider];
       const model = saved && options?.includes(saved) ? saved : (options?.[0] ?? '');
@@ -1243,20 +1204,8 @@ export function ModelSettingsModal({
       if (provider === 'builtin-ai') void loadBuiltinAiModels();
       if (provider === 'custom-openai') {
         invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config').then((config) => {
-          if (!config) return;
-          setCustomOpenAIEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
-          setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
-          setCustomAllowUnencrypted(config.allow_unencrypted ?? false);
-          setCustomDestinationProblem(config.destination_problem ?? null);
-          setCustomKeyStatus(readSecretStatus(config.apiKeyStatus));
-          setSavedCustomEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
-          setCustomMaxTokens(config.maxTokens?.toString() || '');
-          setCustomContextWindow(config.contextWindow?.toString() || '8192');
-          setCustomTemperature(config.temperature?.toString() || '');
-          setCustomTopP(config.topP?.toString() || '');
-          setCustomTimeoutSeconds(config.timeoutSeconds?.toString() || DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS);
-          setCustomOrganization(config.organization || '');
-          setCustomProject(config.project || '');
+          if (previewRef.current !== next) return;
+          setPreview({ ...next, ...customOpenAIModelFields(config), model: config?.model || next.model });
         }).catch(() => { /* the fields keep their last values */ });
       }
     }
@@ -1264,9 +1213,9 @@ export function ModelSettingsModal({
 
   /** What still has to be chosen before the provider being looked at can be used. */
   const draftProviderMissing = (): string | null => {
+    if (modelConfig.provider === 'custom-openai' && modelConfig.customOpenAIEndpoint === undefined) return 'Compatible provider settings must finish loading';
     if (needsKey(modelConfig.provider) && !hasUsableKey(modelConfig.apiKey, keyStatus)) return 'Enter an API key first';
     if (MODEL_LIST_PROVIDERS.includes(modelConfig.provider) && !modelConfig.model?.trim()) return 'Choose a model first';
-    if (modelConfig.provider === 'codex' && codexStatus && !codexStatus.found) return 'Install the Codex runtime first';
     if (modelConfig.provider === 'claude-code' && claudeCode.status && claudeCode.status.state !== 'ready') return 'Claude Code is not ready yet';
     return null;
   };
@@ -1281,6 +1230,7 @@ export function ModelSettingsModal({
         apiKey: needsKey(modelConfig.provider) ? newKeyPayload(modelConfig.apiKey) : null,
       };
       await saveConfig(next, 'Could not save the provider', true);
+      if (sharedModelConfig.model) rememberModel(sharedModelConfig.provider, sharedModelConfig.model);
       setError('');
       setModelConfig({ ...next, apiKey: null });
       setApiKey(null);
@@ -1301,6 +1251,7 @@ export function ModelSettingsModal({
   // The core opens the folder dialog and only accepts the folder it chose here
   // (new or empty, or already ClawScribe's own Codex profile).
   const chooseCodexHome = async () => {
+    if (previewRef.current?.provider === 'codex') return;
     try {
       const folder = await invoke<string | null>('pick_codex_home_folder');
       if (!folder) return;
@@ -1348,6 +1299,7 @@ export function ModelSettingsModal({
   });
 
   const commitCustom = async (over: Partial<ReturnType<typeof customValues>>): Promise<CommitResult> => {
+    if (modelConfig.customOpenAIEndpoint === undefined) throw new SaveError('Could not load the compatible provider settings');
     const v = { ...customValues(), ...over };
     if (keyRequiredForAddress(savedCustomEndpoint, v.endpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, customKeyStatus, v.apiKey)) {
       // Keep the new address; it is saved together with the key.
@@ -1376,6 +1328,7 @@ export function ModelSettingsModal({
       customOpenAIEndpoint: payload.endpoint, customOpenAIModel: payload.model, customOpenAIApiKey: null,
       contextWindow: payload.contextWindow, maxTokens: payload.maxTokens, temperature: payload.temperature, topP: payload.topP,
       timeoutSeconds: payload.timeoutSeconds, organization: payload.organization, project: payload.project,
+      allow_unencrypted: v.allowUnencrypted, destination_problem: null,
     };
     const held = await saveConfig(next, 'Could not save the model settings');
     rememberModel('custom-openai', payload.model);
@@ -1535,10 +1488,10 @@ export function ModelSettingsModal({
     </SettingsRow>
   );
 
-  const renderSimpleModelSelect = (key: string, options: { value: string; label: string }[], onChange: (value: string) => void, loading?: boolean) => (
+  const renderSimpleModelSelect = (key: string, options: { value: string; label: string }[], onChange: (value: string) => void, loading?: boolean, disabled?: boolean) => (
     <SettingsRow key={key} title="Model" htmlFor="summary-model" description={withError(null, modelError)}>
       <SaveMark status={feedback.states.model?.status} />
-      <Select value={modelConfig.model} onValueChange={onChange} disabled={feedback.busy || loading}>
+      <Select value={modelConfig.model} onValueChange={onChange} disabled={feedback.busy || loading || disabled}>
         <SelectTrigger id="summary-model" aria-label="Model" className={ROW_SELECT}>
           <SelectValue placeholder={loading ? 'Loading models…' : 'Select a model'} />
         </SelectTrigger>
@@ -1658,7 +1611,7 @@ export function ModelSettingsModal({
         rows.push(<NoteRow key="custom-error" tone="error">{customCheck.message}</NoteRow>);
       }
       advanced.push(
-        <CommitInputRow key="custom-timeout" id="custom-timeout" title="Timeout" description="Seconds, 5 or more" value={customTimeoutSeconds}
+        <CommitInputRow key="custom-timeout" id="custom-timeout" title="Timeout" description="Seconds, 5 or more" value={customTimeoutSeconds} placeholder={DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS}
           inputMode="numeric" validate={numberProblem(5, 86400, true, true)} onCommit={(value) => commitCustom({ timeoutSeconds: value })} />,
         <CommitInputRow key="custom-org" id="custom-organization" title="OpenAI organization" placeholder="org_..." description="Optional" value={customOrganization}
           onCommit={(value) => commitCustom({ organization: value })} />,
@@ -1727,14 +1680,14 @@ export function ModelSettingsModal({
         renderSimpleModelSelect(
           'model',
           codexPickerModels.map((model) => ({ value: model.id, label: `${model.displayName}${model.isDefault ? ' · recommended' : ''}` })),
-          chooseCodexModel, isLoadingCodexModels,
+          chooseCodexModel, isLoadingCodexModels, codexPreview,
         ),
         <SettingsRow key="codex-account" title="Account"
-          description={codexModelError ? 'The model list is unavailable, so only the configured model is shown' : (codexStatus?.accountEmail || codexStatus?.authStatus || 'Not signed in')}>
-          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_login_browser')} disabled={isCodexBusy}>
+          description={codexPreview ? 'Select Use Codex to check your account and runtime' : codexModelError ? 'The model list is unavailable, so only the configured model is shown' : (codexStatus?.accountEmail || codexStatus?.authStatus || 'Not signed in')}>
+          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_login_browser')} disabled={isCodexBusy || codexPreview}>
             <ExternalLink aria-hidden="true" />Sign in with ChatGPT
           </Button>
-          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_logout')} disabled={isCodexBusy}>Sign out</Button>
+          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_logout')} disabled={isCodexBusy || codexPreview || !codexSignedIn}>Sign out</Button>
         </SettingsRow>,
       );
       advanced.push(
@@ -1743,21 +1696,21 @@ export function ModelSettingsModal({
             A new or empty folder on a local drive that ClawScribe keeps its own Codex profile in. It never uses your normal ~/.codex profile or the standalone Codex CLI sign-in
             <Meta className="mt-1 block break-all">{codexConfig.codexHomePath || '%APPDATA%\\ClawScribe\\codex'}</Meta>
           </>}>
-          <Button type="button" variant="outline" onClick={() => void chooseCodexHome()} disabled={isCodexBusy}>Choose folder</Button>
+          <Button type="button" variant="outline" onClick={() => void chooseCodexHome()} disabled={isCodexBusy || codexPreview}>Choose folder</Button>
         </SettingsRow>,
-        <CommitInputRow key="codex-timeout" id="codex-timeout" title="Timeout" description="Seconds, 30 or more" inputMode="numeric" value={String(codexConfig.timeoutSeconds)}
+        <CommitInputRow key="codex-timeout" id="codex-timeout" title="Timeout" description="Seconds, 30 or more" inputMode="numeric" value={String(codexConfig.timeoutSeconds)} disabled={codexPreview}
           validate={numberProblem(30, 86400, true, true)} onCommit={async (value) => { await saveCodexSafe({ ...codexConfig, timeoutSeconds: parseInt(value, 10) }); }} />,
         <SettingsRow key="codex-runtime" title="Runtime"
-          description={codexStatus?.found ? `${codexStatus.version || 'Codex app-server runtime'} at ${codexStatus.path || 'bundled resources'}` : (codexStatus?.message || 'Bundled Codex runtime is missing or damaged. Repair or reinstall ClawScribe.')}>
-          <Button type="button" variant="outline" onClick={() => void findCodexAutomatically()} disabled={isCodexBusy}>Check bundled runtime</Button>
+          description={codexStatus?.found ? `${codexStatus.version || 'Codex app-server runtime'} at ${codexStatus.path || 'bundled resources'}` : (codexStatus?.message || 'Bundled Codex runtime has not been checked')}>
+          <Button type="button" variant="outline" onClick={() => void findCodexAutomatically()} disabled={isCodexBusy || codexPreview}>Check bundled runtime</Button>
           <Button type="button" variant="outline" onClick={() => void prepareCodexInstallRepair()} disabled={isCodexBusy}><Wrench aria-hidden="true" />Install or repair</Button>
         </SettingsRow>,
         <SettingsRow key="codex-tests" title="Tests" description="Check the app-server, or run a test meeting through it">
-          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_test_app_server')} disabled={isCodexBusy}>Test app-server</Button>
-          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_test_processing')} disabled={isCodexBusy}>Test meeting processing</Button>
+          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_test_app_server')} disabled={isCodexBusy || codexPreview}>Test app-server</Button>
+          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_test_processing')} disabled={isCodexBusy || codexPreview}>Test meeting processing</Button>
         </SettingsRow>,
         <SettingsRow key="codex-device" title="Other sign-in" description="Use a device code when the browser sign-in is not available">
-          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_login_device')} disabled={isCodexBusy}>Sign in with device code</Button>
+          <Button type="button" variant="outline" onClick={() => void runCodexAction('codex_login_device')} disabled={isCodexBusy || codexPreview}>Sign in with device code</Button>
           <Button type="button" variant="ghost" onClick={() => openExternal('https://github.com/ch3573r/ClawScribe/blob/main/docs/auth/codex-auth.md')}>
             <ExternalLink aria-hidden="true" />Auth docs
           </Button>
@@ -1841,7 +1794,7 @@ export function ModelSettingsModal({
                 </Button>
               )}
               {modelConfig.provider !== 'builtin-ai' && (
-                <Button type="button" variant="ghost" size="sm" disabled={checkingNow} onClick={() => void checkAgain()}>
+                <Button type="button" variant="ghost" size="sm" disabled={checkingNow || codexPreview} onClick={() => void checkAgain()}>
                   {checkingNow ? 'Checking…' : modelConfig.provider === 'custom-openai' && customCheck.state === 'idle' ? 'Check connection' : 'Check again'}
                 </Button>
               )}
@@ -1910,21 +1863,9 @@ export function ModelSettingsModal({
                 // Load custom OpenAI config when selected
                 if (provider === 'custom-openai') {
                   invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config').then((config) => {
-                    if (config) {
-                      setCustomOpenAIEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
-                      setCustomOpenAIModel(config.model || DEFAULT_OPENAI_COMPATIBLE_MODEL);
-                      setCustomAllowUnencrypted(config.allow_unencrypted ?? false);
-                      setCustomDestinationProblem(config.destination_problem ?? null);
-                      setCustomKeyStatus(readSecretStatus(config.apiKeyStatus));
-                      setSavedCustomEndpoint(config.endpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
-                      setCustomMaxTokens(config.maxTokens?.toString() || '');
-      setCustomContextWindow(config.contextWindow?.toString() || '8192');
-                      setCustomTemperature(config.temperature?.toString() || '');
-                      setCustomTopP(config.topP?.toString() || '');
-                      setCustomTimeoutSeconds(config.timeoutSeconds?.toString() || DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS);
-                      setCustomOrganization(config.organization || '');
-                      setCustomProject(config.project || '');
-                    }
+                    setModelConfig(prev => prev.provider === 'custom-openai'
+                      ? { ...prev, ...customOpenAIModelFields(config), model: config?.model || prev.model }
+                      : prev);
                   }).catch((err) => {
                     console.error('Failed to load custom OpenAI config:', err);
                   });
@@ -2339,7 +2280,7 @@ export function ModelSettingsModal({
                 <CheckCircle2 className="mr-2 h-4 w-4" />
                 Sign in with device code
               </Button>
-              <Button type="button" variant="outline" onClick={() => runCodexAction('codex_logout')} disabled={isCodexBusy}>
+              <Button type="button" variant="outline" onClick={() => runCodexAction('codex_logout')} disabled={isCodexBusy || !codexSignedIn}>
                 <Lock className="mr-2 h-4 w-4" />
                 Logout
               </Button>

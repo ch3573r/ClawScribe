@@ -87,6 +87,7 @@ test('the saved header preserves attendance and returns focus after reviewing me
   const props = {
     meeting: { id: 'example', created_at: '2026-01-01T12:00:00Z' }, title: 'Review', segmentCount: 2, disabled: false,
     onStartEditing() {}, onFinishEditing() {}, onChange() {}, getMarkdown: async () => '', onOpenFolder: async () => {}, attendance,
+    emailDraft: { subject: 'AI subject', body: 'AI draft' },
   };
   const render = () => nodes(hooks.render(() => MeetingHeader(props)));
   let tree = render();
@@ -100,6 +101,8 @@ test('the saved header preserves attendance and returns focus after reviewing me
   assert.equal(dialog.props.open, true);
   dialog.props.onReturnFocus();
   assert.equal(focused, true);
+  tree.find(node => typeof node.props.onReviewEmail === 'function').props.onReviewEmail();
+  assert.equal(render().find(node => node.type === 'follow-up-email').props.initialDraft, props.emailDraft);
   hooks.unmount();
 });
 

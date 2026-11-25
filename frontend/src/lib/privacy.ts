@@ -23,6 +23,7 @@ export interface PrivacyInput {
   summary: Loadable<{ provider: string | null; ollamaEndpoint: string | null; customEndpoint: string | null }>;
   /** "Automatic summaries" on the Summary page. */
   autoSummary: boolean;
+  automaticSummaryApproved: boolean;
   liveSharing: Loadable<boolean>;
   microsoft: Loadable<{ connected: boolean; calendar: boolean }>;
   /** Confluence is set to publish through its REST API with a base URL. */
@@ -192,6 +193,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       })
     : null;
   const textLeavesKind = summaryClass && (summaryClass.kind === "remote" || summaryClass.kind === "unknown");
+  const sendsAutomaticNotes = input.autoSummary && input.automaticSummaryApproved;
   const outcome = transcriptionOutcome(input);
 
   // Recordings and audio
@@ -236,8 +238,8 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
         ...summaryBase,
         destination: summaryClass.kind === "unknown" ? UNKNOWN_DESTINATION : summaryClass.label,
         detail: summaryClass.kind === "unknown" ? `${summaryClass.label} · ${summaryDetail}` : summaryDetail,
-        when: input.autoSummary ? "When a recording ends" : "When you generate",
-        tone: input.autoSummary ? "warning" : "active",
+        when: sendsAutomaticNotes ? "When a recording ends" : "When you generate",
+        tone: sendsAutomaticNotes ? "warning" : "active",
       };
     }
   }
@@ -369,7 +371,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
     textFact = { id: "text", label: "Transcript text", value: "Stays on this PC", detail: null, tone: "neutral", state: "ready" };
   } else {
     const where = summaryClass.kind === "unknown" ? UNKNOWN_DESTINATION : `To ${summaryClass.label}`;
-    textFact = input.autoSummary
+    textFact = sendsAutomaticNotes
       ? { id: "text", label: "Transcript text", value: "Leaves automatically", detail: where, tone: "warning", state: "ready" }
       : { id: "text", label: "Transcript text", value: "Leaves when you ask", detail: where, tone: "active", state: "ready" };
   }
@@ -388,7 +390,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
   let automaticFact: PrivacyFact;
   if (automaticState !== "ready") {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: automaticState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: automaticState };
-  } else if (input.autoSummary && textLeavesKind) {
+  } else if (sendsAutomaticNotes && textLeavesKind) {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "Transcript text", detail: summaryClass && summaryClass.kind === "unknown" ? UNKNOWN_DESTINATION : `To ${summaryClass?.label ?? ""}`, tone: "warning", state: "ready" };
   } else {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "None", detail: null, tone: "neutral", state: "ready" };

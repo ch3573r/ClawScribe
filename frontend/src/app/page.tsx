@@ -153,16 +153,15 @@ export default function Home() {
         // Refresh sidebar to show the newly recovered meeting
         await refetchMeetings();
 
-        // If no more recoverable meetings, clear session flag so dialog can show again
-        if (recoverableMeetings.length === 0) {
+        if (result.remainingCount === 0) {
+          setShowRecoveryDialog(false);
           sessionStorage.removeItem('recovery_dialog_shown');
-        }
 
-        // Auto-navigate after a short delay
-        if (result.meetingId) {
-          setTimeout(() => {
-            router.push(`/meeting-details?id=${result.meetingId}`);
-          }, 2000);
+          if (result.meetingId) {
+            setTimeout(() => {
+              router.push(`/meeting-details?id=${result.meetingId}`);
+            }, 2000);
+          }
         }
       }
     } catch (error) {

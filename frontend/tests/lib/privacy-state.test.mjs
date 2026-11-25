@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
+import { createHookHarness, flush } from './hook-harness.mjs';
 
 const { derivePrivacy, classifySummaryProvider } = loadTsModule('src/lib/privacy.ts');
 const ready = value => ({ status: 'ready', value });
@@ -11,6 +12,7 @@ const base = () => ({
   cloudTranscription: false,
   summary: ready({ provider: 'builtin-ai', ollamaEndpoint: null, customEndpoint: null }),
   autoSummary: false,
+  automaticSummaryApproved: false,
   liveSharing: ready(false),
   microsoft: ready({ connected: false, calendar: false }),
   confluenceRest: false,
@@ -92,8 +94,13 @@ test('built-in and local Ollama summaries never leave; remote providers leave on
   assert.equal(factOf(remote, 'automatic').value, 'None');
 });
 
-test('automatic summaries with a remote provider send transcript text automatically', () => {
-  const model = derive({ autoSummary: true, summary: ready({ provider: 'openai', ollamaEndpoint: null, customEndpoint: null }) });
+test('external automatic notes require approval of the current destination', () => {
+  const summary = ready({ provider: 'openai', ollamaEndpoint: null, customEndpoint: null });
+  const unapproved = derive({ autoSummary: true, summary });
+  assert.equal(rowOf(unapproved, 'summary').when, 'When you generate');
+  assert.equal(factOf(unapproved, 'text').value, 'Leaves when you ask');
+  assert.equal(factOf(unapproved, 'automatic').value, 'None');
+  const model = derive({ autoSummary: true, automaticSummaryApproved: true, summary });
   assert.equal(rowOf(model, 'summary').tone, 'warning');
   assert.equal(rowOf(model, 'summary').when, 'When a recording ends');
   assert.equal(factOf(model, 'automatic').value, 'Transcript text');
@@ -101,6 +108,42 @@ test('automatic summaries with a remote provider send transcript text automatica
   assert.equal(factOf(model, 'text').tone, 'warning');
   const local = derive({ autoSummary: true });
   assert.equal(factOf(local, 'automatic').value, 'None');
+});
+
+test('Privacy uses the shared recording mode and the current automatic destination approval', async t => {
+  const hooks = createHookHarness();
+  const previous = { window: globalThis.window, document: globalThis.document };
+  globalThis.window = new EventTarget();
+  globalThis.document = new EventTarget();
+  t.after(() => { hooks.unmount(); Object.assign(globalThis, previous); });
+  const modelConfig = { provider: 'openai', model: 'fixture' };
+  let recordingMode = 'audio_only';
+  let approved = false;
+  const { usePrivacyInput } = loadTsModule('src/components/settings/usePrivacyInput', {
+    react: hooks.react,
+    '@tauri-apps/api/core': { invoke: async command => ({
+      get_recording_preferences: { auto_save: false, save_folder: 'Recordings' },
+      api_get_model_config: modelConfig,
+      list_ical_sources: [],
+      get_mcp_access: {},
+    })[command] },
+    '@/contexts/ConfigContext': { useConfig: () => ({ isAutoSummary: true, modelConfig }) },
+    '@/contexts/RecordingStateContext': { useRecordingState: () => ({ recordingMode }) },
+    '@/hooks/useSummaryDestination': { useSummaryDestination: (_active, config) => ({ destination: { provider: config.provider, approved } }) },
+    '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ loaded: true, enabled: false }) },
+    '@/hooks/useWebhookSettings': { useWebhookSettings: () => base().webhook },
+    '@/lib/exportDestinations': { getExportDestinations: () => ({}) },
+    '@/services/knowledgeService': { knowledgeService: { liveSharing: async () => false, modelStatus: async () => ({ enabled: true }) } },
+    '@/services/microsoftExportService': { microsoftExportService: { connectionStatus: async () => ({ state: 'disconnected' }) } },
+  });
+  const render = () => derivePrivacy(hooks.render(usePrivacyInput));
+  render(); await flush();
+  assert.equal(rowOf(render(), 'recording').detail, 'Recordings');
+  assert.equal(factOf(render(), 'text').value, 'Leaves when you ask');
+  recordingMode = 'live';
+  approved = true;
+  assert.equal(rowOf(render(), 'recording').detail, 'Audio is not saved');
+  assert.equal(factOf(render(), 'text').value, 'Leaves automatically');
 });
 
 test('providers are classified from their endpoint where the provider alone cannot tell', () => {

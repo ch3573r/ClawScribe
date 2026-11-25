@@ -55,6 +55,7 @@ fn allowed(label: &str, command: &str) -> bool {
                 command,
                 "get_pending_call_prompt"
                     | "confirm_call_detection_prompt"
+                    | "dismiss_call_detection_prompt"
                     | "recording_window_appearance"
             ))
         || (session(label).is_ok()
@@ -652,6 +653,7 @@ mod tests {
         let label = crate::teams_detection::monitor::prompt_window::LABEL;
         assert!(allowed(label, "get_pending_call_prompt"));
         assert!(allowed(label, "confirm_call_detection_prompt"));
+        assert!(allowed(label, "dismiss_call_detection_prompt"));
         assert!(allowed(label, "recording_window_appearance"));
         assert!(!allowed(label, "start_recording_with_devices_and_meeting"));
         assert!(!allowed(label, "floating_note"));

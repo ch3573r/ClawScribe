@@ -15,7 +15,6 @@ export function useLiveTranscriptionReadiness(inspectModel: boolean, configuredP
   const revision = useRef(0);
   const refresh = useCallback(async () => {
     const request = ++revision.current;
-    setResult(null);
     try {
       const readiness = await invoke<LiveTranscriptionReadiness>('get_live_transcription_readiness', { inspectModel });
       if (request === revision.current) setResult({ scope, data: readiness });

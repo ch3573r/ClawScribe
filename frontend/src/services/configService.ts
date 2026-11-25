@@ -34,6 +34,8 @@ export interface ModelConfig {
   timeoutSeconds?: number | null;
   organization?: string | null;
   project?: string | null;
+  allow_unencrypted?: boolean;
+  destination_problem?: string | null;
 }
 
 /** The custom provider settings as the core returns them: no key, only its status. */
@@ -50,6 +52,23 @@ export interface CustomOpenAIConfig {
   timeoutSeconds?: number | null;
   organization?: string | null;
   project?: string | null;
+}
+
+export function customOpenAIModelFields(config: CustomOpenAIConfig | null) {
+  return {
+    customOpenAIEndpoint: config?.endpoint || null,
+    customOpenAIModel: config?.model || null,
+    customOpenAIKeyStatus: readSecretStatus(config?.apiKeyStatus),
+    maxTokens: config?.maxTokens ?? null,
+    contextWindow: config?.contextWindow ?? null,
+    temperature: config?.temperature ?? null,
+    topP: config?.topP ?? null,
+    timeoutSeconds: config?.timeoutSeconds ?? null,
+    organization: config?.organization ?? null,
+    project: config?.project ?? null,
+    allow_unencrypted: config?.allow_unencrypted ?? false,
+    destination_problem: config?.destination_problem ?? null,
+  };
 }
 
 /** What a save sends for the custom provider. A null `apiKey` keeps the stored key. */

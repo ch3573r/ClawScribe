@@ -23,7 +23,7 @@ const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof
   ? [node, ...nodes(node.props?.children)] : [];
 const primitives = names => Object.fromEntries(names.split(' ').map(name => [name, name]));
 
-function emailReview(close) {
+function emailReview(close, { recipients = [{ name: 'Dana', email: 'dana@example.com' }, { name: 'Pat', email: 'pat@example.com' }], initialDraft } = {}) {
   const hooks = createHookHarness();
   const calls = [];
   const { FollowUpEmail } = loadTsModule('src/components/MeetingDetails/FollowUpEmail.tsx', {
@@ -32,7 +32,7 @@ function emailReview(close) {
       calls.push([command, { ...args }]);
       if (command === 'get_reviewed_follow_up_draft') return {
         subject: 'Follow-up', body: 'Review the plan',
-        recipients: [{ name: 'Dana', email: 'dana@example.com' }, { name: 'Pat', email: 'pat@example.com' }],
+        recipients,
       };
     } },
     '@/components/ui/button': primitives('Button'),
@@ -42,7 +42,7 @@ function emailReview(close) {
     '@/components/ui/textarea': primitives('Textarea'),
     '@/components/ui/dialog': primitives('Dialog DialogContent DialogDescription DialogFooter DialogHeader DialogTitle'),
   });
-  const render = () => nodes(hooks.render(() => FollowUpEmail({ meetingId: 'selected-meeting', close })));
+  const render = () => nodes(hooks.render(() => FollowUpEmail({ meetingId: 'selected-meeting', close, initialDraft })));
   return { hooks, calls, render, find: (type, id) => render().find(node => node.type === type && (!id || node.props.id === id)) };
 }
 
@@ -59,6 +59,27 @@ test('canceling a reviewed draft makes no mail client request', async () => {
   } finally { review.hooks.unmount(); }
 });
 
+test('an ad-hoc meeting opens the AI draft without recipients and accepts validated manual addresses', async t => {
+  const review = emailReview(() => {}, { recipients: [], initialDraft: { subject: 'Sprint & planning', body: 'Agreed next steps.' } });
+  t.after(() => review.hooks.unmount());
+  review.render();
+  await flush();
+  const submit = async () => { review.find('form').props.onSubmit({ preventDefault() {} }); await flush(); };
+  const opens = () => review.calls.filter(([command]) => command === 'open_reviewed_follow_up_draft').map(([, args]) => args);
+  assert.equal(review.render().find(node => node.props.type === 'submit').props.disabled, false);
+  await submit();
+  assert.equal(JSON.stringify(opens()[0]), JSON.stringify({ meetingId: 'selected-meeting', recipients: [], manualRecipients: [], subject: 'Sprint & planning', body: 'Agreed next steps.' }));
+
+  const enter = value => review.find('Input', 'follow-up-manual-recipients').props.onChange({ target: { value } });
+  enter('someone@example.com?bcc=wrong@example.com');
+  await submit();
+  assert.equal(opens().length, 1, 'an invalid address never reaches the native handoff');
+  assert.equal(review.find('Input', 'follow-up-manual-recipients').props['aria-invalid'], true);
+  enter('Dana+meeting@example.com; pat@example.com, PAT@example.com');
+  await submit();
+  assert.equal(JSON.stringify(opens()[1].manualRecipients), JSON.stringify(['Dana+meeting@example.com', 'pat@example.com']));
+});
+
 test('the mail client receives only the checked attendee and the edited draft on submit', async () => {
   const review = emailReview(() => {});
   try {
@@ -70,8 +91,8 @@ test('the mail client receives only the checked attendee and the edited draft on
     review.find('form').props.onSubmit({ preventDefault() {} });
     await flush();
     assert.equal(review.calls[1][0], 'open_reviewed_follow_up_draft');
-    assert.deepEqual({ ...review.calls[1][1], recipients: [...review.calls[1][1].recipients] }, {
-      meetingId: 'selected-meeting', recipients: ['dana@example.com'], subject: 'Follow-up', body: 'Updated reviewed note.',
+    assert.deepEqual({ ...review.calls[1][1], recipients: [...review.calls[1][1].recipients], manualRecipients: [...review.calls[1][1].manualRecipients] }, {
+      meetingId: 'selected-meeting', recipients: ['dana@example.com'], manualRecipients: [], subject: 'Follow-up', body: 'Updated reviewed note.',
     });
   } finally { review.hooks.unmount(); }
 });
