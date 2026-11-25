@@ -16,10 +16,12 @@ import { SummaryUpdaterButtonGroup } from './SummaryUpdaterButtonGroup';
 import Analytics from '@/lib/analytics';
 import { TextReplaceDialog } from './TextReplaceDialog';
 import { SummarySources, ResolvedSummarySource } from './SummarySources';
-import { useEffect, useRef, useState, RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, RefObject } from 'react';
 import { toast } from 'sonner';
-import { Languages, ChevronDown, ChevronUp, Search, Sparkles, X } from 'lucide-react';
+import { Languages, ChevronDown, ChevronUp, Loader2, Search, Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Progress } from '@/components/ui/progress';
 import { Copy } from 'lucide-react';
 import { FollowUpEmail } from './FollowUpEmail';
 import { SavedLiveAnswers } from './SavedLiveAnswers';
@@ -27,6 +29,11 @@ import { isEditorSummary, LOCAL_SUMMARY_HINT, type summaryDetails } from '@/lib/
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
 import { useRecentLanguages } from '@/hooks/useRecentLanguages';
+import { DEFAULT_PLAYER_BINDINGS, playerActionForChord, playerChord, type PlayerBindings } from '@/lib/player-bindings';
+import { isTextEntry } from '@/lib/playback-controls';
+import { MAX_FIND_QUERY_LENGTH, stepMatch } from '@/lib/transcript-find';
+import { collectSummaryRanges } from '@/lib/summary-find';
+import { recoveredSummary } from '@/lib/recovered-summary';
 import { labelForCode, normaliseLanguageCode } from '@/lib/summary-languages';
 import {
   readMeetingSummaryLanguage,
@@ -37,6 +44,8 @@ import {
 import type { SummaryDraft, SaveState } from '@/lib/meetingDrafts';
 
 interface SummaryPanelProps {
+  bindings?: PlayerBindings;
+  findOpenRequest?: number;
   seriesLanguage?: string | null;
   details: ReturnType<typeof summaryDetails> & { transcriptChanged: boolean };
   saveState: SaveState;
@@ -44,8 +53,9 @@ interface SummaryPanelProps {
   summaryRevision: number;
   onRestorePrevious: () => Promise<void>;
   onSummaryDraft: (draft: SummaryDraft, read: () => Promise<SummaryDraft>) => void;
-  onRevealSource?: (source: ResolvedSummarySource) => Promise<void>;
-  onPlaySource?: (seconds: number) => Promise<void>;
+  onRevealSource?: (source: ResolvedSummarySource, current: () => boolean) => Promise<void>;
+  onPlaySource?: (seconds: number, current: () => boolean) => Promise<void>;
+  onNavigateSource?: () => void;
   meeting: {
     id: string;
     title: string;
@@ -57,9 +67,9 @@ interface SummaryPanelProps {
   isSaving: boolean;
   onSaveAll: () => Promise<void>;
   onCopySummary: () => Promise<void>;
-  onOpenFolder: () => Promise<void>;
   aiSummary: MeetingSummary | null;
   summaryStatus: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
+  checkingModels?: boolean;
   transcripts: Transcript[];
   modelConfig: ModelConfig;
   setModelConfig: (config: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => void;
@@ -82,18 +92,18 @@ interface SummaryPanelProps {
   onOpenModelSettings?: (openFn: () => void) => void;
 }
 
-type SummaryTextMatch = {
-  node: Text;
-  start: number;
-  end: number;
-};
+const SUMMARY_FIND_HIGHLIGHT = 'clawscribe-summary-find';
+const SUMMARY_CURRENT_FIND_HIGHLIGHT = 'clawscribe-summary-find-current';
 
 export function SummaryPanel({
+  bindings = DEFAULT_PLAYER_BINDINGS,
+  findOpenRequest = 0,
   details,
   seriesLanguage,
   saveState, hasPreviousSummary, summaryRevision, onRestorePrevious, onSummaryDraft,
   onRevealSource,
   onPlaySource,
+  onNavigateSource,
   meeting,
   meetingTitle,
   isTitleDirty,
@@ -101,9 +111,9 @@ export function SummaryPanel({
   isSaving,
   onSaveAll,
   onCopySummary,
-  onOpenFolder,
   aiSummary,
   summaryStatus,
+  checkingModels = false,
   transcripts,
   modelConfig,
   setModelConfig,
@@ -134,9 +144,6 @@ export function SummaryPanel({
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
-  // The empty view offers the same generate action as the toolbar.
-  const generateRef = useRef<(() => void) | null>(null);
-  const [checkingModels, setCheckingModels] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [dockTarget, setDockTarget] = useState<HTMLDivElement | null>(null);
   const [chatDocked, setChatDocked] = useState(false);
@@ -146,16 +153,25 @@ export function SummaryPanel({
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [emailOpen, setEmailOpen] = useState(false);
   const [isFindOpen, setIsFindOpen] = useState(false);
+  const [findFocus, setFindFocus] = useState(0);
   const [findQuery, setFindQuery] = useState('');
-  const [findMatchCount, setFindMatchCount] = useState(0);
-  const [activeFindIndex, setActiveFindIndex] = useState(-1);
+  const [findMatches, setFindMatches] = useState<Range[]>([]);
+  const [activeFindIndex, setActiveFindIndex] = useState(0);
+  const [recoveryCandidate, setRecoveryCandidate] = useState<string | null>(null);
+  const [appliedRecovery, setAppliedRecovery] = useState<string | null>(null);
+  const [savingRecovery, setSavingRecovery] = useState(false);
+  const [recoveryError, setRecoveryError] = useState('');
+  const recoveryPending = useRef(false);
+  const recoveryButton = useRef<HTMLButtonElement>(null);
   const languageLoadVersionRef = useRef(0);
   const activeMeetingIdRef = useRef(meeting.id);
   const languageSaveVersionRef = useRef(0);
   const languageSaveLoopRunningRef = useRef(false);
   const findInputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const retainFindFocusRef = useRef(false);
   const summarySearchRootRef = useRef<HTMLDivElement>(null);
+  const summaryScrollRef = useRef<HTMLDivElement>(null);
   const latestLanguageSaveRequestRef = useRef<{
     version: number;
     meetingId: string;
@@ -280,93 +296,106 @@ export function SummaryPanel({
   const jobNotice = jobState && ['skipped', 'failed', 'cancelled', 'unavailable'].includes(jobState)
     ? jobState === 'unavailable' ? 'Could not check summary progress. Trying again…' : jobSnapshot?.error
     : null;
+  const generationDisabled = contextLoading || isModelConfigLoading || checkingModels || savingRecovery;
+  const recoveredNotes = jobState === 'failed' ? jobSnapshot?.partial_notes : null;
+  const canUseRecovery = !isSummaryLoading && !checkingModels && !isSaving && Boolean(recoveredNotes);
 
-  const collectSummaryMatches = (query: string): SummaryTextMatch[] => {
-    const root = summarySearchRootRef.current;
-    const normalizedQuery = query.trim().toLowerCase();
-    if (!root || !normalizedQuery) return [];
-
-    const matches: SummaryTextMatch[] = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        const text = node.textContent ?? '';
-        return text.trim()
-          ? NodeFilter.FILTER_ACCEPT
-          : NodeFilter.FILTER_REJECT;
-      },
-    });
-
-    let current = walker.nextNode();
-    while (current) {
-      const node = current as Text;
-      const text = node.data.toLowerCase();
-      let start = text.indexOf(normalizedQuery);
-      while (start !== -1) {
-        matches.push({
-          node,
-          start,
-          end: start + normalizedQuery.length,
-        });
-        start = text.indexOf(normalizedQuery, start + normalizedQuery.length);
-      }
-      current = walker.nextNode();
+  const useRecoveredNotes = async () => {
+    if (!canUseRecovery || !recoveryCandidate || recoveryCandidate !== recoveredNotes || recoveryPending.current) return;
+    recoveryPending.current = true;
+    setSavingRecovery(true);
+    setRecoveryError('');
+    try {
+      await onSaveSummary(recoveredSummary(recoveryCandidate));
+      setAppliedRecovery(recoveryCandidate);
+      setRecoveryCandidate(null);
+      toast.success('Recovered notes saved as summary');
+    } catch {
+      setRecoveryError('Could not save recovered notes. Try again.');
+    } finally {
+      recoveryPending.current = false;
+      setSavingRecovery(false);
     }
-
-    return matches;
   };
 
-  const selectSummaryMatch = (match: SummaryTextMatch) => {
-    const range = document.createRange();
-    range.setStart(match.node, match.start);
-    range.setEnd(match.node, match.end);
-
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-
-    match.node.parentElement?.scrollIntoView({
-      block: 'center',
-      inline: 'nearest',
-      behavior: 'smooth',
-    });
+  const copyRecoveredNotes = async () => {
+    if (!recoveredNotes) return;
+    try {
+      await navigator.clipboard.writeText(recoveredNotes);
+      toast.success('Recovered notes copied');
+    } catch {
+      toast.error('Could not copy recovered notes');
+    }
   };
 
-  const runSummaryFind = (direction: 1 | -1 = 1) => {
-    const matches = collectSummaryMatches(findQuery);
-    setFindMatchCount(matches.length);
+  const hasSummary = Boolean(aiSummary);
+  const openSummaryFind = useCallback(() => {
+    if (!hasSummary) return;
+    setIsFindOpen(true);
+    setFindFocus(value => value + 1);
+  }, [hasSummary]);
+  useEffect(() => {
+    if (findOpenRequest > 0) openSummaryFind();
+  }, [findOpenRequest, openSummaryFind]);
+  useEffect(() => {
+    if (!isFindOpen) return;
+    findInputRef.current?.focus();
+    findInputRef.current?.select();
+  }, [isFindOpen, findFocus]);
 
-    if (matches.length === 0) {
-      setActiveFindIndex(-1);
-      window.getSelection()?.removeAllRanges();
+  useEffect(() => {
+    const root = summarySearchRootRef.current;
+    if (!root || !isFindOpen || !findQuery.trim()) {
+      setFindMatches([]);
       return;
     }
+    const refresh = () => {
+      const matches = collectSummaryRanges(root, findQuery);
+      setFindMatches(matches);
+      setActiveFindIndex(index => index < matches.length ? index : 0);
+    };
+    refresh();
+    // The editor loads asynchronously and can change under an open search.
+    const observer = new window.MutationObserver(refresh);
+    observer.observe(root, { childList: true, characterData: true, subtree: true });
+    return () => observer.disconnect();
+  }, [isFindOpen, findQuery, hasSummary]);
 
-    const nextIndex =
-      activeFindIndex === -1 || activeFindIndex >= matches.length
-        ? direction === 1
-          ? 0
-          : matches.length - 1
-        : (activeFindIndex + direction + matches.length) % matches.length;
+  useEffect(() => {
+    if (!isFindOpen || findMatches.length === 0) return;
+    const highlights = window.CSS?.highlights;
+    if (!window.Highlight || !highlights) return;
+    highlights.set(SUMMARY_FIND_HIGHLIGHT, new window.Highlight(...findMatches));
+    return () => { highlights.delete(SUMMARY_FIND_HIGHLIGHT); };
+  }, [isFindOpen, findMatches]);
 
-    setActiveFindIndex(nextIndex);
-    selectSummaryMatch(matches[nextIndex]);
-  };
+  const activeFindMatch = isFindOpen ? findMatches[activeFindIndex] : undefined;
+  useEffect(() => {
+    const scroll = summaryScrollRef.current;
+    if (!activeFindMatch || !scroll) return;
+    const match = activeFindMatch.getBoundingClientRect();
+    const viewport = scroll.getBoundingClientRect();
+    if (match.top < viewport.top || match.bottom > viewport.bottom) {
+      scroll.scrollTop += match.top - viewport.top - (viewport.height - match.height) / 2;
+    }
+    const highlights = window.CSS?.highlights;
+    if (!window.Highlight || !highlights) return;
+    const highlight = new window.Highlight(activeFindMatch);
+    highlight.priority = 1;
+    highlights.set(SUMMARY_CURRENT_FIND_HIGHLIGHT, highlight);
+    return () => { highlights.delete(SUMMARY_CURRENT_FIND_HIGHLIGHT); };
+  }, [activeFindMatch]);
 
-  const openSummaryFind = () => {
-    retainFindFocusRef.current = true;
-    setIsFindOpen(true);
-    window.requestAnimationFrame(() => {
-      findInputRef.current?.focus();
-      findInputRef.current?.select();
-    });
+  const runSummaryFind = (direction: 1 | -1) => {
+    if (findMatches.length > 0) setActiveFindIndex(index => stepMatch(index, findMatches.length, direction));
   };
 
   const closeSummaryFind = () => {
     setIsFindOpen(false);
     setFindQuery('');
-    setFindMatchCount(0);
-    setActiveFindIndex(-1);
-    window.getSelection()?.removeAllRanges();
+    setFindMatches([]);
+    setActiveFindIndex(0);
+    panelRef.current?.focus();
   };
 
   const languageSlot = (
@@ -399,7 +428,18 @@ export function SummaryPanel({
   );
 
   return (
-    <div id="meeting-summary-panel" tabIndex={0} onKeyDown={event => {
+    <div ref={panelRef} id="meeting-summary-panel" tabIndex={0} onKeyDownCapture={event => {
+      // The player shortcuts stand down while typing. Find still works inside
+      // the summary editor and its find input, but leaves portaled menus alone.
+      const target = event.target as HTMLElement;
+      if (event.defaultPrevented || !hasSummary || !event.currentTarget.contains(target) || !isTextEntry(target) || !(event.ctrlKey || event.metaKey)) return;
+      const chord = playerChord(event.nativeEvent);
+      if (chord && playerActionForChord(bindings, chord)?.key === 'find') {
+        event.preventDefault();
+        event.stopPropagation();
+        openSummaryFind();
+      }
+    }} onKeyDown={event => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h' && aiSummary && !isSummaryLoading) { event.preventDefault(); setReplaceOpen(true); }
     }} className="flex-1 min-h-[24rem] min-w-0 flex flex-col bg-card overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
       <div ref={toolbarRef} className="meeting-summary-toolbar shrink-0 border-b border-border px-3 py-2">
@@ -411,19 +451,37 @@ export function SummaryPanel({
             </span>}
           </div>
           {aiSummary && <Button variant="ghost" size="sm" aria-label="Copy summary" title="Copy summary" onClick={() => void onCopySummary()}><Copy aria-hidden="true" />{!compactToolbar && 'Copy summary'}</Button>}
-          <SummaryGeneratorButtonGroup compact={compactToolbar} generateRef={generateRef} onCheckingChange={setCheckingModels} secondaryGenerate={!aiSummary && !isSummaryLoading && transcripts.length > 0} modelConfig={modelConfig} setModelConfig={setModelConfig} onSaveModelConfig={onSaveModelConfig}
+          <SummaryGeneratorButtonGroup compact={compactToolbar} modelConfig={modelConfig} setModelConfig={setModelConfig} onSaveModelConfig={onSaveModelConfig}
             onActionsCloseAutoFocus={event => {
-              if (retainFindFocusRef.current) event.preventDefault();
+              if (retainFindFocusRef.current) {
+                event.preventDefault();
+                findInputRef.current?.focus();
+                findInputRef.current?.select();
+              }
               retainFindFocusRef.current = false;
             }}
             onGenerateSummary={onGenerateSummary} onStopGeneration={onStopGeneration} customPrompt={customPrompt} summaryStatus={summaryStatus}
             availableTemplates={availableTemplates} selectedTemplate={selectedTemplate} onTemplateSelect={onTemplateSelect}
-            hasTranscripts={transcripts.length > 0} hasSummary={!!aiSummary} isModelConfigLoading={isModelConfigLoading} onOpenModelSettings={onOpenModelSettings} languageSlot={languageSlot}
+            showRegenerate={hasSummary && !details.transcriptChanged && transcripts.length > 0}
+            isCheckingModels={checkingModels} generationDisabled={generationDisabled}
+            onOpenModelSettings={onOpenModelSettings} languageSlot={languageSlot}
             actionsSlot={<SummaryUpdaterButtonGroup isSaving={isSaving} isDirty={saveState !== 'saved' || isTitleDirty} onSave={onSaveAll}
-              onFind={openSummaryFind} onOpenFolder={onOpenFolder} hasSummary={!!aiSummary} disabled={isSummaryLoading} onReplace={() => setReplaceOpen(true)}
+              onFind={() => { retainFindFocusRef.current = true; openSummaryFind(); }} hasSummary={hasSummary} disabled={isSummaryLoading} onReplace={() => setReplaceOpen(true)}
               onRestore={hasPreviousSummary ? () => void onRestorePrevious() : undefined} />} />
         </div>
       </div>
+      {isSummaryLoading && <div className="shrink-0 space-y-2 border-b border-border bg-muted/40 px-3 py-2 text-sm">
+        <p role="status" className="flex items-center gap-2">
+          <Loader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-primary motion-reduce:animate-none" />
+          {jobState === 'deferred' ? 'Automatic notes will resume when local inference is available.'
+            : hasSummary ? 'Regenerating summary…' : 'Generating summary…'}
+        </p>
+        {progress && progress.total > 0 && <>
+          <Progress aria-label="Summary excerpt progress" value={Math.min(100, 100 * progress.completed / progress.total)}
+            aria-valuetext={`${progress.completed} of ${progress.total} excerpts, pass ${progress.level}`} />
+          <p className="text-xs text-muted-foreground">{progress.completed} of {progress.total} excerpts processed · Pass {progress.level}</p>
+        </>}
+      </div>}
       <TextReplaceDialog open={replaceOpen} onOpenChange={setReplaceOpen} title="summary"
         preview={async options => {
           if (!summaryRef.current) throw new Error('The summary is not ready.');
@@ -434,13 +492,19 @@ export function SummaryPanel({
           summaryRef.current.replaceText(options, token);
           toast.success('Summary text replaced', { description: 'Changes save automatically. Use Ctrl+Z in the editor to undo.' });
         }} />
-      {aiSummary && details && (details.model || details.email || details.transcriptChanged || details.reduction?.passes || details.reduction?.limitRetries || details.localProvider) && <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1 text-xs text-muted-foreground">
+      {aiSummary && details && (details.model || details.email || details.reduction?.passes || details.reduction?.limitRetries || details.localProvider) && <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1 text-xs text-muted-foreground">
         {details.model && <span>Generated with {details.model}{details.template && ` · ${details.template}`}</span>}
         {details.localProvider && <span>{LOCAL_SUMMARY_HINT}</span>}
         {!!details.reduction?.passes && <span>{details.reduction.sourceExcerpts} excerpts condensed in {details.reduction.passes} {details.reduction.passes === 1 ? 'pass' : 'passes'}</span>}
         {!!details.reduction?.limitRetries && <span>Retried with a smaller model input</span>}
-        {details.transcriptChanged && <span role="status" className="font-medium text-warning-foreground">Transcript changed since generation</span>}
         {details.email && <Button variant="ghost" size="sm" className="ml-auto text-xs" onClick={() => setEmailOpen(true)}>Follow-up email</Button>}
+      </div>}
+      {aiSummary && details.transcriptChanged && <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
+        <p role="status" className="text-xs font-medium text-warning-foreground">Transcript changed since generation</p>
+        {!isSummaryLoading && transcripts.length > 0 && <Button size="sm" disabled={generationDisabled}
+          onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details_transcript_changed'); void onGenerateSummary(customPrompt); }}>
+          {checkingModels ? 'Checking models…' : 'Regenerate'}
+        </Button>}
       </div>}
       {aiSummary && details?.translation && (
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2 text-sm">
@@ -453,39 +517,43 @@ export function SummaryPanel({
         </div>
       )}
       {emailOpen && details?.email && <FollowUpEmail key={meeting.id} meetingId={meeting.id} initialDraft={details.email} close={() => setEmailOpen(false)} />}
-      {isFindOpen && aiSummary && !isSummaryLoading && (
-        <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
-          <Search className="h-4 w-4 text-muted-foreground" />
+      {isFindOpen && hasSummary && (
+        <div role="search" aria-label="Find in summary" className="flex shrink-0 items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
+          <Search aria-hidden="true" className="h-4 w-4 text-muted-foreground" />
           <Input
             ref={findInputRef}
             value={findQuery}
             onChange={(event) => {
               setFindQuery(event.target.value);
-              setFindMatchCount(0);
-              setActiveFindIndex(-1);
+              setActiveFindIndex(0);
             }}
             onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing) return;
               if (event.key === 'Enter') {
                 event.preventDefault();
                 runSummaryFind(event.shiftKey ? -1 : 1);
               }
               if (event.key === 'Escape') {
                 event.preventDefault();
+                event.stopPropagation();
                 closeSummaryFind();
               }
             }}
             placeholder="Find in summary"
+            aria-label="Find in summary"
+            autoComplete="off"
+            maxLength={MAX_FIND_QUERY_LENGTH}
             className="shadow-none py-0 h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm md:text-sm text-foreground outline-none focus:border-ring focus:ring-1 focus:ring-ring"
           />
-          <span className="min-w-[4.5rem] text-right text-xs tabular-nums text-muted-foreground">
+          <span role="status" className="min-w-[4.5rem] text-right text-xs tabular-nums text-muted-foreground">
             {findQuery.trim()
-              ? findMatchCount > 0
-                ? `${activeFindIndex + 1}/${findMatchCount}`
+              ? findMatches.length > 0
+                ? `${activeFindIndex + 1} of ${findMatches.length}`
                 : 'No matches'
               : ''}
           </span>
-          <ActionIcon label="Previous match" onClick={() => runSummaryFind(-1)} disabled={!findQuery.trim()}><ChevronUp className="h-4 w-4" /></ActionIcon>
-          <ActionIcon label="Next match" onClick={() => runSummaryFind(1)} disabled={!findQuery.trim()}><ChevronDown className="h-4 w-4" /></ActionIcon>
+          <ActionIcon label="Previous match" onClick={() => runSummaryFind(-1)} disabled={!findMatches.length}><ChevronUp className="h-4 w-4" /></ActionIcon>
+          <ActionIcon label="Next match" onClick={() => runSummaryFind(1)} disabled={!findMatches.length}><ChevronDown className="h-4 w-4" /></ActionIcon>
           <ActionIcon label="Close find" onClick={closeSummaryFind}>
             <X className="h-4 w-4" />
           </ActionIcon>
@@ -493,8 +561,8 @@ export function SummaryPanel({
       )}
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
-          <SavedLiveAnswers key={meeting.id} meetingId={meeting.id} onReveal={onRevealSource} onPlay={onPlaySource}
+        <div ref={summaryScrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+          <SavedLiveAnswers key={meeting.id} meetingId={meeting.id} onReveal={onRevealSource && (source => onRevealSource(source, () => true))} onPlay={onPlaySource && (seconds => onPlaySource(seconds, () => true))}
             summaryBusy={isSummaryLoading || isSaving}
             onInsert={aiSummary ? async markdown => {
               if (isEditorSummary(aiSummary)) {
@@ -508,48 +576,64 @@ export function SummaryPanel({
                 } });
               }
             } : undefined} />
-          {isSummaryLoading && (
-            <p role="status" className="flex items-center gap-2 border-b border-border px-4 py-2 text-sm text-muted-foreground">
-              {jobState === 'deferred' ? 'Automatic notes will resume after local inference is free.'
-                : aiSummary ? 'Generating a new summary. The saved notes are available below.' : 'Generating summary…'}
-            </p>
-          )}
           {!aiSummary && !isSummaryLoading ? <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 p-8 text-center">
               <h3 className="text-base font-semibold">{transcripts.length ? 'No summary yet' : 'No transcript yet'}</h3>
               <p className="max-w-sm text-sm text-muted-foreground">{transcripts.length ? 'Notes use the template and AI model chosen in the toolbar.' : 'Transcribe the recording first, then generate a summary.'}</p>
               {transcripts.length > 0 && (
-                <Button className="mt-2" disabled={checkingModels || isModelConfigLoading} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details_empty'); generateRef.current?.(); }}>
-                  <Sparkles className="h-4 w-4" />{jobState === 'failed' || jobState === 'cancelled' ? 'Retry summary' : 'Generate summary'}
+                <Button className="mt-2" disabled={generationDisabled} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details_empty'); void onGenerateSummary(customPrompt); }}>
+                  {checkingModels ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Sparkles className="h-4 w-4" />}
+                  {checkingModels ? 'Checking models…' : jobState === 'failed' || jobState === 'cancelled' ? 'Retry summary' : 'Generate summary'}
                 </Button>
               )}
             </div>
-          : aiSummary && <div ref={summarySearchRootRef} className="mx-auto w-full max-w-[45rem] px-6 py-5">
-              <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource}>
+          : aiSummary && <div className="mx-auto w-full max-w-[45rem] px-6 py-5">
+              <SummarySources meetingId={meeting.id} revision={aiSummary} onReveal={onRevealSource} onPlay={onPlaySource} onNavigate={onNavigateSource}>
+                <div ref={summarySearchRootRef} className="[&_*::highlight(clawscribe-summary-find)]:bg-warning [&_*::highlight(clawscribe-summary-find)]:text-foreground [&_*::highlight(clawscribe-summary-find-current)]:bg-primary [&_*::highlight(clawscribe-summary-find-current)]:text-primary-foreground">
                 <SummarySurface><BlockNoteSummaryView key={`${meeting.id}:${summaryRevision}`} saveState={saveState} onDraftChange={onSummaryDraft} ref={summaryRef}
-                  summaryData={aiSummary} readOnly={isSummaryLoading} onSave={onSaveSummary} onSummaryChange={onSummaryChange} status={summaryStatus} error={summaryError}
+                  summaryData={aiSummary} readOnly={isSummaryLoading || savingRecovery} onSave={onSaveSummary} onSummaryChange={onSummaryChange} status={summaryStatus} error={summaryError}
                   meeting={{ id: meeting.id, title: meetingTitle, created_at: meeting.created_at }} /></SummarySurface>
+                </div>
               </SummarySources>
             </div>}
-          {isSummaryLoading && progress && progress.total > 0 && (
-            <p role="status" className="px-4 py-2 text-sm text-muted-foreground">
-              Excerpts processed {progress.completed} of {progress.total} (pass {progress.level})
-            </p>
-          )}
           {(jobNotice || summaryStatus === 'error') && (
             <p role={jobState === 'failed' || summaryStatus === 'error' ? 'alert' : 'status'} className="mx-4 mb-3 text-sm text-muted-foreground">
               {jobNotice || summaryError || getSummaryStatusMessage(summaryStatus)}
             </p>
           )}
-          {jobState === 'failed' && jobSnapshot?.partial_notes && (
-            <section className="mx-4 mb-4 rounded-md border p-3">
-              <h3 className="text-sm font-semibold">Recovered excerpt notes</h3>
+          {recoveredNotes && (
+            <section className="mx-4 mb-4 rounded-md border border-border p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold">Recovered excerpt notes</h3>
+                <div className="flex flex-wrap gap-1">
+                  <Button variant="ghost" size="sm" onClick={() => void copyRecoveredNotes()}>Copy</Button>
+                  {appliedRecovery !== recoveredNotes && <Button ref={recoveryButton} variant="outline" size="sm" disabled={!canUseRecovery || savingRecovery}
+                    onClick={() => { setRecoveryError(''); setRecoveryCandidate(recoveredNotes); }}>Use as summary</Button>}
+                </div>
+              </div>
               <p className="my-2 text-xs text-muted-foreground">These notes cover the excerpts that finished.</p>
-              <p className="whitespace-pre-wrap break-words text-sm">{jobSnapshot.partial_notes}</p>
+              <p className="whitespace-pre-wrap break-words text-sm">{recoveredNotes}</p>
             </section>
           )}
         </div>
         <div ref={setDockTarget} role="complementary" aria-label="Meeting chat panel" className={chatDocked ? 'flex w-[25rem] shrink-0 flex-col border-l border-border' : 'hidden'} />
       </div>
+      <Dialog open={recoveryCandidate !== null} onOpenChange={open => { if (!open && !savingRecovery) setRecoveryCandidate(null); }}>
+        <DialogContent onCloseAutoFocus={event => {
+          event.preventDefault();
+          (recoveryButton.current ?? panelRef.current)?.focus();
+        }}>
+          <DialogHeader>
+            <DialogTitle>Use recovered notes as summary?</DialogTitle>
+            <DialogDescription>{hasSummary ? 'This replaces the current summary with notes from the excerpts that finished.' : 'This saves notes from the excerpts that finished as the meeting summary.'}</DialogDescription>
+          </DialogHeader>
+          {recoveryError && <p role="alert" className="text-sm text-destructive">{recoveryError}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" disabled={savingRecovery} onClick={() => setRecoveryCandidate(null)}>Cancel</Button>
+            <Button type="button" disabled={!canUseRecovery || savingRecovery || recoveryCandidate !== recoveredNotes}
+              onClick={() => void useRecoveredNotes()}>{savingRecovery ? 'Saving…' : 'Use as summary'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <footer className="shrink-0 border-t border-border px-3 py-2">
         <div className="flex items-center justify-between gap-2">
           <Button variant="ghost" size="sm" className="min-w-0 px-1 text-xs text-muted-foreground" aria-expanded={contextOpen} aria-controls={`summary-context-${meeting.id}`} disabled={contextLoading} onClick={() => setContextOpen(value => !value)}>

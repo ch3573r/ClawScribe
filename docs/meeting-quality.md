@@ -316,7 +316,7 @@ focused button, and the arrows still move a focused slider.
 | `<`, `>` | Slower or faster |
 | F | Follow playback |
 | B | Add a bookmark at the playback position |
-| Ctrl+F | Find in the transcript |
+| Ctrl+F | Find in the focused pane (transcript by default, or the summary when it has focus) |
 
 **Find in transcript** searches the complete saved transcript, not only the loaded
 pages, ignores case, and treats the text literally. Matches are marked in the text;

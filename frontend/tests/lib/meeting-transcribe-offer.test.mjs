@@ -56,15 +56,12 @@ test('saved audio offers transcription only after a click, sharing the toolbar d
   view.hooks.unmount();
 });
 
-test('missing audio offers opening the recording folder', async () => {
-  let opened = 0;
-  const view = panel({ audioStatus: 'missing', onOpenMeetingFolder: async () => { opened++; } });
+test('missing audio explains the transcript state without a duplicate folder action', () => {
+  const view = panel({ audioStatus: 'missing' });
   const empty = find(view.render(), 'VirtualizedTranscriptView').props.emptyState;
   assert.match(text(empty), /No transcript yet, and no audio file was found in this meeting's folder\./);
   assert.doesNotMatch(text(empty), /Transcribe now/);
-  assert.equal(text(find(empty, 'button')), 'Open recording folder');
-  await find(empty, 'button').props.onClick();
-  assert.equal(opened, 1);
+  assert.doesNotMatch(text(empty), /Open recording folder/);
   view.hooks.unmount();
 });
 

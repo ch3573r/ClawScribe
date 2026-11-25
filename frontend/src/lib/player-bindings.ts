@@ -19,7 +19,7 @@ export const PLAYER_ACTIONS: { key: PlayerAction; label: string; command: Playba
   { key: 'faster', label: 'Faster playback', command: { type: 'rate', direction: 1 } },
   { key: 'follow', label: 'Follow playback in the transcript', command: { type: 'follow' } },
   { key: 'bookmark', label: 'Add a bookmark at this moment', command: { type: 'bookmark' } },
-  { key: 'find', label: 'Find in transcript', command: { type: 'find' } },
+  { key: 'find', label: 'Find in the focused pane', command: { type: 'find' } },
 ];
 
 export const PLAYER_BINDINGS_STORAGE = 'clawscribe.playerShortcuts.v1';

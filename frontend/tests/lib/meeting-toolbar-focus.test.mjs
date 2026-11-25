@@ -12,12 +12,13 @@ const primitives = {
   '@/components/ui/button': { Button: 'button' },
   '@/components/ui/input': { Input: 'input' },
   '@/components/ui/textarea': { Textarea: 'textarea' },
+  '@/components/ui/progress': { Progress: 'progress-indicator' },
   '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
   '@/components/ui/dropdown-menu': {
     DropdownMenu: 'menu', DropdownMenuTrigger: 'menu-trigger', DropdownMenuContent: 'menu-content', DropdownMenuItem: 'menu-item',
     DropdownMenuSub: 'menu-sub', DropdownMenuSubTrigger: 'menu-sub-trigger', DropdownMenuSubContent: 'menu-sub-content', DropdownMenuSeparator: 'separator',
   },
-  '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogTitle: 'dialog-title' },
+  '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogTitle: 'dialog-title', DialogHeader: 'dialog-header', DialogDescription: 'dialog-description', DialogFooter: 'dialog-footer' },
   '@/components/ui/visually-hidden': { VisuallyHidden: 'visually-hidden' },
   '@/components/ui/popover': { Popover: 'popover', PopoverTrigger: 'popover-trigger', PopoverContent: 'popover-content' },
   './ActionIcon': { ActionIcon: 'action-icon' },
@@ -131,6 +132,7 @@ test('the saved header shows counted actions, flags suggestions, and restores pi
 });
 
 const summaryProps = {
+  details: { transcriptChanged: false }, jobSnapshot: null,
   saveState: 'saved', hasPreviousSummary: false, summaryRevision: 0, onRestorePrevious: async () => {}, onSummaryDraft() {},
   meeting: { id: 'example', title: 'Review', created_at: '2026-01-01T12:00:00Z' }, meetingTitle: 'Review', isTitleDirty: false,
   summaryRef: { current: null }, isSaving: false, onSaveAll: async () => {}, onCopySummary: async () => {}, onOpenFolder: async () => {},
@@ -141,9 +143,6 @@ const summaryProps = {
 };
 
 test('Find retains input focus after summary overflow closes and resets the suppression', () => {
-  const previousWindow = globalThis.window;
-  const frames = [];
-  globalThis.window = { requestAnimationFrame: callback => frames.push(callback) };
   const panelHooks = createHookHarness(), generatorHooks = createHookHarness();
   try {
     const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', { ...primitives, react: panelHooks.react });
@@ -159,15 +158,13 @@ test('Find retains input focus after summary overflow closes and resets the supp
     assert.ok(input, 'Find must reveal the search input');
     let active = 'overflow';
     input.props.ref.current = { focus() { active = 'find'; }, select() {} };
-    frames.splice(0).forEach(callback => callback());
-    assert.equal(active, 'find');
     const content = nodes(toolbar).find(node => node.type === 'menu-content');
     closeMenu(content, () => { active = 'overflow'; });
     assert.equal(active, 'find', 'menu close must leave the revealed search input focused');
     closeMenu(content, () => { active = 'overflow'; });
     assert.equal(active, 'overflow', 'later menu dismissal must restore normal focus');
   } finally {
-    panelHooks.unmount(); generatorHooks.unmount(); globalThis.window = previousWindow;
+    panelHooks.unmount(); generatorHooks.unmount();
   }
 });
 
@@ -208,31 +205,30 @@ test('meeting title strips pasted line breaks without trimming ordinary spaces',
   hooks.unmount();
 });
 
-test('the empty summary view offers the one primary Generate action, and the toolbar steps back', () => {
+test('the empty summary view offers the only Generate action', () => {
   const hooks = createHookHarness();
   const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', { ...primitives, '@/lib/analytics': { __esModule: true, default: { trackButtonClick() {} } }, react: hooks.react });
   const render = props => hooks.render(() => SummaryPanel({ ...summaryProps, ...props }));
-  const group = tree => nodes(tree).find(node => node.props && 'secondaryGenerate' in node.props);
+  const group = tree => nodes(tree).find(node => node.props && 'showRegenerate' in node.props);
   const generate = tree => nodes(tree).find(node => node.type === 'button' && text(node) === 'Generate summary');
 
-  const empty = render({ aiSummary: null, summaryStatus: 'idle' });
+  const generated = [];
+  const empty = render({ aiSummary: null, summaryStatus: 'idle', customPrompt: 'Context', onGenerateSummary: async prompt => { generated.push(prompt); } });
   assert.ok(generate(empty), 'the empty view has the action');
-  assert.equal(group(empty).props.secondaryGenerate, true, 'so the toolbar one is secondary');
-  let started = 0;
-  group(empty).props.generateRef.current = () => { started++; };
+  assert.equal(group(empty).props.showRegenerate, false);
   generate(empty).props.onClick();
-  assert.equal(started, 1, 'it runs the same action as the toolbar');
+  assert.deepEqual(generated, ['Context']);
   assert.doesNotMatch(text(empty), /toolbar above/);
 
   const noTranscript = render({ aiSummary: null, summaryStatus: 'idle', transcripts: [] });
   assert.equal(generate(noTranscript), undefined, 'nothing to generate from');
-  assert.equal(group(noTranscript).props.secondaryGenerate, false);
+  assert.equal(group(noTranscript).props.showRegenerate, false);
 
   const generating = render({ aiSummary: null, summaryStatus: 'processing' });
   assert.equal(generate(generating), undefined, 'no Generate while one is running');
-  assert.equal(group(generating).props.secondaryGenerate, false);
+  assert.equal(group(generating).props.showRegenerate, false);
 
   const populated = render({});
-  assert.equal(group(populated).props.secondaryGenerate, false, 'with a summary the toolbar action is the only one');
+  assert.equal(group(populated).props.showRegenerate, true, 'with a summary the toolbar action is the only one');
   hooks.unmount();
 });

@@ -45,7 +45,7 @@ function transcriptView(initial, captureSegment = () => {}) {
     './ui/button': { Button: 'button' },
     './ui/tooltip': names('Tooltip TooltipTrigger TooltipContent'),
     './MeetingDetails/SpeakerLabelPopover': names('SpeakerLabelPopover SpeakerDot'),
-    'lucide-react': { Pencil: 'Pencil' },
+    'lucide-react': { Pencil: 'Pencil', BookmarkPlus: 'BookmarkPlus' },
   });
   let props = { segments: rows, showSpeakerLabels: false, ...initial };
   return {
@@ -69,6 +69,23 @@ test('find marks every match, rings only the current passage, and leaves other t
   view.set({ findQuery: undefined, activeFindId: null });
   assert.equal(view.render().filter(node => node.type === 'mark').length, 0);
   view.unmount();
+});
+
+test('transcript row bookmarks are keyboard reachable and use the row offset in both layouts', () => {
+  const starts = [];
+  const trigger = { isConnected: true };
+  for (const count of [3, 12]) {
+    const view = transcriptView({ onBookmarkSegment: (...args) => starts.push(args) });
+    view.set({ segments: [...view.rows.slice(0, count), { id: 'untimed', timestamp: NaN, text: 'Untimed segment' }] });
+    const buttons = view.render().filter(node => node.props?.['aria-label']?.startsWith('Add bookmark at '));
+    assert.equal(buttons.length, count);
+    assert.equal(buttons[1].props.tabIndex, undefined);
+    assert.match(buttons[1].props.className, /focus-visible:opacity-100/);
+    assert.match(buttons[1].props.className, /group-hover\/segment:opacity-100/);
+    buttons[1].props.onClick({ currentTarget: trigger });
+    view.unmount();
+  }
+  assert.deepEqual(starts, [[10, trigger], [10, trigger]]);
 });
 
 test('each find request scrolls to the current match once, even when the page loads it later', async () => {
@@ -321,6 +338,27 @@ test('bookmarks are reported to the page for the timeline', async () => {
   } finally { ui.hooks.unmount(); }
 });
 
+test('saved bookmarks unfold on load and a timestamp is validated and clamped before saving', async () => {
+  const ui = bookmarksUi({ addOpen: true, initialTime: 32.75, duration: 160 });
+  try {
+    ui.render(); await flush(); ui.render();
+    const accordion = () => ui.render().find(node => node.type === 'Accordion');
+    const time = () => ui.render().find(node => node.type === 'input' && node.props.placeholder === 'MM:SS');
+    const submit = () => ui.render().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+    assert.equal(accordion().props.value, 'bookmarks');
+    accordion().props.onValueChange('');
+    assert.equal(accordion().props.value, '');
+    assert.equal(time().props.value, '32.75');
+    time().props.onChange({ target: { value: '02:99' } });
+    assert.equal(time().props['aria-invalid'], true);
+    submit(); await flush();
+    assert.equal(ui.invoked.filter(([name]) => name === 'add_meeting_bookmark').length, 0);
+    time().props.onChange({ target: { value: '00:03:00' } });
+    submit(); await flush();
+    assert.equal(ui.invoked.find(([name]) => name === 'add_meeting_bookmark')[1].seconds, 160);
+  } finally { ui.hooks.unmount(); }
+});
+
 test('using notes as summary priorities is off by default and changes only with the switch', async () => {
   const ui = bookmarksUi();
   const another = bookmarksUi({ meetingId: 'meeting-2' }, { 'meeting-1': true });
@@ -560,13 +598,28 @@ test('Escape closes the find bar and clears the marks; a bookmark request opens 
   } finally { globalThis.document = previousDocument; ui.hooks.unmount(); }
 });
 
+test('activating a row bookmark pre-fills its time and restores focus to that row control', () => {
+  const ui = panel();
+  try {
+    let focused = false;
+    ui.view(ui.render()).onBookmarkSegment(31.125, { isConnected: true, focus: () => { focused = true; } });
+    const { props } = ui.render().find(node => node.type === 'MeetingBookmarks');
+    assert.equal(props.addOpen, true);
+    assert.equal(props.initialTime, 31.125);
+    props.onReturnFocus();
+    assert.equal(focused, true);
+  } finally { ui.hooks.unmount(); }
+});
+
 // ---------------------------------------------------------------------------
 // Meeting page: shortcut wiring
 // ---------------------------------------------------------------------------
 async function meetingPage({ audioReady = true } = {}) {
-  const previousLog = console.log, previousWindow = globalThis.window;
+  const previousLog = console.log, previousWindow = globalThis.window, previousDocument = globalThis.document;
   console.log = () => {};
   globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  const document = { activeElement: null };
+  globalThis.document = document;
   const hooks = createHookHarness();
   const calls = [];
   let shortcuts;
@@ -578,6 +631,7 @@ async function meetingPage({ audioReady = true } = {}) {
     'framer-motion': { motion: { div: 'div' } },
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
     '@/lib/analytics': { trackPageView() {} },
+    sonner: { toast: { error() {}, warning() {}, info() {}, success() {} } },
     '@tauri-apps/api/core': { invoke: async () => 'synthetic/audio.wav' },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({}) },
     '@/contexts/ConfigContext': { useConfig: () => ({ modelConfig: {} }) },
@@ -598,11 +652,37 @@ async function meetingPage({ audioReady = true } = {}) {
     '@/components/Knowledge/EvidenceRoute': { EvidenceRoute: 'EvidenceRoute' },
     '@/components/MeetingDetails/SpeakerLaneTimeline': { SpeakerLaneTimeline: 'SpeakerLaneTimeline' },
   });
-  const props = { meeting: { id: 'synthetic-meeting', folder_path: 'synthetic-folder' }, summaryData: null, segments: [], timelineSegments: [], totalCount: 0 };
+  const props = { meeting: { id: 'synthetic-meeting', folder_path: 'synthetic-folder' }, summaryData: null, segments: [], timelineSegments: [], totalCount: 0,
+    onRevealTranscript: async (id, index) => { calls.push(['reveal', id, index]); } };
   const render = () => expand(hooks.render(() => PageContent(props)));
   render(); await flush(); render();
-  return { calls, audio, render, shortcuts: () => shortcuts, restore: () => { console.log = previousLog; globalThis.window = previousWindow; hooks.unmount(); } };
+  return { calls, audio, document, render, shortcuts: () => shortcuts, restore: () => { console.log = previousLog; globalThis.window = previousWindow; globalThis.document = previousDocument; hooks.unmount(); } };
 }
+
+test('the find shortcut follows summary focus and defaults to the transcript elsewhere', async () => {
+  const ui = await meetingPage();
+  try {
+    const get = name => ui.render().find(node => node.type === name).props;
+    ui.shortcuts().find();
+    assert.equal(get('TranscriptPanel').findOpenRequest, 1);
+    assert.equal(get('SummaryPanel').findOpenRequest, 0);
+    ui.document.activeElement = { closest: selector => selector === '#meeting-summary-panel' ? {} : null };
+    ui.shortcuts().find();
+    assert.equal(get('TranscriptPanel').findOpenRequest, 1);
+    assert.equal(get('SummaryPanel').findOpenRequest, 1);
+  } finally { ui.restore(); }
+});
+
+test('summary source navigation requests transcript reveal and can then seek and play', async () => {
+  const ui = await meetingPage();
+  try {
+    const { props } = ui.render().find(node => node.type === 'SummaryPanel');
+    await props.onRevealSource({ transcript_id: 'late-row', transcript_index: 155 }, () => true);
+    await props.onPlaySource(25.5, () => true);
+    assert.deepEqual(ui.calls, [['reveal', 'late-row', 155], ['seek', 25.5], 'play']);
+    assert.equal(ui.render().find(node => node.type === 'TranscriptPanel').props.focusedSource.id, 'late-row');
+  } finally { ui.restore(); }
+});
 
 test('page shortcuts drive the player, follow, bookmarks and find, and only offer playback keys with ready audio', async () => {
   const ui = await meetingPage();

@@ -3,7 +3,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { ActionIcon } from './ActionIcon';
 import {
   DropdownMenu,
@@ -46,7 +45,6 @@ interface TranscriptButtonGroupProps {
   onTranscribeOpenChange: (open: boolean) => void;
   onCopyTranscript: () => void;
   onFind?: () => void;
-  onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
   meetingFolderPath?: string | null;
   audioAvailable?: boolean;
@@ -63,7 +61,6 @@ export function TranscriptButtonGroup({
   onTranscribeOpenChange,
   onCopyTranscript,
   onFind,
-  onOpenMeetingFolder,
   meetingId,
   meetingFolderPath,
   audioAvailable = true,
@@ -260,11 +257,6 @@ export function TranscriptButtonGroup({
 
   const speakerDetectionDisabled = transcriptCount === 0 || isDiarizing;
   const hasRecordingFolder = Boolean(meetingFolderPath?.trim());
-  const recordingFolderAction = (
-    <DropdownMenuItem disabled={!hasRecordingFolder} onSelect={() => { if (hasRecordingFolder) void onOpenMeetingFolder(); }}>
-      Open recording folder
-    </DropdownMenuItem>
-  );
 
   return (
     <div className="flex shrink-0 items-center justify-end gap-1">
@@ -272,10 +264,6 @@ export function TranscriptButtonGroup({
       <Button variant="ghost" size="sm" className="px-1 text-xs" disabled={transcriptCount === 0} onClick={() => { Analytics.trackButtonClick('copy_transcript', 'meeting_details'); onCopyTranscript(); }}>Copy</Button>
       <DropdownMenu><DropdownMenuTrigger asChild><ActionIcon ref={menuTrigger} label="More transcript actions" className="h-8 w-8"><MoreHorizontal /></ActionIcon></DropdownMenuTrigger>
         <DropdownMenuContent align="end" onCloseAutoFocus={event => { if (detectionRequest) event.preventDefault(); }}>
-          {hasRecordingFolder ? recordingFolderAction : <Tooltip>
-            <TooltipTrigger asChild><span className="block" tabIndex={0}>{recordingFolderAction}</span></TooltipTrigger>
-            <TooltipContent>No recording folder is attached to this meeting.</TooltipContent>
-          </Tooltip>}
           {meetingId && meetingFolderPath && audioAvailable && <DropdownMenuItem title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'} onClick={() => { Analytics.trackButtonClick('enhance_transcript', 'meeting_details'); onTranscribeOpenChange(true); }}>{transcriptCount === 0 ? 'Transcribe saved audio' : 'Enhance or retranscribe'}</DropdownMenuItem>}
           {onFind && <DropdownMenuItem disabled={transcriptCount === 0} onSelect={onFind}>Find in transcript<DropdownMenuShortcut>{playerKeycaps(bindings.find).join('+')}</DropdownMenuShortcut></DropdownMenuItem>}
           {onAddBookmark && <DropdownMenuItem onSelect={onAddBookmark}>Add bookmark<DropdownMenuShortcut>{playerKeycaps(bindings.bookmark).join('+')}</DropdownMenuShortcut></DropdownMenuItem>}

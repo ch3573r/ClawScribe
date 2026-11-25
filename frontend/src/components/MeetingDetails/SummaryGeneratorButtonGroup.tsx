@@ -1,6 +1,5 @@
 "use client";
 
-import { openExternal } from '@/lib/openExternal';
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
 import {
   Dialog,
@@ -18,12 +17,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Sparkles, Settings, Loader2, FileText, Check, Square, MoreHorizontal } from 'lucide-react';
 import Analytics from '@/lib/analytics';
-import type { OllamaModel } from '@/contexts/ConfigContext';
-import { invoke } from '@tauri-apps/api/core';
-import { toast } from 'sonner';
 import { useState, useEffect, ReactNode } from 'react';
-import { isOllamaNotInstalledError } from '@/lib/utils';
-import { BuiltInModelInfo } from '@/lib/builtin-ai';
 
 interface SummaryGeneratorButtonGroupProps {
   onActionsCloseAutoFocus?: (event: Event) => void;
@@ -40,15 +34,10 @@ interface SummaryGeneratorButtonGroupProps {
   availableTemplates: Array<{ id: string, name: string, description: string }>;
   selectedTemplate: string;
   onTemplateSelect: (templateId: string, templateName: string) => void;
-  hasTranscripts?: boolean;
-  hasSummary?: boolean;
-  isModelConfigLoading?: boolean;
+  showRegenerate?: boolean;
+  generationDisabled?: boolean;
+  isCheckingModels?: boolean;
   onOpenModelSettings?: (openFn: () => void) => void;
-  /** Filled with the generate action, so the empty summary view can offer the same one. */
-  generateRef?: { current: (() => void) | null };
-  onCheckingChange?: (checking: boolean) => void;
-  /** The empty summary view shows the primary action; this one steps back. */
-  secondaryGenerate?: boolean;
 }
 
 export function SummaryGeneratorButtonGroup({
@@ -62,193 +51,18 @@ export function SummaryGeneratorButtonGroup({
   availableTemplates,
   selectedTemplate,
   onTemplateSelect,
-  hasTranscripts = true,
-  hasSummary = false,
-  isModelConfigLoading = false,
+  showRegenerate = false,
+  generationDisabled = false,
+  isCheckingModels = false,
   onOpenModelSettings,
   languageSlot, actionsSlot, compact = true, onActionsCloseAutoFocus,
-  generateRef, onCheckingChange, secondaryGenerate = false
 }: SummaryGeneratorButtonGroupProps) {
-  const [isCheckingModels, setIsCheckingModels] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
 
-  // Expose the function to open the modal via callback registration
+  // Preflight failures can open the same settings dialog as the toolbar.
   useEffect(() => {
-    if (onOpenModelSettings) {
-      // Register our open dialog function with the parent by calling the callback
-      // This allows the parent to store a reference to this function
-      const openDialog = () => {
-        console.log('📱 Opening model settings dialog via callback');
-        setSettingsDialogOpen(true);
-      };
-
-      // Call the parent's callback with our open function
-      // Note: This assumes onOpenModelSettings accepts a function parameter
-      // We'll need to adjust the signature
-      onOpenModelSettings(openDialog);
-    }
+    onOpenModelSettings?.(() => setSettingsDialogOpen(true));
   }, [onOpenModelSettings]);
-
-
-  const checkBuiltInAIModelsAndGenerate = async () => {
-    setIsCheckingModels(true);
-    try {
-      const selectedModel = modelConfig.model;
-
-      // Check if specific model is configured
-      if (!selectedModel) {
-        toast.error('No built-in AI model selected', {
-          description: 'Please select a model in settings',
-          duration: 5000,
-        });
-        setSettingsDialogOpen(true);
-        return;
-      }
-
-      // Check model readiness (with filesystem refresh)
-      const isReady = await invoke<boolean>('builtin_ai_is_model_ready', {
-        modelName: selectedModel,
-        refresh: true,
-      });
-
-      if (isReady) {
-        // Model is available, proceed with generation
-        onGenerateSummary(customPrompt);
-        return;
-      }
-
-      // Model not ready - check detailed status
-      const modelInfo = await invoke<BuiltInModelInfo | null>('builtin_ai_get_model_info', {
-        modelName: selectedModel,
-      });
-
-      if (!modelInfo) {
-        toast.error('Model not found', {
-          description: `Could not find information for model: ${selectedModel}`,
-          duration: 5000,
-        });
-        setSettingsDialogOpen(true);
-        return;
-      }
-
-      // Handle different model states
-      const status = modelInfo.status;
-
-      if (status.type === 'downloading') {
-        toast.info('Model download in progress', {
-          description: `${selectedModel} is downloading (${status.progress}%). Please wait until download completes.`,
-          duration: 5000,
-        });
-        return;
-      }
-
-      if (status.type === 'not_downloaded') {
-        toast.error('Model not downloaded', {
-          description: `${selectedModel} needs to be downloaded before use. Opening model settings...`,
-          duration: 5000,
-        });
-        setSettingsDialogOpen(true);
-        return;
-      }
-
-      if (status.type === 'corrupted') {
-        toast.error('Model file corrupted', {
-          description: `${selectedModel} file is corrupted. Please delete and re-download.`,
-          duration: 7000,
-        });
-        setSettingsDialogOpen(true);
-        return;
-      }
-
-      if (status.type === 'error') {
-        toast.error('Model error', {
-          description: status.Error || 'An error occurred with the model',
-          duration: 5000,
-        });
-        setSettingsDialogOpen(true);
-        return;
-      }
-
-      // Fallback
-      toast.error('Model not available', {
-        description: 'The selected model is not ready for use',
-        duration: 5000,
-      });
-      setSettingsDialogOpen(true);
-
-    } catch (error) {
-      console.error('Error checking built-in AI models:', error);
-      toast.error('Failed to check model status', {
-        description: error instanceof Error ? error.message : String(error),
-        duration: 5000,
-      });
-    } finally {
-      setIsCheckingModels(false);
-    }
-  };
-
-  const checkOllamaModelsAndGenerate = async () => {
-    // Handle built-in AI provider
-    if (modelConfig.provider === 'builtin-ai') {
-      await checkBuiltInAIModelsAndGenerate();
-      return;
-    }
-
-    // Only check for Ollama provider
-    if (modelConfig.provider !== 'ollama') {
-      onGenerateSummary(customPrompt);
-      return;
-    }
-
-    setIsCheckingModels(true);
-    try {
-      const endpoint = modelConfig.ollamaEndpoint || null;
-      const models = await invoke<OllamaModel[]>('get_ollama_models', { endpoint });
-
-      if (!models || models.length === 0) {
-        // No models available, show message and open settings
-        toast.error(
-          'No Ollama models found. Please download gemma2:2b from Model settings.',
-          { duration: 5000 }
-        );
-        setSettingsDialogOpen(true);
-        return;
-      }
-
-      // Models are available, proceed with generation
-      onGenerateSummary(customPrompt);
-    } catch (error) {
-      console.error('Error checking Ollama models:', error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-
-      if (isOllamaNotInstalledError(errorMessage)) {
-        // Ollama is not installed - show specific message with download link
-        toast.error(
-          'Ollama is not installed',
-          {
-            description: 'Please download and install Ollama to use local models.',
-            duration: 7000,
-            action: {
-              label: 'Download',
-              onClick: () => openExternal('https://ollama.com/download')
-            }
-          }
-        );
-      } else {
-        // Other error - generic message
-        toast.error(
-          'Failed to check Ollama models. Please check if Ollama is running and download a model.',
-          { duration: 5000 }
-        );
-      }
-      setSettingsDialogOpen(true);
-    } finally {
-      setIsCheckingModels(false);
-    }
-  };
-
-  if (generateRef) generateRef.current = () => { void checkOllamaModelsAndGenerate(); };
-  useEffect(() => { onCheckingChange?.(isCheckingModels); }, [isCheckingModels, onCheckingChange]);
 
   const isGenerating = summaryStatus === 'processing' || summaryStatus === 'summarizing' || summaryStatus === 'regenerating';
 
@@ -260,9 +74,9 @@ export function SummaryGeneratorButtonGroup({
     {!compact && availableTemplates.length > 0 && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="sm" className="px-2">Template</Button></DropdownMenuTrigger><DropdownMenuContent align="end">{templateItems}</DropdownMenuContent></DropdownMenu>}
     {!compact && <Button variant="ghost" size="sm" className="px-2" onClick={() => setSettingsDialogOpen(true)}>AI model</Button>}
     {isGenerating ? <Button variant="outline" size="sm" onClick={() => { Analytics.trackButtonClick('stop_summary_generation', 'meeting_details'); onStopGeneration(); }}><Square className="h-4 w-4" />Stop</Button>
-      : <Button size="sm" variant={secondaryGenerate ? 'outline' : 'default'} className="px-2 text-xs" disabled={!hasTranscripts || isCheckingModels || isModelConfigLoading} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details'); void checkOllamaModelsAndGenerate(); }}>
-        {isCheckingModels || isModelConfigLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-        {isCheckingModels || isModelConfigLoading ? 'Checking models…' : hasSummary ? 'Regenerate summary' : 'Generate summary'}
+      : showRegenerate && <Button size="sm" className="px-2 text-xs" disabled={generationDisabled || isCheckingModels} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details'); void onGenerateSummary(customPrompt); }}>
+        {isCheckingModels ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Sparkles className="h-4 w-4" />}
+        {isCheckingModels ? 'Checking models…' : 'Regenerate summary'}
       </Button>}
     <DropdownMenu><DropdownMenuTrigger asChild><ActionIcon label="More summary actions" className="h-8 w-8"><MoreHorizontal /></ActionIcon></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-60" onCloseAutoFocus={onActionsCloseAutoFocus}>

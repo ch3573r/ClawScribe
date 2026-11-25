@@ -159,6 +159,7 @@ export default function PageContent({
   const [followPlayback, setFollowPlayback] = useState(true);
   const [bookmarks, setBookmarks] = useState<MeetingBookmark[]>([]);
   const [findOpenRequest, setFindOpenRequest] = useState(0);
+  const [summaryFindRequest, setSummaryFindRequest] = useState(0);
   const [bookmarkRequest, setBookmarkRequest] = useState(0);
   const stopFollowing = useCallback(() => setFollowPlayback(false), []);
   const isAudioReady = Boolean(audioStatus === 'found' && audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
@@ -183,12 +184,12 @@ export default function PageContent({
       setFocusedSource(source => source && { id: source.id, request });
     }
   }, [isAudioReady, revealTranscriptPane]);
-  const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean) => {
+  const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean, focus = true) => {
     if (!onRevealTranscript || !current()) throw new Error('The transcript is not ready. Retry the citation.');
     await onRevealTranscript(id, index);
     if (!current()) return;
     setFocusedSource({ id, request: ++evidenceFocusRequest.current });
-    revealTranscriptPane();
+    if (focus) revealTranscriptPane();
   }, [onRevealTranscript, revealTranscriptPane]);
   const playEvidence = useCallback(async (seconds: number, current: () => boolean) => {
     if (!current()) return;
@@ -397,7 +398,10 @@ export default function PageContent({
     rate: isAudioReady ? ({ direction }) => audioPlayer.setRate(stepPlaybackRate(audioPlayer.rate, direction)) : undefined,
     follow: isAudioReady ? () => setFollowPlayback(value => !value) : undefined,
     bookmark: isAudioReady ? () => setBookmarkRequest(value => value + 1) : undefined,
-    find: () => setFindOpenRequest(value => value + 1),
+    find: () => {
+      if (document.activeElement?.closest('#meeting-summary-panel')) setSummaryFindRequest(value => value + 1);
+      else setFindOpenRequest(value => value + 1);
+    },
   });
 
   // Track page view
@@ -483,7 +487,6 @@ export default function PageContent({
           onClearSpeakerHighlight={clearSpeakerHighlight}
           transcripts={meetingData.transcripts}
           onCopyTranscript={copyOperations.handleCopyTranscript}
-          onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
           isRecording={isRecording}
           disableAutoScroll={true}
           // Pagination props for efficient loading
@@ -504,6 +507,7 @@ export default function PageContent({
           isLoadingTranscript={isLoadingTranscript}
           showSpeakerAttribution={showSpeakerAttribution}
           playbackClock={isAudioReady ? audioPlayer.clock : undefined}
+          recordingDuration={audioPlayer.duration || undefined}
           onSeekToTime={isAudioReady ? playPassage : undefined}
           onRefetchTranscripts={onRefetchTranscripts}
           onPatchTranscriptText={onPatchTranscriptText}
@@ -517,14 +521,13 @@ export default function PageContent({
           onBookmarksChange={setBookmarks}
         />
         <SummaryPanel
+          bindings={playerBindings}
+          findOpenRequest={summaryFindRequest}
           seriesLanguage={series?.language}
           details={meetingData.details}
-          onRevealSource={async (source) => {
-            await onRevealTranscript?.(source.transcript_id, source.transcript_index);
-            setFocusedSource({ id: source.transcript_id, request: Date.now() });
-            revealTranscriptPane();
-          }}
-          onPlaySource={isAudioReady ? async seconds => { await seek(seconds); if (!isPlaying) await play(); } : undefined}
+          onRevealSource={onRevealTranscript ? (source, current) => revealEvidence(source.transcript_id, source.transcript_index, current, false) : undefined}
+          onPlaySource={isAudioReady ? playEvidence : undefined}
+          onNavigateSource={revealTranscriptPane}
           meeting={meeting}
           meetingTitle={meetingData.meetingTitle}
           isTitleDirty={meetingData.isTitleDirty}
@@ -532,9 +535,9 @@ export default function PageContent({
           isSaving={meetingData.isSaving}
           onSaveAll={meetingData.saveAllChanges}
           onCopySummary={copyOperations.handleCopySummary}
-          onOpenFolder={meetingOperations.handleOpenMeetingFolder}
           aiSummary={meetingData.aiSummary}
           summaryStatus={summaryGeneration.summaryStatus}
+          checkingModels={summaryGeneration.isCheckingModels}
           transcripts={meetingData.transcripts}
           modelConfig={modelConfig}
           setModelConfig={setModelConfig}

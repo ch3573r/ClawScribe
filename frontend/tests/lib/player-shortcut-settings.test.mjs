@@ -82,7 +82,7 @@ const actions = [
   ['Faster playback', '>', 'm', 'rate', 1],
   ['Follow playback in the transcript', 'f', 't', 'follow'],
   ['Add a bookmark at this moment', 'b', 'a', 'bookmark'],
-  ['Find in transcript', 'f', 'z', 'find', undefined, { ctrlKey: true }],
+  ['Find in the focused pane', 'f', 'z', 'find', undefined, { ctrlKey: true }],
 ];
 
 test('player bindings survive reopening, replace all ten defaults in the listener and help, and reset independently', async t => {
