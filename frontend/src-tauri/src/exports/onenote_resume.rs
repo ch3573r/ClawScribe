@@ -7,7 +7,9 @@ use super::exporter::{
     self, from_ledger, graph_url_with_path_segments, json_request, now_rfc3339, ExportContext,
     ExportReport, OneNoteTarget,
 };
-use super::ledger::{valid_remote_id, ExportLedger, OneNoteOptions, OneNoteSection};
+use super::ledger::{
+    onenote_ledger_prefix, valid_remote_id, ExportLedger, OneNoteOptions, OneNoteSection,
+};
 use super::model::{ExportStatus, MeetingExport, MicrosoftConnectionState};
 use super::onenote::{self, DEFAULT_PAGE_BUDGET_BYTES};
 use super::transport::{GraphRequest, GraphTransport};
@@ -67,6 +69,9 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
         if !valid_remote_id(&id) {
             return Err("Invalid saved OneNote section reference.".into());
         }
+        if !valid_remote_id(&section.notebook_id) {
+            return Err("Invalid saved OneNote notebook reference.".into());
+        }
         if !super::resolution::section_is_in_notebook(client, account, &id, &section.notebook_id)
             .await?
         {
@@ -75,7 +80,7 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
         let changed =
             section.content_hash != content_hash || section.page_title != request.page_title;
         if !request.replace_existing || !changed {
-            let prefix = format!("onenote:{}:{}:{id}:", account.tenant_id, account.user_id);
+            let prefix = onenote_ledger_prefix(account.tenant_id, account.user_id, &id);
             if ledger
                 .entries
                 .range(prefix.clone()..)
@@ -216,10 +221,7 @@ async fn export_saved_section_notes<T: GraphTransport, S: Sleeper>(
     let target = OneNoteTarget {
         section_id: section_id.into(),
     };
-    let prefix = format!(
-        "onenote:{}:{}:{section_id}:",
-        account.tenant_id, account.user_id
-    );
+    let prefix = onenote_ledger_prefix(account.tenant_id, account.user_id, section_id);
     let revision = saved_notes_revision(ledger, meeting, &prefix);
     exporter::export_onenote_revision(client, ledger, meeting, &target, account, &revision).await
 }
@@ -257,10 +259,7 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
     saved_page_id: Option<String>,
     meeting: &MeetingExport,
 ) -> Result<ExportReport, String> {
-    let prefix = format!(
-        "onenote:{}:{}:{section_id}:",
-        account.tenant_id, account.user_id
-    );
+    let prefix = onenote_ledger_prefix(account.tenant_id, account.user_id, section_id);
     let revision = saved_notes_revision(ledger, meeting, &prefix);
     let key = format!("{prefix}{revision}:notes:0");
     let mut pages = std::collections::BTreeMap::new();
@@ -717,7 +716,11 @@ mod tests {
 
     fn request(resume_id: Option<String>) -> SectionRequest {
         SectionRequest {
-            notebook_id: "notebook".into(),
+            notebook_id: if resume_id.is_none() {
+                "notebook".into()
+            } else {
+                String::new()
+            },
             section_name: "Weekly sync".into(),
             page_title: "Release follow-ups".into(),
             markdown: "## Decisions\n- Send the draft".into(),
@@ -726,6 +729,46 @@ mod tests {
             resume_id,
             replace_existing: false,
         }
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_an_invalid_saved_notebook_before_contacting_graph() {
+        let transport = MockGraphTransport::new();
+        let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+        let mut ledger = ExportLedger::new("meeting");
+        let account = ExportContext {
+            tenant_id: "tenant",
+            user_id: "user",
+            bearer_token: "<redacted>",
+        };
+        ledger.onenote_sections.insert(
+            "saved-attempt".into(),
+            OneNoteSection {
+                tenant_id: account.tenant_id.into(),
+                user_id: account.user_id.into(),
+                notebook_id: "..".into(),
+                section_id: Some("section-a".into()),
+                section_name: "Weekly sync".into(),
+                page_title: "Release follow-ups".into(),
+                content_hash: section_content_hash(&request(None)),
+                options: None,
+                started_at: now_rfc3339().unwrap(),
+                notes_page_id: None,
+            },
+        );
+
+        assert_eq!(
+            export_section(
+                &client,
+                &mut ledger,
+                &account,
+                request(Some("saved-attempt".into()))
+            )
+            .await
+            .unwrap_err(),
+            "Invalid saved OneNote notebook reference."
+        );
+        assert!(client.transport().recorded().is_empty());
     }
 
     #[tokio::test]

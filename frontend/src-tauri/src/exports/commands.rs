@@ -256,7 +256,10 @@ pub async fn microsoft_sign_out<R: tauri::Runtime>(
         crate::teams_detection::monitor::join::cancel_microsoft_pending(&app);
         session.end_session(token_store::delete_token)?;
     }
-    crate::library::calendar::clear_microsoft(app_state.db_manager.pool()).await
+    let _calendar_edits = crate::library::recording_calendar::EDIT.lock().await;
+    crate::library::calendar::clear_microsoft(app_state.db_manager.pool()).await?;
+    crate::audio::recording_commands::refresh_active_recording_title(&app).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -609,7 +612,7 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     resume_id: Option<String>,
     replace_existing: Option<bool>,
 ) -> Result<ExportReportResponse, String> {
-    super::ledger::require_remote_ids(&[&notebook_id])?;
+    validate_onenote_notebook_input(&notebook_id, resume_id.as_deref())?;
     let replace_existing = replace_existing.unwrap_or(false);
     let scope = if replace_existing {
         "Notes.ReadWrite"
@@ -650,6 +653,16 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
         state.inner.write().await.connection_state = MicrosoftConnectionState::Expired;
     }
     Ok(report.into())
+}
+
+fn validate_onenote_notebook_input(
+    notebook_id: &str,
+    resume_id: Option<&str>,
+) -> Result<(), String> {
+    if resume_id.is_none() {
+        super::ledger::require_remote_ids(&[notebook_id])?;
+    }
+    Ok(())
 }
 
 async fn onenote_export_header<R: Runtime>(
@@ -1700,6 +1713,13 @@ pub async fn list_todo_lists(
 #[cfg(test)]
 mod export_history_tests {
     use super::*;
+
+    #[test]
+    fn resuming_onenote_uses_the_saved_notebook_instead_of_the_request_field() {
+        assert!(validate_onenote_notebook_input("", Some("saved-attempt")).is_ok());
+        assert!(validate_onenote_notebook_input("", None).is_err());
+        assert!(validate_onenote_notebook_input("test-notebook", None).is_ok());
+    }
 
     #[test]
     fn selected_exports_use_full_preview_or_saved_action_history() {

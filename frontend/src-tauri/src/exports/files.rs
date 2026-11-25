@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::exports::client::{GraphClient, GraphOutcome, Sleeper};
 use crate::exports::document::build_meeting_docx;
 use crate::exports::error::GraphErrorKind;
-use crate::exports::exporter::{now_rfc3339, ExportContext};
+use crate::exports::exporter::{graph_url_with_path_segments, now_rfc3339, ExportContext};
 use crate::exports::ledger::{
     artifact_key_hash, microsoft_web_url, valid_remote_id, DriveBinding, ExportLedger,
 };
@@ -380,7 +380,7 @@ pub async fn create_folder<T: GraphTransport, S: Sleeper>(
     super::ledger::require_remote_ids(&[&parent.drive_id, &parent.item_id])?;
     let folder_name = sanitize_drive_item_name(folder_name, "Meeting notes");
     let request = post_json_request(
-        super::exporter::graph_url_with_path_segments(&[
+        graph_url_with_path_segments(&[
             "drives",
             &parent.drive_id,
             "items",
@@ -419,13 +419,12 @@ async fn upload_file<T: GraphTransport, S: Sleeper>(
     content_type: &str,
     bytes: Vec<u8>,
 ) -> Result<DriveFile, UploadFailure> {
+    let parent_url =
+        graph_url_with_path_segments(&["drives", &parent.drive_id, "items", &parent.item_id]);
     let encoded_name = encode_graph_path_segment(file_name);
     let request = binary_request(
         "PUT",
-        format!(
-            "{GRAPH_BASE}/drives/{}/items/{}:/{encoded_name}:/content?%40microsoft.graph.conflictBehavior=fail",
-            parent.drive_id, parent.item_id
-        ),
+        format!("{parent_url}:/{encoded_name}:/content?%40microsoft.graph.conflictBehavior=fail"),
         content_type,
         bytes,
     );
@@ -469,8 +468,14 @@ pub async fn convert_docx_to_pdf<T: GraphTransport, S: Sleeper>(
     let request = binary_request(
         "GET",
         format!(
-            "{GRAPH_BASE}/drives/{}/items/{}/content?format=pdf",
-            file.drive_id, file.item_id
+            "{}?format=pdf",
+            graph_url_with_path_segments(&[
+                "drives",
+                &file.drive_id,
+                "items",
+                &file.item_id,
+                "content",
+            ])
         ),
         "",
         Vec::new(),
@@ -487,10 +492,13 @@ pub async fn create_organization_view_link<T: GraphTransport, S: Sleeper>(
     file: &DriveFile,
 ) -> Result<String, String> {
     let request = post_json_request(
-        format!(
-            "{GRAPH_BASE}/drives/{}/items/{}/createLink",
-            file.drive_id, file.item_id
-        ),
+        graph_url_with_path_segments(&[
+            "drives",
+            &file.drive_id,
+            "items",
+            &file.item_id,
+            "createLink",
+        ]),
         serde_json::json!({
             "type": "view",
             "scope": "organization",
@@ -800,10 +808,13 @@ async fn export_folder<T: GraphTransport, S: Sleeper>(
         return Err("Check the OneDrive folder in export history before trying again.".into());
     }
     let request = post_json_request(
-        format!(
-            "{GRAPH_BASE}/drives/{}/items/{}/children",
-            base.drive_id, base.item_id
-        ),
+        graph_url_with_path_segments(&[
+            "drives",
+            &base.drive_id,
+            "items",
+            &base.item_id,
+            "children",
+        ]),
         serde_json::json!({"name": name, "folder": {}, "@microsoft.graph.conflictBehavior": "rename"}),
     );
     ledger.begin_attempt(key, now_rfc3339());
@@ -908,10 +919,13 @@ async fn export_file<T: GraphTransport, S: Sleeper>(
             .map_err(FileExportFailure::History)?;
         let request = binary_request(
             "PUT",
-            format!(
-                "{GRAPH_BASE}/drives/{}/items/{}/content",
-                file.drive_id, file.item_id
-            ),
+            graph_url_with_path_segments(&[
+                "drives",
+                &file.drive_id,
+                "items",
+                &file.item_id,
+                "content",
+            ]),
             content_type,
             bytes,
         );
@@ -1145,15 +1159,20 @@ mod tests {
         let transport = MockGraphTransport::new();
         transport.queue_binary_default([GraphBinaryResponse::success(
             201,
-            br#"{"id":"file-1","name":"Meeting #1.docx","webUrl":"https://example.test/file","parentReference":{"driveId":"drive-1"}}"#
+            br#"{"id":"file-1","name":"Meeting #1.docx","webUrl":"https://example.test/file","parentReference":{"driveId":"drive!a+=/b"}}"#
                 .to_vec(),
         )]);
         let c = client(transport);
+        let parent = DriveDestination {
+            drive_id: "drive!a+=/b".into(),
+            item_id: "root!c+=/d".into(),
+            ..parent_destination()
+        };
 
         let file = upload_file(
             &c,
             "token",
-            &parent_destination(),
+            &parent,
             "Meeting #1.docx",
             DOCX_CONTENT_TYPE,
             b"docx".to_vec(),
@@ -1168,7 +1187,7 @@ mod tests {
         assert_eq!(recorded[0].content_type, DOCX_CONTENT_TYPE);
         assert_eq!(
             recorded[0].url,
-            format!("{GRAPH_BASE}/drives/drive-1/items/root-id:/Meeting%20%231.docx:/content?%40microsoft.graph.conflictBehavior=fail")
+            format!("{GRAPH_BASE}/drives/drive!a+=%2Fb/items/root!c+=%2Fd:/Meeting%20%231.docx:/content?%40microsoft.graph.conflictBehavior=fail")
         );
     }
 
@@ -1179,7 +1198,7 @@ mod tests {
         let c = client(transport);
         let file = DriveFile {
             drive_id: "drive-1".to_string(),
-            item_id: "docx-1".to_string(),
+            item_id: "docx/1+?%2e%2e".to_string(),
             name: "Meeting.docx".to_string(),
             web_url: None,
         };
@@ -1191,7 +1210,7 @@ mod tests {
         assert_eq!(recorded[0].method, "GET");
         assert_eq!(
             recorded[0].url,
-            format!("{GRAPH_BASE}/drives/drive-1/items/docx-1/content?format=pdf")
+            format!("{GRAPH_BASE}/drives/drive-1/items/docx%2F1+%3F%252e%252e/content?format=pdf")
         );
     }
 

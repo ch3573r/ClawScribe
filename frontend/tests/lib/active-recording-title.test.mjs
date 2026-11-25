@@ -10,6 +10,7 @@ test('live title edits target the active session, survive a refusal, and submit 
   const hooks = createHookHarness();
   t.after(() => hooks.unmount());
   const attempts = [];
+  const titles = [];
   const saved = deferred();
   const names = ['Dialog', 'DialogContent', 'DialogDescription', 'DialogFooter', 'DialogHeader', 'DialogTitle', 'DialogTrigger'];
   const { ActiveRecordingTitle } = loadTsModule('src/app/_components/ActiveRecordingTitle.tsx', {
@@ -23,9 +24,10 @@ test('live title edits target the active session, survive a refusal, and submit 
       assert.equal(command, 'set_active_recording_title');
       attempts.push(args.title);
       if (attempts.length === 1) return saved.promise;
+      return 'Normalized title';
     } },
   });
-  const render = () => hooks.render(() => ActiveRecordingTitle({ sessionId: 'active-recording' }));
+  const render = () => hooks.render(() => ActiveRecordingTitle({ sessionId: 'active-recording', onSaved: (...args) => titles.push(args) }));
   const find = type => nodes(render()).find(node => node.type === type);
   render().props.onOpenChange(true);
   await flush();
@@ -41,4 +43,5 @@ test('live title edits target the active session, survive a refusal, and submit 
   assert.ok(nodes(render()).some(node => node.props.role === 'alert'));
   await find('form').props.onSubmit({ preventDefault() {} });
   assert.equal(render().props.open, false);
+  assert.deepEqual(titles, [['active-recording', 'Normalized title']]);
 });

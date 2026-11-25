@@ -372,7 +372,7 @@ impl SidecarManager {
                 let result = self.exchange_request(&request_json, timeout).await;
                 // A sleeping machine can miss the parent's idle timer. The
                 // helper may already have written Goodbye or closed its pipes.
-                // Retry only the idle handshake or an immediate empty disconnect.
+                // Retry an idle handshake or a disconnect before a response.
                 if let (Some(model), Err(error)) = (model, &result) {
                     if error.is::<RetryableHelperDisconnect>() {
                         self.ensure_running_after_disconnect(model).await?;
@@ -418,12 +418,17 @@ impl SidecarManager {
                 stdin
                     .write_all(request_json.as_bytes())
                     .await
-                    .context("Failed to write request to stdin")?;
+                    .map_err(|error| {
+                        classify_stdin_error("Failed to write request to stdin", error)
+                    })?;
                 stdin
                     .write_all(b"\n")
                     .await
-                    .context("Failed to write newline")?;
-                stdin.flush().await.context("Failed to flush stdin")?;
+                    .map_err(|error| classify_stdin_error("Failed to write newline", error))?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|error| classify_stdin_error("Failed to flush stdin", error))?;
             }
 
             let response = self.read_response(Some(Instant::now())).await?;
@@ -767,6 +772,14 @@ const IDLE_DISCONNECT_WINDOW: Duration = Duration::from_millis(500);
 #[error("{0}")]
 struct RetryableHelperDisconnect(&'static str);
 
+fn classify_stdin_error(context: &'static str, error: std::io::Error) -> anyhow::Error {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
+    if matches!(error.kind(), BrokenPipe | ConnectionReset | UnexpectedEof) {
+        return RetryableHelperDisconnect(context).into();
+    }
+    anyhow::Error::new(error).context(context)
+}
+
 async fn read_response_line(
     reader: impl tokio::io::AsyncBufRead + Unpin,
     written_at: Option<Instant>,
@@ -845,6 +858,22 @@ async fn kill_and_reap(child: &mut Child, deadline: Duration) -> bool {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn only_disconnects_while_sending_a_request_are_retryable() {
+        use std::io::{Error, ErrorKind};
+        for (kind, retryable) in [
+            (ErrorKind::BrokenPipe, true),
+            (ErrorKind::ConnectionReset, true),
+            (ErrorKind::UnexpectedEof, true),
+            (ErrorKind::TimedOut, false),
+            (ErrorKind::PermissionDenied, false),
+            (ErrorKind::WriteZero, false),
+        ] {
+            let error = classify_stdin_error("Could not send request", Error::from(kind));
+            assert_eq!(error.is::<RetryableHelperDisconnect>(), retryable);
+        }
+    }
 
     #[tokio::test]
     async fn only_an_immediate_disconnect_without_response_bytes_is_retryable() {

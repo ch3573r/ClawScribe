@@ -157,7 +157,13 @@ pub fn dedupe_key(
 }
 
 pub(crate) fn task_scope(tenant_id: &str, user_id: &str, destination: &ToDoDestination) -> String {
-    format!("todo:{tenant_id}:{user_id}:{}", destination.list_id)
+    use super::ledger::graph_ledger_id;
+    format!(
+        "todo:{}:{}:{}",
+        graph_ledger_id(tenant_id),
+        graph_ledger_id(user_id),
+        graph_ledger_id(&destination.list_id),
+    )
 }
 
 #[cfg(test)]

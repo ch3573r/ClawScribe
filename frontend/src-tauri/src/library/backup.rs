@@ -3223,7 +3223,7 @@ mod tests {
             vec![("existing".to_owned(), fingerprint.to_owned())]
         );
         assert!(
-            !Summaries::claim_automatic_resume(&destination, "matching", fingerprint)
+            !Summaries::claim_automatic_resume(&destination, "matching", fingerprint, false)
                 .await
                 .unwrap()
         );

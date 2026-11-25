@@ -123,7 +123,7 @@ async fn consume(
         Launch::Handled
     };
     // An in-memory registration alone isn't a durable job or skip.
-    if matches!(outcome, Launch::Busy) {
+    if matches!(outcome, Launch::Busy | Launch::Exiting) {
         return Ok(outcome);
     }
     // A crash before acknowledgement is safe: the normal job claim or skip
@@ -139,7 +139,7 @@ async fn consume(
 
 pub(super) async fn resume<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool) {
     let mut after = String::new();
-    loop {
+    while !super::is_exiting() {
         let next = sqlx::query_scalar::<_, String>(
             "SELECT meeting_id FROM retranscription_notes_retry WHERE meeting_id > ? ORDER BY meeting_id LIMIT 1",
         ).bind(&after).fetch_optional(pool).await;
@@ -155,6 +155,7 @@ pub(super) async fn resume<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool) {
             Ok(Launch::Started(worker)) => {
                 let _ = worker.await;
             }
+            Ok(Launch::Exiting) => return,
             Ok(_) => {}
             Err(_) => log::warn!("Could not retry notes after retranscription"),
         }
@@ -233,12 +234,12 @@ mod tests {
             vec![(meeting.to_owned(), "local:approved".to_owned())]
         );
         assert!(
-            Jobs::claim_automatic_resume(&pool, meeting, &candidates[0].1)
+            Jobs::claim_automatic_resume(&pool, meeting, &candidates[0].1, false)
                 .await
                 .unwrap()
         );
         assert!(
-            !Jobs::claim_automatic_resume(&pool, meeting, &candidates[0].1)
+            !Jobs::claim_automatic_resume(&pool, meeting, &candidates[0].1, false)
                 .await
                 .unwrap()
         );

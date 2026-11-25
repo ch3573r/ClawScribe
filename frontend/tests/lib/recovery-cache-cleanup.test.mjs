@@ -76,6 +76,24 @@ test('successful SQLite save immediately removes the recovery meeting and transc
   assert.equal(cache.transcripts.size, 0);
 });
 
+test('a cache title update verifies session ownership and preserves recovery metadata', async () => {
+  const draft = {
+    meetingId: 'draft', sessionId: 'current', title: 'Calendar subject',
+    savedToSQLite: false, transcriptCount: 42, startTime: 1, lastUpdated: 2, folderPath: 'fixture-folder',
+  };
+  const cache = recoveryCache([draft]);
+  await cache.indexedDBService.updateMeetingTitle('draft', 'retired', 'Wrong title');
+  assert.deepEqual(cache.meetings.get('draft'), draft);
+  await cache.indexedDBService.updateMeetingTitle('draft', 'current', 'Recording');
+  const { lastUpdated, ...updated } = cache.meetings.get('draft');
+  const { lastUpdated: previousUpdate, ...original } = draft;
+  assert.ok(lastUpdated > previousUpdate);
+  assert.deepEqual(updated, { ...original, title: 'Recording' });
+  await cache.indexedDBService.markMeetingSaved('draft');
+  await cache.indexedDBService.updateMeetingTitle('draft', 'current', 'Late title');
+  assert.equal(cache.meetings.size, 0);
+});
+
 test('cached transcripts sort by sequence in both stored formats', async () => {
   const cache = recoveryCache([]);
   cache.transcripts.set(1, { meetingId: 'sample', sequence_id: 2 });

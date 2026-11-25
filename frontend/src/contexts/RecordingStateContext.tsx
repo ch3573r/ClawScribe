@@ -8,7 +8,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { drainEta } from '@/lib/recording-progress';
-import { isNothingToStop } from '@/lib/stop-error';
 export type RecordingMode = 'live' | 'audio_only';
 
 /**
@@ -174,12 +173,14 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
   }, []);
 
   const reconcileNothingToStop = useCallback(async (result: unknown) => {
-    if (result !== false && !isNothingToStop(result)) return false;
+    if (result !== false) return false;
     const revision = lifecycleRevision.current;
-    const backend = await recordingService.getRecordingState().catch(() => null);
-    if (!backend || (backend.is_recording && result !== false)) return false;
+    const backend = await recordingService.getRecordingState().catch(() => {
+      console.warn('Could not read the recording state after Stop returned no recording.');
+      return null;
+    });
     // A newer lifecycle event owns the UI if it arrived during the state read.
-    if (!backend.is_recording && revision === lifecycleRevision.current && lifecycleStatus.current === RecordingStatus.STOPPING) {
+    if (!backend?.is_recording && revision === lifecycleRevision.current && lifecycleStatus.current === RecordingStatus.STOPPING) {
       setStatus(RecordingStatus.IDLE);
       setElapsedSeconds(0);
       setState(prev => ({ ...prev, sessionId: null, isRecording: false, isPaused: false, isActive: false }));

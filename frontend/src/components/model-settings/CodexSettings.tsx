@@ -43,11 +43,15 @@ const DEFAULT_CONFIG: CodexConfig = {
   model: DEFAULT_MODEL, timeoutSeconds: 600,
 };
 const timeoutProblem = numberProblem(30, 86400, true, true);
+const LOAD_ERROR = 'Could not load the Codex settings';
 
 type CodexAction = 'codex_login_browser' | 'codex_login_device' | 'codex_logout' | 'codex_test_app_server' | 'codex_test_processing';
 
 export function useCodexSettings(active: boolean, preview: boolean, selected: string, updateConfig: UpdateConfig) {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
+  const [load, setLoad] = useState<'loading' | 'ready' | 'error'>('loading');
+  const configLoaded = useRef(false);
+  const ready = active && load === 'ready';
   const [timeoutDraft, setTimeoutDraft] = useState<string | null>(null);
   const timeout = timeoutDraft ?? String(config.timeoutSeconds);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
@@ -73,6 +77,7 @@ export function useCodexSettings(active: boolean, preview: boolean, selected: st
   }, []);
 
   const persistConfig = useCallback(async (next: CodexConfig) => {
+    if (!configLoaded.current) throw new SaveError(LOAD_ERROR);
     const problem = timeoutProblem(String(next.timeoutSeconds));
     if (problem) throw new SaveError(problem);
     const normalized: CodexConfig = {
@@ -111,6 +116,8 @@ export function useCodexSettings(active: boolean, preview: boolean, selected: st
   }, [loadModels, save]);
 
   useEffect(() => {
+    configLoaded.current = false;
+    setLoad('loading');
     setTimeoutDraft(null);
     if (!active) return;
     let current = true;
@@ -119,17 +126,22 @@ export function useCodexSettings(active: boolean, preview: boolean, selected: st
         const saved = await invoke<{ processing?: { codex?: CodexConfig } }>('codex_get_config');
         if (!current) return;
         const codex = saved.processing?.codex;
-        if (codex) {
-          setConfig(codex);
-          if (codex.model) updateConfig(prev => prev.provider === 'codex' && prev.model !== codex.model ? { ...prev, model: codex.model } : prev);
-        }
+        if (!codex) throw new Error(LOAD_ERROR);
+        setConfig(codex);
+        if (codex.model) updateConfig(prev => prev.provider === 'codex' && prev.model !== codex.model ? { ...prev, model: codex.model } : prev);
+        configLoaded.current = true;
+        setLoad('ready');
       } catch {
         if (!current) return;
-        setResult('Could not load the Codex settings');
+        setLoad('error');
+        return;
       }
       if (!preview) await check();
     })();
-    return () => { current = false; };
+    return () => {
+      current = false;
+      configLoaded.current = false;
+    };
   }, [active, preview, updateConfig, check]);
 
   const findRuntime = async () => {
@@ -186,13 +198,15 @@ export function useCodexSettings(active: boolean, preview: boolean, selected: st
   const options = models.some(model => model.id === configured) ? models
     : [{ id: configured, displayName: configured, isDefault: false }, ...models];
   const signedIn = !['', 'unauthenticated', 'not-required'].includes(runtime?.authStatus?.trim().toLowerCase() ?? '');
-  const status: ProviderStatus = busy ? { tone: 'neutral', text: 'Checking…' }
+  const loadMessage = ready ? null : load === 'error' ? LOAD_ERROR : 'Loading Codex settings…';
+  const status: ProviderStatus = loadMessage ? { tone: load === 'error' ? 'error' : 'neutral', text: loadMessage }
+    : busy ? { tone: 'neutral', text: 'Checking…' }
     : !runtime ? { tone: 'neutral', text: 'Not checked yet' }
     : runtime.found ? { tone: 'ok', text: 'Runtime found', meta: [runtime.version, runtime.planType].filter(Boolean).join(' · ') || undefined }
     : { tone: 'warning', text: 'Runtime missing or damaged' };
 
   return {
-    config, timeout, setTimeoutDraft, timeoutError: timeoutProblem(timeout),
+    config, ready, loadMessage, timeout, setTimeoutDraft, timeoutError: timeoutProblem(timeout),
     runtime, busy, loading, modelError, options, result, signedIn, status, save, run, check: () => check(config),
     saveModelAfterSwitch: (model: string) => persistConfig({ ...config, model }),
     findRuntime, repair, chooseHome,
@@ -211,10 +225,10 @@ export function CodexSettings({ state, model, chooseModel, preview, disabled, fe
     <SettingsRow title="Account"
       description={preview ? 'Select Use Codex to check your account and runtime' : state.modelError
         ? 'The model list is unavailable, so only the configured model is shown' : (state.runtime?.accountEmail || state.runtime?.authStatus || 'Not signed in')}>
-      <Button type="button" variant="outline" onClick={() => void state.run('codex_login_browser')} disabled={state.busy || preview}>
+      <Button type="button" variant="outline" onClick={() => void state.run('codex_login_browser')} disabled={state.busy || !state.ready || preview}>
         <ExternalLink aria-hidden="true" />Sign in with ChatGPT
       </Button>
-      <Button type="button" variant="outline" onClick={() => void state.run('codex_logout')} disabled={state.busy || preview || !state.signedIn}>Sign out</Button>
+      <Button type="button" variant="outline" onClick={() => void state.run('codex_logout')} disabled={state.busy || !state.ready || preview || !state.signedIn}>Sign out</Button>
     </SettingsRow>
   </>;
 }

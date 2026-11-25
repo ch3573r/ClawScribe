@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Meta, SettingsFooter, SettingsRow, StatusText } from '@/components/ui/settings-layout';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -143,6 +144,7 @@ export function ModelSettingsModal({
       ? 'Could not load the compatible provider settings' : 'Checking compatible provider settings…';
     if (provider === 'custom-openai' && compatible.problem) return compatible.problem;
     if (provider === 'custom-openai' && compatible.connection.state === 'checking') return 'Checking the connection…';
+    if (provider === 'codex' && !codex.ready) return codex.loadMessage;
     if (isHostedProvider(provider)) {
       const problem = keyProblem(hosted.key);
       if (problem) return problem;
@@ -155,7 +157,7 @@ export function ModelSettingsModal({
   };
 
   const submit = (switching: boolean) => {
-    if (savePending.current) return;
+    if (savePending.current || (provider === 'codex' && !codex.ready)) return;
     savePending.current = true;
     void feedback.run('provider', async () => {
       try {
@@ -175,13 +177,11 @@ export function ModelSettingsModal({
         await saveConfig(next, switching ? 'Could not save the provider' : 'Could not save model settings', switching);
         if (switching && shared.model) rememberModel(shared.provider, shared.model);
         setShared({ ...next, apiKey: null, customOpenAIApiKey: null });
-        try {
-          if (pickedCodexModel) {
-            await codex.saveModelAfterSwitch(pickedCodexModel);
-          }
-        } finally {
-          if (switching) setDraft(null);
+        if (pickedCodexModel) {
+          try { await codex.saveModelAfterSwitch(pickedCodexModel); }
+          catch { toast.warning('Could not save the Codex model'); }
         }
+        if (switching) setDraft(null);
         if (next.model) rememberModel(provider, next.model);
         if (isHostedProvider(provider)) hosted.markKeyChanged();
         await refreshKeyStatus?.(provider);
@@ -190,7 +190,7 @@ export function ModelSettingsModal({
   };
 
   const chooseModel = (selected: string) => {
-    if (selected === model) return;
+    if (selected === model || (provider === 'codex' && !codex.ready)) return;
     if (!autosave || preview) {
       if (codexPreview) codexPreviewModel.current = selected;
       updateConfig({ ...config, model: selected });
@@ -253,9 +253,10 @@ export function ModelSettingsModal({
     checking: compatible.checking, checkDisabled: compatible.saving,
   };
   else if (provider === 'codex') view = {
-    content: <CodexSettings {...modelControls} state={codex} preview={codexPreview} />,
-    advanced: <CodexAdvanced state={codex} autosave={autosave} preview={codexPreview} />,
-    status: codex.status, check: codex.check, checking: codex.busy, checkDisabled: codexPreview,
+    content: <CodexSettings {...modelControls} state={codex} preview={codexPreview} disabled={busy || !codex.ready} />,
+    advanced: codex.ready && <CodexAdvanced state={codex} autosave={autosave} preview={codexPreview} />,
+    status: codexPreview && !codex.ready ? undefined : codex.status,
+    check: codex.ready ? codex.check : undefined, checking: codex.busy, checkDisabled: codexPreview,
   };
   else view = {
     content: <ClaudeCodeSettings {...modelControls} state={claudeCode} autosave={autosave} />,
@@ -266,10 +267,8 @@ export function ModelSettingsModal({
   const noSummaryModel = shared.provider === 'builtin-ai' && !shared.model;
   const incomplete = preview ? missing() : null;
   const advancedOpen = advancedProvider === provider;
-  const dialogSaveBlocked = busy || (isHostedProvider(provider) && (!hosted.usable || !!keyProblem(hosted.key)))
-    || (provider === 'custom-openai' && (compatible.blocked || compatible.connection.state === 'checking'))
+  const dialogSaveBlocked = busy || missing() !== null
     || (provider === 'ollama' && ollama.needsCheck && ollama.endpoint.trim() !== (config.ollamaEndpoint ?? '').trim())
-    || (provider === 'claude-code' && claudeCode.busy)
     || (provider === 'codex' && (codex.busy || !!codex.timeoutError));
 
   const content = <>

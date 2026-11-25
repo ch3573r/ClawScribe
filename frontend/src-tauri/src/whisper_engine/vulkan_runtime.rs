@@ -11,6 +11,11 @@
 
 #[cfg(any(test, all(windows, feature = "vulkan")))]
 use crate::parakeet_engine::worker::WorkerError;
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+use std::time::{Duration, Instant};
+
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+const RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 /// User-facing explanation when Whisper cannot run in this build.
 pub const VULKAN_RUNTIME_MISSING_MESSAGE: &str =
@@ -33,23 +38,34 @@ pub enum VulkanRuntime {
 struct ProbeCache {
     definite: Option<VulkanRuntime>,
     attempts: u8,
+    last_transient_failure: Option<Instant>,
 }
 
 #[cfg(any(test, all(windows, feature = "vulkan")))]
 impl ProbeCache {
-    fn check(&mut self, probe: impl FnOnce() -> Result<bool, WorkerError>) -> VulkanRuntime {
+    fn check(
+        &mut self,
+        now: impl Fn() -> Instant,
+        probe: impl FnOnce(Duration) -> Result<bool, WorkerError>,
+    ) -> VulkanRuntime {
         const MAX_ATTEMPTS: u8 = 3;
         if let Some(result) = self.definite {
             return result;
         }
-        if self.attempts >= MAX_ATTEMPTS {
+        if self.attempts >= MAX_ATTEMPTS
+            || self
+                .last_transient_failure
+                .is_some_and(|failed_at| now().duration_since(failed_at) < RETRY_INTERVAL)
+        {
             return VulkanRuntime::Missing;
         }
+        let deadline = Duration::from_secs(if self.attempts == 0 { 15 } else { 5 });
         self.attempts += 1;
-        let runtime = match probe() {
+        let runtime = match probe(deadline) {
             Ok(true) => VulkanRuntime::Available,
             Ok(false) | Err(WorkerError::Crashed) => VulkanRuntime::Missing,
             Err(_) => {
+                self.last_transient_failure = Some(now());
                 log::warn!(
                     "Vulkan preflight did not complete; Whisper is unavailable for this check"
                 );
@@ -74,8 +90,8 @@ pub async fn vulkan_runtime() -> VulkanRuntime {
             let Ok(mut cache) = PROBE.get_or_init(Mutex::default).lock() else {
                 return VulkanRuntime::Missing;
             };
-            cache.check(|| {
-                if !crate::parakeet_engine::worker::vulkan_device_available()? {
+            cache.check(Instant::now, |deadline| {
+                if !crate::parakeet_engine::worker::vulkan_device_available(deadline)? {
                     return Ok(false);
                 }
                 let Some(loader) = load_compatible_loader() else {
@@ -186,16 +202,61 @@ pub(crate) fn probe_device_in_child() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn transient_preflight_errors_allow_a_later_definite_answer() {
         let mut cache = ProbeCache::default();
+        let now = Cell::new(Instant::now());
         for error in [WorkerError::TimedOut, WorkerError::Spawn] {
-            assert_eq!(cache.check(|| Err(error)), VulkanRuntime::Missing);
+            assert_eq!(
+                cache.check(|| now.get(), |_| Err(error)),
+                VulkanRuntime::Missing
+            );
+            now.set(now.get() + RETRY_INTERVAL);
         }
-        assert_eq!(cache.check(|| Ok(true)), VulkanRuntime::Available);
         assert_eq!(
-            cache.check(|| panic!("available result was cached")),
+            cache.check(|| now.get(), |_| Ok(true)),
+            VulkanRuntime::Available
+        );
+        assert_eq!(
+            cache.check(|| now.get(), |_| panic!("available result was cached")),
+            VulkanRuntime::Available
+        );
+    }
+
+    #[test]
+    fn first_attempt_gets_more_time_and_retries_wait_from_failure() {
+        let mut cache = ProbeCache::default();
+        let now = Cell::new(Instant::now());
+        assert_eq!(
+            cache.check(
+                || now.get(),
+                |deadline| {
+                    assert_eq!(deadline, Duration::from_secs(15));
+                    now.set(now.get() + deadline);
+                    Err(WorkerError::TimedOut)
+                }
+            ),
+            VulkanRuntime::Missing
+        );
+        now.set(now.get() + Duration::from_secs(29));
+        assert_eq!(
+            cache.check(
+                || now.get(),
+                |_| panic!("probe retried before 30 seconds elapsed")
+            ),
+            VulkanRuntime::Missing
+        );
+        now.set(now.get() + Duration::from_secs(1));
+        assert_eq!(
+            cache.check(
+                || now.get(),
+                |deadline| {
+                    assert_eq!(deadline, Duration::from_secs(5));
+                    Ok(true)
+                }
+            ),
             VulkanRuntime::Available
         );
     }
@@ -204,9 +265,12 @@ mod tests {
     fn unavailable_and_crashed_preflights_are_cached() {
         for result in [Ok(false), Err(WorkerError::Crashed)] {
             let mut cache = ProbeCache::default();
-            assert_eq!(cache.check(|| result), VulkanRuntime::Missing);
             assert_eq!(
-                cache.check(|| panic!("definite failure was cached")),
+                cache.check(Instant::now, |_| result),
+                VulkanRuntime::Missing
+            );
+            assert_eq!(
+                cache.check(Instant::now, |_| panic!("definite failure was cached")),
                 VulkanRuntime::Missing
             );
         }
@@ -215,15 +279,20 @@ mod tests {
     #[test]
     fn transient_preflights_have_a_session_limit() {
         let mut cache = ProbeCache::default();
+        let now = Cell::new(Instant::now());
         for error in [
             WorkerError::Spawn,
             WorkerError::TimedOut,
             WorkerError::TimedOut,
         ] {
-            assert_eq!(cache.check(|| Err(error)), VulkanRuntime::Missing);
+            assert_eq!(
+                cache.check(|| now.get(), |_| Err(error)),
+                VulkanRuntime::Missing
+            );
+            now.set(now.get() + RETRY_INTERVAL);
         }
         assert_eq!(
-            cache.check(|| panic!("retry budget exhausted")),
+            cache.check(|| now.get(), |_| panic!("retry budget exhausted")),
             VulkanRuntime::Missing
         );
         assert_eq!(cache.definite, None);

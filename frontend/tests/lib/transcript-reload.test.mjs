@@ -19,17 +19,25 @@ test('a late live row is inserted with logarithmic comparisons', () => {
   assert.ok(comparisons <= Math.ceil(Math.log2(current.length)) + 1);
 });
 
-function transcriptView() {
+function transcriptView(titleRegistration) {
   const hooks = createHookHarness();
   const histories = [];
   const cacheWrites = [];
-  let started, updated;
+  const titleWrites = [];
+  let started, updated, titleChanged;
+  let titleUnsubscribes = 0;
   let subscriptions = 0;
   const state = { isRecording: true, sessionId: 'first' };
   const { TranscriptProvider } = loadTsModule('src/contexts/TranscriptContext.tsx', {
     react: hooks.react,
     'react/jsx-runtime': { jsx: (_type, props) => props },
     './RecordingStateContext': { useRecordingState: () => state },
+    '@tauri-apps/api/event': { listen: async (event, callback) => {
+      assert.equal(event, 'recording-title-changed');
+      titleChanged = callback;
+      await titleRegistration;
+      return () => { titleUnsubscribes++; };
+    } },
     '@/services/recordingService': { recordingService: {
       onRecordingStarted: async callback => { started = callback; return () => {}; },
       getRecordingMeetingName: async () => state.sessionId,
@@ -48,15 +56,93 @@ function transcriptView() {
     } },
     '@/services/indexedDBService': { indexedDBService: {
       saveMeetingMetadata: async () => {},
+      updateMeetingTitle: async (...args) => { titleWrites.push(args); },
       saveTranscript: async (id, update) => { cacheWrites.push([id, update.sequence_id]); },
     } },
   });
   return {
-    hooks, histories, state, cacheWrites, subscriptions: () => subscriptions,
+    hooks, histories, state, cacheWrites, titleWrites, subscriptions: () => subscriptions,
+    titleChanged: (session_id, title) => titleChanged?.({ payload: { session_id, title } }),
+    titleUnsubscribes: () => titleUnsubscribes,
     start: (...args) => started(...args), update: value => updated?.(value),
     render: () => hooks.render(() => TranscriptProvider({ children: null })).value,
   };
 }
+
+test('title events and the editor update the current live title and its recovery metadata', async t => {
+  const previousStorage = globalThis.sessionStorage;
+  globalThis.sessionStorage = { setItem() {} };
+  const view = transcriptView();
+  t.after(() => { view.hooks.unmount(); globalThis.sessionStorage = previousStorage; });
+  view.render();
+  await flush();
+  view.start('live', 'first', '1', { recording_id: 'cache-first', meeting_name: 'Calendar subject' });
+  view.titleChanged('other', 'Unrelated');
+  assert.equal(view.render().meetingTitle, 'Calendar subject');
+  view.titleChanged('first', 'Recording');
+  assert.equal(view.render().meetingTitle, 'Recording');
+  view.render().setActiveRecordingTitle('first', 'Edited title');
+  view.render().clearTranscripts();
+  view.titleChanged('first', 'Retired event');
+  await flush();
+  assert.equal(view.render().meetingTitle, 'Edited title');
+  assert.deepEqual(view.titleWrites, [
+    ['cache-first', 'first', 'Recording'],
+    ['cache-first', 'first', 'Edited title'],
+  ]);
+});
+
+test('a title event after reload still targets the cache entry for the matching live session', async t => {
+  const previousStorage = globalThis.sessionStorage;
+  globalThis.sessionStorage = { getItem: () => 'cache-first' };
+  const view = transcriptView();
+  t.after(() => { view.hooks.unmount(); globalThis.sessionStorage = previousStorage; });
+  view.render();
+  await flush();
+  view.titleChanged('first', 'Recording');
+  view.histories[0].resolve([]);
+  await flush();
+  assert.equal(view.render().meetingTitle, 'Recording');
+  assert.deepEqual(view.titleWrites, [['cache-first', 'first', 'Recording']]);
+});
+
+for (const pending of [false, true]) {
+  test(`title listener cleanup handles ${pending ? 'pending' : 'completed'} registration`, async () => {
+    const registration = deferred();
+    const view = transcriptView(registration.promise);
+    view.render();
+    if (!pending) {
+      registration.resolve();
+      await flush();
+    }
+    view.hooks.unmount();
+    view.titleChanged('first', 'After cleanup');
+    registration.resolve();
+    await flush();
+    assert.equal(view.titleUnsubscribes(), 1);
+    assert.equal(view.render().meetingTitle, '+ New Call');
+  });
+}
+
+test('a saved title updates its recording and an older save cannot rename the next one', async t => {
+  const view = transcriptView();
+  t.after(() => view.hooks.unmount());
+  view.render();
+  await flush();
+  const saveTitle = view.render().setActiveRecordingTitle;
+  saveTitle('first', 'Edited meeting');
+  view.histories[0].resolve([]);
+  await flush();
+  assert.equal(view.render().meetingTitle, 'Edited meeting');
+
+  view.state.sessionId = 'second';
+  view.render();
+  await flush();
+  view.histories[1].resolve([]);
+  await flush();
+  saveTitle('first', 'Late edit');
+  assert.equal(view.render().meetingTitle, 'second');
+});
 
 test('a delayed reload merges history with live updates and retains word timings', async () => {
   const view = transcriptView();

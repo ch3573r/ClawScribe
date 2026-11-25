@@ -69,26 +69,38 @@ test('a duplicate stop reconciles an idle backend without swallowing an actual f
   await flush();
   view.render().setStatus('stopping');
   const reconcile = view.render().reconcileNothingToStop;
-  assert.equal(await reconcile('Could not save: No recording in progress'), false);
+  assert.equal(await reconcile('The audio device is not responding'), false);
   assert.equal(view.requests.length, 1);
-  const duplicate = reconcile('No recording in progress');
+  const nativeNoOp = reconcile(false);
   view.requests[1].resolve({ is_recording: false });
-  assert.equal(await duplicate, true);
+  assert.equal(await nativeNoOp, true);
   const state = view.render();
   assert.equal(state.status, 'idle');
   assert.equal(state.isRecording, false);
   assert.equal(state.sessionId, null);
   state.setStatus('stopping');
-  const nativeNoOp = reconcile(false);
-  view.requests[2].resolve({ is_recording: false });
-  assert.equal(await nativeNoOp, true);
-  assert.equal(view.render().status, 'idle');
-  state.setStatus('stopping');
   const staleProbe = reconcile(false);
   state.setStatus('starting');
-  view.requests[3].resolve({ is_recording: false });
+  view.requests[2].resolve({ is_recording: false });
   assert.equal(await staleProbe, true);
   assert.equal(view.render().status, 'starting');
+});
+
+test('a native stop no-op returns to idle when the state read rejects', async t => {
+  const view = createView();
+  t.after(() => view.unmount());
+  view.render();
+  await flush();
+  view.requests[0].resolve(recording);
+  await flush();
+  view.render().setStatus('stopping');
+  const stop = view.render().reconcileNothingToStop(false);
+  view.requests[1].reject(new Error('Synthetic recording state failure'));
+  assert.equal(await stop, true);
+  const state = view.render();
+  assert.equal(state.status, 'idle');
+  assert.equal(state.isRecording, false);
+  assert.equal(state.sessionId, null);
 });
 
 test('elapsed ticks update the clock without changing the lifecycle context value', async () => {

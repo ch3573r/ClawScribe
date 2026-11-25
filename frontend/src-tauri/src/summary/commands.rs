@@ -248,11 +248,18 @@ fn summary_job_status(
     error: Option<String>,
 ) -> (String, Option<String>) {
     let status = status.to_lowercase();
-    if status == "cancelled" && error.as_deref() == Some(super::automatic::PAUSED_FOR_INFERENCE) {
-        if SummaryService::has_paused_automatic_job(meeting_id) {
-            return ("deferred".into(), error);
+    use super::automatic::{PAUSED_FOR_EXIT, PAUSED_FOR_INFERENCE, PAUSE_ENDED};
+    if status == "cancelled" {
+        match error.as_deref() {
+            Some(PAUSED_FOR_INFERENCE) if SummaryService::has_paused_automatic_job(meeting_id) => {
+                return ("deferred".into(), error);
+            }
+            Some(PAUSED_FOR_INFERENCE) => return (status, Some(PAUSE_ENDED.into())),
+            Some(PAUSED_FOR_EXIT) if !SummaryService::has_paused_automatic_job(meeting_id) => {
+                return (status, Some(PAUSE_ENDED.into()));
+            }
+            _ => {}
         }
-        return (status, Some(super::automatic::PAUSE_ENDED.into()));
     }
     (status, error)
 }
@@ -363,7 +370,19 @@ pub(super) struct MeetingSummaryContext {
 #[cfg(test)]
 mod pause_status_tests {
     use super::*;
-    use crate::summary::automatic::{PAUSED_FOR_INFERENCE, PAUSE_ENDED};
+    use crate::summary::automatic::{PAUSED_FOR_EXIT, PAUSED_FOR_INFERENCE, PAUSE_ENDED};
+
+    #[test]
+    fn exit_pause_without_a_live_job_offers_manual_retry() {
+        assert_eq!(
+            summary_job_status(
+                "orphaned-exit-pause",
+                "cancelled".into(),
+                Some(PAUSED_FOR_EXIT.into())
+            ),
+            ("cancelled".into(), Some(PAUSE_ENDED.into()))
+        );
+    }
 
     #[tokio::test]
     async fn paused_notes_require_a_live_local_automatic_job_to_show_as_deferred() {

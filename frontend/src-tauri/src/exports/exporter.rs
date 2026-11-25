@@ -294,19 +294,13 @@ pub(super) async fn export_onenote_revision<T: GraphTransport, S: Sleeper>(
 ) -> ExportReport {
     let url =
         graph_url_with_path_segments(&["me", "onenote", "sections", &target.section_id, "pages"]);
+    let prefix =
+        super::ledger::onenote_ledger_prefix(ctx.tenant_id, ctx.user_id, &target.section_id);
     let pages = onenote::build_pages(meeting, DEFAULT_PAGE_BUDGET_BYTES);
     let mut items = Vec::new();
 
     for page in pages {
-        let dedupe_key = format!(
-            "onenote:{}:{}:{}:{}:{}:{}",
-            ctx.tenant_id,
-            ctx.user_id,
-            target.section_id,
-            revision,
-            page.kind.as_str(),
-            page.index,
-        );
+        let dedupe_key = format!("{prefix}{revision}:{}:{}", page.kind.as_str(), page.index,);
         let local_id = format!("{}-{}", page.kind.as_str(), page.index);
 
         if ledger.already_succeeded(&dedupe_key).is_some() || !ledger.may_attempt(&dedupe_key) {

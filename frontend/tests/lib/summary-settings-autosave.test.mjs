@@ -169,13 +169,15 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
   const hooks = createHookHarness();
   const pickerHooks = createHookHarness();
   const calls = [];
+  const warnings = [];
+  const refreshed = [];
   // The core never returns a stored key: the settings only know whether one is stored.
   const config = { provider, model, whisperModel: 'large-v3', apiKey: null, ollamaEndpoint: null };
   const context = {
     modelConfig: config,
     setModelConfig(next) { Object.assign(context, { modelConfig: typeof next === 'function' ? next(context.modelConfig) : next }); },
     providerKeyStatus: { claude: { stored: provider === 'claude' && stored, hint: stored ? '0001' : null }, groq: { stored: false, hint: null }, openai: { stored: provider === 'openai' && stored, hint: null }, openrouter: { stored: false, hint: null } },
-    refreshProviderKeyStatus: async key => { context.providerKeyStatus = { ...context.providerKeyStatus, [key]: { stored: true, hint: null } }; },
+    refreshProviderKeyStatus: async key => { refreshed.push(key); context.providerKeyStatus = { ...context.providerKeyStatus, [key]: { stored: true, hint: null } }; },
   };
   const stub = name => ({ [name]: name });
   const panels = new Set([
@@ -197,7 +199,7 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
     if (Object.hasOwn(responses, command)) return responses[command];
     if (command === 'get_anthropic_models') return catalogResponse ? catalogResponse() : [{ id: 'claude-sonnet-5' }];
     if (['get_groq_models', 'get_ollama_models', 'get_openrouter_models'].includes(command)) return [];
-    if (command === 'codex_get_config') return {};
+    if (command === 'codex_get_config') return { processing: { codex: { model: 'gpt-5.6-sol', timeoutSeconds: 600 } } };
     return null;
   };
   const mocks = {
@@ -238,7 +240,7 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
       CommitInputRow: 'commit-input-row', CopyCommandRow: 'copy-command-row', SaveMark: 'save-mark',
       withError: (description, error) => (error ? [description, error] : description),
     },
-    sonner: { toast: { error() {}, success() {}, info() {} } },
+    sonner: { toast: { error() {}, success() {}, info() {}, warning: message => warnings.push(message) } },
     'lucide-react': new Proxy({}, { get: (_target, name) => (name === '__esModule' ? false : String(name)) }),
   };
   const { ModelSettingsModal } = loadTsModule('src/components/ModelSettingsModal.tsx', mocks);
@@ -248,7 +250,7 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
     onSave: onSave ?? (async next => { saves.push(next); }),
   };
   const render = () => hooks.render(() => ModelSettingsModal(props));
-  return { hooks, calls, saves, context, render };
+  return { hooks, calls, saves, context, render, warnings, refreshed, responses };
 }
 
 const customOpenAI = {
@@ -483,8 +485,8 @@ test('choosing another provider only previews it; the saved provider stays in us
   assert.equal(select().props.value, 'codex', 'the page shows the provider being looked at');
   assert.equal(app.context.modelConfig.provider, 'claude', 'summaries keep using the saved provider: the shared configuration is untouched');
   assert.match(text(app.render()), /Not in use yet/);
-  assert.match(text(app.render()), /Claude stays your summary provider until you switch/);
   await flush();
+  assert.match(text(app.render()), /Claude stays your summary provider until you switch/);
   assert.equal(app.calls.filter(([command]) => command === 'codex_get_config').length, 1, 'opening the Codex preview checks its configuration once');
 
   button('Keep Claude').props.onClick();
@@ -495,6 +497,7 @@ test('choosing another provider only previews it; the saved provider stays in us
   assert.doesNotMatch(text(app.render()), /Not in use yet/);
 
   select().props.onValueChange('codex');
+  app.render();
   await flush();
   button('Use Codex').props.onClick();
   await flush();
@@ -564,6 +567,7 @@ test('a provider that still needs a key cannot be switched to, and a failed swit
   const failing = modalHarness({ provider: 'claude', stored: true, onSave: async () => { throw new Error(`database said ${KEY}`); } });
   failing.render(); await flush(); failing.render();
   nodes(failing.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('codex');
+  failing.render();
   await flush();
   nodes(failing.render()).find(node => node.type === 'button' && text(node) === 'Use Codex').props.onClick();
   await flush();
@@ -890,4 +894,68 @@ test('a compatible gateway has no automatic credential request and HTTP testing 
   assert.deepEqual(diagnostics().map(([command]) => command), ['api_test_custom_openai_connection']);
   assert.equal(diagnostics()[0][1].allowUnencrypted, true);
   assert.equal(diagnostics()[0][1].apiKey, null);
+});
+
+test('Codex switch and dialog Save wait for the settings read and stay blocked on failure', async t => {
+  for (const autosave of [true, false]) {
+    const loading = deferred();
+    const app = modalHarness({ autosave, responses: { codex_get_config: loading.promise } });
+    t.after(() => app.hooks.unmount());
+    const find = predicate => nodes(app.render()).find(predicate);
+    find(node => node.type === 'select').props.onValueChange('codex');
+    const primary = () => find(node => node.type === 'button' && text(node) === (autosave ? 'Use Codex' : 'Save'));
+    assert.equal(primary().props.disabled, true, 'settings still loading');
+    loading.reject(new Error('Synthetic settings read failure'));
+    await flush();
+    assert.equal(primary().props.disabled, true, 'settings read failed');
+    assert.match(text(app.render()), /Could not load the Codex settings/);
+    if (!autosave) find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+    await flush();
+    assert.equal(app.saves.length, 0);
+    assert.equal(app.calls.some(([command]) => command === 'codex_save_config'), false);
+  }
+});
+
+test('a failed Codex model write leaves the provider switched and still refreshes its key status', async t => {
+  const saved = { model: 'saved-codex', codexHomePath: 'fixture-profile', timeoutSeconds: 900 };
+  const write = deferred();
+  const app = modalHarness({ provider: 'codex', model: saved.model, responses: {
+    codex_get_config: { processing: { codex: saved } },
+    codex_check_installation: { found: true },
+    codex_list_models: [{ id: 'picked-codex', displayName: 'Picked model' }],
+  } });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  app.render(); await flush(); app.render(); await flush();
+  app.context.setModelConfig(previous => ({ ...previous, provider: 'claude', model: 'claude-sonnet-5' }));
+  find(node => node.type === 'select').props.onValueChange('codex');
+  app.render(); await flush();
+  find(node => node.type === 'select' && node.props.value === saved.model).props.onValueChange('picked-codex');
+  app.responses.codex_save_config = write.promise;
+  find(node => node.type === 'button' && text(node) === 'Use Codex').props.onClick();
+  await flush();
+  const [, args] = app.calls.find(([command]) => command === 'codex_save_config');
+  assert.equal(args.config.codexHomePath, saved.codexHomePath);
+  assert.equal(args.config.timeoutSeconds, saved.timeoutSeconds);
+  write.reject(new Error('Synthetic model write failure'));
+  await flush();
+  app.render(); await flush();
+  assert.deepEqual(app.refreshed, ['codex']);
+  assert.equal(app.context.modelConfig.provider, 'codex');
+  app.render();
+  assert.equal(app.context.modelConfig.model, saved.model);
+  assert.deepEqual(app.warnings, ['Could not save the Codex model']);
+  assert.doesNotMatch(text(app.render()), /Not in use yet|Could not save the provider|Could not save the Codex settings/);
+});
+
+test('the model dialog blocks Save for a missing model or an unready Claude Code provider', async t => {
+  for (const provider of ['builtin-ai', 'ollama', 'claude', 'claude-code']) {
+    const app = modalHarness({ autosave: false, provider, model: provider === 'claude-code' ? 'sonnet' : '   ', stored: true });
+    t.after(() => app.hooks.unmount());
+    app.render(); await flush();
+    const tree = app.render();
+    assert.equal(nodes(tree).find(node => node.type === 'button' && text(node) === 'Save').props.disabled, true, provider);
+    tree.props.onSubmit({ preventDefault() {} });
+    assert.equal(app.saves.length, 0);
+  }
 });

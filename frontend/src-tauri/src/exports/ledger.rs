@@ -6,6 +6,7 @@
 //! and sanitized error codes. It contains no tokens. See the idempotency
 //! sections of the OneNote/Planner design docs.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +18,7 @@ use crate::exports::model::ExportStatus;
 pub const LEDGER_SCHEMA: &str = "clawscribe.exports.v1";
 pub const LEDGER_FILENAME: &str = "exports.json";
 pub(crate) const MAX_LEDGER_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_REMOTE_ID_CHARS: usize = 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AmbiguousTaskIdentity;
@@ -337,7 +339,8 @@ impl ExportLedger {
         };
         let expected_meeting = meeting_key_hash(meeting_id);
         let valid_key = |key: &str| {
-            if !text(key, 4096) {
+            // A Planner key can include four Graph IDs plus its own fields.
+            if !text(key, 4 * 4 * MAX_REMOTE_ID_CHARS + 256) {
                 return false;
             }
             let fields: Vec<_> = key.split(':').collect();
@@ -376,10 +379,17 @@ impl ExportLedger {
             || self.entries.iter().any(|(key, entry)| {
                 !valid_key(key)
                     || entry.attempts == 0
-                    || entry
-                        .resource_id
-                        .as_deref()
-                        .is_some_and(|id| !text(id, 2048))
+                    || entry.resource_id.as_deref().is_some_and(|id| {
+                        let limit = if matches!(
+                            key.split(':').next(),
+                            Some("planner" | "todo" | "onenote" | "onedrive")
+                        ) {
+                            4 * MAX_REMOTE_ID_CHARS
+                        } else {
+                            2048
+                        };
+                        !text(id, limit)
+                    })
                     || entry.code.as_deref().is_some_and(|code| !text(code, 128))
                     || entry.content_revision.as_deref().is_some_and(|revision| {
                         !(key.starts_with("onedrive:") || key.starts_with("onenote:"))
@@ -821,7 +831,12 @@ impl ExportLedger {
         now: Option<String>,
     ) -> Result<(), String> {
         if let Some(id) = &resource_id {
-            if !valid_remote_id(id) {
+            let valid = if key.starts_with("confluence:") {
+                super::confluence::valid_page_id(id)
+            } else {
+                valid_remote_id(id)
+            };
+            if !valid {
                 return Err("Enter a valid ID for the existing item.".into());
             }
         }
@@ -923,9 +938,12 @@ impl ExportLedger {
                         }
                     }
                     for saved in self.onenote_sections.values_mut().filter(|saved| {
-                        saved.tenant_id == *tenant
-                            && saved.user_id == *user
-                            && saved.section_id.as_deref() == Some(*section)
+                        graph_ledger_id(&saved.tenant_id) == *tenant
+                            && graph_ledger_id(&saved.user_id) == *user
+                            && saved
+                                .section_id
+                                .as_deref()
+                                .is_some_and(|id| graph_ledger_id(id) == *section)
                             && saved.notes_page_id.as_deref() == Some(previous)
                     }) {
                         saved.notes_page_id = replacement.map(str::to_owned);
@@ -963,11 +981,35 @@ pub(super) fn require_remote_ids(ids: &[&str]) -> Result<(), String> {
 
 pub(crate) fn valid_remote_id(id: &str) -> bool {
     !id.is_empty()
-        && id.len() <= 512
         && !matches!(id, "." | "..")
-        && id.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'!' | b'=' | b'+')
-        })
+        && id.chars().count() <= MAX_REMOTE_ID_CHARS
+        && !id.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+}
+
+/// Keep ':' as the ledger's field separator and preserve existing keys.
+pub(super) fn graph_ledger_id(id: &str) -> Cow<'_, str> {
+    if id.contains(['%', ':']) {
+        Cow::Owned(id.replace('%', "%25").replace(':', "%3A"))
+    } else {
+        Cow::Borrowed(id)
+    }
+}
+
+pub(super) fn read_graph_ledger_id(id: &str) -> Cow<'_, str> {
+    if id.contains('%') {
+        Cow::Owned(id.replace("%3A", ":").replace("%25", "%"))
+    } else {
+        Cow::Borrowed(id)
+    }
+}
+
+pub(super) fn onenote_ledger_prefix(tenant: &str, user: &str, section: &str) -> String {
+    format!(
+        "onenote:{}:{}:{}:",
+        graph_ledger_id(tenant),
+        graph_ledger_id(user),
+        graph_ledger_id(section),
+    )
 }
 
 fn web_url(value: &str) -> Option<url::Url> {
@@ -1017,6 +1059,25 @@ pub(crate) fn microsoft_web_url(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_ids_accept_opaque_characters_and_reject_invalid_values() {
+        assert!(valid_remote_id("id/with+base64=~:,$"));
+        assert!(valid_remote_id(&"é".repeat(1024)));
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "spaces here",
+            "x\t",
+            "x\u{a0}",
+            "x\u{7f}",
+            "x\0",
+        ] {
+            assert!(!valid_remote_id(invalid));
+        }
+        assert!(!valid_remote_id(&"a".repeat(1025)));
+    }
 
     #[tokio::test]
     async fn unknown_outcomes_stay_blocked_until_reconciled_and_survive_restart() {

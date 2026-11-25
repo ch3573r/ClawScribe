@@ -32,7 +32,7 @@ export default function Home() {
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
 
   // Use contexts for state management
-  const { meetingTitle, transcripts } = useTranscripts();
+  const { meetingTitle, setActiveRecordingTitle, transcripts } = useTranscripts();
   const { transcriptModelConfig, selectedDevices } = useTranscriptionConfig();
   const recordingState = useRecordingState();
   const liveAssistance = useLiveAssistanceOwner();
@@ -235,7 +235,7 @@ export default function Home() {
             <div className="flex min-h-0 min-w-0 flex-1 flex-col">
               {isRecording && recordingState.sessionId && !isRecordingDisabled && (
                 <div className="flex shrink-0 justify-center border-b border-border bg-card px-4 py-2">
-                  <ActiveRecordingTitle key={recordingState.sessionId} sessionId={recordingState.sessionId} />
+                  <ActiveRecordingTitle key={recordingState.sessionId} sessionId={recordingState.sessionId} onSaved={setActiveRecordingTitle} />
                 </div>
               )}
               <LiveAssistanceDock

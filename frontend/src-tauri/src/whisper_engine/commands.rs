@@ -356,6 +356,10 @@ pub(crate) async fn whisper_validate_model_ready_for(
     use crate::audio::transcription::engine::{
         check_model_files, LiveModelFailure, ModelFileState,
     };
+    crate::whisper_engine::vulkan_runtime::ensure_whisper_runtime()
+        .await
+        .map_err(|_| LiveModelFailure::VulkanRuntimeMissing)?;
+
     let engine = {
         let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
@@ -402,12 +406,6 @@ pub(crate) async fn whisper_validate_model_ready_for(
             available_models[0].name.clone()
         };
 
-        if crate::whisper_engine::vulkan_runtime::ensure_whisper_runtime()
-            .await
-            .is_err()
-        {
-            return Err(LiveModelFailure::VulkanRuntimeMissing);
-        }
         engine.load_model(&model_name).await.map_err(|error| {
             log::warn!("Live model load failed: {error}");
             LiveModelFailure::LoadFailed

@@ -747,6 +747,7 @@ struct ActiveRecording {
     sink: super::recording_manager::LiveTranscriptSink,
     recording_id: Option<String>,
     folder: Option<std::path::PathBuf>,
+    default_meeting_name: Option<String>,
     meeting_name: Option<String>,
 }
 
@@ -829,6 +830,7 @@ fn publish_active_recording(
         ActiveRecording {
             sink: sink.clone(),
             folder: manager.get_meeting_folder(),
+            default_meeting_name: manager.get_meeting_name(),
             meeting_name: recording_name,
             recording_id: manager.recording_id().map(str::to_owned),
         }
@@ -1359,14 +1361,6 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     let manager_timer = Instant::now();
     let mut staged_calendar_id = None;
     let mut staged_title_id = None;
-    // The durable fallback title stays neutral. A calendar subject is only
-    // available for live display after staging succeeded, and the library
-    // derives its saved title from the still-current draft.
-    let calendar_title = options
-        .calendar_link
-        .as_ref()
-        .and_then(|link| link.clone().normalized().ok())
-        .and_then(|link| link.subject().map(str::to_owned));
     let requested_mode = mode;
     let startup = async {
         let staged_id = &mut staged_calendar_id;
@@ -1466,11 +1460,17 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     let recording_folder = manager
         .get_meeting_folder()
         .map(|folder| folder.to_string_lossy().into_owned());
-    let recording_name = staged_title_id
-        .as_ref()
-        .and(custom_title)
-        .or_else(|| staged_calendar_id.as_ref().and(calendar_title))
-        .or_else(|| manager.get_meeting_name());
+    // Sign-out can clear the initial calendar draft while the streams open.
+    // Resolve the current title under the same edit lock used to publish edits.
+    let calendar_edits = crate::library::recording_calendar::EDIT.lock().await;
+    let mut recording_name = manager.get_meeting_name();
+    if let Some(id) = staged_title_id.as_deref().or(staged_calendar_id.as_deref()) {
+        let state = app.state::<crate::state::AppState>();
+        match resolve_recording_title(state.db_manager.pool(), id, recording_name.clone()).await {
+            Ok(title) => recording_name = title,
+            Err(_) => warn!("Could not load the initial recording title"),
+        }
+    }
     let recording_generation = live_startup.recording_generation;
     let live_session_id = live_startup.commit();
     if options.request.is_some_and(|request| request.is_call()) {
@@ -1492,7 +1492,6 @@ pub(crate) async fn start_selected_session<R: Runtime>(
         live_sink,
         recording_name.clone(),
     );
-
     // Emit success event
     app.emit(
         "recording-started",
@@ -1509,6 +1508,7 @@ pub(crate) async fn start_selected_session<R: Runtime>(
         }),
     )
     .unwrap_or_else(|_| warn!("Could not announce the started recording to the window"));
+    drop(calendar_edits);
 
     if invalid_custom_title {
         let _ = app.emit(
@@ -2115,9 +2115,9 @@ async fn stop_recording_session<R: Runtime>(
         }
     }
     let recording_id = handoff.as_ref().map(|(id, _, _)| id.clone());
+    let calendar_edits = crate::library::recording_calendar::EDIT.lock().await;
     let (meeting_id, transcript_count) = match (handoff, &folder_path_str, &meeting_name_str) {
         (Some((recording_id, transcripts, provenance)), Some(folder), Some(title)) => {
-            let _calendar_edits = crate::library::recording_calendar::EDIT.lock().await;
             let state = app.state::<crate::state::AppState>();
             let saved = crate::database::repositories::transcript::TranscriptsRepository::save_recording_handoff(
                 state.db_manager.pool(), &recording_id, title, &transcripts, folder.clone(), &outcome, provenance,
@@ -2207,6 +2207,7 @@ async fn stop_recording_session<R: Runtime>(
             "recording_files_incomplete": outcome.recording_files_incomplete
         }),
     );
+    drop(calendar_edits);
     if emitted.is_err() {
         warn!("Could not notify the webview that recording stopped");
     }
@@ -2542,30 +2543,129 @@ pub(crate) async fn get_active_recording_title<R: Runtime>(
 ) -> Result<String, String> {
     let id = calendar_recording_id(&session_id)?;
     let state = app.state::<crate::state::AppState>();
-    let pool = state.db_manager.pool();
+    let fallback = ACTIVE_CAPTURE.lock().ok().and_then(|active| {
+        active
+            .as_ref()
+            .filter(|active| active.sink.session_id == session_id)
+            .and_then(|active| active.default_meeting_name.clone())
+    });
+    resolve_recording_title(state.db_manager.pool(), &id, fallback)
+        .await?
+        .ok_or_else(|| "This recording's title is unavailable.".into())
+}
+
+async fn resolve_recording_title(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+    fallback: Option<String>,
+) -> Result<Option<String>, String> {
     let title = sqlx::query_scalar::<_, String>(
         "SELECT title FROM recording_title_drafts WHERE recording_id = ?",
     )
-    .bind(&id)
+    .bind(id)
     .fetch_optional(pool)
     .await
     .map_err(|_| "Could not load this recording's title.".to_string())?;
-    if let Some(title) = title {
+    if title.is_some() {
         return Ok(title);
     }
-    if let Some(subject) = crate::library::recording_calendar::draft_subject(pool, &id).await? {
-        return Ok(subject);
-    }
-    ACTIVE_CAPTURE
+    Ok(crate::library::recording_calendar::draft_subject(pool, id)
+        .await?
+        .or(fallback))
+}
+
+/// Caller holds the calendar edit lock across the draft change and refresh.
+pub(crate) async fn refresh_active_recording_title<R: Runtime>(app: &AppHandle<R>) {
+    let active = ACTIVE_CAPTURE
         .lock()
-        .ok()
-        .and_then(|guard| {
-            guard
-                .as_ref()
-                .filter(|active| active.sink.session_id == session_id)
-                .and_then(|active| active.meeting_name.clone())
-        })
-        .ok_or_else(|| "This recording's title is unavailable.".into())
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|active| {
+            Some((
+                active.sink.session_id.clone(),
+                active.recording_id.clone()?,
+                active.default_meeting_name.clone(),
+            ))
+        });
+    let Some((session_id, id, fallback)) = active else {
+        return;
+    };
+    let state = app.state::<crate::state::AppState>();
+    let title = match resolve_recording_title(state.db_manager.pool(), &id, fallback.clone()).await
+    {
+        Ok(title) => title,
+        Err(_) => {
+            warn!("Could not refresh the recording title");
+            fallback
+        }
+    };
+    update_cached_recording_title(app, &session_id, title);
+}
+
+fn update_cached_recording_title<R: Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    title: Option<String>,
+) {
+    {
+        let mut capture = ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(active) = capture
+            .as_mut()
+            .filter(|active| active.sink.session_id == session_id)
+        else {
+            return;
+        };
+        if active.meeting_name == title {
+            return;
+        }
+        active.meeting_name.clone_from(&title);
+    }
+    if app.emit(
+        "recording-title-changed",
+        serde_json::json!({"session_id": session_id, "title": title.as_deref().unwrap_or_default()}),
+    ).is_err() {
+        warn!("Could not announce the updated recording title");
+    }
+    crate::tray::update_tray_menu(app);
+}
+
+#[tokio::test]
+async fn recording_title_follows_the_current_calendar_and_keeps_custom_titles() {
+    let pool = crate::database::transcript_edits::tests::fixture().await;
+    let id = "synthetic-recording";
+    let resolved = || resolve_recording_title(&pool, id, Some("Local recording".into()));
+    let set_link = |link| {
+        sqlx::query("INSERT INTO recording_calendar_drafts (recording_id, calendar_link, revision) VALUES (?, ?, 1) ON CONFLICT(recording_id) DO UPDATE SET calendar_link = excluded.calendar_link")
+            .bind(id).bind(link).execute(&pool)
+    };
+    let link = r#"{"source":"microsoft","eventId":"event-a","subject":"Calendar subject"}"#;
+    set_link(link).await.unwrap();
+    assert_eq!(
+        resolved().await.unwrap().as_deref(),
+        Some("Calendar subject")
+    );
+    set_link("null").await.unwrap();
+    assert_eq!(
+        resolved().await.unwrap().as_deref(),
+        Some("Local recording")
+    );
+    set_link(link).await.unwrap();
+    crate::library::calendar::clear_microsoft(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved().await.unwrap().as_deref(),
+        Some("Local recording")
+    );
+    set_link(link).await.unwrap();
+    write_recording_title(&pool, id, "Custom title")
+        .await
+        .unwrap();
+    assert_eq!(resolved().await.unwrap().as_deref(), Some("Custom title"));
+    crate::library::calendar::clear_microsoft(&pool)
+        .await
+        .unwrap();
+    assert_eq!(resolved().await.unwrap().as_deref(), Some("Custom title"));
 }
 
 #[tauri::command]
@@ -2581,15 +2681,7 @@ pub(crate) async fn set_active_recording_title<R: Runtime>(
     let id = calendar_recording_id(&session_id)?;
     let state = app.state::<crate::state::AppState>();
     write_recording_title(state.db_manager.pool(), &id, &title).await?;
-    if let Some(active) = ACTIVE_CAPTURE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_mut()
-        .filter(|active| active.sink.session_id == session_id)
-    {
-        active.meeting_name = Some(title.clone());
-    }
-    crate::tray::update_tray_menu(&app);
+    update_cached_recording_title(&app, &session_id, Some(title.clone()));
     Ok(title)
 }
 
@@ -3168,6 +3260,7 @@ mod reconnect_tests {
                 sink,
                 recording_id: Some("synthetic-recording".into()),
                 folder: Some("synthetic-folder".into()),
+                default_meeting_name: Some("Synthetic meeting".into()),
                 meeting_name: Some("Synthetic meeting".into()),
             });
             (startup.commit(), capture)

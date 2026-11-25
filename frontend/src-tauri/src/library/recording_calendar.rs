@@ -124,5 +124,7 @@ pub(crate) async fn set_active_recording_calendar<R: Runtime>(
 ) -> Result<i64, String> {
     let _edit = EDIT.lock().await;
     let id = crate::audio::recording_commands::calendar_recording_id(&session_id)?;
-    write(&app, &id, revision, link).await
+    let revision = write(&app, &id, revision, link).await?;
+    crate::audio::recording_commands::refresh_active_recording_title(&app).await;
+    Ok(revision)
 }

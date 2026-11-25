@@ -18,11 +18,6 @@ function rawText(error: unknown): string {
   return '';
 }
 
-/** Nothing was running, so there is nothing to report. */
-export function isNothingToStop(error: unknown): boolean {
-  return rawText(error).trim() === 'No recording in progress';
-}
-
 /** The text to show for a failed Stop. */
 export function stopFailureMessage(error: unknown): string {
   const text = rawText(error).trim();

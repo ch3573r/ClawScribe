@@ -15,6 +15,8 @@ const PENDING: &str = "parakeet-directml-probe-running";
 const TIMEOUTS: &str = "parakeet-directml-probe-timeouts";
 #[cfg(any(test, all(windows, feature = "directml")))]
 const UNFINISHED: &str = "parakeet-directml-probe-unfinished";
+#[cfg(any(test, all(windows, feature = "directml")))]
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(super) fn record_runtime_failure(app_data: &Path) -> io::Result<()> {
     fs::create_dir_all(app_data)?;
@@ -39,11 +41,37 @@ fn remove_marker(path: &Path) -> io::Result<()> {
 
 #[cfg(any(test, all(windows, feature = "directml")))]
 fn read_streak(path: &Path) -> io::Result<u8> {
-    match fs::read_to_string(path) {
-        Ok(value) => Ok(value.trim().parse::<u8>().unwrap_or(2)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error),
+    let data = match fs::read(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let Some(data) = data.strip_prefix(b"version=") else {
+        return Ok(0); // Legacy counters were unversioned.
+    };
+    let mut fields = data.splitn(2, |&byte| byte == b'\n');
+    let (Some(version), Some(count)) = (fields.next(), fields.next()) else {
+        return Ok(2);
+    };
+    if version.is_empty() || std::str::from_utf8(version).is_err() {
+        return Ok(2);
     }
+    if version != APP_VERSION.as_bytes() {
+        return Ok(0);
+    }
+    Ok(std::str::from_utf8(count)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(2))
+}
+
+#[cfg(any(test, all(windows, feature = "directml")))]
+fn write_streak(app_data: &Path, path: &Path, count: u8) -> io::Result<()> {
+    let mut counter = tempfile::NamedTempFile::new_in(app_data)?;
+    writeln!(counter, "version={APP_VERSION}\n{count}")?;
+    counter.as_file().sync_all()?;
+    counter.persist(path)?;
+    Ok(())
 }
 
 #[cfg(any(test, all(windows, feature = "directml")))]
@@ -77,10 +105,7 @@ fn run_probe(
     } else {
         // Publish the counter atomically while holding the stable probe lock.
         // A parent that never returns from the probe leaves this increment behind.
-        let mut counter = tempfile::NamedTempFile::new_in(app_data)?;
-        writeln!(counter, "{}", interrupted + 1)?;
-        counter.as_file().sync_all()?;
-        counter.persist(&unfinished)?;
+        write_streak(app_data, &unfinished, interrupted + 1)?;
         let available = match probe() {
             Ok(available) => {
                 remove_marker(&timeouts)?;
@@ -90,9 +115,7 @@ fn run_probe(
                 match error {
                     // The short deadline includes starting the child process.
                     WorkerError::TimedOut => {
-                        let mut file = fs::File::create(&timeouts)?;
-                        writeln!(file, "{}", count + 1)?;
-                        file.sync_all()?;
+                        write_streak(app_data, &timeouts, count + 1)?;
                         log::warn!("Parakeet automatic DirectML probe timed out");
                     }
                     WorkerError::Crashed => {
@@ -133,6 +156,46 @@ pub(super) fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrade_ignores_legacy_and_other_version_streaks_but_keeps_crash_marker() {
+        for old in ["", "2\n", "version=0.0.0\n2\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            for name in [TIMEOUTS, UNFINISHED] {
+                fs::write(dir.path().join(name), old).unwrap();
+            }
+            assert!(run_probe(dir.path(), || Ok(true)).unwrap());
+            record_runtime_failure(dir.path()).unwrap();
+            assert!(
+                !run_probe(dir.path(), || panic!("durable failure must block probes")).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn current_version_streaks_replace_atomically_and_corruption_blocks_probing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(TIMEOUTS);
+        assert!(!run_probe(dir.path(), || Err(WorkerError::TimedOut)).unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("version={}\n1\n", env!("CARGO_PKG_VERSION"))
+        );
+        assert!(!run_probe(dir.path(), || Err(WorkerError::TimedOut)).unwrap());
+        assert_eq!(read_streak(&path).unwrap(), 2);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2); // Stable lock and timeout counter.
+
+        for corrupt in [
+            format!("version={APP_VERSION}\nbroken\n"),
+            format!("version={APP_VERSION}"),
+        ] {
+            fs::write(&path, corrupt).unwrap();
+            assert!(!run_probe(dir.path(), || panic!(
+                "corrupt current state must block probes"
+            ))
+            .unwrap());
+        }
+    }
 
     #[test]
     fn completed_probe_is_cached_and_clears_the_marker() {

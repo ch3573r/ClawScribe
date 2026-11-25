@@ -102,8 +102,12 @@ impl Sidecars {
 static SIDECAR_MANAGER: Lazy<Mutex<Sidecars>> = Lazy::new(|| Mutex::new(Sidecars::default()));
 static SIDECARS_EXITING: AtomicBool = AtomicBool::new(false);
 
+pub(crate) fn is_exiting() -> bool {
+    SIDECARS_EXITING.load(Ordering::Acquire)
+}
+
 pub(super) fn check_exit_admission() -> Result<()> {
-    if SIDECARS_EXITING.load(Ordering::Acquire) {
+    if is_exiting() {
         return Err(anyhow!("The application is closing"));
     }
     Ok(())
@@ -365,7 +369,14 @@ pub async fn force_shutdown_sidecar() -> Result<()> {
 /// Close admission permanently before cleaning up the helpers on app exit.
 pub(crate) async fn shutdown_sidecars_for_exit() -> Result<()> {
     {
-        let _route = super::super::automatic::ROUTE_CHANGE_LOCK.lock().await;
+        let route = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::super::automatic::ROUTE_CHANGE_LOCK.lock(),
+        )
+        .await;
+        if route.is_err() {
+            log::warn!("Timed out waiting for the summary route lock during application exit");
+        }
         SIDECARS_EXITING.store(true, Ordering::Release);
         super::super::SummaryService::cancel_local_summaries_for_exit();
     }

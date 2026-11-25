@@ -503,7 +503,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_destination_ids_never_reach_graph() {
         let c = client(MockGraphTransport::new());
-        for id in [".", "..", "bad:separator"] {
+        for id in [".", "..", "contains whitespace"] {
             assert!(list_buckets(&c, "token", id).await.is_err());
             assert!(list_sections(&c, "token", id).await.is_err());
             assert!(delete_section(&c, "token", id).await.is_err());

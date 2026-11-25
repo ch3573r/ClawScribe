@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo, ReactNode, MutableRefObject } from 'react';
 import { Transcript, TranscriptUpdate } from '@/types';
 import { toast } from 'sonner';
+import { listen } from '@tauri-apps/api/event';
 import { useRecordingState } from './RecordingStateContext';
 import { transcriptService } from '@/services/transcriptService';
 import { recordingService } from '@/services/recordingService';
@@ -18,6 +19,7 @@ interface TranscriptContextType {
   flushBuffer: () => void;
   meetingTitle: string;
   setMeetingTitle: (title: string) => void;
+  setActiveRecordingTitle: (sessionId: string, title: string) => void;
   clearTranscripts: () => void;
   currentMeetingId: string | null;
   markMeetingAsSaved: (id?: string | null) => Promise<void>;
@@ -26,6 +28,7 @@ interface TranscriptContextType {
 const TranscriptContext = createContext<TranscriptContextType | undefined>(undefined);
 
 type TranscriptEvent = TranscriptUpdate & { session_id?: string | null };
+type RecordingTitleChanged = { session_id: string; title: string };
 
 function toTranscript({ source, session_id, ...row }: TranscriptEvent): Transcript {
   const id = session_id ? `${session_id}-${row.sequence_id}` : String(row.sequence_id);
@@ -42,11 +45,29 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   const seenSequences = useRef(new Set<number>());
   const initializingCache = useRef<{ id: string; task: Promise<void> } | null>(null);
   const producer = useRef<{ sessionId: string; cacheId: string | null } | null>(null);
-  const startedTitleSession = useRef<string | null>(null);
+  const titledSession = useRef<string | null>(null);
   const retiredSession = useRef<string | null>(null);
   const listenerReady = useRef<Promise<void> | null>(null);
   const finalFlushRef = useRef<(() => void) | null>(null);
   const adoptSession = useRef<((id: string, cacheId: string | null) => void) | null>(null);
+
+  const setActiveRecordingTitle = useCallback((id: string, title: string) => {
+    const owner = producer.current;
+    if (owner?.sessionId !== id || retiredSession.current === id) return;
+    titledSession.current = id;
+    setMeetingTitle(title);
+
+    // After a reload the stored cache ID is only a hint. IndexedDB also
+    // checks the session ID before changing that entry.
+    const cacheId = owner.cacheId ?? sessionStorage?.getItem?.('indexeddb_current_meeting_id');
+    if (!cacheId) return;
+    const initialization = initializingCache.current;
+    const updateCache = async () => {
+      if (initialization?.id === cacheId) await initialization.task;
+      await indexedDBService.updateMeetingTitle(cacheId, id, title);
+    };
+    void updateCache().catch(() => console.warn('Could not update the title in the transcript recovery cache.'));
+  }, []);
 
   const replaceTranscripts = useCallback((rows: Transcript[]) => {
     transcriptsRef.current = rows;
@@ -73,7 +94,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     replaceTranscripts([]);
   }, [flushBuffer, replaceTranscripts]);
 
-  // Keep both subscriptions for the provider's lifetime. The native worker can
+  // Keep the subscriptions for the provider's lifetime. The native worker can
   // deliver its first segment before Started reaches the webview.
   useEffect(() => {
     let active = true;
@@ -147,17 +168,21 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
       lastGeneration = identity.generation;
       setCurrentMeetingId(cacheId);
       const startedTitle = metadata.meeting_name?.trim();
-      startedTitleSession.current = startedTitle ? identity.id : null;
+      titledSession.current = startedTitle ? identity.id : null;
       const title = startedTitle || 'New Meeting';
       setMeetingTitle(title);
       const task = indexedDBService.saveMeetingMetadata({
-        meetingId: cacheId, title, folderPath: metadata.folder_path ?? undefined,
+        meetingId: cacheId, sessionId: identity.id, title, folderPath: metadata.folder_path ?? undefined,
         startTime: Date.now(), lastUpdated: Date.now(), transcriptCount: 0, savedToSQLite: false,
       }).catch(() => console.warn('Could not initialize the transcript recovery cache.'));
       initializingCache.current = { id: cacheId, task };
       adoptSession.current?.(identity.id, cacheId);
       sessionStorage.setItem('indexeddb_current_meeting_id', cacheId);
     })).catch(() => console.warn('Could not subscribe to recording cache updates.'));
+
+    void subscribe(listen<RecordingTitleChanged>('recording-title-changed', ({ payload }) => {
+      if (active) setActiveRecordingTitle(payload.session_id, payload.title);
+    })).catch(() => console.warn('Could not subscribe to recording title updates.'));
 
     return () => {
       active = false;
@@ -167,7 +192,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
       listenerReady.current = null;
       unlisteners.forEach(unlisten => unlisten());
     };
-  }, [appendTranscripts, replaceTranscripts]);
+  }, [appendTranscripts, replaceTranscripts, setActiveRecordingTitle]);
 
   // Populate history after the live listener is ready. Merge any gaps left by a
   // reload and prefer the live row if both paths saw the same sequence.
@@ -194,9 +219,9 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
           speaker: segment.speaker || undefined,
         })));
 
-        if (startedTitleSession.current === sessionId) return;
+        if (titledSession.current === sessionId) return;
         const meetingName = await recordingService.getRecordingMeetingName();
-        if (isCurrent() && startedTitleSession.current !== sessionId && meetingName) setMeetingTitle(meetingName);
+        if (isCurrent() && titledSession.current !== sessionId && meetingName) setActiveRecordingTitle(sessionId, meetingName);
       } catch {
         if (isCurrent()) console.error('Could not synchronize transcript history.');
       }
@@ -204,7 +229,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
     void syncFromBackend();
     return () => { active = false; };
-  }, [isRecording, sessionId, appendTranscripts, flushBuffer]);
+  }, [isRecording, sessionId, appendTranscripts, flushBuffer, setActiveRecordingTitle]);
 
   const addTranscript = useCallback((update: TranscriptUpdate) => {
     if (transcriptsRef.current.some(row => row.text === update.text && row.timestamp === update.timestamp)) return;
@@ -249,10 +274,11 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     flushBuffer,
     meetingTitle,
     setMeetingTitle,
+    setActiveRecordingTitle,
     clearTranscripts,
     currentMeetingId,
     markMeetingAsSaved,
-  }), [transcripts, addTranscript, copyTranscript, flushBuffer, meetingTitle, clearTranscripts, currentMeetingId, markMeetingAsSaved]);
+  }), [transcripts, addTranscript, copyTranscript, flushBuffer, meetingTitle, setActiveRecordingTitle, clearTranscripts, currentMeetingId, markMeetingAsSaved]);
 
   return (
     <TranscriptContext.Provider value={value}>

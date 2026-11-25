@@ -5,7 +5,10 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 
-export function ActiveRecordingTitle({ sessionId }: { sessionId: string }) {
+export function ActiveRecordingTitle({ sessionId, onSaved }: {
+  sessionId: string;
+  onSaved: (sessionId: string, title: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState('');
   const [loading, setLoading] = useState(false);
@@ -46,7 +49,8 @@ export function ActiveRecordingTitle({ sessionId }: { sessionId: string }) {
     setSaving(true);
     setError('');
     try {
-      await invoke('set_active_recording_title', { sessionId, title });
+      const savedTitle = await invoke<string>('set_active_recording_title', { sessionId, title });
+      onSaved(sessionId, savedTitle);
       setOpen(false);
     } catch (error) {
       setError(typeof error === 'string' ? error : 'Could not save the meeting title. Try again.');

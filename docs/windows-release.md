@@ -151,9 +151,11 @@ The `windows-gpu` and `vulkan` builds delay-load `vulkan-1.dll`
 loader is not in the executable's normal import table and the app starts on a
 PC without it. Before Whisper can load a model, a supervised child checks the
 System32 Vulkan loader and enumerates at least one device with Whisper's Vulkan
-backend. The check has a five-second deadline and its result is cached until
-restart. If the loader or driver is unavailable, Home and Settings report that
-Whisper cannot start. Parakeet and Nemotron remain available. To confirm a build,
+backend. The first check can take up to 15 seconds. A missing device or a
+probe crash keeps Whisper unavailable until restart. After a timeout or start
+failure, ClawScribe can retry twice, at least 30 seconds apart. If the loader or
+driver is unavailable, Home and Settings report that Whisper cannot start.
+Parakeet and Nemotron remain available. To confirm a build,
 `dumpbin /imports clawscribe.exe` must list `vulkan-1.dll` only under the delay-load section.
 
 To use Whisper on such a PC, install or update the supported GPU driver and
