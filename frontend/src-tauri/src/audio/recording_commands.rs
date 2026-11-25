@@ -372,6 +372,7 @@ struct SavingRecording {
     active_seconds: f64,
     progress: u8,
     message: &'static str,
+    estimated_seconds_remaining: Option<f64>,
     session_id: Option<String>,
     start_requested: Option<Instant>,
 }
@@ -422,6 +423,17 @@ mod save_intent_tests {
     use super::*;
 
     #[test]
+    fn edited_titles_are_trimmed_and_limited_to_one_line() {
+        assert_eq!(
+            validate_recording_title("  Planung 📝  ").unwrap(),
+            "Planung 📝"
+        );
+        assert!(validate_recording_title("   ").is_err());
+        assert!(validate_recording_title("Two\nlines").is_err());
+        assert!(validate_recording_title(&"ä".repeat(161)).is_err());
+    }
+
+    #[test]
     fn explicit_requests_coalesce_for_one_save_and_can_be_canceled() {
         let now = Instant::now();
         let mut saving = SavingRecording {
@@ -429,6 +441,7 @@ mod save_intent_tests {
             active_seconds: 12.0,
             progress: 20,
             message: "Stopping audio capture…",
+            estimated_seconds_remaining: None,
             start_requested: None,
         };
         assert!(!saving.update(Some(true), Some("old"), now));
@@ -460,6 +473,7 @@ impl StopState {
         {
             owner.progress = progress;
             owner.message = message;
+            owner.estimated_seconds_remaining = None;
         }
         let _ = app.emit(
             "recording-shutdown-progress",
@@ -1179,6 +1193,7 @@ pub(crate) struct SelectedStart<'a> {
     pub(crate) use_default_microphone: bool,
     pub(crate) calendar_link: Option<crate::library::calendar::CalendarLink>,
     pub(crate) summary_language: Option<String>,
+    pub(crate) custom_title: Option<String>,
     pub(crate) request: Option<&'a crate::start_request::ClaimedStart>,
 }
 
@@ -1192,6 +1207,11 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     let start_timer = Instant::now();
     start_allowed()?;
     let _starting = StartingState::claim()?;
+    let custom_title = options
+        .custom_title
+        .as_deref()
+        .map(validate_recording_title)
+        .transpose()?;
     info!("Starting recording with selected devices");
     if let Some(request) = options.request {
         request.check_call()?;
@@ -1324,6 +1344,7 @@ pub(crate) async fn start_selected_session<R: Runtime>(
         .collect::<Vec<_>>();
     let manager_timer = Instant::now();
     let mut staged_calendar_id = None;
+    let mut staged_title_id = None;
     // The durable fallback title stays neutral. A calendar subject is only
     // available for live display after staging succeeded, and the library
     // derives its saved title from the still-current draft.
@@ -1335,6 +1356,8 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     let requested_mode = mode;
     let startup = async {
         let staged_id = &mut staged_calendar_id;
+        let staged_title_id = &mut staged_title_id;
+        let custom_title = custom_title.as_deref();
         let transcription_receiver = manager
             .start_recording_with_preparation(
                 mic_device,
@@ -1367,6 +1390,15 @@ pub(crate) async fn start_selected_session<R: Runtime>(
                         }
                         if let Some(request) = request {
                             request.admit(app).map_err(anyhow::Error::msg)?;
+                        }
+                        if let (Some(id), Some(title)) = (recording_id.as_deref(), custom_title) {
+                            let state = app.state::<crate::state::AppState>();
+                            match write_recording_title(state.db_manager.pool(), id, title).await {
+                                Ok(()) => *staged_title_id = Some(id.to_owned()),
+                                Err(_) => {
+                                    let _ = app.emit("recording-warning", "Could not save the meeting title. You can edit it while recording.");
+                                }
+                            }
                         }
                         Ok(())
                     }
@@ -1405,13 +1437,13 @@ pub(crate) async fn start_selected_session<R: Runtime>(
             // only when it has removed this start's verified empty directory.
             if crate::library::recording_calendar::discard_failed_start_draft(
                 state.db_manager.pool(),
-                staged_calendar_id.as_deref(),
+                staged_calendar_id.as_deref().or(staged_title_id.as_deref()),
                 manager.get_meeting_folder().is_none(),
             )
             .await
             .is_err()
             {
-                warn!("Could not remove the calendar draft for an empty failed start");
+                warn!("Could not remove drafts for an empty failed start");
             }
             return Err(error);
         }
@@ -1420,9 +1452,10 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     let recording_folder = manager
         .get_meeting_folder()
         .map(|folder| folder.to_string_lossy().into_owned());
-    let recording_name = staged_calendar_id
+    let recording_name = staged_title_id
         .as_ref()
-        .and(calendar_title)
+        .and(custom_title)
+        .or_else(|| staged_calendar_id.as_ref().and(calendar_title))
         .or_else(|| manager.get_meeting_name());
     let recording_generation = live_startup.recording_generation;
     let live_session_id = live_startup.commit();
@@ -1623,6 +1656,7 @@ async fn stop_recording_session<R: Runtime>(
             active_seconds,
             progress: 20,
             message: "Stopping audio capture…",
+            estimated_seconds_remaining: None,
             session_id: identity
                 .as_ref()
                 .map(|identity| identity.session_id.clone())
@@ -1737,6 +1771,13 @@ async fn stop_recording_session<R: Runtime>(
                 let estimated_seconds = status
                     .as_ref()
                     .and_then(|status| status.estimated_seconds_remaining);
+                if let Some(owner) = SAVING_RECORDING
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+                {
+                    owner.estimated_seconds_remaining = estimated_seconds;
+                }
 
                 // Emit periodic progress updates during shutdown
                 let elapsed = last_update.elapsed().as_secs();
@@ -1797,6 +1838,7 @@ async fn stop_recording_session<R: Runtime>(
 
         // Stop progress monitoring
         progress_task.abort();
+        let _ = progress_task.await;
     } else if transcribes {
         info!("ℹ️ No transcription task found to wait for");
         if transcription::current_transcription_metrics()
@@ -2409,6 +2451,89 @@ pub async fn get_recording_meeting_name() -> Result<Option<String>, String> {
         .unwrap()
         .as_ref()
         .and_then(|active| active.meeting_name.clone()))
+}
+
+fn validate_recording_title(value: &str) -> Result<String, String> {
+    let title = value.trim();
+    if title.is_empty() || title.chars().count() > 160 || title.chars().any(char::is_control) {
+        return Err("Enter a meeting title of 1 to 160 characters on one line.".into());
+    }
+    Ok(title.to_owned())
+}
+
+async fn write_recording_title(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+    title: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO recording_title_drafts (recording_id, title) VALUES (?, ?)
+         ON CONFLICT(recording_id) DO UPDATE SET title = excluded.title",
+    )
+    .bind(id)
+    .bind(title)
+    .execute(pool)
+    .await
+    .map_err(|_| "Could not save this recording's title.".to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn get_active_recording_title<R: Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+) -> Result<String, String> {
+    let id = calendar_recording_id(&session_id)?;
+    let state = app.state::<crate::state::AppState>();
+    let pool = state.db_manager.pool();
+    let title = sqlx::query_scalar::<_, String>(
+        "SELECT title FROM recording_title_drafts WHERE recording_id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| "Could not load this recording's title.".to_string())?;
+    if let Some(title) = title {
+        return Ok(title);
+    }
+    if let Some(subject) = crate::library::recording_calendar::draft_subject(pool, &id).await? {
+        return Ok(subject);
+    }
+    ACTIVE_CAPTURE
+        .lock()
+        .ok()
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .filter(|active| active.sink.session_id == session_id)
+                .and_then(|active| active.meeting_name.clone())
+        })
+        .ok_or_else(|| "This recording's title is unavailable.".into())
+}
+
+#[tauri::command]
+pub(crate) async fn set_active_recording_title<R: Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+    title: String,
+) -> Result<String, String> {
+    let title = validate_recording_title(&title)?;
+    // The meeting handoff already waits for admitted metadata edits after
+    // capture stops. A late editor cannot change another session or the saved row.
+    let _edit = crate::library::recording_calendar::EDIT.lock().await;
+    let id = calendar_recording_id(&session_id)?;
+    let state = app.state::<crate::state::AppState>();
+    write_recording_title(state.db_manager.pool(), &id, &title).await?;
+    if let Some(active) = ACTIVE_CAPTURE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+        .filter(|active| active.sink.session_id == session_id)
+    {
+        active.meeting_name = Some(title.clone());
+    }
+    crate::tray::update_tray_menu(&app);
+    Ok(title)
 }
 
 // ============================================================================

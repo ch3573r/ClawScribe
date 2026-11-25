@@ -1,13 +1,18 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { MeetingTag } from '@/lib/library';
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, MAX, readStoredSidebarWidth } from '@/lib/sidebarWidth';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useConfig } from '@/contexts/ConfigContext';
+import { useLiveTranscriptionReadiness } from '@/hooks/useLiveTranscriptionReadiness';
+import { reportStartFailure, useStartRecordingSession } from '@/hooks/useRecordingStart';
+import { audioSourceReadiness } from '@/lib/audioDevicePreferences';
+import { recordingActionBlock, startReadinessReason } from '@/lib/recording-start-readiness';
 import { useSummaryPolling } from '@/hooks/useSummaryPolling';
 import { allowLoadedMeetingDrafts, discardMeetingDraft } from '@/lib/meetingDrafts';
 
@@ -54,6 +59,10 @@ interface SidebarContextType extends ReturnType<typeof useSummaryPolling> {
   isMeetingActive: boolean;
   setIsMeetingActive: (active: boolean) => void;
   handleRecordingToggle: () => void;
+  recordingActionReason: string | null;
+  nextMeetingTitle: string;
+  setNextMeetingTitle: React.Dispatch<React.SetStateAction<string>>;
+  liveReadiness: ReturnType<typeof useLiveTranscriptionReadiness>;
   setServerAddress: (address: string) => void;
   serverAddress: string;
   transcriptServerAddress: string;
@@ -122,16 +131,31 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const meetingVersion = React.useRef(0);
   const meetingLoadPending = React.useRef(false);
   const [isMeetingActive, setIsMeetingActive] = useState(false);
+  const [nextMeetingTitle, setNextMeetingTitle] = useState('');
+  const startingFromSidebar = React.useRef(false);
   const [serverAddress, setServerAddress] = useState('');
   const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
   const { activeSummaryPolls, startSummaryPolling, stopSummaryPolling, attachSummaryPolling } = useSummaryPolling();
 
   // Use recording state from RecordingStateContext (single source of truth)
-  const { isRecording } = useRecordingState();
+  const recording = useRecordingState();
+  const { isRecording, recordingMode, isSavingMode } = recording;
+  const { audioDeviceInventory, selectedDevices, devicePreferencesStatus, isSavingDevicePreferences, transcriptModelConfig } = useConfig();
+  const { data: inventory, status: inventoryStatus, refresh } = audioDeviceInventory;
+  useEffect(() => { void refresh(); }, [refresh]);
+  const liveReadiness = useLiveTranscriptionReadiness(recordingMode === 'live', transcriptModelConfig.provider, transcriptModelConfig.model);
+  const startReason = startReadinessReason({
+    inventoryStatus, preferencesStatus: devicePreferencesStatus, mode: recordingMode,
+    mic: inventory && audioSourceReadiness(inventory, 'Input', selectedDevices.micDevice),
+    system: inventory && audioSourceReadiness(inventory, 'Output', selectedDevices.systemDevice),
+    hasReadiness: Boolean(liveReadiness.data), readinessError: liveReadiness.error,
+    modelIssue: liveReadiness.data?.modelIssue, savingDevices: isSavingDevicePreferences, savingMode: isSavingMode,
+  });
+  const recordingActionReason = recordingActionBlock(recording, startReason);
+  const start = useStartRecordingSession(setIsMeetingActive);
 
   const pathname = usePathname();
   const sidebarOffset = isCollapsed || pathname === '/settings' ? '4rem' : `${sidebarWidth}px`;
-  const router = useRouter();
 
   // Extract fetchMeetings as a reusable function
   const fetchMeetings = React.useCallback(async () => {
@@ -230,31 +254,17 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 
   // Function to handle recording toggle from sidebar
   const handleRecordingToggle = React.useCallback(() => {
+    if (recordingActionReason || startingFromSidebar.current) return;
     if (!isRecording) {
-      // Check if already on home page
-      if (pathname === '/') {
-        // Already on home - trigger recording directly via custom event
-        console.log('Triggering recording from sidebar (already on home page)');
-        window.dispatchEvent(new CustomEvent('start-recording-from-sidebar'));
-      } else {
-        // Not on home - navigate and use auto-start mechanism
-        console.log('Navigating to home page with auto-start flag');
-        sessionStorage.setItem('autoStartRecording', 'true');
-        router.push('/');
-      }
-
-      // Track recording initiation from sidebar
-      Analytics.trackButtonClick('start_recording', 'sidebar');
-    } else {
-      // Already recording - clicking the indicator stops the recording. The
-      // app-wide RecordingPostProcessingProvider handles it, so it works from
-      // any page without navigating.
-      console.log('Stopping recording from sidebar');
-      window.dispatchEvent(new CustomEvent('stop-recording-from-sidebar'));
-      Analytics.trackButtonClick('stop_recording', 'sidebar');
+      startingFromSidebar.current = true;
+      void start('sidebar_direct', undefined, nextMeetingTitle).then(() => {
+        setNextMeetingTitle(current => current === nextMeetingTitle ? '' : current);
+      }).catch(reportStartFailure).finally(() => { startingFromSidebar.current = false; });
+      return;
     }
-    // Starting is handled by the Home component; stopping by the provider.
-  }, [isRecording, pathname, router]);
+    window.dispatchEvent(new CustomEvent('stop-recording-from-sidebar'));
+    Analytics.trackButtonClick('stop_recording', 'sidebar');
+  }, [isRecording, nextMeetingTitle, recordingActionReason, start]);
 
   const value = React.useMemo<SidebarContextType>(() => ({
       deleteTarget, setDeleteTarget,
@@ -280,6 +290,10 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       isMeetingActive,
       setIsMeetingActive,
       handleRecordingToggle,
+      recordingActionReason,
+      nextMeetingTitle,
+      setNextMeetingTitle,
+      liveReadiness,
       setServerAddress,
       serverAddress,
       transcriptServerAddress,
@@ -293,7 +307,8 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     deleteTarget, projectTags, projectTagsError, projectTagsLoading, refreshProjectTags,
     currentMeeting, sidebarItems, isCollapsed, sidebarWidth, setSidebarWidth,
     sidebarMaxWidth, sidebarOffset, isSidebarResizing, toggleCollapse, meetings,
-    meetingsError, meetingsLoading, setMeetings, isMeetingActive, handleRecordingToggle,
+    meetingsError, meetingsLoading, setMeetings, isMeetingActive, handleRecordingToggle, recordingActionReason, nextMeetingTitle,
+    liveReadiness.data, liveReadiness.error, liveReadiness.refresh,
     serverAddress, transcriptServerAddress, activeSummaryPolls, startSummaryPolling,
     stopSummaryPolling, attachSummaryPolling, fetchMeetings,
   ]);

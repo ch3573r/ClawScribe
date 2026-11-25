@@ -90,6 +90,7 @@ export class RecordingService {
     calendarLink?: MeetingCalendarLink | null,
     requestId?: string,
     summaryLanguage?: string | null,
+    customTitle?: string,
   ): Promise<string> {
     return invoke('start_recording_with_devices_and_meeting', {
       micDeviceName,
@@ -99,6 +100,7 @@ export class RecordingService {
       calendarLink,
       requestId,
       summaryLanguage,
+      customTitle,
     });
   }
 

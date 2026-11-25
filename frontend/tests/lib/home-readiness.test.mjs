@@ -198,6 +198,8 @@ test('Home can change a disconnected device without leaving the signal path', as
   let rechecks = 0;
   const state = { status: 'ready', data: inventory, refresh: () => { rechecks++; } };
   const preferred = { micDevice: null, systemDevice: null };
+  const liveReadiness = { data: { provider: 'parakeet', hostedBatchProvider: 'mai-transcribe', modelIssue: null }, error: false };
+  let nextMeetingTitle = '';
   const savedDevices = [];
   const jsx = (type, props) => ({ type, props });
   const stub = (...names) => Object.fromEntries(names.map(name => [name, name]));
@@ -205,11 +207,16 @@ test('Home can change a disconnected device without leaving the signal path', as
     react: { ...hook.react, useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot() },
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@/components/ui/button': stub('Button'),
+    '@/components/ui/input': stub('Input'),
     '@/components/AudioDeviceSelect': stub('AudioDeviceSelect'),
     '@/components/RecordingControls': stub('RecordingControls'),
     '@/components/RecordingModeSelect': stub('RecordingModeSelect'),
     '@/components/UpcomingMeetings': stub('UpcomingMeetings'),
-    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ meetings: [] }) },
+    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({
+      meetings: [], liveReadiness, nextMeetingTitle, setNextMeetingTitle: title => { nextMeetingTitle = title; },
+      recordingActionReason: state.status === 'error' ? 'Could not check audio devices'
+        : preferred.micDevice === 'Unplugged mic (input)' ? 'Preferred microphone unavailable' : null,
+    }) },
     '@/contexts/ConfigContext': { useConfig: () => ({
       selectedDevices: preferred, selectedLanguage: 'auto', audioDeviceInventory: state, devicePreferencesStatus: 'ready',
       saveSelectedDevices: async devices => { savedDevices.push(devices); Object.assign(preferred, devices); },
@@ -222,9 +229,7 @@ test('Home can change a disconnected device without leaving the signal path', as
     'next/navigation': { useRouter: () => ({ push() {} }) },
     'lucide-react': stub('ArrowRight', 'AudioLines', 'ChevronRight', 'Clock3', 'FileText', 'Languages', 'Mic', 'Settings2', 'RefreshCw', 'Sparkles', 'Upload', 'Volume2'),
   });
-  const render = () => hook.render(() => HomeDashboard({
-    liveReadiness: { data: { provider: 'parakeet', hostedBatchProvider: 'mai-transcribe', modelIssue: null }, error: false },
-  }));
+  const render = () => hook.render(() => HomeDashboard({}));
   const nodes = root => Array.isArray(root) ? root.flatMap(nodes) :
     root && typeof root === 'object' ? [root, ...nodes(root.props.children)] : [];
   const text = root => Array.isArray(root) ? root.map(text).join('') :
@@ -235,6 +240,9 @@ test('Home can change a disconnected device without leaving the signal path', as
   assert.match(text(home), /Azure Speech · Hosted file transcription/);
   assert.match(text(home), /Only your microphone will be recorded/);
   assert.equal(nodes(home).find(node => node.type === 'RecordingControls').props.isRecordingDisabled, false);
+  const titleInput = () => nodes(render()).find(node => node.props.id === 'next-meeting-title');
+  titleInput().props.onChange({ target: { value: 'Synthetic planning meeting' } });
+  assert.equal(titleInput().props.value, 'Synthetic planning meeting');
 
   preferred.micDevice = 'Unplugged mic (input)';
   const stale = render();
@@ -246,7 +254,7 @@ test('Home can change a disconnected device without leaving the signal path', as
   assert.equal(JSON.stringify(savedDevices), JSON.stringify([{ micDevice: 'Desk mic (input)', systemDevice: null }]));
   assert.equal(nodes(render()).find(node => node.type === 'RecordingControls').props.isRecordingDisabled, false);
   nodes(stale).find(node => node.type === 'Button' && /Recheck devices/.test(text(node))).props.onClick();
-  assert.equal(rechecks, 2);
+  assert.equal(rechecks, 1);
 
   state.status = 'error';
   state.data = null;

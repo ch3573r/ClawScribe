@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   ArrowRight,
   AudioLines,
@@ -29,12 +30,10 @@ import {
   audioSourceReadiness,
   type AudioDevice,
 } from "@/lib/audioDevicePreferences";
-import type { useLiveTranscriptionReadiness } from "@/hooks/useLiveTranscriptionReadiness";
 import { LIVE_MODEL_FAILURE_MESSAGE, transcriptionSettingsPath } from "@/lib/start-error";
 import { useCloudTranscription } from "@/hooks/useCloudTranscription";
 
 interface HomeDashboardProps {
-  liveReadiness: ReturnType<typeof useLiveTranscriptionReadiness>;
   isRecording: boolean;
   isProcessingStop: boolean;
   isRecordingDisabled: boolean;
@@ -81,7 +80,6 @@ function formatMeetingDate(value?: string): string {
 }
 
 export function HomeDashboard({
-  liveReadiness,
   isRecording,
   isProcessingStop,
   isRecordingDisabled,
@@ -90,7 +88,7 @@ export function HomeDashboard({
   onStopInitiated,
   onTranscriptionError,
 }: HomeDashboardProps) {
-  const { meetings } = useSidebar();
+  const { meetings, liveReadiness, recordingActionReason, nextMeetingTitle, setNextMeetingTitle } = useSidebar();
   const {
     selectedDevices,
     selectedLanguage,
@@ -107,7 +105,6 @@ export function HomeDashboard({
   const recentMeetings = useMemo(() => meetings.slice(0, 5), [meetings]);
   const { enabled: hostedEnabled, loaded: hostedSettingLoaded } = useCloudTranscription();
   const { data: inventory, status: inventoryStatus, refresh } = audioDeviceInventory;
-  useEffect(() => { void refresh(); }, [refresh]);
   const checkingDevices = inventoryStatus === "checking" || devicePreferencesStatus === "loading";
   const deviceCheckFailed = inventoryStatus === "error" || devicePreferencesStatus === "error";
   const micReady = inventory && audioSourceReadiness(inventory, "Input", selectedDevices.micDevice);
@@ -120,18 +117,7 @@ export function HomeDashboard({
   const providerLabel = provider ? PROVIDER_LABELS[provider] : null;
   const batch = liveReadiness.data?.hostedBatchProvider;
   const languageLabel = LANGUAGE_LABELS[selectedLanguage] ?? selectedLanguage.toUpperCase();
-  const firstFailure = deviceCheckFailed ? "Could not check audio devices"
-    : checkingDevices ? "Checking audio devices"
-    : micReady === "preferred_unavailable" ? "Preferred microphone unavailable"
-    : micReady !== "available" ? "Default microphone unavailable"
-    : systemReady === "preferred_unavailable" ? "Preferred output unavailable"
-    : !recordingState.recordingMode ? "Choose a recording mode"
-    : checkingModel ? "Checking speech model"
-    : modelCheckFailed ? "Could not check speech model"
-    : modelIssue ? "Live transcription needs attention"
-    : null;
   const micOnly = !deviceCheckFailed && !checkingDevices && micReady === "available" && systemReady === "default_unavailable";
-  const canStart = !firstFailure && !recordingState.isSavingMode && !isSavingDevicePreferences;
   const canChooseDevices = inventoryStatus === 'ready' && devicePreferencesStatus === 'ready'
     && !isSavingDevicePreferences && !isRecording && !isProcessingStop && !recordingState.isStarting
     && !recordingState.isStopping && !recordingState.isSaving && !recordingState.isProcessing;
@@ -139,8 +125,8 @@ export function HomeDashboard({
     ? recordingState.isPaused
       ? { label: "Paused", dot: "bg-warning-foreground", ring: "ring-warning-foreground/20" }
       : { label: "Recording", dot: "bg-error-foreground", ring: "ring-error-foreground/20" }
-    : firstFailure || micOnly || recordingState.status === RecordingStatus.ERROR
-      ? { label: firstFailure ?? (micOnly ? "Microphone only" : "Previous start failed"), dot: "bg-warning-foreground", ring: "ring-warning-foreground/20" }
+    : recordingActionReason || micOnly || recordingState.status === RecordingStatus.ERROR
+      ? { label: recordingActionReason ?? (micOnly ? "Microphone only" : "Previous start failed"), dot: "bg-warning-foreground", ring: "ring-warning-foreground/20" }
       : { label: "Ready to record", dot: "bg-success-foreground", ring: "ring-success-foreground/20" };
 
   const deviceMeta = (type: AudioDevice["device_type"], preferred: string | null) => {
@@ -236,6 +222,11 @@ export function HomeDashboard({
 
                 <div className="mt-7 space-y-4 rounded-lg border border-border bg-background/85 p-5 shadow-lg backdrop-blur-sm">
                   <RecordingModeSelect />
+                  <div className="space-y-1.5 text-left">
+                    <label htmlFor="next-meeting-title" className="text-sm text-muted-foreground">Meeting title (optional)</label>
+                    <Input id="next-meeting-title" value={nextMeetingTitle} maxLength={160}
+                      onChange={event => setNextMeetingTitle(event.target.value)} />
+                  </div>
                   {micOnly && <p role="status" className="max-w-sm text-sm text-warning-foreground">No default output is available. Only your microphone will be recorded.</p>}
                   {deviceCheckFailed && <p role="alert" className="max-w-sm text-sm text-destructive">Could not verify the audio devices or load their preferences. Recheck devices to try again.</p>}
                   {(micReady === "preferred_unavailable" || micReady === "default_unavailable" || systemReady === "preferred_unavailable") &&
@@ -255,7 +246,8 @@ export function HomeDashboard({
                     onRecordingStart={onRecordingStart}
                     onStopInitiated={onStopInitiated}
                     onTranscriptionError={onTranscriptionError}
-                    isRecordingDisabled={isRecordingDisabled || !canStart}
+                    isRecordingDisabled={isRecordingDisabled || Boolean(recordingActionReason)}
+                    startDisabledReason={recordingActionReason}
                     isParentProcessing={isProcessingStop}
                     selectedDevices={selectedDevices}
                     meetingName={meetingName}

@@ -28,6 +28,9 @@ import Analytics from "@/lib/analytics";
 import { groupMeetings, shortMeetingDate } from "@/lib/sidebarMeetings";
 import { Meta, StatusText } from "@/components/ui/settings-layout";
 import { NextUpCard } from "./NextUpCard";
+import { SidebarImportStatus } from "./SidebarImportStatus";
+import { useActiveGlobalShortcuts } from "@/hooks/useActiveGlobalShortcuts";
+import { shortcutHint } from "@/lib/shortcuts";
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, MIN, MAX, storeSidebarWidth } from "@/lib/sidebarWidth";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -96,6 +99,7 @@ const Sidebar: React.FC = () => {
     setIsSidebarResizing,
     toggleCollapse,
     handleRecordingToggle,
+    recordingActionReason,
     meetings,
     meetingsError,
     meetingsLoading,
@@ -126,6 +130,9 @@ const Sidebar: React.FC = () => {
 
   // Get recording state from RecordingStateContext (single source of truth)
   const { isRecording, isPaused } = useRecordingState();
+  const shortcuts = useActiveGlobalShortcuts();
+  const recordingAction = isRecording ? "Stop recording" : "Start recording";
+  const recordingActionHint = recordingActionReason ?? shortcutHint(recordingAction, shortcuts.startStop);
   const { openImportDialog } = useImportDialog();
   const [sidebarQuery, handleSearchChange] = useState("");
   const showSidebarSearch = pathname !== "/meetings";
@@ -363,31 +370,25 @@ const Sidebar: React.FC = () => {
           <div className="flex flex-col items-center gap-2">
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  onClick={handleRecordingToggle}
-                  className={`whitespace-normal gap-0 p-0 hover:bg-transparent hover:text-primary-foreground [&_svg]:size-5 flex h-11 w-11 items-center justify-center rounded-lg transition ${
-                    isRecording
-                      ? "bg-destructive text-destructive-foreground hover:bg-destructive/90 hover:text-destructive-foreground"
-                      : idleRecordingButtonClass
-                  }`}
-                  aria-label={isRecording ? "Stop recording" : "Start recording"}
-                >
-                  {isRecording ? (
-                    <Square className="h-5 w-5" />
-                  ) : (
-                    <Mic className="h-5 w-5" />
-                  )}
-                </Button>
+                <span className="inline-flex rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  tabIndex={recordingActionReason ? 0 : undefined} aria-label={recordingActionReason ?? undefined}>
+                  <Button
+                    variant="ghost"
+                    onClick={handleRecordingToggle}
+                    disabled={Boolean(recordingActionReason)}
+                    className={`whitespace-normal gap-0 p-0 hover:bg-transparent hover:text-primary-foreground [&_svg]:size-5 flex h-11 w-11 items-center justify-center rounded-lg transition ${
+                      isRecording
+                        ? "bg-destructive text-destructive-foreground hover:bg-destructive/90 hover:text-destructive-foreground"
+                        : idleRecordingButtonClass
+                    }`}
+                    aria-label={recordingAction}
+                  >
+                    {isRecording ? <Square aria-hidden="true" /> : <Mic aria-hidden="true" />}
+                  </Button>
+                </span>
               </TooltipTrigger>
               <TooltipContent side="right">
-                <p>
-                  {isRecording
-                    ? isPaused
-                      ? "Paused — click to stop"
-                      : "Recording — click to stop"
-                    : "Start recording"}
-                </p>
+                <p>{recordingActionHint}</p>
               </TooltipContent>
             </Tooltip>
 
@@ -751,25 +752,23 @@ const Sidebar: React.FC = () => {
             </div>
 
             <div className="flex-shrink-0 space-y-2.5 border-t border-sidebar-border bg-sidebar p-3">
-              <Button
-                variant={isRecording ? "destructive" : "default"}
-                onClick={handleRecordingToggle}
-                title={isRecording ? "Click to stop recording" : undefined}
-                className="h-10 w-full whitespace-normal text-sm font-semibold"
-              >
-                {isRecording ? (
-                  <Square className="h-4 w-4" />
-                ) : (
-                  <Mic className="h-4 w-4" />
-                )}
-                <span>
-                  {isRecording
-                    ? isPaused
-                      ? "Paused — click to stop"
-                      : "Recording — click to stop"
-                    : "Start recording"}
-                </span>
-              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="block rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    tabIndex={recordingActionReason ? 0 : undefined} aria-label={recordingActionReason ?? undefined}>
+                    <Button
+                      variant={isRecording ? "destructive" : "default"}
+                      onClick={handleRecordingToggle}
+                      disabled={Boolean(recordingActionReason)}
+                      className="h-10 w-full whitespace-normal text-sm font-semibold"
+                    >
+                      {isRecording ? <Square aria-hidden="true" /> : <Mic aria-hidden="true" />}
+                      {recordingAction}
+                    </Button>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="right">{recordingActionHint}</TooltipContent>
+              </Tooltip>
 
               <div className="grid grid-cols-2 gap-2">
                 <Button variant="outline" onClick={() => openImportDialog()} className="min-w-0" aria-label="Import audio or video" title="Import audio or video">
@@ -784,16 +783,17 @@ const Sidebar: React.FC = () => {
 
               <div role="status" className="flex items-center justify-between gap-3 px-1 text-xs">
                 <StatusText
-                  tone={isRecording ? (isPaused ? "warning" : "error") : "ok"}
+                  tone={recordingActionReason ? "warning" : isRecording ? (isPaused ? "warning" : "error") : "ok"}
                   className={`text-xs ${isRecording && !isPaused ? "font-medium" : ""}`}
                 >
-                  {isRecording ? (isPaused ? "Paused" : "Recording") : "Ready to record"}
+                  {recordingActionReason ?? (isRecording ? (isPaused ? "Paused" : "Recording") : "Ready to record")}
                 </StatusText>
                 {appVersion ? <Meta>v{appVersion}</Meta> : null}
               </div>
             </div>
           </>
         )}
+        <SidebarImportStatus collapsed={isEffectivelyCollapsed} />
       </aside>
 
       {/* Confirmation Modal for Delete */}

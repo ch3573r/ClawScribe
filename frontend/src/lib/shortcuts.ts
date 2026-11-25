@@ -68,6 +68,10 @@ export function keycaps(accelerator: string): string[] {
   );
 }
 
+export function shortcutHint(label: string, accelerator?: string): string {
+  return accelerator ? `${label} (${keycaps(accelerator).join('+')})` : label;
+}
+
 /** The action that already uses this combination, if any other action does. */
 export function duplicateAction(bindings: ShortcutBindings, action: ShortcutAction, accelerator: string): ShortcutAction | null {
   return (Object.keys(bindings) as ShortcutAction[]).find((key) => key !== action && bindings[key] === accelerator) ?? null;

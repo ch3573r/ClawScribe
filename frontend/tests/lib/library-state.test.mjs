@@ -64,6 +64,12 @@ test('project tags distinguish initial loading, failure, retry, and success', as
       'next/navigation': { usePathname: () => '/meetings', useRouter: () => ({}) },
       '@/lib/analytics': { trackBackendConnection() {} },
       '@/contexts/RecordingStateContext': { useRecordingState: () => ({ isRecording: false }) },
+      '@/contexts/ConfigContext': { useConfig: () => ({
+        audioDeviceInventory: { data: null, status: 'checking', refresh() {} },
+        selectedDevices: {}, transcriptModelConfig: {},
+      }) },
+      '@/hooks/useRecordingStart': { useStartRecordingSession: () => () => {} },
+      '@/hooks/useLiveTranscriptionReadiness': { useLiveTranscriptionReadiness: () => ({}) },
       '@tauri-apps/api/core': { invoke: async command => {
         if (command === 'list_meeting_tags') { const read = deferred(); reads.push(read); return read.promise; }
         return [];

@@ -712,6 +712,47 @@ test('a partial calendar result can be checked again from the recording review',
   assert.ok(!view.some(node => node.type === 'Button' && node.props.children === 'Check again'));
 });
 
+test('a recording with no automatic match can manually link a calendar event', async t => {
+  t.mock.method(Date, 'now', () => now + 30_000);
+  const calendar = withStorage(t);
+  const candidate = calendar.calendarLinkFromEvent(event('overlap'));
+  calendar.setActiveRecordingCalendar({
+    sessionId: 'active', revision: 0, startedAt: now, link: null, status: 'none', matches: [],
+  });
+  const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
+  const jsx = (type, props) => ({ type, props });
+  const writes = [];
+  const { RecordingCalendarReview } = loadTsModule('src/components/MeetingAttendance.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
+    '@/lib/meetingCalendar': calendar, '@/lib/meetingCalendarStore': {},
+    '@/components/ui/button': {}, '@/components/ui/checkbox': {},
+    '@/components/ui/dialog': {}, '@/components/ui/select': {},
+    '@/services/recordingCalendarService': {
+      async findCalendarEventsBetween(from, to) {
+        assert.ok(from < now && to > now);
+        return { matches: [candidate], unavailable: [] };
+      },
+      async writeRecordingCalendar(sessionId, revision, link) {
+        writes.push({ sessionId, revision, link });
+        return 1;
+      },
+    },
+  });
+  const dialog = () => hooks.render(() => RecordingCalendarReview({ sessionId: 'active', disabled: false }))
+    .props.children.flat().find(node => node?.type?.name === 'AttendanceDialog').props;
+  assert.equal(dialog().label, 'Link calendar event');
+  assert.equal(dialog().options.length, 0);
+  dialog().onOpen();
+  await flush();
+  assert.equal(dialog().options[0].eventId, candidate.eventId);
+  assert.equal(writes.length, 0);
+  await dialog().onSave(candidate);
+  assert.deepEqual(writes.map(({ sessionId, revision }) => [sessionId, revision]), [['active', 0]]);
+  assert.equal(calendar.getActiveRecordingCalendar('active').link.eventId, candidate.eventId);
+  assert.equal(calendar.getActiveRecordingCalendar('active').revision, 1);
+});
+
 test('a saved meeting without a link can be linked from the current calendars, with failing sources retried', async t => {
   const links = withStorage(t);
   const candidate = links.calendarLinkFromEvent(event('candidate', { seriesId: graphSeries }));

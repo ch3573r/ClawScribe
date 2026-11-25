@@ -12,6 +12,63 @@ mod recording_save_tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_manual_title_survives_handoff_and_keeps_the_calendar_link() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let current = sqlx::migrate!("./migrations");
+        let before_titles = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                current
+                    .iter()
+                    .filter(|migration| migration.version < 20261122004800)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        before_titles.run(&pool).await.unwrap();
+        let id = "meeting-26f07e03-9b02-41d1-996f-a4216de6b2df";
+        let link = r#"{"source":"ical","sourceId":"calendar","eventId":"event","subject":"Invitation","attendees":[]}"#;
+        sqlx::query("INSERT INTO recording_calendar_drafts VALUES (?, ?, 1)")
+            .bind(id)
+            .bind(link)
+            .execute(&pool)
+            .await
+            .unwrap();
+        current.run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO recording_title_drafts VALUES (?, ?)")
+            .bind(id)
+            .bind("My meeting title")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for title in ["Default title", "Duplicate attempt"] {
+            TranscriptsRepository::save_recording_handoff(
+                &pool,
+                id,
+                title,
+                &[],
+                "synthetic-folder".into(),
+                &Default::default(),
+                RecordingProvenance::recording(None, None),
+            )
+            .await
+            .unwrap();
+        }
+        let saved: (String, String) =
+            sqlx::query_as("SELECT title, calendar_link FROM meetings WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(saved, ("My meeting title".into(), link.into()));
+        let drafts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM recording_title_drafts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(drafts, 0);
+    }
+
+    #[tokio::test]
     async fn a_recovered_recording_uses_its_start_time_even_when_saved_another_day() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
@@ -637,9 +694,19 @@ impl TranscriptsRepository {
         let calendar_title = draft
             .as_deref()
             .and_then(|stored| crate::library::calendar::decode(stored).ok().flatten());
-        let meeting_title = calendar_title
-            .as_ref()
-            .and_then(|link| link.subject())
+        let custom_title = if has_recording_id {
+            sqlx::query_scalar::<_, String>(
+                "DELETE FROM recording_title_drafts WHERE recording_id = ? RETURNING title",
+            )
+            .bind(&meeting_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+        } else {
+            None
+        };
+        let meeting_title = custom_title
+            .as_deref()
+            .or_else(|| calendar_title.as_ref().and_then(|link| link.subject()))
             .unwrap_or(meeting_title);
         let now = Utc::now();
 

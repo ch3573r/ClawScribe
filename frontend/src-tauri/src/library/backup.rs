@@ -2467,6 +2467,7 @@ mod tests {
             "recording_calendar_drafts",
             "recording_library_deletions",
             "recording_summary_bookmarks",
+            "recording_title_drafts",
             "retranscription_notes_retry",
             "saved_live_answer_attachment_instances",
             "saved_live_answer_dependencies",

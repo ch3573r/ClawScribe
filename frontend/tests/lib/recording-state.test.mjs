@@ -88,20 +88,43 @@ test('a native stop shows progress until the matching library commit and ignores
     view.callbacks.Started('live', 'session-current');
     await flush();
     const progress = (stage, session_id = 'session-current', recording_generation = '2') =>
-      view.callbacks['recording-shutdown-progress']({ payload: { identity: { session_id, recording_generation }, stage, chunks_remaining: 3 } });
+      view.callbacks['recording-shutdown-progress']({ payload: {
+        identity: { session_id, recording_generation }, stage, chunks_remaining: 3, estimated_seconds_remaining: 64.1,
+      } });
     progress('processing_transcripts', 'old', '1');
     assert.equal(view.render().isStopping, false);
     progress('processing_transcripts');
     assert.equal(view.render().isStopping, true);
     assert.match(view.render().statusMessage, /3 segments/);
+    assert.match(view.render().statusMessage, /About 1 min 5 sec remaining/);
     progress('finalizing');
     assert.match(view.render().statusMessage, /Saving/);
+    assert.doesNotMatch(view.render().statusMessage, /remaining/);
     progress('complete');
     assert.equal(view.render().isStopping, true);
     view.callbacks.Stopped({ session_id: 'session-current', library_save_failed: false });
     progress('finalizing');
     assert.equal(view.render().status, 'idle');
     assert.equal(view.render().statusMessage, undefined);
+  } finally { view.unmount(); }
+});
+
+test('visibility events only switch the in-page controls for their bound native session', async () => {
+  const view = createView();
+  view.render();
+  try {
+    await flush();
+    view.callbacks.Started('live', 'session-current');
+    await flush();
+    view.render();
+    await flush();
+    const visibility = visible => view.callbacks['floating-controls-visibility-changed']({ payload: visible });
+    visibility(['previous-session', true]);
+    assert.equal(view.render().floatingControlsVisible, false);
+    visibility(['session-current', true]);
+    assert.equal(view.render().floatingControlsVisible, true);
+    visibility(['session-current', false]);
+    assert.equal(view.render().floatingControlsVisible, false);
   } finally { view.unmount(); }
 });
 

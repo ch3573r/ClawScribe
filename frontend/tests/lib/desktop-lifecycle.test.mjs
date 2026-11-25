@@ -53,6 +53,7 @@ test('recording controls label Stop and release both registrations when unmounte
     '@/components/MeetingDetails/MeetingBookmarks': components('LiveBookmarkButton'),
     '@/components/LiveRecordingNotes': components('LiveRecordingNotes'),
     '@/components/RecordingLevelMeter': components('RecordingLevelMeter'),
+    '@/hooks/useActiveGlobalShortcuts': { useActiveGlobalShortcuts: () => ({ startStop: 'Ctrl+F9' }) },
   });
   const tree = app.render(() => RecordingControls({ isRecording: true, variant: 'floating' }));
   await flush();
@@ -62,6 +63,7 @@ test('recording controls label Stop and release both registrations when unmounte
   await flush();
   assert.deepEqual(app.unregistered, ['transcript-error', 'transcription-error']);
   assert.ok(nodes(tree).some(node => node.type === 'Button' && node.props['aria-label'] === 'Stop recording'));
+  assert.ok(nodes(tree).some(node => node.props.children === 'Stop recording (Ctrl+F9)'));
 });
 
 test('Ollama removes listeners registered before and after disposal without setting up another one', async t => {
@@ -107,6 +109,7 @@ test('Home keeps recovery open for the next interrupted recording and clears its
     sonner: { toast: { error: (...args) => recoveryErrors.push(args), success() {} } },
     './_components/SettingsModal': components('SettingsModals'),
     './_components/TranscriptPanel': components('TranscriptPanel'),
+    './_components/ActiveRecordingTitle': components('ActiveRecordingTitle'),
     '@/app/_components/StatusOverlays': components('StatusOverlays'),
     '@/components/HomeDashboard': components('HomeDashboard'),
     '@/components/LiveAssistancePanel': components('LiveAssistancePanel'),

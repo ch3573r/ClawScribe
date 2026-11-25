@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, JavaScriptChannelId};
-use tauri::{AppHandle, Manager, Runtime, Webview};
+use tauri::{AppHandle, Emitter, Manager, Runtime, Webview};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -68,7 +68,7 @@ pub struct ShortcutApplyResult {
 }
 
 // Currently-registered (Shortcut -> Action) pairs, consulted by the handler.
-static REGISTERED: Mutex<Vec<(Shortcut, ShortcutAction)>> = Mutex::new(Vec::new());
+static REGISTERED: Mutex<Vec<(Shortcut, ShortcutAction, String)>> = Mutex::new(Vec::new());
 
 // Windows delivers already registered hotkeys to the native handler before the
 // WebView can record them. Route them back to the focused shortcut editor.
@@ -208,8 +208,8 @@ pub fn on_shortcut<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, state: S
         let registered = REGISTERED.lock().unwrap();
         registered
             .iter()
-            .find(|(sc, _)| sc == shortcut)
-            .map(|(_, a)| *a)
+            .find(|(sc, _, _)| sc == shortcut)
+            .map(|(_, action, _)| *action)
     };
     let Some(action) = action else { return };
     if let Some(channel) = capture_channel(app) {
@@ -293,7 +293,10 @@ pub fn apply_bindings<R: Runtime>(
         match Shortcut::from_str(accel) {
             Ok(shortcut) => match gs.register(shortcut) {
                 Ok(()) => {
-                    REGISTERED.lock().unwrap().push((shortcut, action));
+                    REGISTERED
+                        .lock()
+                        .unwrap()
+                        .push((shortcut, action, accel.to_owned()));
                 }
                 Err(e) => {
                     log::warn!("Global shortcut '{accel}' could not be registered: {e}");
@@ -316,6 +319,7 @@ pub fn apply_bindings<R: Runtime>(
 /// Register the persisted (or default) bindings at startup.
 pub fn init_from_storage<R: Runtime>(app: &AppHandle<R>) {
     let _ = apply_bindings(app, &load_bindings());
+    let _ = app.emit("global-shortcuts-changed", ());
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────
@@ -323,6 +327,16 @@ pub fn init_from_storage<R: Runtime>(app: &AppHandle<R>) {
 #[tauri::command]
 pub fn get_shortcuts() -> ShortcutBindings {
     load_bindings()
+}
+
+#[tauri::command]
+pub(crate) fn get_active_shortcuts() -> Vec<(ShortcutAction, String)> {
+    REGISTERED
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, action, binding)| (*action, binding.clone()))
+        .collect()
 }
 
 #[tauri::command]
@@ -334,6 +348,7 @@ pub fn set_shortcuts<R: Runtime>(
     // Persist what the user chose even if a binding conflicts, so the UI keeps
     // showing their intent; conflicting ones simply aren't active.
     save_bindings(&bindings);
+    let _ = app.emit("global-shortcuts-changed", ());
     result
 }
 

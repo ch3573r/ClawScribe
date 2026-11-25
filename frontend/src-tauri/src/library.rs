@@ -288,6 +288,10 @@ pub(crate) async fn discard_recording_drafts(
         .bind(recording_id)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM recording_title_drafts WHERE recording_id = ?")
+        .bind(recording_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM saved_live_answers WHERE recording_id = ? AND meeting_id IS NULL")
         .bind(recording_id)
         .execute(&mut *tx)

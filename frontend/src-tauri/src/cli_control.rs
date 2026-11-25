@@ -11,6 +11,8 @@ pub enum CliAction {
     ToggleRecording,
     StartRecording,
     StopRecording,
+    PauseRecording,
+    Bookmark,
 }
 
 /// Returns the first recognised flag in `args`. `args[0]` is the program path
@@ -20,8 +22,21 @@ pub fn parse_cli_action<S: AsRef<str>>(args: &[S]) -> Option<CliAction> {
         "--toggle-recording" => Some(CliAction::ToggleRecording),
         "--start-recording" => Some(CliAction::StartRecording),
         "--stop-recording" => Some(CliAction::StopRecording),
+        "--pause-recording" => Some(CliAction::PauseRecording),
+        "--bookmark" => Some(CliAction::Bookmark),
         _ => None,
     })
+}
+
+pub(crate) fn dispatch_forwarded(
+    args: &[String],
+    run: impl FnOnce(CliAction),
+    focus_main: impl FnOnce(),
+) {
+    match parse_cli_action(args) {
+        Some(action) => run(action),
+        None => focus_main(),
+    }
 }
 
 /// Performs the action through the tray's recording handler (the same path the
@@ -38,6 +53,8 @@ pub fn run_cli_action<R: Runtime>(app: &AppHandle<R>, action: CliAction) {
         CliAction::ToggleRecording => None,
         CliAction::StartRecording => Some(true),
         CliAction::StopRecording => Some(false),
+        CliAction::PauseRecording => return crate::tray::pause_recording_handler(app),
+        CliAction::Bookmark => return crate::library::bookmark_active_recording(app),
     };
     crate::tray::recording_intent_handler(
         app,
@@ -86,5 +103,22 @@ mod tests {
         assert_eq!(parse_cli_action(&["--start-recording"]), None);
         let owned = vec!["app".to_string(), "--start-recording".to_string()];
         assert_eq!(parse_cli_action(&owned), Some(CliAction::StartRecording));
+    }
+
+    #[test]
+    fn forwarded_pause_and_bookmark_dispatch_without_focusing_the_window() {
+        for (flag, action) in [
+            ("--pause-recording", CliAction::PauseRecording),
+            ("--bookmark", CliAction::Bookmark),
+        ] {
+            let args = vec!["ClawScribe.exe".to_owned(), flag.to_owned()];
+            let mut actions = Vec::new();
+            dispatch_forwarded(
+                &args,
+                |action| actions.push(action),
+                || panic!("handled recording flags must not focus the window"),
+            );
+            assert_eq!(actions, [action]);
+        }
     }
 }

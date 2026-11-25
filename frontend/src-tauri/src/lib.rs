@@ -493,6 +493,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     use_default_microphone: Option<bool>,
     calendar_link: Option<library::calendar::CalendarLink>,
     summary_language: Option<String>,
+    custom_title: Option<String>,
     request_id: Option<String>,
 ) -> Result<String, String> {
     let request = request_id
@@ -517,6 +518,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
                     .cloned()
                     .or(calendar_link),
                 summary_language,
+                custom_title,
                 request: request.as_ref(),
             },
         )
@@ -656,18 +658,12 @@ pub fn run() {
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-            log_info!(
-                "Second app instance requested with args: {:?}, cwd: {:?}",
-                args,
-                cwd
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            cli_control::dispatch_forwarded(
+                &args,
+                |action| cli_control::run_cli_action(app, action),
+                || tray::focus_main_window(app),
             );
-
-            if let Some(action) = cli_control::parse_cli_action(args.as_slice()) {
-                cli_control::run_cli_action(app, action);
-            } else {
-                tray::focus_main_window(app);
-            }
         }));
     }
 
@@ -894,6 +890,7 @@ pub fn run() {
             floating::floating_drag,
             floating::floating_resize,
             floating::floating_open_main,
+            floating::floating_controls_visible,
             library::context::get_meeting_context,
             library::context::set_meeting_context,
             library::calendar::get_meeting_calendar,
@@ -1001,6 +998,7 @@ pub fn run() {
             stop_audio_level_monitoring,
             // Global keyboard shortcuts
             shortcuts::get_shortcuts,
+            shortcuts::get_active_shortcuts,
             shortcuts::set_shortcuts,
             shortcuts::set_shortcut_capture,
             shortcuts::shortcut_key_characters,
@@ -1008,6 +1006,8 @@ pub fn run() {
             audio::recording_commands::pause_recording,
             audio::recording_commands::resume_recording,
             audio::recording_commands::get_recording_state,
+            audio::recording_commands::get_active_recording_title,
+            audio::recording_commands::set_active_recording_title,
             audio::recording_commands::get_meeting_folder_path,
             // Source attribution (Beta, opt-in): Me/Participants labelling
             audio::recording_commands::set_source_attribution_enabled,

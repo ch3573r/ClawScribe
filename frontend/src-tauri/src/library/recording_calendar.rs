@@ -93,12 +93,16 @@ pub(crate) async fn discard_failed_start_draft(
     empty_folder_removed: bool,
 ) -> Result<(), sqlx::Error> {
     if let (Some(id), true) = (staged_id, empty_folder_removed) {
-        sqlx::query("DELETE FROM recording_calendar_drafts WHERE recording_id = ?")
-            .bind(id)
-            .execute(pool)
-            .await?;
+        crate::library::discard_recording_drafts(pool, id).await?;
     }
     Ok(())
+}
+
+pub(crate) async fn draft_subject(pool: &SqlitePool, id: &str) -> Result<Option<String>, String> {
+    Ok(read(pool, id)
+        .await?
+        .link
+        .and_then(|link| link.subject().map(str::to_owned)))
 }
 
 #[tauri::command]

@@ -15,6 +15,7 @@ import { TranscriptPanel } from './_components/TranscriptPanel';
 import { LiveAssistanceDock } from '@/components/LiveAssistanceDock';
 import { HomeDashboard } from '@/components/HomeDashboard';
 import { RecordingControls } from '@/components/RecordingControls';
+import { ActiveRecordingTitle } from './_components/ActiveRecordingTitle';
 import { useModalState } from '@/hooks/useModalState';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
@@ -22,7 +23,6 @@ import { RECOVERY_OPEN_ALL, RECOVERY_OPEN_REQUEST } from '@/lib/interruptedRecor
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
-import { useLiveTranscriptionReadiness } from '@/hooks/useLiveTranscriptionReadiness';
 import { LIVE_MODEL_FAILURE_MESSAGE, transcriptionSettingsPath } from '@/lib/start-error';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -42,15 +42,17 @@ export default function Home() {
 
   // Hooks
   const { hasMicrophone } = usePermissionCheck();
-  const { sidebarOffset, isSidebarResizing, refetchMeetings } = useSidebar();
+  const { sidebarOffset, isSidebarResizing, refetchMeetings, liveReadiness, nextMeetingTitle, setNextMeetingTitle,
+    setIsMeetingActive, recordingActionReason } = useSidebar();
   const { modals, messages, showModal, hideModal, modelStartFailure, dismissModelStartFailure } = useModalState(transcriptModelConfig);
-  const liveReadiness = useLiveTranscriptionReadiness(
-    recordingState.recordingMode === 'live',
-    transcriptModelConfig.provider,
-    transcriptModelConfig.model,
-  );
   const isRecordingDisabled = isStarting || isStopping || isProcessing || isSaving;
-  const { handleRecordingStart } = useRecordingStart();
+  const { handleRecordingStart } = useRecordingStart(setIsMeetingActive);
+  const startFromHome = async () => {
+    if (recordingActionReason) return;
+    if (await handleRecordingStart(nextMeetingTitle)) {
+      setNextMeetingTitle(current => current === nextMeetingTitle ? '' : current);
+    }
+  };
 
   // Recovery hook
   const {
@@ -230,16 +232,23 @@ export default function Home() {
       <div className="flex flex-1 overflow-hidden">
         {isRecordingOrStarting || transcripts.length > 0 || isProcessingStop || isStopping ? (
           <>
-            <LiveAssistanceDock sessionId={isRecording && !isStopping && !isProcessingStop && recordingState.sessionMode === 'live'
-              ? recordingState.sessionId ?? null : null}
-              verificationError={isRecordingOrStarting && !isStopping ? recordingState.verificationError : null}
-              onRetryStatus={() => { recordingState.retryVerification(); void liveAssistance.refresh(); }}>
-              <TranscriptPanel isProcessingStop={isProcessingStop} isStopping={isStopping} />
-            </LiveAssistanceDock>
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              {isRecording && recordingState.sessionId && !isRecordingDisabled && (
+                <div className="flex shrink-0 justify-center border-b border-border bg-card px-4 py-2">
+                  <ActiveRecordingTitle key={recordingState.sessionId} sessionId={recordingState.sessionId} />
+                </div>
+              )}
+              <LiveAssistanceDock
+                sessionId={isRecording && !isStopping && !isProcessingStop && recordingState.sessionMode === 'live' ? recordingState.sessionId : null}
+                verificationError={isRecordingOrStarting && !isStopping ? recordingState.verificationError : null}
+                onRetryStatus={() => { recordingState.retryVerification(); void liveAssistance.refresh(); }}>
+                <TranscriptPanel isProcessingStop={isProcessingStop} isStopping={isStopping} />
+              </LiveAssistanceDock>
+            </div>
 
             {/* Floating pause/stop controls for the active recording. Hidden once
                 we move into transcript processing/saving (StatusOverlays take over). */}
-            {(hasMicrophone || isRecording) &&
+            {(hasMicrophone || isRecording) && !recordingState.floatingControlsVisible &&
               status !== RecordingStatus.PROCESSING_TRANSCRIPTS &&
               status !== RecordingStatus.SAVING && (
                 <div className="fixed bottom-12 left-0 right-0 z-10 pointer-events-none">
@@ -251,10 +260,11 @@ export default function Home() {
                       <RecordingControls
                         variant="floating"
                         isRecording={recordingState.isRecording}
-                        onRecordingStart={handleRecordingStart}
+                        onRecordingStart={startFromHome}
                         onStopInitiated={() => recordingState.setStatus(RecordingStatus.STOPPING)}
                         onTranscriptionError={(message) => showModal('errorAlert', message)}
-                        isRecordingDisabled={isRecordingDisabled}
+                        isRecordingDisabled={isRecordingDisabled || (!isRecording && Boolean(recordingActionReason))}
+                        startDisabledReason={recordingActionReason}
                         isParentProcessing={isProcessingStop}
                         selectedDevices={selectedDevices}
                         meetingName={meetingTitle}
@@ -271,12 +281,11 @@ export default function Home() {
           </>
         ) : (
           <HomeDashboard
-            liveReadiness={liveReadiness}
             isRecording={recordingState.isRecording}
             isProcessingStop={isProcessingStop}
             isRecordingDisabled={isRecordingDisabled}
             meetingName={meetingTitle}
-            onRecordingStart={handleRecordingStart}
+            onRecordingStart={startFromHome}
             onStopInitiated={() => recordingState.setStatus(RecordingStatus.STOPPING)}
             onTranscriptionError={(message) => {
               showModal('errorAlert', message);

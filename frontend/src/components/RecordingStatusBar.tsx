@@ -9,8 +9,9 @@ interface RecordingStatusBarProps {
 
 export const RecordingStatusBar: React.FC<RecordingStatusBarProps> = ({ isPaused = false }) => {
   // State only. The elapsed time is shown once, next to the recording controls.
-  const { status } = useRecordingState();
+  const { status, floatingControlsVisible } = useRecordingState();
   const isStarting = status === RecordingStatus.STARTING;
+  if (floatingControlsVisible) return null;
 
   return (
     <motion.div

@@ -1,7 +1,7 @@
 import Head from 'next/head';
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type Ref, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { BookmarkPlus, Mic, MonitorSpeaker, Pause, Play, Square, X } from 'lucide-react';
+import { BookmarkPlus, ExternalLink, Mic, MonitorSpeaker, Pause, Play, Square, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
@@ -11,13 +11,19 @@ import type { RecordingLevelsPayload, SourceLevelPayload } from '@/lib/recording
 import { bookmarkTime } from '@/lib/library';
 import { deviceLabel, recordingHealthWarnings, type MissingRecordingDevice, type RecordingHealth } from '@/lib/recording-health';
 import { applyAccent, applyThemePreference, DEFAULT_ACCENT_ID, subscribeToSystemTheme, type ThemePreference } from '@/lib/theme';
+import { shortcutHint, type ShortcutAction } from '@/lib/shortcuts';
+import { drainEta } from '@/lib/recording-progress';
 
 type Status =
-  | { state: 'recording'; seconds: number; paused: boolean; levels: RecordingLevelsPayload | null }
-  | { state: 'saving'; seconds: number; progress: number; message: string }
+  | { state: 'recording'; seconds: number; paused: boolean; levels: RecordingLevelsPayload | null; mode: 'live' | 'audio_only'; mic_no_signal: boolean }
+  | { state: 'saving'; seconds: number; progress: number; message: string; estimated_seconds_remaining?: number | null }
   | { state: 'review' | 'ended' };
 
-type Snapshot = Status & { appearance: { theme: ThemePreference; accent: string | null } | null; health?: RecordingHealth | null };
+type Snapshot = Status & {
+  appearance: { theme: ThemePreference; accent: string | null } | null;
+  health?: RecordingHealth | null;
+  shortcuts?: [ShortcutAction, string][];
+};
 
 function Level({ label, reading, paused }: { label: string; reading?: SourceLevelPayload | null; paused: boolean }) {
   const Icon = label === 'Microphone' ? Mic : MonitorSpeaker;
@@ -48,7 +54,7 @@ function Control({ label, children, onClick, disabled, destructive, buttonRef, e
         aria-expanded={expanded} aria-keyshortcuts={shortcut}>{children}</Button>
     </TooltipTrigger>
     <TooltipContent side="left" sideOffset={4} collisionPadding={2} className="pointer-events-none px-2 py-0.5">
-      {shortcut ? `${label} (${shortcut})` : label}
+      {shortcutHint(label, shortcut)}
     </TooltipContent>
   </Tooltip>;
 }
@@ -131,6 +137,8 @@ export default function FloatingControls() {
 
   const recording = status?.state === 'recording' ? status : null;
   const saving = status?.state === 'saving' ? status : null;
+  const eta = drainEta(saving?.estimated_seconds_remaining);
+  const shortcuts = Object.fromEntries(status?.shortcuts ?? []);
   const health = recording ? status?.health : null;
   const warnings = health ? recordingHealthWarnings(health) : [];
   const canStop = !!recording && !unavailable && !pending;
@@ -288,7 +296,12 @@ export default function FloatingControls() {
               {recording && !stopping && <span aria-hidden="true" title={title}
                 className={`size-2 shrink-0 rounded-full ${recording.paused ? 'bg-warning-foreground' : 'bg-destructive motion-safe:animate-pulse'}`} />}
               <h1 role="status" className={recording && !stopping ? 'sr-only' : 'text-sm font-semibold'}>{title}</h1>
-              {seconds != null && <span role="timer" aria-label="Active recording time" className="shrink-0 text-base font-semibold tabular-nums">{bookmarkTime(seconds)}</span>}
+              {seconds != null && <div className="shrink-0 leading-tight">
+                <span role="timer" aria-label="Active recording time" className="block text-base font-semibold tabular-nums">{bookmarkTime(seconds)}</span>
+                {recording && <span className="inline-flex whitespace-nowrap rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
+                  {recording.mode === 'audio_only' ? 'Audio only' : 'Live'}
+                </span>}
+              </div>}
               <div className="min-w-0 flex-1">
                 {recording && !stopping && !notice && <div role="group" aria-label="Recording levels">
                   <Level label="Microphone" paused={recording.paused} reading={recording.levels?.mic} />
@@ -300,14 +313,15 @@ export default function FloatingControls() {
               </div>
               <div data-no-drag className="flex shrink-0 items-center gap-1">
                 {recording && !stopping && <>
-                  <Control label={recording.paused ? 'Resume recording' : 'Pause recording'} disabled={!canNote} onClick={setPaused}>
+                  <Control label={recording.paused ? 'Resume recording' : 'Pause recording'} disabled={!canNote} onClick={setPaused} shortcut={shortcuts.pauseResume}>
                     {recording.paused ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
                   </Control>
                   <Control label="Add note" buttonRef={noteButton} expanded={noteOpen} shortcut="N" disabled={!canNote}
                     onClick={() => noteOpen ? closeNote() : setNoteOpen(true)}><BookmarkPlus aria-hidden="true" /></Control>
-                  <Control label="Stop recording" destructive disabled={!canStop} onClick={stop}>
+                  <Control label="Stop recording" destructive disabled={!canStop} onClick={stop} shortcut={shortcuts.startStop}>
                     <Square aria-hidden="true" className="fill-current" />
                   </Control>
+                  <Control label="Open main window" disabled={openingMain} onClick={openMain}><ExternalLink aria-hidden="true" /></Control>
                 </>}
                 {!review && <Control label="Close controls" onClick={dismiss}><X aria-hidden="true" /></Control>}
               </div>
@@ -315,10 +329,13 @@ export default function FloatingControls() {
             {recording && noteOpen && !stopping && <form onSubmit={saveNote} className="flex items-center gap-2 border-t border-border p-2">
               <Input ref={noteInput} aria-label="Optional timestamped note" placeholder="Optional note" maxLength={160} autoComplete="off"
                 className="h-8 min-w-0 flex-1" value={draft} readOnly={!canNote} onChange={e => setDraft(e.target.value)} />
-              <Button className="h-8" size="sm" type="submit" variant="outline" disabled={!canNote}>
+              <Button className="h-8" size="sm" type="submit" variant="outline" disabled={!canNote}
+                title={!draft.trim() ? shortcutHint('Bookmark', shortcuts.bookmarkRecording) : undefined}>
                 {draft.trim() ? 'Save note' : 'Bookmark'}
               </Button>
             </form>}
+            {recording && !stopping && !recording.paused && recording.mic_no_signal &&
+              <p role="status" className="border-t border-border px-3 py-2 text-xs text-warning-foreground">No microphone signal yet</p>}
             {(health?.reconnecting || warnings.length > 0 || !!health?.disconnected_devices.length) &&
               <div className="space-y-1.5 border-t border-border px-3 py-2 text-xs">
                 {health?.reconnecting && <p role="status">Checking audio device…</p>}
@@ -333,6 +350,7 @@ export default function FloatingControls() {
               </div>}
             {saving && <div className="space-y-2 border-t border-border px-3 py-2.5">
               <p className="text-xs" role="status">{saving.message}</p>
+              {eta && <p className="text-xs text-muted-foreground">{eta}</p>}
               <Progress value={saving.progress} aria-label="Recording save progress" aria-valuenow={saving.progress} />
             </div>}
             {review && <div className="space-y-2 border-t border-border px-3 py-2.5">
