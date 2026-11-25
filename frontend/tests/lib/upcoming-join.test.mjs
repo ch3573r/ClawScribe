@@ -27,6 +27,45 @@ test('only timed, uncancelled Teams meeting links offer a recording request', ()
   assert.equal(eligible({ ...chosen, allDay: true }), false);
 });
 
+test('Next up offers prep for a recurring event and reuses the Teams recording guard', t => {
+  const hooks = createHookHarness();
+  t.after(hooks.unmount);
+  const previousWindow = globalThis.window;
+  globalThis.window = { setInterval: () => 1, clearInterval() {} };
+  t.after(() => { globalThis.window = previousWindow; });
+  const chosen = entry({ seriesId: 'series' });
+  const joined = [];
+  let windows = true;
+  const jsx = (type, props) => ({ type, props });
+  const { NextUpCard } = loadTsModule('src/components/Sidebar/NextUpCard.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
+    '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/settings-layout': { Meta: 'span' },
+    '@/components/MeetingDetails/SeriesPreparation': { UpcomingSeriesPreparation: 'Brief' },
+    'next/navigation': { usePathname: () => '/meetings' },
+    '@/hooks/useUpcomingEvents': { useUpcomingEvents: () => ({
+      entries: [chosen], isSelected: () => false, select() {},
+    }) },
+    '@/hooks/useJoinRecording': {
+      supportsJoinRecording: loadTsModule('src/hooks/useJoinRecording.ts').supportsJoinRecording,
+      useJoinRecording: () => ({ windows, pending: null, join: event => joined.push(event) }),
+    },
+  });
+  const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node?.props ? [node, ...nodes(node.props.children)] : [];
+  const view = () => nodes(hooks.render(NextUpCard));
+  const button = label => view().find(node => node.type === 'button' && node.props.children === label);
+  button('Preparation brief').props.onClick();
+  assert.equal(view().find(node => node.type === 'Brief').props.event.eventId, 'chosen');
+  assert.equal(view().find(node => node.type === 'Brief').props.event.attendees.length, 0);
+  button('Join and record').props.onClick();
+  assert.deepEqual(joined, [chosen]);
+  windows = false;
+  assert.equal(button('Join and record'), undefined);
+  windows = true;
+  chosen.event.joinUrl = 'https://example.com/meet/123';
+  assert.equal(button('Join and record'), undefined);
+});
+
 test('the call panel uses the selected appearance and answers only the displayed prompt', async t => {
   const hooks = createHookHarness();
   t.after(hooks.unmount);

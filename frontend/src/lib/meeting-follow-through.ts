@@ -1,7 +1,47 @@
+import { markdownToPlainText } from "./clipboard-format";
+import { calendarLinkFromEvent, type MeetingCalendarLink } from "./meetingCalendar";
+import type { UpcomingEntry } from "@/hooks/useUpcomingEvents";
+
 export type FollowUpDestination = "planner" | "todo" | "email";
 export const SERIES_REVIEW_CHANGED = "clawscribe-series-review-changed";
 export const REVIEWED_ACTIONS_CHANGED = "reviewed-actions-changed";
 export const MICROSOFT_EXPORT_SETTINGS = "/settings?tab=ms365";
+export const SERIES_NOTES_LIMIT = 2000;
+
+export function upcomingSeriesLink({ event, sourceId }: UpcomingEntry): MeetingCalendarLink | null {
+  return event.seriesId && event.start
+    ? calendarLinkFromEvent({ ...event, sourceId, attendees: [] })
+    : null;
+}
+
+interface DraftSummary {
+  markdown?: string;
+  structured_meeting_output?: {
+    executive_summary?: string;
+    decisions?: { decision?: string }[];
+  };
+}
+
+export function draftSeriesNotes(data: DraftSummary | null, current: string): string | null {
+  const structured = data?.structured_meeting_output;
+  const plain = (text: unknown) => typeof text === "string" ? markdownToPlainText(text).trim() : "";
+  const decisions = Array.isArray(structured?.decisions)
+    ? [...new Set(structured.decisions.map(item => plain(item?.decision)).filter(Boolean))]
+    : [];
+  const summary = plain(structured?.executive_summary) || plain(data?.markdown);
+  const sections = [
+    decisions.length ? `Decisions\n${decisions.map(decision => `- ${decision}`).join("\n")}` : "",
+    summary ? `Summary\n${summary}` : "",
+  ].filter(Boolean);
+  const draft = sections.join("\n\n");
+  const prefix = current.trimEnd() ? `${current.trimEnd()}\n\n` : "";
+  const available = SERIES_NOTES_LIMIT - prefix.length;
+  if (!draft || current.includes(draft) || available < (decisions.length ? 13 : 9)) return null;
+  const excerpt = draft.length > available
+    ? `${draft.slice(0, available - 1).replace(/[\uD800-\uDBFF]$/u, "").trimEnd()}…`
+    : draft;
+  return prefix + excerpt;
+}
 
 export interface SeriesPreferences {
   language: string | null;

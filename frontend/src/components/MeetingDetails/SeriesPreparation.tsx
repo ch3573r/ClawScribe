@@ -11,13 +11,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { formatArchiveDate } from "@/lib/archive-review";
 import { type MeetingCalendarLink, MICROSOFT_CALENDAR_CLEARED } from "@/lib/meetingCalendar";
-import { meetingActionUrl, SERIES_REVIEW_CHANGED, type FollowUpDestination, type SeriesOccurrence, type SeriesPreferences } from "@/lib/meeting-follow-through";
+import { draftSeriesNotes, meetingActionUrl, SERIES_NOTES_LIMIT, SERIES_REVIEW_CHANGED, type FollowUpDestination, type SeriesOccurrence, type SeriesPreferences } from "@/lib/meeting-follow-through";
+import { MEETING_SERIES_TEMPLATE_CHANGED } from "@/lib/meetingCalendarStore";
 import { LANGUAGE_OPTIONS } from "@/lib/summary-languages";
+import type { TemplateInfo } from "@/hooks/meeting-details/useTemplates";
 
 interface SeriesReview {
   subject: string | null;
   reviewToken: string;
   preferences: SeriesPreferences;
+  templateId: string | null;
   approvedNotes: string;
   priorOccurrences: SeriesOccurrence[];
 }
@@ -75,16 +78,21 @@ export function UpcomingSeriesPreparation({ event, close }: { event: MeetingCale
 
 export function SavedSeriesReview({ meetingId, close }: { meetingId: string; close: () => void }) {
   const [data, setData] = useState<SeriesReview | null | undefined>();
+  const [templates, setTemplates] = useState<TemplateInfo[]>([]);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [drafting, setDrafting] = useState(false);
+  const [draftStatus, setDraftStatus] = useState("");
+  const [drafted, setDrafted] = useState(false);
   const pending = useRef(false);
   useEffect(() => {
     let active = true;
     setData(undefined);
     setError("");
-    void invoke<SeriesReview | null>("get_meeting_series_review", { meetingId }).then(data => {
-      if (active) setData(data);
+    void invoke<SeriesReview | null>("get_meeting_series_review", { meetingId }).then(async data => {
+      const choices = data ? await invoke<TemplateInfo[]>("api_list_templates") : [];
+      if (active) { setData(data); setTemplates(choices); }
     }).catch(() => { if (active) setError("Could not load this series."); });
     return () => { active = false; };
   }, [meetingId, attempt]);
@@ -95,8 +103,9 @@ export function SavedSeriesReview({ meetingId, close }: { meetingId: string; clo
     setBusy(true);
     setError("");
     try {
-      const { reviewToken, approvedNotes, preferences } = data;
-      await invoke("save_meeting_series_review", { meetingId, reviewToken, approvedNotes, preferences });
+      const { reviewToken, approvedNotes, preferences, templateId } = data;
+      await invoke("save_meeting_series_review", { meetingId, reviewToken, approvedNotes, preferences, templateId: templateId ?? "" });
+      window.dispatchEvent(new Event(MEETING_SERIES_TEMPLATE_CHANGED));
       window.dispatchEvent(new Event(SERIES_REVIEW_CHANGED));
       close();
     } catch (failure) {
@@ -104,6 +113,29 @@ export function SavedSeriesReview({ meetingId, close }: { meetingId: string; clo
     } finally {
       pending.current = false;
       setBusy(false);
+    }
+  }
+
+  async function draft() {
+    if (!data || pending.current || drafted) return;
+    pending.current = true;
+    setDrafting(true);
+    setDraftStatus("");
+    try {
+      const { data: saved } = await invoke<{ data: Parameters<typeof draftSeriesNotes>[0] }>("api_get_summary", { meetingId });
+      const notes = draftSeriesNotes(saved, data.approvedNotes);
+      if (notes === null) {
+        setDraftStatus("There is no new summary text or there is too little room in the notes.");
+        return;
+      }
+      setData({ ...data, approvedNotes: notes });
+      setDrafted(true);
+      setDraftStatus("Draft added. Review it before saving.");
+    } catch {
+      setDraftStatus("Could not read the saved summary. Try again.");
+    } finally {
+      pending.current = false;
+      setDrafting(false);
     }
   }
 
@@ -124,10 +156,21 @@ export function SavedSeriesReview({ meetingId, close }: { meetingId: string; clo
       {data && <>
         <PreparationBrief occurrences={data.priorOccurrences} close={close} />
         <form className="space-y-4 border-t border-border pt-4" onSubmit={event => { event.preventDefault(); void save(); }}>
+          <div className="space-y-1">
+            <Label htmlFor="series-template">Summary template</Label>
+            <Select disabled={busy || drafting} value={data.templateId ?? "use-default"} onValueChange={value =>
+              setData(current => current && ({ ...current, templateId: value === "use-default" ? null : value }))}>
+              <SelectTrigger id="series-template"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="use-default">Use the default template</SelectItem>
+                {templates.map(template => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1">
               <Label htmlFor="series-language">Summary language</Label>
-              <Select disabled={busy} value={data.preferences.language ?? "default"} onValueChange={value => update({ language: value === "default" ? null : value })}>
+              <Select disabled={busy || drafting} value={data.preferences.language ?? "default"} onValueChange={value => update({ language: value === "default" ? null : value })}>
                 <SelectTrigger id="series-language"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="default">Use meeting or automatic language</SelectItem>
@@ -137,7 +180,7 @@ export function SavedSeriesReview({ meetingId, close }: { meetingId: string; clo
             </div>
             <div className="space-y-1">
               <Label htmlFor="series-destination">Preferred follow-up</Label>
-              <Select disabled={busy} value={data.preferences.destination ?? "default"} onValueChange={value => update({ destination: value === "default" ? null : value as FollowUpDestination })}>
+              <Select disabled={busy || drafting} value={data.preferences.destination ?? "default"} onValueChange={value => update({ destination: value === "default" ? null : value as FollowUpDestination })}>
                 <SelectTrigger id="series-destination"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="default">No preference</SelectItem>
@@ -148,21 +191,25 @@ export function SavedSeriesReview({ meetingId, close }: { meetingId: string; clo
               </Select>
             </div>
           </div>
-          <p className="text-xs text-muted-foreground">Choose the series template in Attendance. Preferred follow-up highlights an option in Export. Review each export or draft before opening it.</p>
+          <p className="text-xs text-muted-foreground">Preferred follow-up highlights an option in Export. Review each export or draft before opening it.</p>
           <div className="space-y-1">
             <Label htmlFor="series-note">Approved decisions and notes for this occurrence</Label>
-            <Textarea id="series-note" maxLength={2000} rows={4} disabled={busy} value={data.approvedNotes}
+            <Textarea id="series-note" maxLength={SERIES_NOTES_LIMIT} rows={4} disabled={busy || drafting} value={data.approvedNotes}
               onChange={event => setData(current => current && ({ ...current, approvedNotes: event.target.value }))} />
+            <Button type="button" size="sm" variant="outline" disabled={busy || drafting || drafted} onClick={() => void draft()}>
+              {drafting ? "Drafting…" : "Draft prep notes from summary & decisions"}
+            </Button>
+            {draftStatus && <p role="status" className="text-xs text-muted-foreground">{draftStatus}</p>}
             <p className="text-xs text-muted-foreground">This text stays local and can appear in later preparation briefs for this series.</p>
           </div>
           <div className="flex items-center gap-2">
-            <Checkbox id="series-include-notes" disabled={busy} checked={data.preferences.includeApprovedNotes}
+            <Checkbox id="series-include-notes" disabled={busy || drafting} checked={data.preferences.includeApprovedNotes}
               onCheckedChange={value => update({ includeApprovedNotes: value === true })} />
             <Label htmlFor="series-include-notes">Include approved notes in preparation briefs</Label>
           </div>
           <DialogFooter>
-            <Button type="button" variant="outline" disabled={busy} onClick={close}>Cancel</Button>
-            <Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save series preferences"}</Button>
+            <Button type="button" variant="outline" disabled={busy || drafting} onClick={close}>Cancel</Button>
+            <Button type="submit" disabled={busy || drafting}>{busy ? "Saving…" : "Save series preferences"}</Button>
           </DialogFooter>
         </form>
       </>}

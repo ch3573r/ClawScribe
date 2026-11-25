@@ -338,6 +338,7 @@ pub(crate) struct SeriesReview {
     subject: Option<String>,
     review_token: String,
     preferences: SeriesPreferences,
+    template_id: Option<String>,
     approved_notes: String,
     prior_occurrences: Vec<BriefOccurrence>,
 }
@@ -366,6 +367,7 @@ async fn series_review(
         return Ok(None);
     };
     let preferences = preferences(&mut tx, key).await?;
+    let template_id = calendar::series_template_for(&mut tx, key).await?;
     let approved_notes: Option<String> = sqlx::query_scalar(
         "SELECT approved_notes FROM approved_series_notes
          WHERE meeting_id = ? AND source_id = ? AND series_id = ? AND event_id = ?",
@@ -390,6 +392,7 @@ async fn series_review(
         subject: link.subject().map(str::to_owned),
         review_token: review_token(&link, key),
         preferences,
+        template_id,
         approved_notes: approved_notes.unwrap_or_default(),
         prior_occurrences,
     }))
@@ -724,6 +727,7 @@ pub(crate) async fn save_meeting_series_review(
     preferences: SeriesPreferences,
     approved_notes: String,
     review_token: String,
+    template_id: Option<String>,
 ) -> Result<(), String> {
     save_series_review(
         state.db_manager.pool(),
@@ -731,6 +735,7 @@ pub(crate) async fn save_meeting_series_review(
         preferences,
         &approved_notes,
         &review_token,
+        template_id.as_deref(),
     )
     .await
 }
@@ -747,6 +752,7 @@ async fn save_series_review(
     preferences: SeriesPreferences,
     approved_notes: &str,
     token: &str,
+    template_id: Option<&str>,
 ) -> Result<(), String> {
     if preferences
         .language
@@ -770,6 +776,12 @@ async fn save_series_review(
     let key = link.reviewed_series_key().ok_or(SERIES_REQUIRED)?;
     if review_token(&link, key) != token {
         return Err("The linked event changed. Reopen the series to review it.".into());
+    }
+    // A review saved by an older caller omitted the template. An empty ID
+    // represents an explicit choice to use the default template.
+    if let Some(template_id) = template_id {
+        let selected = (!template_id.is_empty()).then_some(template_id);
+        calendar::save_series_template_for(&mut tx, key, selected).await?;
     }
     sqlx::query("INSERT INTO recurring_meeting_preferences VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(source_id, series_id) DO UPDATE SET
@@ -864,12 +876,14 @@ mod tests {
             },
             "Reviewed decision",
             &prior.review_token,
+            Some("standard_meeting"),
         )
         .await
         .unwrap();
 
         let result = series_review(&pool, "target").await.unwrap().unwrap();
         assert_eq!(result.preferences.language.as_deref(), Some("de"));
+        assert_eq!(result.template_id.as_deref(), Some("standard_meeting"));
         assert_eq!(result.prior_occurrences.len(), 1);
         let evidence = &result.prior_occurrences[0];
         assert_eq!(evidence.meeting_id, "prior");
@@ -910,10 +924,36 @@ mod tests {
             "target",
             result.preferences,
             "Old review",
-            &result.review_token
+            &result.review_token,
+            None,
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn series_review_preserves_an_omitted_template_and_clears_an_explicit_default() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        occurrence(&pool, "saved", "a", "2026-11-20T10:00:00Z", true).await;
+        for (change, expected) in [
+            (Some("daily_standup"), Some("daily_standup")),
+            (None, Some("daily_standup")),
+            (Some(""), None),
+        ] {
+            let review = series_review(&pool, "saved").await.unwrap().unwrap();
+            save_series_review(
+                &pool,
+                "saved",
+                review.preferences,
+                "",
+                &review.review_token,
+                change,
+            )
+            .await
+            .unwrap();
+            let saved = series_review(&pool, "saved").await.unwrap().unwrap();
+            assert_eq!(saved.template_id.as_deref(), expected);
+        }
     }
 
     #[tokio::test]

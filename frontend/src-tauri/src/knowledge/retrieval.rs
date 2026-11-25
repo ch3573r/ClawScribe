@@ -40,7 +40,7 @@ pub async fn freeze_scope_in_connection(
     freeze_scope_rows(connection, scope, None).await
 }
 
-pub(super) async fn freeze_scope_rows(
+pub(crate) async fn freeze_scope_rows(
     connection: &mut sqlx::SqliteConnection,
     scope: &KnowledgeScope,
     row_limit: Option<i64>,

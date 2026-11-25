@@ -1,6 +1,67 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
+
+test('series prep draft reads saved decisions and keeps approved text for review', () => {
+  const { draftSeriesNotes } = loadTsModule('src/lib/meeting-follow-through.ts');
+  const data = {
+    markdown: '# Saved summary\nThe **rollout** starts Monday.',
+    structured_meeting_output: { decisions: [{ decision: 'Keep the pilot small' }, { decision: 'Keep the pilot small' }] },
+  };
+  assert.equal(draftSeriesNotes(data, 'Existing approved note'),
+    'Existing approved note\n\nDecisions\n- Keep the pilot small\n\nSummary\nSaved summary\nThe rollout starts Monday.');
+  assert.equal(draftSeriesNotes(null, ''), null);
+  assert.equal(draftSeriesNotes({ markdown: 'x'.repeat(3000) }, '😀'.repeat(998)), null);
+});
+
+test('the recurring meeting dialog drafts locally and saves the template with the approved notes', async t => {
+  const hooks = createHookHarness();
+  const original = globalThis.window;
+  globalThis.window = new EventTarget();
+  t.after(() => { hooks.unmount(); globalThis.window = original; });
+  const calls = [];
+  const jsx = (type, props) => ({ type, props });
+  const controls = {
+    button: ['Button'], checkbox: ['Checkbox'], dialog: ['Dialog', 'DialogContent', 'DialogDescription', 'DialogFooter', 'DialogHeader', 'DialogTitle'],
+    label: ['Label'], select: ['Select', 'SelectContent', 'SelectItem', 'SelectTrigger', 'SelectValue'], textarea: ['Textarea'],
+  };
+  const { SavedSeriesReview } = loadTsModule('src/components/MeetingDetails/SeriesPreparation.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'next/link': 'link',
+    ...Object.fromEntries(Object.entries(controls).map(([path, names]) =>
+      ['@/components/ui/' + path, Object.fromEntries(names.map(name => [name, name]))])),
+    '@/lib/meetingCalendarStore': { MEETING_SERIES_TEMPLATE_CHANGED: 'series-template-changed' },
+    '@tauri-apps/api/core': { invoke: async (name, args) => {
+      calls.push([name, args]);
+      if (name === 'get_meeting_series_review') return {
+        subject: 'Planning', reviewToken: 'review', templateId: null, approvedNotes: '',
+        preferences: { language: 'de', destination: 'todo', includeApprovedNotes: true }, priorOccurrences: [],
+      };
+      if (name === 'api_list_templates') return [{ id: 'daily_standup', name: 'Daily standup' }];
+      if (name === 'api_get_summary') return { data: {
+        markdown: 'The pilot is ready.',
+        structured_meeting_output: { decisions: [{ decision: 'Start Monday' }] },
+      } };
+      assert.equal(name, 'save_meeting_series_review');
+    } },
+  });
+  const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node?.props ? [node, ...nodes(node.props.children)] : [];
+  const view = () => nodes(hooks.render(() => SavedSeriesReview({ meetingId: 'saved', close() {} })));
+  view();
+  await flush();
+  view().find(node => node.type === 'Select').props.onValueChange('daily_standup');
+  view().find(node => node.type === 'Button' && node.props.children === 'Draft prep notes from summary & decisions').props.onClick();
+  await flush();
+  assert.equal(calls.filter(([name]) => name === 'save_meeting_series_review').length, 0);
+  const notes = view().find(node => node.type === 'Textarea').props.value;
+  assert.match(notes, /Start Monday/);
+  assert.match(notes, /The pilot is ready\./);
+  view().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), ['save_meeting_series_review', {
+    meetingId: 'saved', reviewToken: 'review', templateId: 'daily_standup', approvedNotes: notes,
+    preferences: { language: 'de', destination: 'todo', includeApprovedNotes: true },
+  }]);
+});
 import { createHookHarness, flush } from './hook-harness.mjs';
 
 test('action navigation keeps the meeting and action identities separate from route directives', () => {

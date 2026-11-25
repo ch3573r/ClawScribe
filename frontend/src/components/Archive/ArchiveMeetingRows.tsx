@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { archiveRecordingFacts, archiveReview, formatArchiveDate, visibleSelection, type ArchiveAction, type ArchiveRow } from "@/lib/archive-review";
+import { MEETING_SERIES_TEMPLATE_CHANGED } from "@/lib/meetingCalendarStore";
 import { ArchiveAudioRemoval, type ArchiveMeeting } from "./ArchiveAudioRemoval";
 import type { BulkAction } from "./ArchiveBulkActions";
 
@@ -57,11 +58,13 @@ export function useArchiveMetadata(active: boolean, revision: number, librarySiz
     if (!active) return;
     void refresh();
     window.addEventListener("focus", refresh);
+    window.addEventListener(MEETING_SERIES_TEMPLATE_CHANGED, refresh);
     const subscriptions = ["retranscription-complete", "transcript-files-synchronized", "summary-job-changed", "library-changed"].map(event => listen(event, refresh));
     for (const subscription of subscriptions) void subscription.catch(() => {});
     return () => {
       request.current += 1;
       window.removeEventListener("focus", refresh);
+      window.removeEventListener(MEETING_SERIES_TEMPLATE_CHANGED, refresh);
       for (const subscription of subscriptions) void subscription.then(unlisten => unlisten()).catch(() => {});
     };
   }, [active, refresh, revision, librarySize]);

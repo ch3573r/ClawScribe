@@ -1031,6 +1031,7 @@ pub fn run() {
             mcp::settings::get_mcp_access,
             mcp::settings::set_mcp_access,
             mcp::settings::set_mcp_follow_through_access,
+            mcp::settings::test_mcp_server,
             webhook::get_webhook_settings,
             webhook::get_meeting_webhook_history,
             webhook::save_webhook_settings,

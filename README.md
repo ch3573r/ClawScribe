@@ -423,8 +423,8 @@ for the saved server even while that server is offline.
 ## Library And Data
 
 **Meetings → Archive** shows recording source and measured duration when available.
-Filter to meetings that need attention to find incomplete recordings, missing
-transcripts, and failed summaries. Use
+Filter by recurring series or narrow to meetings that need attention to find
+incomplete recordings, missing transcripts, and failed summaries. Use
 **Storage** to measure the library or select meetings to review which saved
 audio copies can be removed while keeping their transcripts and notes.
 See [Archive review and storage](docs/local-library.md#archive-review-and-storage).
@@ -439,8 +439,9 @@ the saved meeting. Other live answers clear at Stop.
 
 **Settings → Assistant access** offers separate permissions for an MCP client.
 Follow-through access reads open reviewed actions and basic metadata for a
-meeting reference you provide. Library access supports broader searches and
-can read notes, transcripts, and recording paths. Both use local standard
+meeting reference you provide. Library access supports filtered meeting and
+passage searches, cross-meeting open actions, notes, bookmarks, attachment
+metadata, transcripts, and recording paths. Both permissions use local standard
 input and output and start off. [Local assistant access](docs/local-library.md#local-assistant-access)
 
 **Backup and restore** saves a portable archive of meeting data, transcript history,

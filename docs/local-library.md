@@ -11,8 +11,8 @@ uses its save time. Imports keep the date selected during import.
 Older meetings may have no duration or source. **Meetings that need attention** puts saved
 meetings with recording warnings, missing transcripts, or failed or cancelled
 summary jobs before the rest of the archive. Select **Needs attention** to show
-only those meetings. The title and project filters
-apply to both groups. Use the row action to open transcription, review the
+only those meetings. The title, project, date and recurring series filters
+apply to both groups and to Archive search. Use the row action to open transcription, review the
 recording, retry a recording-folder copy, or return to the summary. Starting transcription or generation
 still requires a choice in the existing meeting tools. A missing summary
 alone is optional. Recovery files from another computer must be recovered there.
@@ -93,16 +93,19 @@ read-only access**. Choose your client format. For Claude Desktop, add the
 add the displayed table to `config.toml`. Keep other server entries and
 reconnect your client. For clients with separate fields, use the
 ClawScribe executable as the command and `--mcp-stdio` as the sole argument.
+Choose **Test MCP server** to check that the local process responds and lists
+the tools for your enabled permissions.
 The client starts its own local process, including when the desktop window
 is closed. See the [Claude Desktop setup guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
 and [Codex MCP configuration](https://developers.openai.com/codex/mcp).
 
 | Tool | Result |
 | --- | --- |
-| `list_meetings` | Saved meeting IDs, titles and dates, newest first. |
+| `list_meetings` | Saved meeting IDs, titles and dates, newest first. Accepts inclusive `from` and `to` dates, `tags`, `tag_mode` (`any` or `all`), and `untagged`. |
+| `list_open_actions` | Open reviewed actions across saved meetings, newest meeting first. Follow `next_offset` for more. |
 | `search_meetings` | Meetings matching literal text in their title or current transcript. |
-| `search_passages` | Up to 25 literal matches in current transcripts, with meeting and segment IDs, speaker and available recording time. Accepts inclusive `from` and `to` dates, `tags`, `tag_mode` (`any` or `all`), and `untagged`. |
-| `get_meeting` | Saved meeting details, summary and notes. |
+| `search_passages` | Up to 25 current transcript passages containing all search terms, ignoring letter case. Use double quotes for a phrase. Accepts the same date and tag filters as `list_meetings`. Set `semantic` to `true` to request related passages when the local index and model are ready. |
+| `get_meeting` | Saved meeting summary, notes, tags, bookmarks and attachment names, formats and sizes. Use `next_metadata_offset` to continue the metadata lists. |
 | `get_transcript` | Current transcript text in recording order with available speaker labels and timestamps. |
 | `get_audio` | A local path for a verified saved audio file, or null when unavailable. |
 
@@ -121,8 +124,9 @@ transcripts, recordings, notes, citations, and export history.
 Use the meeting ID from a list or search result. For passage matches, use
 the segment ID when reading the transcript. If passage search reports
 `limited`, narrow the query or date and project filters. Follow the returned
-offsets for long transcripts and notes. Calendar invitations stored in the desktop
-calendar picker and attached reference documents are outside this interface.
+offsets for long transcripts and notes. Attachment results contain metadata
+only. Calendar invitations and the contents of reference documents stay in
+the desktop library.
 
 Each permission grants its scope to local clients running under your user
 account. A client may send retrieved content to its own provider. Turning a

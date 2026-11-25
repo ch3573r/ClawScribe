@@ -368,21 +368,19 @@ async fn query_anchor(
     Ok(anchor)
 }
 
-pub(crate) async fn search(
+pub(crate) async fn search_transcript_terms(
     conn: &mut SqliteConnection,
     query: &str,
     scope: Option<&KnowledgeScope>,
     limit: usize,
-    titles: bool,
-    one_per_meeting: bool,
 ) -> Result<LiteralHits, KnowledgeError> {
     search_query(
         conn,
-        &LiteralQuery::new(query, false)?,
+        &LiteralQuery::archive(query)?,
         scope,
         limit,
-        titles,
-        one_per_meeting,
+        false,
+        false,
     )
     .await
 }

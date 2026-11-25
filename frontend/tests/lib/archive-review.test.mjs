@@ -19,6 +19,19 @@ const meeting = {
   pending_file_sync: false,
 };
 
+test('Archive offers one choice per stable recurring series, including series with the same name', () => {
+  const { archiveSeriesChoices } = loadTsModule('src/lib/archive-review.ts');
+  const choices = archiveSeriesChoices([
+    { ...meeting, series: { id: 'one', label: 'Planning' } },
+    { ...meeting, series: { id: 'one', label: 'Previous title' } },
+    { ...meeting, series: { id: 'two', label: 'Planning' } },
+    meeting,
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(choices)), [
+    { id: 'one', label: 'Planning' }, { id: 'two', label: 'Planning' },
+  ]);
+});
+
 test('review routes local recovery to transcription and preserves the remote recovery instruction', () => {
   assert.equal(archiveReview({ ...meeting, transcription_incomplete: true }).action, 'transcribe');
   assert.equal(archiveReview({ ...meeting, recovery_files_elsewhere: true, transcription_incomplete: true }).action, 'review');

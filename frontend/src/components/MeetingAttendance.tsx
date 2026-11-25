@@ -6,6 +6,8 @@ import { CalendarClock } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
@@ -19,7 +21,7 @@ import {
   getMeetingCalendar, setMeetingCalendar, MEETING_SERIES_TEMPLATE_CHANGED,
 } from "@/lib/meetingCalendarStore";
 import { findCalendarEventsBetween, findOngoingRecordingCalendar } from "@/services/recordingCalendarService";
-import type { TemplateInfo } from "@/hooks/meeting-details/useTemplates";
+import { archiveDateKey, parseArchiveDate } from "@/lib/archive-review";
 import type { RecordingState } from "@/services/recordingService";
 
 const RELINK_MARGIN_MS = 10 * 60_000;
@@ -31,6 +33,8 @@ interface CandidateLookup {
   loading: boolean;
   unavailable: string[];
   onRetry: () => void;
+  date?: string;
+  onDateChange?: (date: string) => void;
 }
 
 function UnavailableSources({ lookup }: { lookup: CandidateLookup }) {
@@ -104,9 +108,18 @@ function AttendanceDialog({ link, options = [], label, onSave, disabled, childre
             {" "}Saving lets your AI provider use the event title and checked names when you summarize. Email addresses stay on this device.
           </DialogDescription>
         </DialogHeader>
+        {lookup?.onDateChange && <div className="space-y-1">
+          <Label htmlFor="calendar-search-date">Calendar date</Label>
+          <Input id="calendar-search-date" type="date" value={lookup.date || ""}
+            disabled={saving || lookup.loading} onChange={event => {
+              setDraft(null);
+              lookup.onDateChange?.(event.target.value);
+            }} />
+        </div>}
         {lookup?.loading && options.length === 0 && <p role="status" className="text-sm text-muted-foreground">Looking for calendar events…</p>}
         {lookup && !lookup.loading && !link && options.length === 0 && lookup.unavailable.length === 0 && (
-          <p role="status" className="text-sm text-muted-foreground">No calendar events found around this recording.</p>
+          <p role="status" className="text-sm text-muted-foreground">{lookup.onDateChange
+            ? "No calendar events found for this date." : "No calendar events found around this recording."}</p>
         )}
         {lookup && <UnavailableSources lookup={lookup} />}
         {options.length > 0 && (!link || options.length > 1) ? (
@@ -120,7 +133,10 @@ function AttendanceDialog({ link, options = [], label, onSave, disabled, childre
               {options.map((option, index) => (
                 <SelectItem key={index} value={String(index)}>
                   {eventTitle(option)} · {option.source === "microsoft" ? "Microsoft 365" : "iCalendar"}
-                  {option.start && ` · ${new Date(option.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`}
+                  {option.start && ` · ${new Date(option.start).toLocaleString([], {
+                    ...(lookup?.onDateChange ? { month: "short", day: "numeric" } as const : {}),
+                    hour: "numeric", minute: "2-digit",
+                  })}`}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -290,44 +306,11 @@ export function RecordingCalendarReview({ disabled, sessionId }: {
   );
 }
 
-function SeriesTemplatePreference({ meetingId, templates, remembered }: {
+export function SavedMeetingAttendance({ meetingId, createdAt, durationSeconds, disabled }: {
   meetingId: string;
-  templates: TemplateInfo[];
-  remembered: string | null;
-}) {
-  const [saving, setSaving] = useState(false);
-  return (
-    <div className="space-y-1">
-      <span className="text-sm font-medium">Template for this series</span>
-      <Select value={remembered ?? "use-default"} disabled={saving}
-        onValueChange={async value => {
-          setSaving(true);
-          try {
-            await invoke("set_meeting_series_template", { meetingId, templateId: value === "use-default" ? null : value });
-            window.dispatchEvent(new Event(MEETING_SERIES_TEMPLATE_CHANGED));
-          } catch {
-            toast.error("Could not save the series template.");
-          } finally {
-            setSaving(false);
-          }
-        }}>
-        <SelectTrigger aria-label="Template for this series"><SelectValue /></SelectTrigger>
-        <SelectContent>
-          <SelectItem value="use-default">Use the default template</SelectItem>
-          {templates.map(template => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}
-        </SelectContent>
-      </Select>
-    </div>
-  );
-}
-
-export function SavedMeetingAttendance({ meetingId, createdAt, durationSeconds, templates, remembered, disabled }: {
-  meetingId: string;
-  /** The save time of the recording; events are searched before it for the recorded duration. */
+  /** The capture, import or legacy save date. */
   createdAt: string;
   durationSeconds?: number;
-  templates: TemplateInfo[];
-  remembered: string | null;
   disabled?: boolean;
 }) {
   const [link, setLink] = useState<MeetingCalendarLink | null>(null);
@@ -338,17 +321,30 @@ export function SavedMeetingAttendance({ meetingId, createdAt, durationSeconds, 
   );
   const request = useRef(0);
   const lookup = useRef(0);
-  const findCandidates = async () => {
+  const [overrideDate, setOverrideDate] = useState("");
+  const recordingDate = archiveDateKey(createdAt) ?? "";
+  const findCandidates = async (date = overrideDate) => {
     const version = ++lookup.current;
-    const end = new Date(createdAt).getTime();
-    if (!Number.isFinite(end)) {
+    const start = parseArchiveDate(date || recordingDate);
+    if (!start) {
       setCandidates({ loading: false, matches: [], unavailable: [] });
       return;
     }
-    setCandidates(current => ({ ...current, loading: true }));
-    const from = end - Math.max(durationSeconds ?? 3_600, 900) * 1000 - RELINK_MARGIN_MS;
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    const recordedAt = date || createdAt === recordingDate ? null : parseArchiveDate(createdAt);
+    const duration = Number.isFinite(durationSeconds) && durationSeconds !== undefined
+      ? Math.min(86_400, Math.max(900, durationSeconds))
+      : 3_600;
+    // Legacy meetings may have stored the save time after a recording crossed midnight.
+    const from = recordedAt
+      ? Math.min(start.getTime(), recordedAt.getTime() - duration * 1000 - RELINK_MARGIN_MS)
+      : start.getTime();
+    const to = recordedAt ? Math.max(end.getTime(), recordedAt.getTime() + RELINK_MARGIN_MS) : end.getTime();
+    setCandidates({ loading: true, matches: [], unavailable: [] });
     try {
-      const result = await findCalendarEventsBetween(from, end + RELINK_MARGIN_MS);
+      const result = await findCalendarEventsBetween(from, to, true);
       if (version === lookup.current) setCandidates({ loading: false, ...result });
     } catch {
       if (version === lookup.current) setCandidates({ loading: false, matches: [], unavailable: ["your calendars"] });
@@ -392,12 +388,16 @@ export function SavedMeetingAttendance({ meetingId, createdAt, durationSeconds, 
     return (
       <AttendanceDialog link={null} label="Link calendar event" options={candidates.matches} disabled={disabled}
         onOpen={() => void findCandidates()} onSave={save}
-        lookup={{ loading: candidates.loading, unavailable: candidates.unavailable, onRetry: () => void findCandidates() }} />
+        lookup={{
+          loading: candidates.loading,
+          unavailable: candidates.unavailable,
+          date: overrideDate || recordingDate,
+          onRetry: () => void findCandidates(),
+          onDateChange: value => { setOverrideDate(value); void findCandidates(value); },
+        }} />
     );
   }
   return (
-    <AttendanceDialog link={link} label="Attendance" disabled={disabled} retained onSave={save}>
-      {link.seriesId && <SeriesTemplatePreference meetingId={meetingId} templates={templates} remembered={remembered} />}
-    </AttendanceDialog>
+    <AttendanceDialog link={link} label="Attendance" disabled={disabled} retained onSave={save} />
   );
 }

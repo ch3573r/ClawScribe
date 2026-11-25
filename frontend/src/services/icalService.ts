@@ -67,6 +67,39 @@ function weekFrom(start: Date) {
   return end;
 }
 
+async function readSource(source: ICalendarSource, from: Date, to: Date, force: boolean, isCurrent: () => boolean) {
+  const text = await invoke<string>("read_ical_source", { id: source.id, force });
+  if (!isCurrent()) return [];
+  const parsed = await parseCalendarInWorker(text, source.id, from, to);
+  return parsed.map(event => ({ ...event, sourceId: source.id }));
+}
+
+/** Read a saved meeting's date without replacing the rolling upcoming snapshot. */
+export async function readICalendarsBetween(
+  from: Date, to: Date, signal: AbortSignal,
+  onEvents: (events: ICalendarEvent[], isCurrent: () => boolean) => void,
+) {
+  const version = generation;
+  const isCurrent = () => version === generation;
+  const active = () => !signal.aborted && isCurrent();
+  const sources = await invoke<ICalendarSource[]>("list_ical_sources");
+  const queue = [...sources.filter(source => source.kind === "file"), ...sources.filter(source => source.kind === "subscription")];
+  let complete = true;
+  let next = 0;
+  async function readNext() {
+    while (active() && next < queue.length) {
+      try {
+        const matches = await readSource(queue[next++], from, to, false, active);
+        if (active()) onEvents(matches, isCurrent);
+      } catch {
+        complete = false;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(3, queue.length) }, readNext));
+  return complete && active();
+}
+
 async function load(version: number, force: boolean) {
   try {
     const sources = await invoke<ICalendarSource[]>("list_ical_sources");
@@ -87,10 +120,7 @@ async function load(version: number, force: boolean) {
         let events: ICalendarEvent[] = [];
         let issue: string | null = null;
         try {
-          const text = await invoke<string>("read_ical_source", { id: source.id, force });
-          if (version !== generation) return;
-          const parsed = await parseCalendarInWorker(text, source.id, now, until);
-          events = parsed.map(event => ({ ...event, sourceId: source.id }));
+          events = await readSource(source, now, until, force, () => version === generation);
         } catch (error) {
           issue = messageFor(error, "Could not read this calendar. Check its format or connection and refresh.");
         }

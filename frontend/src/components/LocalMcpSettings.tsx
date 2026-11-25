@@ -23,6 +23,8 @@ export function LocalMcpSettings({ onStatusChange }: { onStatusChange?: (access:
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [client, setClient] = useState("json");
+  const [testing, setTesting] = useState(false);
+  const [testPassed, setTestPassed] = useState(false);
   const request = useRef(0);
   const pending = useRef(false);
 
@@ -33,6 +35,7 @@ export function LocalMcpSettings({ onStatusChange }: { onStatusChange?: (access:
     setBusy(true);
     setError("");
     setCopied(false);
+    setTestPassed(false);
     try {
       const result = enabled === undefined
         ? await invoke<Access>("get_mcp_access")
@@ -75,17 +78,37 @@ export function LocalMcpSettings({ onStatusChange }: { onStatusChange?: (access:
     }
   }
 
+  async function testServer() {
+    if (!config || pending.current) return;
+    pending.current = true;
+    const id = ++request.current;
+    setTesting(true);
+    setTestPassed(false);
+    setError("");
+    try {
+      await invoke("test_mcp_server");
+      if (id === request.current) setTestPassed(true);
+    } catch (failure) {
+      if (id === request.current) setError(typeof failure === "string" ? failure : "Could not test the local MCP server.");
+    } finally {
+      if (id === request.current) {
+        pending.current = false;
+        setTesting(false);
+      }
+    }
+  }
+
   return (
     <>
       <SettingsCard>
         <SettingsRow
           title="Allow read-only access"
           htmlFor="mcp-access"
-          description="Local apps running as you can read meeting titles, summaries, transcripts and audio paths, also while ClawScribe is closed"
+          description="Local apps running as you can read saved meetings, transcripts, notes, open actions, bookmarks, attachment metadata and audio paths, even while ClawScribe is closed"
         >
           {busy && <span role="status" className="text-[13px] text-muted-foreground">Checking access…</span>}
           {!access && !busy && <Button size="sm" variant="outline" onClick={() => void refresh()}>Retry</Button>}
-          <Switch id="mcp-access" checked={access?.enabled ?? false} disabled={busy || !access}
+          <Switch id="mcp-access" checked={access?.enabled ?? false} disabled={busy || testing || !access}
             onCheckedChange={value => void refresh(value)} />
         </SettingsRow>
         <SettingsRow
@@ -93,7 +116,7 @@ export function LocalMcpSettings({ onStatusChange }: { onStatusChange?: (access:
           htmlFor="mcp-follow-through"
           description="A local assistant can read open reviewed actions and basic metadata for a meeting only when it has that meeting’s reference"
         >
-          <Switch id="mcp-follow-through" checked={access?.follow_through ?? false} disabled={busy || !access}
+          <Switch id="mcp-follow-through" checked={access?.follow_through ?? false} disabled={busy || testing || !access}
             onCheckedChange={value => void refresh(value, true)} />
         </SettingsRow>
         {config && <div className="grid gap-2 px-5 py-4">
@@ -108,11 +131,18 @@ export function LocalMcpSettings({ onStatusChange }: { onStatusChange?: (access:
           <Label htmlFor="mcp-client-config">Assistant configuration</Label>
           <Textarea id="mcp-client-config" value={config} readOnly rows={7} className="font-mono text-xs"
             onFocus={event => event.target.select()} />
-          <div>
-            <Button variant="outline" size="sm" disabled={busy} onClick={() => void copy()}>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" disabled={busy || testing} onClick={() => void copy()}>
               {copied ? "Copied" : "Copy configuration"}
             </Button>
+            <Button variant="outline" size="sm" disabled={busy || testing} onClick={() => void testServer()}>
+              {testing ? "Testing…" : "Test MCP server"}
+            </Button>
           </div>
+          {testPassed && <p role="status" className="text-sm text-muted-foreground">The local MCP server responded.</p>}
+          {access?.follow_through && <p className="text-sm text-muted-foreground">
+            In a saved meeting, open ⋯ → Copy meeting reference and give that reference to your assistant.
+          </p>}
         </div>}
         {error && <NoteRow tone="error">{error}</NoteRow>}
       </SettingsCard>

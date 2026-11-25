@@ -443,8 +443,7 @@ export default function PageContent({
         disabled={summaryBusy}
         getMarkdown={getSummaryMarkdown} onOpenFolder={meetingOperations.handleOpenMeetingFolder}
         attendance={<SavedMeetingAttendance key={meeting.id} meetingId={meeting.id} createdAt={meeting.created_at}
-          durationSeconds={audioPlayer.duration || undefined} disabled={summaryBusy}
-          templates={templates.availableTemplates} remembered={templates.seriesTemplate} />} />
+          durationSeconds={audioPlayer.duration || undefined} disabled={summaryBusy} />} />
       {isAudioReady && (
         <SpeakerLaneTimeline
           bindings={playerBindings}

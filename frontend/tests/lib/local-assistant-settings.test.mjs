@@ -15,6 +15,7 @@ test('local assistant configuration appears only after a successful opt-in and d
   let grant = false;
   let followThrough = false;
   const save = deferred();
+  const serverTest = deferred();
   const calls = [];
   const command = String.raw`C:\Audio tools\Übung\ClawScribe.exe`;
   const { LocalMcpSettings } = loadTsModule('src/components/LocalMcpSettings.tsx', {
@@ -25,6 +26,7 @@ test('local assistant configuration appears only after a successful opt-in and d
     '@/components/ui/textarea': { Textarea: 'Textarea' }, '@/components/ui/input': { Input: 'Input' }, 'lucide-react': {},
     '@tauri-apps/api/core': { invoke: async (name, args) => {
       calls.push(name);
+      if (name === 'test_mcp_server') return serverTest.promise;
       if (name === 'set_mcp_access') {
         if (args.enabled) await save.promise;
         grant = args.enabled;
@@ -34,9 +36,12 @@ test('local assistant configuration appears only after a successful opt-in and d
     } },
   });
   const find = kind => nodes(hooks.render(LocalMcpSettings)).find(node => node.type === kind);
+  const findButton = label => nodes(hooks.render(LocalMcpSettings)).find(node =>
+    node.type === 'Button' && node.props.children === label);
   assert.equal(find('Switch').props.disabled, true);
   await flush();
   assert.equal(find('Textarea'), undefined);
+  assert.equal(findButton('Test MCP server'), undefined);
   assert.ok(nodes(hooks.render(LocalMcpSettings)).some(node => /may send what it reads to its own provider/.test(String(node.props.children))), 'the opt-in discloses provider sharing');
   const enable = find('Switch').props.onCheckedChange;
   enable(true);
@@ -61,6 +66,15 @@ test('local assistant configuration appears only after a successful opt-in and d
   assert.equal(find('Switch').props.checked, false);
   assert.equal(followThroughSwitch().props.checked, true);
   assert.ok(find('Textarea'));
+  assert.ok(nodes(hooks.render(LocalMcpSettings)).some(node => String(node.props.children).includes('Copy meeting reference')));
+  const testServer = findButton('Test MCP server').props.onClick;
+  testServer();
+  testServer();
+  assert.equal(calls.filter(name => name === 'test_mcp_server').length, 1);
+  assert.equal(findButton('Testing…').props.disabled, true);
+  serverTest.resolve();
+  await flush();
+  assert.ok(nodes(hooks.render(LocalMcpSettings)).some(node => node.props.children === 'The local MCP server responded.'));
   followThroughSwitch().props.onCheckedChange(false);
   await flush();
   assert.equal(find('Textarea'), undefined);

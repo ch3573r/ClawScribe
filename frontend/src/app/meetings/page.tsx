@@ -24,7 +24,7 @@ import { ArchiveStorageButton } from "@/components/Archive/ArchiveStorageButton"
 import { ArchiveBulkActions, type BulkAction } from "@/components/Archive/ArchiveBulkActions";
 import type { ArchiveMeeting } from "@/components/Archive/ArchiveAudioRemoval";
 import { OpenMeetingActions } from "@/components/Archive/OpenMeetingActions";
-import { archiveDateKey, archiveReview, parseArchiveDate } from "@/lib/archive-review";
+import { archiveDateKey, archiveReview, archiveSeriesChoices, formatArchiveDate, parseArchiveDate } from "@/lib/archive-review";
 import { receiveMatchScope, savedPassageUrl, sourceLabel, supportsPersonalExcerpts, type MatchScope, type SavedHit } from "@/lib/archive-search";
 import { SearchSnippet } from "@/components/Archive/SearchSnippet";
 import { KnowledgeArchive } from "@/components/Knowledge/KnowledgeArchive";
@@ -58,7 +58,7 @@ import {
 type SortMode = "newest" | "oldest" | "title";
 const noProjectFilter: ProjectFilter = { tags: [], untagged: false, mode: "any" };
 // Keep this view's filters in memory when a meeting route replaces it.
-let archiveView = { tab: "archive" as "archive" | "memory" | "actions", memoryProject: noProjectFilter, query: "", from: "", to: "", attentionOnly: false, sortMode: "newest" as SortMode, projectFilter: noProjectFilter, searchMode: "keyword" as SearchMode };
+let archiveView = { tab: "archive" as "archive" | "memory" | "actions", memoryProject: noProjectFilter, query: "", from: "", to: "", series: "", attentionOnly: false, sortMode: "newest" as SortMode, projectFilter: noProjectFilter, searchMode: "keyword" as SearchMode };
 
 export default function MeetingsPage() {
   const router = useRouter();
@@ -77,6 +77,7 @@ export default function MeetingsPage() {
   const [query, setQuery] = useState(archiveView.query);
   const [from, setFrom] = useState(archiveView.from);
   const [to, setTo] = useState(archiveView.to);
+  const [series, setSeries] = useState(archiveView.series);
   const [tab, setTab] = useState(archiveView.tab);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [sortMode, setSortMode] = useState(archiveView.sortMode);
@@ -105,17 +106,22 @@ export default function MeetingsPage() {
     window.addEventListener("open-meetings-tab", onTab);
     return () => window.removeEventListener("open-meetings-tab", onTab);
   }, []);
-  useEffect(() => { archiveView = { query, from, to, sortMode, attentionOnly, projectFilter, tab, memoryProject, searchMode }; }, [query, from, to, sortMode, attentionOnly, projectFilter, tab, memoryProject, searchMode]);
+  useEffect(() => { archiveView = { query, from, to, series, sortMode, attentionOnly, projectFilter, tab, memoryProject, searchMode }; }, [query, from, to, series, sortMode, attentionOnly, projectFilter, tab, memoryProject, searchMode]);
   const [archiveRevision, setArchiveRevision] = useState(0);
   const archiveStatus = useArchiveMetadata(tab === "archive", archiveRevision, meetings.length);
   const attentionIds = useMemo(() => new Set(Array.from(archiveStatus.metadata?.values() ?? [])
     .filter(row => archiveReview(row).needsAttention).map(row => row.id)), [archiveStatus.metadata]);
+  const seriesChoices = useMemo(() => archiveSeriesChoices(archiveStatus.metadata?.values() ?? []), [archiveStatus.metadata]);
+  const scopedIds = useMemo(() => new Set(Array.from(archiveStatus.metadata?.values() ?? [])
+    .filter(row => (!attentionOnly || attentionIds.has(row.id)) && (!series || row.series?.id === series))
+    .map(row => row.id)), [archiveStatus.metadata, attentionIds, attentionOnly, series]);
 
   const hasQuery = !!query.trim();
-  const hasScope = !!(attentionOnly || from || to || projectFilter.untagged || projectFilter.tags.length);
+  const restrictMeetings = attentionOnly || !!series;
+  const hasScope = !!(restrictMeetings || from || to || projectFilter.untagged || projectFilter.tags.length);
   const invalidDates = !!from && !!to && from > to;
-  const scope = hasScope ? libraryScope(attentionOnly ? [...attentionIds] : [], !attentionOnly, projectFilter, from, to) : undefined;
-  const searchActive = tab === "archive" && !invalidDates && (!attentionOnly || attentionIds.size > 0);
+  const scope = hasScope ? libraryScope(restrictMeetings ? [...scopedIds] : [], !restrictMeetings, projectFilter, from, to) : undefined;
+  const searchActive = tab === "archive" && !invalidDates && (!restrictMeetings || scopedIds.size > 0);
   const { results, searching: literalSearching, error: searchError } = useLibrarySearch(query, searchActive, scope, false, meetings);
   const { semanticReady, index } = useKnowledgeIndexStatus(tab === "archive");
   const mode = semanticReady ? searchMode : "keyword";
@@ -125,12 +131,12 @@ export default function MeetingsPage() {
   }), [scopeKey]);
   const hybrid = useDebouncedDiscovery(query, searchActive && mode === "hybrid" && !searchError && Array.from(query.trim()).length <= 256, hybridSearch, meetings);
   const searching = literalSearching || hybrid.loading;
-  const noteSelection = useResultNotes(JSON.stringify({ query, projectFilter, attentionOnly, from, to, mode }), supportsPersonalExcerpts(modelConfig?.provider));
+  const noteSelection = useResultNotes(JSON.stringify({ query, projectFilter, attentionOnly, series, from, to, mode }), supportsPersonalExcerpts(modelConfig?.provider));
   const titleMatches = useMemo(() => new Map(results?.titles.map(hit => [hit.id, hit])), [results]);
 
   const sortedMeetings = useMemo(() => {
     const next = meetings.filter(meeting => {
-      if (invalidDates || (attentionOnly && !attentionIds.has(meeting.id)) || !matchesProjectFilter(meeting.id, projectFilter, projectTags)) return false;
+      if (invalidDates || (restrictMeetings && !scopedIds.has(meeting.id)) || !matchesProjectFilter(meeting.id, projectFilter, projectTags)) return false;
       if (!from && !to) return true;
       const date = archiveDateKey(meeting.created_at);
       return (!from || (!!date && date >= from)) && (!to || (!!date && date <= to));
@@ -147,7 +153,7 @@ export default function MeetingsPage() {
       return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
     });
     return next;
-  }, [meetings, sortMode, projectFilter, projectTags, from, to, invalidDates, attentionOnly, attentionIds]);
+  }, [meetings, sortMode, projectFilter, projectTags, from, to, invalidDates, restrictMeetings, scopedIds]);
   const memoryMeetings = useMemo(() => meetings.filter(meeting => matchesProjectFilter(meeting.id, memoryProject, projectTags)), [meetings, memoryProject, projectTags]);
   const excerpts = useMemo(() => {
     const groups = new Map<string, { passages: TranscriptHit[]; saved: SavedHit[] }>();
@@ -281,6 +287,16 @@ export default function MeetingsPage() {
                 </SelectContent>
               </Select>
               <ProjectFilterMenu filter={projectFilter} setFilter={setProjectFilter} />
+              {(series || seriesChoices.length > 0) && <Select value={series || "all"} onValueChange={value => setSeries(value === "all" ? "" : value)}>
+                <SelectTrigger aria-label="Recurring series" className="h-9 w-40"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All meetings</SelectItem>
+                  {series && !seriesChoices.some(choice => choice.id === series) && <SelectItem value={series} disabled>Selected series</SelectItem>}
+                  {seriesChoices.map(choice => <SelectItem key={choice.id} value={choice.id}>
+                    {choice.label}{choice.date ? ` · ${formatArchiveDate(choice.date)}` : ""}
+                  </SelectItem>)}
+                </SelectContent>
+              </Select>}
               {(attentionOnly || attentionIds.size > 0) && <Button variant={attentionOnly ? "secondary" : "ghost"} size="sm" aria-pressed={attentionOnly} onClick={() => setAttentionOnly(value => !value)}>Needs attention</Button>}
               <Popover>
                 <PopoverTrigger asChild><Button variant="outline" size="sm">Date range{from || to ? " · active" : ""}</Button></PopoverTrigger>
@@ -308,7 +324,7 @@ export default function MeetingsPage() {
         )}
 
         <div className="min-h-0">
-          {attentionOnly && archiveStatus.error && <p role="alert" className="text-sm text-destructive">Could not refresh meetings that need attention. <Button variant="ghost" size="sm" onClick={() => void archiveStatus.refresh()}>Retry</Button></p>}
+          {restrictMeetings && archiveStatus.error && <p role="alert" className="text-sm text-destructive">Could not refresh archive filters. <Button variant="ghost" size="sm" onClick={() => void archiveStatus.refresh()}>Retry</Button></p>}
           {invalidDates && <p role="alert" className="text-sm text-destructive">The start date must be on or before the end date.</p>}
           {searching && <p role="status" className="text-sm text-muted-foreground">Searching saved meetings…</p>}
           {searchError && <p role="alert" className="text-sm text-destructive">{searchError}</p>}

@@ -71,6 +71,24 @@ test('concurrent refreshes share one read and a failed subscription leaves impor
   assert.doesNotMatch(JSON.stringify(state), /private feed detail/);
 });
 
+test('a saved recording date expands historical iCalendar occurrences without changing Upcoming', async () => {
+  const { parseICalendar } = loadTsModule('src/lib/icalEvents.ts');
+  const source = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', 'UID:planning',
+    'DTSTART:20240101T130000Z', 'DTEND:20240101T140000Z', 'RRULE:FREQ=WEEKLY;COUNT=2',
+    'SUMMARY:Planning', 'END:VEVENT', 'END:VCALENDAR',
+  ].join('\r\n');
+  const api = service(async name => name === 'list_ical_sources' ? [calendar] : source, parseICalendar);
+  const matches = [];
+  const complete = await api.readICalendarsBetween(
+    new Date('2024-01-08T00:00:00Z'), new Date('2024-01-09T00:00:00Z'),
+    new AbortController().signal, rows => matches.push(...rows),
+  );
+  assert.equal(complete, true);
+  assert.deepEqual(matches.map(event => [event.sourceId, event.start]), [[calendar.id, '2024-01-08T13:00:00.000Z']]);
+  assert.equal(api.getICalendarSnapshot().events.length, 0);
+});
+
 test('removing a source discards a late refresh response', async () => {
   let sources = [calendar];
   const entered = deferred(), read = deferred();

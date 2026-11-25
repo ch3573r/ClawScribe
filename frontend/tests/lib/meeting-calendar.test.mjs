@@ -617,6 +617,7 @@ test('the active recording review checks attendance explicitly and can unlink th
     },
     'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
     '@tauri-apps/api/core': {}, sonner: {},
+    '@/components/ui/input': {}, '@/components/ui/label': {},
     '@/lib/meetingCalendar': links, '@/lib/meetingCalendarStore': {},
     '@/services/recordingCalendarService': {
       findOngoingRecordingCalendar: async () => lookupResult,
@@ -685,6 +686,7 @@ test('a partial calendar result can be checked again from the recording review',
     react: review.react,
     'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
     '@tauri-apps/api/core': {}, sonner: {},
+    '@/components/ui/input': {}, '@/components/ui/label': {},
     '@/lib/meetingCalendar': links, '@/lib/meetingCalendarStore': {},
     '@/services/recordingCalendarService': { findOngoingRecordingCalendar: async when => {
       assert.equal(when, now);
@@ -727,6 +729,7 @@ test('a recording with no automatic match can manually link a calendar event', a
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
     '@/lib/meetingCalendar': calendar, '@/lib/meetingCalendarStore': {},
     '@/components/ui/button': {}, '@/components/ui/checkbox': {},
+    '@/components/ui/input': {}, '@/components/ui/label': {},
     '@/components/ui/dialog': {}, '@/components/ui/select': {},
     '@/services/recordingCalendarService': {
       async findCalendarEventsBetween(from, to) {
@@ -758,17 +761,15 @@ test('a saved meeting without a link can be linked from the current calendars, w
   const candidate = links.calendarLinkFromEvent(event('candidate', { seriesId: graphSeries }));
   const lookups = [];
   const saved = [];
-  const preferences = [];
   let result = { matches: [], unavailable: ['Microsoft 365'] };
   const page = createHookHarness();
   const dialog = createHookHarness();
-  const picker = createHookHarness();
-  t.after(() => { page.unmount(); dialog.unmount(); picker.unmount(); });
+  t.after(() => { page.unmount(); dialog.unmount(); });
   const jsx = (type, props) => ({ type, props });
   const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node?.props
     ? [node, ...nodes(node.props.children)] : [];
   const controls = {
-    button: ['Button'], checkbox: ['Checkbox'],
+    button: ['Button'], checkbox: ['Checkbox'], input: ['Input'], label: ['Label'],
     dialog: ['Dialog', 'DialogContent', 'DialogDescription', 'DialogFooter', 'DialogHeader', 'DialogTitle', 'DialogTrigger'],
     select: ['Select', 'SelectContent', 'SelectItem', 'SelectTrigger', 'SelectValue'],
   };
@@ -780,10 +781,7 @@ test('a saved meeting without a link can be linked from the current calendars, w
       useRef: (...args) => current.useRef(...args),
     },
     'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
-    '@tauri-apps/api/core': { invoke: async (command, { meetingId, templateId }) => {
-      assert.equal(command, 'set_meeting_series_template');
-      preferences.push([meetingId, templateId]);
-    } }, sonner: {},
+    sonner: {},
     '@/lib/meetingCalendar': links,
     '@/lib/meetingCalendarStore': {
       MEETING_SERIES_TEMPLATE_CHANGED: 'series-changed',
@@ -800,8 +798,7 @@ test('a saved meeting without a link can be linked from the current calendars, w
   const renderPage = () => {
     current = page.react;
     return page.render(() => SavedMeetingAttendance({
-      meetingId: 'saved', createdAt: '2030-04-15T11:00:00Z', durationSeconds: 3600,
-      templates: [{ id: 'standard_meeting', name: 'Standard meeting' }], remembered: null,
+      meetingId: 'saved', createdAt: new Date(2030, 3, 15, 0, 5).toISOString(),
     }));
   };
   const renderDialog = () => {
@@ -818,8 +815,7 @@ test('a saved meeting without a link can be linked from the current calendars, w
   assert.equal(lookups.length, 0);
   tree.find(node => node.type === 'Dialog').props.onOpenChange(true);
   await flush();
-  // The search covers the recorded time, not just the moment of saving.
-  assert.deepEqual(lookups[0], [Date.parse('2030-04-15T09:50:00Z'), Date.parse('2030-04-15T11:10:00Z')]);
+  assert.deepEqual(lookups[0], [new Date(2030, 3, 14, 22, 55).getTime(), new Date(2030, 3, 16).getTime(), true]);
   ({ tree } = renderDialog());
   // The failing source is named and can be checked again.
   const sources = tree.find(node => node.type?.name === 'UnavailableSources');
@@ -829,6 +825,10 @@ test('a saved meeting without a link can be linked from the current calendars, w
   shown.find(node => node.type === 'Button' && node.props.children === 'Check again').props.onClick();
   await flush();
   assert.equal(lookups.length, 2);
+  ({ tree } = renderDialog());
+  tree.find(node => node.type === 'Input' && node.props.type === 'date').props.onChange({ target: { value: '2030-03-31' } });
+  await flush();
+  assert.deepEqual(lookups[2], [new Date(2030, 2, 31).getTime(), new Date(2030, 3, 1).getTime(), true]);
   ({ tree } = renderDialog());
   tree.find(node => node.type === 'Select').props.onValueChange('0');
   ({ tree } = renderDialog());
@@ -840,12 +840,5 @@ test('a saved meeting without a link can be linked from the current calendars, w
   assert.equal(saved[0][1].attendees[0].attendance, 'unreviewed');
   assert.equal(saved[0][1].seriesId, graphSeries);
   ({ tree } = renderDialog());
-  const seriesControl = tree.find(node => node.type?.name === 'SeriesTemplatePreference');
-  assert.ok(seriesControl);
-  current = picker.react;
-  const select = nodes(picker.render(() => seriesControl.type(seriesControl.props)))
-    .find(node => node.type === 'Select');
-  await select.props.onValueChange('standard_meeting');
-  await select.props.onValueChange('use-default');
-  assert.deepEqual(preferences, [['saved', 'standard_meeting'], ['saved', null]]);
+  assert.ok(!tree.some(node => node.type === 'Select'));
 });
