@@ -72,8 +72,7 @@ export function useCodexSettings(active: boolean, preview: boolean, selected: st
     } finally { setLoading(false); }
   }, []);
 
-  const save = useCallback(async (next: CodexConfig) => {
-    if (!canStart.current) throw new SaveError('Select Use Codex before saving Codex settings');
+  const persistConfig = useCallback(async (next: CodexConfig) => {
     const problem = timeoutProblem(String(next.timeoutSeconds));
     if (problem) throw new SaveError(problem);
     const normalized: CodexConfig = {
@@ -86,6 +85,11 @@ export function useCodexSettings(active: boolean, preview: boolean, selected: st
       return normalized;
     } catch { throw new SaveError('Could not save the Codex settings'); }
   }, []);
+
+  const save = useCallback(async (next: CodexConfig) => {
+    if (!canStart.current) throw new SaveError('Select Use Codex before saving Codex settings');
+    return persistConfig(next);
+  }, [persistConfig]);
 
   const check = useCallback(async (next?: CodexConfig) => {
     if (!canStart.current) return;
@@ -190,6 +194,7 @@ export function useCodexSettings(active: boolean, preview: boolean, selected: st
   return {
     config, timeout, setTimeoutDraft, timeoutError: timeoutProblem(timeout),
     runtime, busy, loading, modelError, options, result, signedIn, status, save, run, check: () => check(config),
+    saveModelAfterSwitch: (model: string) => persistConfig({ ...config, model }),
     findRuntime, repair, chooseHome,
   };
 }
@@ -202,7 +207,7 @@ export function CodexSettings({ state, model, chooseModel, preview, disabled, fe
   return <>
     <SimpleModelSelect value={model} options={state.options.map(option => ({
       value: option.id, label: `${option.displayName}${option.isDefault ? ' · recommended' : ''}`,
-    }))} onChoose={chooseModel} loading={state.loading} disabled={preview || disabled} feedback={feedback} />
+    }))} onChoose={chooseModel} loading={state.loading} disabled={disabled} feedback={feedback} />
     <SettingsRow title="Account"
       description={preview ? 'Select Use Codex to check your account and runtime' : state.modelError
         ? 'The model list is unavailable, so only the configured model is shown' : (state.runtime?.accountEmail || state.runtime?.authStatus || 'Not signed in')}>

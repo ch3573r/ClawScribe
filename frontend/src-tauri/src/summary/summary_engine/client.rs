@@ -364,11 +364,27 @@ pub async fn force_shutdown_sidecar() -> Result<()> {
 
 /// Close admission permanently before cleaning up the helpers on app exit.
 pub(crate) async fn shutdown_sidecars_for_exit() -> Result<()> {
-    SIDECARS_EXITING.store(true, Ordering::Release);
-    super::super::SummaryService::cancel_local_summaries("The application is closing");
-    let mut sidecars = SIDECAR_MANAGER.lock().await;
-    sidecars.retire_active();
-    sidecars.shutdown_draining().await
+    {
+        let _route = super::super::automatic::ROUTE_CHANGE_LOCK.lock().await;
+        SIDECARS_EXITING.store(true, Ordering::Release);
+        super::super::SummaryService::cancel_local_summaries_for_exit();
+    }
+    let drained = {
+        let mut sidecars = SIDECAR_MANAGER.lock().await;
+        sidecars.retire_active();
+        sidecars.shutdown_draining().await
+    };
+    // Give automatic jobs time to save their pause reason before DB cleanup.
+    if tokio::time::timeout(
+        Duration::from_secs(2),
+        super::super::SummaryService::wait_for_exit_pauses(),
+    )
+    .await
+    .is_err()
+    {
+        log::warn!("Automatic notes did not finish pausing before application exit");
+    }
+    drained
 }
 
 /// Check if sidecar is healthy

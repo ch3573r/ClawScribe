@@ -114,6 +114,7 @@ fn desktop_teams_continuation(call: &CallWindow, active: &CallWindow) -> bool {
 struct Observed {
     call: CallWindow,
     misses: u8,
+    seen_last_scan: bool,
     dismissed: bool,
     /// Which observation this is. A call remembered again gets a new serial, so
     /// a start decided on the earlier observation can tell it is out of date.
@@ -150,6 +151,7 @@ impl ObservedCalls {
             Observed {
                 call: call.clone(),
                 misses: 0,
+                seen_last_scan: true,
                 dismissed: false,
                 serial,
             },
@@ -164,6 +166,7 @@ impl ObservedCalls {
     fn interrupted(&mut self) {
         for observed in self.calls.values_mut() {
             observed.misses = 0;
+            observed.seen_last_scan = false;
         }
     }
 
@@ -177,6 +180,8 @@ impl ObservedCalls {
             if !self.calls.contains_key(&call.key) {
                 let mut previous = self.calls.values().filter(|seen| {
                     seen.dismissed
+                        && seen.misses == 0
+                        && seen.seen_last_scan
                         && desktop_teams_continuation(&seen.call, call)
                         && !scan.ended.iter().any(|ended| ended.key == seen.call.key)
                 });
@@ -192,6 +197,10 @@ impl ObservedCalls {
         }
         let mut ended = Vec::new();
         for (key, observed) in self.calls.iter_mut() {
+            observed.seen_last_scan = scan
+                .active
+                .iter()
+                .any(|active| same_observed_call(&observed.call, active));
             observed.misses = if ended_on_scan(&observed.call, scan) {
                 observed.misses + 1
             } else {
@@ -1163,6 +1172,50 @@ mod tests {
             tracker.observe(revision, Some(&next_scan), IDLE),
             Decision::Prompt
         );
+    }
+
+    #[test]
+    fn dismissed_desktop_teams_call_does_not_suppress_the_next_call_after_a_gap() {
+        for (open, explicitly_ended) in [(false, false), (true, false), (true, true)] {
+            let mut tracker = Tracker::new(CallSettings {
+                mode: Mode::Prompt,
+                providers: vec![Provider::Teams],
+                ..Default::default()
+            });
+            let revision = tracker.revision();
+            let first = CallWindow {
+                desktop_teams: true,
+                ..call(Provider::Teams, "window-a", "key-a")
+            };
+            let next = CallWindow {
+                desktop_teams: true,
+                ..call(Provider::Teams, "window-b", "key-b")
+            };
+            let first_scan = snapshot(std::slice::from_ref(&first), &["window-a"], &[]);
+            assert_eq!(
+                tracker.observe(revision, Some(&first_scan), IDLE),
+                Decision::Prompt
+            );
+            assert!(tracker.dismiss(&tracker.prompt_view().unwrap().key));
+
+            let windows: &[&str] = if open { &["window-a"] } else { &[] };
+            let ended = if explicitly_ended {
+                std::slice::from_ref(&first)
+            } else {
+                &[]
+            };
+            let gap = snapshot(&[], windows, ended);
+            assert_eq!(
+                tracker.observe(revision, Some(&gap), IDLE),
+                Decision::Nothing
+            );
+
+            let next_scan = snapshot(&[next], &["window-b"], &[]);
+            assert_eq!(
+                tracker.observe(revision, Some(&next_scan), IDLE),
+                Decision::Prompt
+            );
+        }
     }
 
     #[test]

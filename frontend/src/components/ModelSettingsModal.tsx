@@ -52,9 +52,11 @@ export function ModelSettingsModal({
   const refreshKeyStatus = context?.refreshProviderKeyStatus;
   const [draft, setDraftState] = useState<ModelConfig | null>(null);
   const draftRef = useRef<ModelConfig | null>(null);
+  const codexPreviewModel = useRef<string | null>(null);
   const sharedRef = useRef(shared);
   sharedRef.current = shared;
   const setDraft = useCallback((next: ModelConfig | null) => {
+    if (next?.provider !== draftRef.current?.provider) codexPreviewModel.current = null;
     draftRef.current = next;
     setDraftState(next);
   }, []);
@@ -84,14 +86,16 @@ export function ModelSettingsModal({
     if (preview && !switching) return 'held';
     try { await onSave(next); }
     catch { throw new SaveError(failure); }
-    if (switching) setDraft(null);
   };
 
   const hosted = useHostedProviderSettings(provider, keyStatus);
   const ollama = useOllamaSettings(provider === 'ollama', config.ollamaEndpoint ?? '');
   const compatible = useCompatibleOpenAISettings({ active: provider === 'custom-openai', modelConfig: config, updateConfig, saveConfig, refreshKeyStatus });
   const codexPreview = preview?.provider === 'codex';
-  const codex = useCodexSettings(provider === 'codex', codexPreview, model, updateConfig);
+  const hydrateCodexModel: UpdateConfig = useCallback(next => {
+    if (!codexPreviewModel.current) updateConfig(next);
+  }, [updateConfig]);
+  const codex = useCodexSettings(provider === 'codex', codexPreview, model, hydrateCodexModel);
   const claudeCode = useClaudeCodeProvider(provider === 'claude-code');
   const builtin = useBuiltInModels();
   const options = {
@@ -156,6 +160,8 @@ export function ModelSettingsModal({
     void feedback.run('provider', async () => {
       try {
         let next: ModelConfig = { ...config, apiKey: isHostedProvider(provider) ? newKeyPayload(hosted.key) : null, customOpenAIApiKey: null };
+        const pickedCodexModel = switching && codexPreview ? codexPreviewModel.current : null;
+        if (pickedCodexModel) next.model = pickedCodexModel;
         if (provider === 'custom-openai') next = { ...next, ...await compatible.save() };
         if (!switching && provider === 'ollama') next.ollamaEndpoint = ollama.endpoint.trim() || null;
         if (!switching && provider === 'codex') {
@@ -168,8 +174,15 @@ export function ModelSettingsModal({
         if (provider === 'openai') await saveOpenAIAuthMode();
         await saveConfig(next, switching ? 'Could not save the provider' : 'Could not save model settings', switching);
         if (switching && shared.model) rememberModel(shared.provider, shared.model);
-        if (next.model) rememberModel(provider, next.model);
         setShared({ ...next, apiKey: null, customOpenAIApiKey: null });
+        try {
+          if (pickedCodexModel) {
+            await codex.saveModelAfterSwitch(pickedCodexModel);
+          }
+        } finally {
+          if (switching) setDraft(null);
+        }
+        if (next.model) rememberModel(provider, next.model);
         if (isHostedProvider(provider)) hosted.markKeyChanged();
         await refreshKeyStatus?.(provider);
       } finally { savePending.current = false; }
@@ -179,6 +192,7 @@ export function ModelSettingsModal({
   const chooseModel = (selected: string) => {
     if (selected === model) return;
     if (!autosave || preview) {
+      if (codexPreview) codexPreviewModel.current = selected;
       updateConfig({ ...config, model: selected });
       return;
     }

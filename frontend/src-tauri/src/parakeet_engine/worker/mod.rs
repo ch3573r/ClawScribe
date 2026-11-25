@@ -32,10 +32,9 @@ pub(super) fn automatic_directml_available(app_data: &std::path::Path) -> bool {
 }
 
 #[cfg(all(windows, feature = "vulkan"))]
-pub(crate) fn vulkan_device_available() -> bool {
+pub(crate) fn vulkan_device_available() -> Result<bool, WorkerError> {
     TranscriptionWorker::new()
         .and_then(|mut worker| worker.probe_vulkan(std::time::Duration::from_secs(5)))
-        .unwrap_or(false)
 }
 
 /// Dispatch before initializing logging or the desktop runtime.

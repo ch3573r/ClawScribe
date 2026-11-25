@@ -770,11 +770,12 @@ impl SummaryProcessesRepository {
             WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint IN (?1, ?2 || ':' || ?1)
             AND meeting_id > ?3 AND (
                 (status = 'failed' AND automatic_resume_attempted = 0 AND error = ?4)
-                OR (?5 AND status = 'cancelled' AND result IS NULL AND error IN (?6, ?7))
+                OR (?5 AND status = 'cancelled' AND result IS NULL AND error IN (?6, ?7, ?8))
             ) ORDER BY meeting_id LIMIT 3")
             .bind(fingerprint).bind(profile).bind(after).bind(INTERRUPTED).bind(local)
             .bind(crate::summary::automatic::PAUSED_FOR_INFERENCE)
             .bind(crate::summary::service::RECORDING_INTERRUPTED_SUMMARY)
+            .bind(crate::summary::automatic::PAUSED_FOR_EXIT)
             .fetch_all(pool).await
     }
 
@@ -788,10 +789,11 @@ impl SummaryProcessesRepository {
             status = 'pending', error = NULL, start_time = CURRENT_TIMESTAMP, end_time = NULL, updated_at = CURRENT_TIMESTAMP
             WHERE meeting_id = ?1 AND automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ?2
             AND ((status = 'failed' AND automatic_resume_attempted = 0 AND error = ?3)
-                OR (status = 'cancelled' AND result IS NULL AND error IN (?4, ?5)))")
+                OR (status = 'cancelled' AND result IS NULL AND error IN (?4, ?5, ?6)))")
             .bind(meeting).bind(fingerprint).bind(INTERRUPTED)
             .bind(crate::summary::automatic::PAUSED_FOR_INFERENCE)
             .bind(crate::summary::service::RECORDING_INTERRUPTED_SUMMARY)
+            .bind(crate::summary::automatic::PAUSED_FOR_EXIT)
             .execute(pool).await?.rows_affected() == 1)
     }
 

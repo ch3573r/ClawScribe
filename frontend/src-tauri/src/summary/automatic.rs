@@ -26,6 +26,8 @@ pub(super) const DESTINATION_CHANGED: &str =
     "The summary destination changed. Review it and try again.";
 pub(crate) const PAUSED_FOR_INFERENCE: &str =
     "Automatic notes are paused while recording or transcription uses local inference.";
+pub(crate) const PAUSED_FOR_EXIT: &str =
+    "Automatic notes are paused because ClawScribe is closing.";
 pub(super) const PAUSE_ENDED: &str = "Automatic notes stopped. Generate a summary to try again.";
 pub(crate) const CHANGED_EVENT: &str = "summary-job-changed";
 pub(crate) static ROUTE_CHANGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -651,6 +653,13 @@ async fn resume_after_preemption(
     else {
         return false;
     };
+    // Serialize the claim with exit cancellation so a parked job cannot
+    // replace its resumable row with a new pending attempt during shutdown.
+    let _route = ROUTE_CHANGE_LOCK.lock().await;
+    if job.cancelled_for_exit() {
+        super::service::finish_provider_error(pool, meeting, job.token(), PAUSED_FOR_EXIT).await;
+        return false;
+    }
     SummaryProcessesRepository::claim_automatic_resume(pool, meeting, &fingerprint)
         .await
         .unwrap_or(false)
@@ -771,6 +780,70 @@ async fn notify_ready<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool, meeting
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exit_cancels_a_parked_job_without_renewing_and_startup_can_claim_it() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        let foreground = crate::audio::inference::claim_job().unwrap();
+        let mut job = SummaryService::try_register_job(meeting, "builtin-ai", true)
+            .unwrap()
+            .unwrap();
+        SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved",
+        )
+        .await
+        .unwrap();
+        SummaryService::cancel_local_summaries_for_recording();
+        super::super::service::finish_provider_error(&pool, meeting, job.token(), "preempted")
+            .await;
+
+        let pause = tokio::sync::Notify::new();
+        let check: DispatchCheck = Arc::new(|| Ok(()));
+        let (resumed, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                resume_after_preemption(&pool, meeting, &mut job, &check, || pause.notify_one()),
+                async {
+                    pause.notified().await;
+                    let _route = ROUTE_CHANGE_LOCK.lock().await;
+                    SummaryService::cancel_local_summaries_for_exit();
+                    drop(foreground);
+                }
+            )
+        })
+        .await
+        .unwrap();
+        assert!(!resumed);
+        assert!(job.token().is_cancelled());
+        let row = SummaryProcessesRepository::get_summary_data(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.error.as_deref(), Some(PAUSED_FOR_EXIT));
+        drop(job);
+        SummaryService::wait_for_exit_pauses().await;
+        let candidates = SummaryProcessesRepository::automatic_resume_candidates_after(
+            &pool, "approved", None, "", true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(candidates, vec![(meeting.into(), "approved".into())]);
+        assert!(
+            SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "approved")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "approved")
+                .await
+                .unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn revoked_approval_ends_a_pause_while_transcription_still_holds_the_slot() {

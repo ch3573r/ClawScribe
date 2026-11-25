@@ -9,8 +9,8 @@
 //! missing or ggml cannot enumerate devices. Every native Whisper entry point
 //! calls [`ensure_whisper_runtime`].
 
-#[cfg(all(windows, feature = "vulkan"))]
-use std::sync::OnceLock;
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+use crate::parakeet_engine::worker::WorkerError;
 
 /// User-facing explanation when Whisper cannot run in this build.
 pub const VULKAN_RUNTIME_MISSING_MESSAGE: &str =
@@ -28,34 +28,66 @@ pub enum VulkanRuntime {
     Missing,
 }
 
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+#[derive(Default)]
+struct ProbeCache {
+    definite: Option<VulkanRuntime>,
+    attempts: u8,
+}
+
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+impl ProbeCache {
+    fn check(&mut self, probe: impl FnOnce() -> Result<bool, WorkerError>) -> VulkanRuntime {
+        const MAX_ATTEMPTS: u8 = 3;
+        if let Some(result) = self.definite {
+            return result;
+        }
+        if self.attempts >= MAX_ATTEMPTS {
+            return VulkanRuntime::Missing;
+        }
+        self.attempts += 1;
+        let runtime = match probe() {
+            Ok(true) => VulkanRuntime::Available,
+            Ok(false) | Err(WorkerError::Crashed) => VulkanRuntime::Missing,
+            Err(_) => {
+                log::warn!(
+                    "Vulkan preflight did not complete; Whisper is unavailable for this check"
+                );
+                return VulkanRuntime::Missing;
+            }
+        };
+        if runtime == VulkanRuntime::Missing {
+            log::warn!("Vulkan preflight failed; Whisper is unavailable");
+        }
+        self.definite = Some(runtime);
+        runtime
+    }
+}
+
 /// On Windows, the first check can wait for a driver running in a child.
 pub async fn vulkan_runtime() -> VulkanRuntime {
     #[cfg(all(windows, feature = "vulkan"))]
     {
-        static PROBE: OnceLock<VulkanRuntime> = OnceLock::new();
-        if let Some(result) = PROBE.get() {
-            return *result;
-        }
+        use std::sync::{Mutex, OnceLock};
+        static PROBE: OnceLock<Mutex<ProbeCache>> = OnceLock::new();
         tokio::task::spawn_blocking(|| {
-            *PROBE.get_or_init(|| {
-                classify(true, || {
-                    if !crate::parakeet_engine::worker::vulkan_device_available() {
-                        log::warn!("Vulkan preflight failed; Whisper is unavailable");
-                        return false;
-                    }
-                    let Some(loader) = load_compatible_loader() else {
-                        log::warn!(
-                            "System Vulkan loader could not be loaded; Whisper is unavailable"
-                        );
-                        return false;
-                    };
-                    // MSVC's delayhlp.cpp calls LoadLibraryEx with flags 0 and the
-                    // bare DLL name. Windows consults loaded modules by base name
-                    // before searching directories, so retain the System32 module
-                    // for the lifetime of this process.
-                    std::mem::forget(loader);
-                    true
-                })
+            let Ok(mut cache) = PROBE.get_or_init(Mutex::default).lock() else {
+                return VulkanRuntime::Missing;
+            };
+            cache.check(|| {
+                if !crate::parakeet_engine::worker::vulkan_device_available()? {
+                    return Ok(false);
+                }
+                let Some(loader) = load_compatible_loader() else {
+                    log::warn!("System Vulkan loader could not be loaded; Whisper is unavailable");
+                    return Ok(false);
+                };
+                // MSVC's delayhlp.cpp calls LoadLibraryEx with flags 0 and the
+                // bare DLL name. Windows consults loaded modules by base name
+                // before searching directories, so retain the System32 module
+                // for the lifetime of this process.
+                std::mem::forget(loader);
+                Ok(true)
             })
         })
         .await
@@ -68,6 +100,7 @@ pub async fn vulkan_runtime() -> VulkanRuntime {
     }
 }
 
+#[cfg(any(test, not(all(windows, feature = "vulkan"))))]
 fn classify(requires_vulkan: bool, probe: impl FnOnce() -> bool) -> VulkanRuntime {
     if !requires_vulkan {
         VulkanRuntime::NotRequired
@@ -153,6 +186,48 @@ pub(crate) fn probe_device_in_child() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_preflight_errors_allow_a_later_definite_answer() {
+        let mut cache = ProbeCache::default();
+        for error in [WorkerError::TimedOut, WorkerError::Spawn] {
+            assert_eq!(cache.check(|| Err(error)), VulkanRuntime::Missing);
+        }
+        assert_eq!(cache.check(|| Ok(true)), VulkanRuntime::Available);
+        assert_eq!(
+            cache.check(|| panic!("available result was cached")),
+            VulkanRuntime::Available
+        );
+    }
+
+    #[test]
+    fn unavailable_and_crashed_preflights_are_cached() {
+        for result in [Ok(false), Err(WorkerError::Crashed)] {
+            let mut cache = ProbeCache::default();
+            assert_eq!(cache.check(|| result), VulkanRuntime::Missing);
+            assert_eq!(
+                cache.check(|| panic!("definite failure was cached")),
+                VulkanRuntime::Missing
+            );
+        }
+    }
+
+    #[test]
+    fn transient_preflights_have_a_session_limit() {
+        let mut cache = ProbeCache::default();
+        for error in [
+            WorkerError::Spawn,
+            WorkerError::TimedOut,
+            WorkerError::TimedOut,
+        ] {
+            assert_eq!(cache.check(|| Err(error)), VulkanRuntime::Missing);
+        }
+        assert_eq!(
+            cache.check(|| panic!("retry budget exhausted")),
+            VulkanRuntime::Missing
+        );
+        assert_eq!(cache.definite, None);
+    }
 
     #[test]
     fn builds_without_vulkan_never_probe() {

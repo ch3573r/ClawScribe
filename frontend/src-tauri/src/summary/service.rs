@@ -30,6 +30,7 @@ pub(crate) static METADATA_CACHE: Lazy<ModelMetadataCache> =
 // Global registry for cancellation tokens (thread-safe)
 static CANCELLATION_REGISTRY: Lazy<Arc<Mutex<HashMap<String, ActiveSummaryJob>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+static EXIT_PAUSE_FINISHED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 pub(crate) const RECORDING_INTERRUPTED_SUMMARY: &str =
     "Local summary stopped because a recording started. Generate it again afterwards.";
@@ -66,6 +67,13 @@ impl SummaryJob {
         &self.token
     }
 
+    pub(super) fn cancelled_for_exit(&self) -> bool {
+        CANCELLATION_REGISTRY.lock().is_ok_and(|jobs| {
+            jobs.get(&self.meeting_id)
+                .is_some_and(|job| job.reason == Some(super::automatic::PAUSED_FOR_EXIT))
+        })
+    }
+
     pub(super) fn renew_after_preemption(&mut self) -> bool {
         let Ok(mut registry) = CANCELLATION_REGISTRY.lock() else {
             return false;
@@ -88,7 +96,12 @@ impl SummaryJob {
 impl Drop for SummaryJob {
     fn drop(&mut self) {
         if let Ok(mut registry) = CANCELLATION_REGISTRY.lock() {
-            registry.remove(&self.meeting_id);
+            if registry
+                .remove(&self.meeting_id)
+                .is_some_and(|job| job.reason == Some(super::automatic::PAUSED_FOR_EXIT))
+            {
+                EXIT_PAUSE_FINISHED.notify_waiters();
+            }
         }
     }
 }
@@ -625,10 +638,38 @@ impl SummaryService {
     }
 
     pub fn cancel_local_summaries(reason: &'static str) {
+        Self::cancel_local_summaries_with_reason(reason, super::automatic::PAUSED_FOR_INFERENCE);
+    }
+
+    pub(super) fn cancel_local_summaries_for_exit() {
+        Self::cancel_local_summaries_with_reason(
+            "The application is closing",
+            super::automatic::PAUSED_FOR_EXIT,
+        );
+    }
+
+    pub(super) async fn wait_for_exit_pauses() {
+        loop {
+            let finished = EXIT_PAUSE_FINISHED.notified();
+            let pending = CANCELLATION_REGISTRY.lock().is_ok_and(|jobs| {
+                jobs.values()
+                    .any(|job| job.reason == Some(super::automatic::PAUSED_FOR_EXIT))
+            });
+            if !pending {
+                return;
+            }
+            finished.await;
+        }
+    }
+
+    fn cancel_local_summaries_with_reason(reason: &'static str, automatic_reason: &'static str) {
         if let Ok(mut registry) = CANCELLATION_REGISTRY.lock() {
             for job in registry.values_mut().filter(|job| job.builtin) {
+                if job.automatic && job.reason == Some(super::automatic::PAUSED_FOR_INFERENCE) {
+                    job.reason = Some(automatic_reason);
+                }
                 job.reason.get_or_insert(if job.automatic {
-                    super::automatic::PAUSED_FOR_INFERENCE
+                    automatic_reason
                 } else {
                     reason
                 });

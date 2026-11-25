@@ -506,6 +506,51 @@ test('choosing another provider only previews it; the saved provider stays in us
   app.hooks.unmount();
 });
 
+test('a Codex preview selection is persisted only after the provider switch succeeds', async t => {
+  for (const succeeds of [true, false]) {
+    const switching = deferred();
+    const saved = { model: 'previous-codex', timeoutSeconds: 900 };
+    const app = modalHarness({
+      provider: 'codex',
+      model: saved.model,
+      stored: true,
+      responses: {
+        codex_get_config: { processing: { codex: saved } },
+        codex_check_installation: { found: true },
+        codex_list_models: [
+          { id: saved.model, displayName: 'Previous model' },
+          { id: 'picked-codex', displayName: 'Picked model' },
+        ],
+      },
+      onSave: () => switching.promise,
+    });
+    t.after(() => app.hooks.unmount());
+    const find = predicate => nodes(app.render()).find(predicate);
+    app.render();
+    await flush();
+    app.context.setModelConfig(previous => ({ ...previous, provider: 'claude', model: 'claude-sonnet-5' }));
+    find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('codex');
+    app.render();
+    await flush();
+    const picker = find(node => node.type === 'select' && node.props.value === saved.model);
+    assert.equal(picker.props.disabled, false);
+    assert.ok(nodes(picker).some(node => node.type === 'select-item' && node.props.value === 'picked-codex'));
+    picker.props.onValueChange('picked-codex');
+    find(node => node.type === 'button' && text(node) === 'Use Codex').props.onClick();
+    const modelWrites = () => app.calls.filter(([command]) => command === 'codex_save_config');
+    await flush();
+    assert.equal(modelWrites().length, 0);
+    if (succeeds) switching.resolve();
+    else switching.reject(new Error('Provider switch failed'));
+    await flush();
+    assert.equal(modelWrites().length, Number(succeeds));
+    if (succeeds) {
+      assert.equal(modelWrites()[0][1].config.model, 'picked-codex');
+      assert.equal(modelWrites()[0][1].config.timeoutSeconds, 900);
+    }
+  }
+});
+
 test('a provider that still needs a key cannot be switched to, and a failed switch shows no key', async () => {
   const app = modalHarness({ provider: 'claude', stored: true });
   app.render(); await flush(); app.render();

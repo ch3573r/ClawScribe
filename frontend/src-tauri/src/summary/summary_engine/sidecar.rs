@@ -372,9 +372,9 @@ impl SidecarManager {
                 let result = self.exchange_request(&request_json, timeout).await;
                 // A sleeping machine can miss the parent's idle timer. The
                 // helper may already have written Goodbye or closed its pipes.
-                // A local generation with no response can safely be retried once.
+                // Retry only the idle handshake or an immediate empty disconnect.
                 if let (Some(model), Err(error)) = (model, &result) {
-                    if helper_closed(error) {
+                    if error.is::<RetryableHelperDisconnect>() {
                         self.ensure_running_after_disconnect(model).await?;
                         return self.exchange_request(
                             &request_json,
@@ -426,13 +426,9 @@ impl SidecarManager {
                 stdin.flush().await.context("Failed to flush stdin")?;
             }
 
-            let response = self.read_response().await?;
+            let response = self.read_response(Some(Instant::now())).await?;
             if is_goodbye(&response) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Local summary helper went idle",
-                )
-                .into());
+                return Err(RetryableHelperDisconnect("Local summary helper went idle").into());
             }
             self.update_activity().await;
             Ok(response)
@@ -442,35 +438,13 @@ impl SidecarManager {
     }
 
     /// Read a single line response from stdout
-    async fn read_response(&self) -> Result<String> {
+    async fn read_response(&self, written_at: Option<Instant>) -> Result<String> {
         let mut stdout_lock = self.stdout_reader.lock().await;
         let reader = stdout_lock
             .as_mut()
             .ok_or_else(|| anyhow!("Sidecar not running"))?;
 
-        const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-        let mut line = Vec::new();
-        (&mut *reader)
-            .take((MAX_RESPONSE_BYTES + 1) as u64)
-            .read_until(b'\n', &mut line)
-            .await
-            .context("Failed to read response from stdout")?;
-        if line.len() > MAX_RESPONSE_BYTES {
-            return Err(anyhow!("Local helper response exceeds its protocol limit"));
-        }
-
-        if line.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "Sidecar closed stdout (process may have crashed)",
-            )
-            .into());
-        }
-
-        Ok(String::from_utf8(line)
-            .map_err(|_| anyhow!("Local helper response is not UTF-8"))?
-            .trim()
-            .to_string())
+        read_response_line(reader, written_at).await
     }
 
     /// Send ping to keep sidecar alive
@@ -500,7 +474,7 @@ impl SidecarManager {
             }
 
             // Read response
-            let response = tokio::time::timeout(timeout, self.read_response()).await??;
+            let response = tokio::time::timeout(timeout, self.read_response(None)).await??;
 
             let resp: serde_json::Value = serde_json::from_str(&response)?;
             if resp.get("type").and_then(|t| t.as_str()) == Some("pong") {
@@ -787,13 +761,48 @@ fn helper_idle_backstop_secs(app_idle_timeout_secs: u64) -> u64 {
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
-fn helper_closed(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<std::io::Error>().is_some_and(|error| {
-        matches!(
+const IDLE_DISCONNECT_WINDOW: Duration = Duration::from_millis(500);
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct RetryableHelperDisconnect(&'static str);
+
+async fn read_response_line(
+    reader: impl tokio::io::AsyncBufRead + Unpin,
+    written_at: Option<Instant>,
+) -> Result<String> {
+    const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+    const CLOSED: &str = "Sidecar closed stdout (process may have crashed)";
+    let mut line = Vec::new();
+    let read = reader
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_until(b'\n', &mut line)
+        .await;
+    let closed = match &read {
+        Ok(0) => true,
+        Err(error) => matches!(
             error.kind(),
             std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
-        )
-    })
+        ),
+        Ok(_) => false,
+    };
+    if closed
+        && line.is_empty()
+        && written_at.is_some_and(|at| at.elapsed() <= IDLE_DISCONNECT_WINDOW)
+    {
+        return Err(RetryableHelperDisconnect(CLOSED).into());
+    }
+    read.context("Failed to read response from stdout")?;
+    if line.len() > MAX_RESPONSE_BYTES {
+        return Err(anyhow!("Local helper response exceeds its protocol limit"));
+    }
+    if !line.ends_with(b"\n") {
+        return Err(anyhow!(CLOSED));
+    }
+    Ok(String::from_utf8(line)
+        .map_err(|_| anyhow!("Local helper response is not UTF-8"))?
+        .trim()
+        .to_string())
 }
 
 fn is_goodbye(response: &str) -> bool {
@@ -836,6 +845,22 @@ async fn kill_and_reap(child: &mut Child, deadline: Duration) -> bool {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_an_immediate_disconnect_without_response_bytes_is_retryable() {
+        let recent = Instant::now();
+        let old = recent - IDLE_DISCONNECT_WINDOW - Duration::from_secs(1);
+        for (response, written_at, retryable) in [
+            (&b""[..], recent, true),
+            (&b""[..], old, false),
+            (&b"{\"type\":"[..], recent, false),
+        ] {
+            let error = read_response_line(response, Some(written_at))
+                .await
+                .unwrap_err();
+            assert_eq!(error.is::<RetryableHelperDisconnect>(), retryable);
+        }
+    }
 
     #[test]
     fn helper_idle_exit_is_a_backstop_after_the_app_idle_task() {
@@ -982,6 +1007,7 @@ pub(super) mod protocol_tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("went idle"));
+        assert!(error.is::<RetryableHelperDisconnect>());
         assert!(manager.child_process.lock().await.is_none());
     }
 

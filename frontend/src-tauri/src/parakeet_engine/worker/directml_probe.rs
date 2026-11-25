@@ -13,6 +13,8 @@ const MARKER: &str = "parakeet-directml-probe-in-progress";
 const PENDING: &str = "parakeet-directml-probe-running";
 #[cfg(any(test, all(windows, feature = "directml")))]
 const TIMEOUTS: &str = "parakeet-directml-probe-timeouts";
+#[cfg(any(test, all(windows, feature = "directml")))]
+const UNFINISHED: &str = "parakeet-directml-probe-unfinished";
 
 pub(super) fn record_runtime_failure(app_data: &Path) -> io::Result<()> {
     fs::create_dir_all(app_data)?;
@@ -32,6 +34,15 @@ fn remove_marker(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         result => result,
+    }
+}
+
+#[cfg(any(test, all(windows, feature = "directml")))]
+fn read_streak(path: &Path) -> io::Result<u8> {
+    match fs::read_to_string(path) {
+        Ok(value) => Ok(value.trim().parse::<u8>().unwrap_or(2)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
     }
 }
 
@@ -58,15 +69,19 @@ fn run_probe(
     pending.try_lock().map_err(io::Error::from)?;
 
     let timeouts = app_data.join(TIMEOUTS);
-    let count = match fs::read_to_string(&timeouts) {
-        Ok(value) => value.trim().parse::<u8>().unwrap_or(2),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
-        Err(error) => return Err(error),
-    };
-    let available = if count >= 2 || marker.try_exists()? {
+    let unfinished = app_data.join(UNFINISHED);
+    let count = read_streak(&timeouts)?;
+    let interrupted = read_streak(&unfinished)?;
+    let available = if count >= 2 || interrupted >= 2 || marker.try_exists()? {
         false
     } else {
-        match probe() {
+        // Publish the counter atomically while holding the stable probe lock.
+        // A parent that never returns from the probe leaves this increment behind.
+        let mut counter = tempfile::NamedTempFile::new_in(app_data)?;
+        writeln!(counter, "{}", interrupted + 1)?;
+        counter.as_file().sync_all()?;
+        counter.persist(&unfinished)?;
+        let available = match probe() {
             Ok(available) => {
                 remove_marker(&timeouts)?;
                 available
@@ -91,7 +106,9 @@ fn run_probe(
                 }
                 false
             }
-        }
+        };
+        remove_marker(&unfinished)?;
+        available
     };
     Ok(available && !marker.try_exists()?)
 }
@@ -193,6 +210,37 @@ mod tests {
         assert!(!dir.path().join(MARKER).exists());
         assert!(!probe(Err(WorkerError::TimedOut)));
         assert!(probe(Ok(true)));
+    }
+
+    #[test]
+    fn two_unfinished_attempts_block_automatic_probing_on_the_next_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        for _ in 0..2 {
+            let result = std::panic::catch_unwind(|| {
+                run_probe(dir.path(), || panic!("parent stopped during probe"))
+            });
+            assert!(result.is_err());
+        }
+        assert!(!run_probe(dir.path(), || panic!("third probe should be blocked")).unwrap());
+    }
+
+    #[test]
+    fn a_finished_attempt_clears_the_unfinished_attempt_streak() {
+        let dir = tempfile::tempdir().unwrap();
+        for completed in [
+            Ok(true),
+            Err(WorkerError::TimedOut),
+            Err(WorkerError::Spawn),
+        ] {
+            let result = std::panic::catch_unwind(|| {
+                run_probe(dir.path(), || panic!("parent stopped during probe"))
+            });
+            assert!(result.is_err());
+            let available = completed == Ok(true);
+            assert_eq!(run_probe(dir.path(), || completed).unwrap(), available);
+            assert!(!dir.path().join(UNFINISHED).exists());
+        }
+        assert!(run_probe(dir.path(), || Ok(true)).unwrap());
     }
 
     #[test]
