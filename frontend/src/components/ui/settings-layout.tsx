@@ -21,7 +21,7 @@ export function SettingsStack({ wide, className, ...props }: HTMLAttributes<HTML
  */
 export function SettingsColumns({ aside, children, className }: { aside: ReactNode; children: ReactNode; className?: string }) {
   return (
-    <div className={cn("grid items-start gap-5 min-[1700px]:grid-cols-[minmax(0,55rem)_minmax(0,25rem)] min-[1700px]:gap-8", className)}>
+    <div className={cn("grid items-start gap-5 min-[1280px]:grid-cols-[minmax(0,2.2fr)_minmax(0,1fr)] min-[1280px]:gap-6 max-w-[82rem]", className)}>
       <div className="grid min-w-0 max-w-[55rem] gap-5">{children}</div>
       <aside className="grid min-w-0 max-w-[55rem] gap-5">{aside}</aside>
     </div>

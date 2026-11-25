@@ -2,31 +2,33 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
 
-test('the meeting search shortcut focuses Archive or the sidebar and respects the editor', t => {
+test('Ctrl+K opens the command palette only outside editors and other dialogs', t => {
   const calls = [];
-  const controls = new Map();
-  let keydown;
+  let keydown, dialog = false;
   const previousWindow = globalThis.window;
   const previousDocument = globalThis.document;
   t.after(() => { globalThis.window = previousWindow; globalThis.document = previousDocument; });
   globalThis.window = {
     addEventListener: (_, listener) => { keydown = listener; },
-    requestAnimationFrame: callback => callback(),
+    dispatchEvent: event => calls.push(event.type),
   };
-  globalThis.document = { getElementById: id => controls.get(id) ?? null };
+  globalThis.document = { querySelector: () => dialog };
   const { AppShortcuts } = loadTsModule('src/components/AppShortcuts.tsx', {
     react: { useEffect: effect => effect() }, 'next/navigation': { useRouter: () => ({}) },
   });
   AppShortcuts();
-  const shortcut = target => keydown({ key: 'k', ctrlKey: true, target, preventDefault() {} });
-  const input = (name, hidden) => ({
-    focus: () => calls.push(name), select: () => calls.push('select'), closest: () => hidden,
+  const shortcut = (target, overrides = {}) => keydown({
+    key: 'k', ctrlKey: true, target, preventDefault: () => calls.push('prevented'), ...overrides,
   });
-  controls.set('meeting-search', input('sidebar', false));
   shortcut({ tagName: 'DIV' });
-  controls.set('meetings-search', input('archive', true));
-  controls.set('meetings-archive-tab', { click: () => calls.push('show archive') });
-  shortcut({ tagName: 'DIV' });
+  shortcut({ tagName: 'INPUT' });
+  shortcut({ tagName: 'TEXTAREA' });
   shortcut({ isContentEditable: true });
-  assert.deepEqual(calls, ['sidebar', 'select', 'show archive', 'archive', 'select']);
+  shortcut({ closest: () => ({}) });
+  shortcut(null, { defaultPrevented: true });
+  shortcut(null, { isComposing: true });
+  shortcut(null, { repeat: true });
+  dialog = true;
+  shortcut(null);
+  assert.deepEqual(calls, ['prevented', 'shortcut:open-command-palette']);
 });

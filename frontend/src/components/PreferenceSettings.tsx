@@ -11,6 +11,8 @@ import { Meta, SettingsCard, SettingsRow, SettingsStack } from "./ui/settings-la
 import { NoteRow } from "./settings/settings-parts";
 import { UpdateChannelSettings } from "./UpdateChannelSettings";
 import { PendingRecordingNotes } from "./PendingRecordingNotes";
+import { LibraryBackup } from "./LibraryBackup";
+import { ArchiveStorageButton } from "./Archive/ArchiveStorageButton";
 import Analytics from "@/lib/analytics";
 import { useConfig, type NotificationSettings } from "@/contexts/ConfigContext";
 import { getAutoUpdateCheckEnabled, setAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
@@ -71,6 +73,8 @@ export function PreferenceSettings() {
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [saveFolder, setSaveFolder] = useState<string | undefined>(undefined);
   const [openingFolder, setOpeningFolder] = useState<FolderKind | null>(null);
+  const [choosingFolder, setChoosingFolder] = useState(false);
+  const folderPicker = useRef(false);
   const hasTrackedViewRef = useRef(false);
 
   // Lazy load preferences on mount (only loads if not already cached).
@@ -148,6 +152,24 @@ export function PreferenceSettings() {
     });
   };
 
+  const chooseFolder = async () => {
+    if (folderPicker.current) return;
+    folderPicker.current = true;
+    setChoosingFolder(true);
+    try {
+      const folder = await invoke<string | null>("select_recording_folder");
+      if (!folder) return;
+      await invoke("set_recording_save_folder", { folder });
+      setSaveFolder(folder);
+      toast.success("Recording folder updated");
+    } catch (error) {
+      toast.error("Could not choose the recordings folder", { description: typeof error === "string" ? error : undefined });
+    } finally {
+      folderPicker.current = false;
+      setChoosingFolder(false);
+    }
+  };
+
   const rows = storageRows(saveFolder ?? storageLocations?.recordings, storageLocations);
   const locationsUnavailable = loaded && !isLoadingPreferences && !storageLocations;
 
@@ -211,8 +233,19 @@ export function PreferenceSettings() {
               {openingFolder === row.kind ? <Loader2 aria-hidden="true" className="animate-spin" /> : <FolderOpen aria-hidden="true" />}
               {row.kind === "recordings" ? "Open recordings folder" : "Open folder"}
             </Button>
+            {row.kind === "recordings" && <Button type="button" size="sm" variant="outline"
+              disabled={choosingFolder || recordingState.isRecording || recordingState.isStarting || recordingState.isStopping}
+              onClick={() => void chooseFolder()}>
+              {choosingFolder ? "Choosing…" : "Choose folder"}
+            </Button>}
           </SettingsRow>
         ))}
+        <SettingsRow title="Library storage" description="See disk usage by meeting and review pending file cleanup.">
+          <ArchiveStorageButton label="Review storage" />
+        </SettingsRow>
+        <SettingsRow title="Backup and restore" description="Save or restore a portable copy of your local meeting library.">
+          <LibraryBackup />
+        </SettingsRow>
         {locationsUnavailable && <NoteRow tone="muted">The database and model locations could not be read.</NoteRow>}
         {(interrupted.scanFailed || interrupted.hasUnverifiedFolders || interrupted.waitingForAudio) && (
           <SettingsRow title="Recovery scan" description={interrupted.scanFailed

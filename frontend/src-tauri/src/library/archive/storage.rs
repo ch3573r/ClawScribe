@@ -526,7 +526,9 @@ async fn remove_selected(
     Ok(results)
 }
 
-fn validate_selection<'a>(ids: impl ExactSizeIterator<Item = &'a str>) -> Result<(), String> {
+pub(in crate::library) fn validate_selection<'a>(
+    ids: impl ExactSizeIterator<Item = &'a str>,
+) -> Result<(), String> {
     if ids.len() == 0 || ids.len() > MAX_SELECTION {
         return Err(format!("Select between 1 and {MAX_SELECTION} meetings."));
     }
@@ -688,6 +690,159 @@ pub(crate) async fn measure_archive_storage(
     tokio::task::spawn_blocking(move || measure_storage(&roots, &folders, &data))
         .await
         .map_err(|_| "Could not measure library storage".into())
+}
+
+const STORAGE_PAGE_SIZE: usize = 20;
+const MEETING_STORAGE_ENTRIES: usize = 2_048;
+
+#[derive(sqlx::FromRow)]
+struct StorageFolder {
+    cursor: i64,
+    title: String,
+    folder_path: Option<String>,
+}
+
+#[derive(Default, Serialize)]
+struct MeetingStorage {
+    title: String,
+    audio_bytes: u64,
+    recovery_bytes: u64,
+    other_bytes: u64,
+    unavailable: bool,
+    partial: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct MeetingStoragePage {
+    rows: Vec<MeetingStorage>,
+    next_cursor: Option<String>,
+}
+
+fn bounded_storage_bytes(path: &Path, depth: u8, remaining: &mut usize, partial: &mut bool) -> u64 {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !linked(&metadata) => metadata.len(),
+        Ok(metadata) if metadata.is_dir() && !linked(&metadata) && depth < 8 => {
+            let Ok(entries) = fs::read_dir(path) else {
+                *partial = true;
+                return 0;
+            };
+            let mut bytes = 0u64;
+            for entry in entries {
+                if *remaining == 0 {
+                    *partial = true;
+                    break;
+                }
+                *remaining -= 1;
+                match entry {
+                    Ok(entry) => {
+                        bytes = bytes.saturating_add(bounded_storage_bytes(
+                            &entry.path(),
+                            depth + 1,
+                            remaining,
+                            partial,
+                        ));
+                    }
+                    Err(_) => *partial = true,
+                }
+            }
+            bytes
+        }
+        _ => {
+            *partial = true;
+            0
+        }
+    }
+}
+
+fn measure_meeting_folder(roots: &[PathBuf], row: StorageFolder) -> MeetingStorage {
+    let mut measured = MeetingStorage {
+        title: row.title,
+        ..Default::default()
+    };
+    let Some(path) = row.folder_path.filter(|path| !path.trim().is_empty()) else {
+        return measured;
+    };
+    let opened = (|| {
+        let folder = safe_folder(Path::new(&path), roots).ok()?;
+        let pins = pin_backup_folder(&folder).ok()?;
+        Some((fs::read_dir(folder).ok()?, pins))
+    })();
+    let Some((entries, _pins)) = opened else {
+        measured.unavailable = true;
+        return measured;
+    };
+    let mut remaining = MEETING_STORAGE_ENTRIES;
+    for entry in entries {
+        if remaining == 0 {
+            measured.partial = true;
+            break;
+        }
+        remaining -= 1;
+        let Ok(entry) = entry else {
+            measured.partial = true;
+            continue;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let path = entry.path();
+        let bytes =
+            if RECOVERY_DIRS.contains(&name.as_ref()) || RECOVERY_AUDIO.contains(&name.as_ref()) {
+                &mut measured.recovery_bytes
+            } else if !name.starts_with('.') && audio_extension(&path) {
+                &mut measured.audio_bytes
+            } else {
+                &mut measured.other_bytes
+            };
+        *bytes = bytes.saturating_add(bounded_storage_bytes(
+            &path,
+            0,
+            &mut remaining,
+            &mut measured.partial,
+        ));
+    }
+    measured
+}
+
+#[tauri::command]
+pub(crate) async fn measure_meeting_storage_page(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    cursor: Option<String>,
+) -> Result<MeetingStoragePage, String> {
+    let before = cursor
+        .map(|cursor| cursor.parse::<i64>())
+        .transpose()
+        .map_err(|_| "Invalid storage page")?;
+    let (folders, next_cursor) = read_storage_folders(state.db_manager.pool(), before).await?;
+    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    tokio::task::spawn_blocking(move || MeetingStoragePage {
+        rows: folders
+            .into_iter()
+            .map(|row| measure_meeting_folder(&roots, row))
+            .collect(),
+        next_cursor,
+    })
+    .await
+    .map_err(|_| "Could not measure the meeting storage page".into())
+}
+
+async fn read_storage_folders(
+    pool: &SqlitePool,
+    before: Option<i64>,
+) -> Result<(Vec<StorageFolder>, Option<String>), String> {
+    let mut folders: Vec<StorageFolder> = sqlx::query_as(
+        "SELECT rowid AS cursor, SUBSTR(title, 1, 256) AS title, folder_path FROM meetings
+         WHERE rowid < ? ORDER BY rowid DESC LIMIT ?",
+    )
+    .bind(before.unwrap_or(i64::MAX))
+    .bind((STORAGE_PAGE_SIZE + 1) as i64)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| "Could not read the meeting storage page")?;
+    let next_cursor = (folders.len() > STORAGE_PAGE_SIZE)
+        .then(|| folders[STORAGE_PAGE_SIZE - 1].cursor.to_string());
+    folders.truncate(STORAGE_PAGE_SIZE);
+    Ok((folders, next_cursor))
 }
 
 #[cfg(test)]

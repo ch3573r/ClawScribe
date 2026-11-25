@@ -18,6 +18,7 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
     '@/components/LibraryBackup':{LibraryBackup:'backup'},'@/components/Knowledge/KnowledgeArchive':{KnowledgeArchive:'memory'},
     '@/components/Archive/ArchiveMeetingRows':{ArchiveMeetingRows:'archive-rows',useArchiveMetadata:()=>({metadata:sidebar.metadata??null,error:false,refresh:async()=>{}})},'@/components/Archive/ArchiveStorageButton':{ArchiveStorageButton:'storage'},
     '@/components/Archive/OpenMeetingActions':{OpenMeetingActions:'open-actions'},
+    '@/components/Archive/ArchiveBulkActions':{ArchiveBulkActions:'bulk-actions'},
     '@/components/MeetingDetails/ProjectTags':{ProjectTags:'project-tags'},
     './ArchiveAudioRemoval':{ArchiveAudioRemoval:'audio-removal'},
     '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
@@ -102,6 +103,17 @@ test('archive filtering keeps controls and clear filters restores all rows',()=>
   nodes(tree).find(node=>node.type==='button'&&text(node)==='Clear filters').props.onClick();
   tree=app.render();assert.match(text(tree),/2 meetings/);
   assert.equal(nodes(tree).find(node=>node.type==='archive-rows').props.meetings.length,2);app.unmount();
+});
+
+test('selected Archive rows open Meeting memory with only those IDs and no preset question', () => {
+  const archive = surface('src/app/meetings/page.tsx', 'default');
+  const rows = nodes(archive.render()).find(node => node.type === 'archive-rows');
+  rows.props.onAsk(['b']);
+  const memory = nodes(archive.render()).find(node => node.type === 'memory');
+  assert.equal(memory.props.active, true);
+  assert.deepEqual(Array.from(memory.props.initialMatches.ids), ['b']);
+  assert.equal(memory.props.initialMatches.question, undefined);
+  archive.unmount();
 });
 
 test('archive shows titles and passages and restores date and query when returning',()=>{

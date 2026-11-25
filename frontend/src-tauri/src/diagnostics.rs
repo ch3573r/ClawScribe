@@ -90,6 +90,33 @@ pub struct IntegrationDiagnostics {
 }
 
 #[tauri::command]
+pub(crate) async fn open_diagnostics_logs_folder<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<(), String> {
+    let folder = app
+        .path()
+        .app_log_dir()
+        .map_err(|_| "Could not locate logs")?;
+    tokio::task::spawn_blocking(move || {
+        crate::local_path::require_unlinked_directory(&folder)?;
+        #[cfg(windows)]
+        return crate::local_path::open_in_explorer(&folder);
+        #[cfg(target_os = "macos")]
+        let program = "open";
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let program = "xdg-open";
+        #[cfg(unix)]
+        return std::process::Command::new(program)
+            .arg(folder)
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "Could not open the logs folder".into());
+    })
+    .await
+    .map_err(|_| "Could not open the logs folder".to_string())?
+}
+
+#[tauri::command]
 pub(crate) async fn get_diagnostics_snapshot<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
@@ -97,7 +124,7 @@ pub(crate) async fn get_diagnostics_snapshot<R: Runtime>(
 ) -> Result<DiagnosticSnapshot, String> {
     let mut errors = Vec::new();
     let app_data_dir = app.path().app_data_dir().ok();
-    let logs_dir = app_data_dir.as_ref().map(|dir| dir.join("logs"));
+    let logs_dir = app.path().app_log_dir().ok();
 
     let acceleration = match whisper_get_acceleration_status().await {
         Ok(status) => Some(status),

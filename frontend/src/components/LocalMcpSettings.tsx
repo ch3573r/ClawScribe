@@ -17,7 +17,7 @@ interface Access {
   command: string;
 }
 
-export function LocalMcpSettings() {
+export function LocalMcpSettings({ onStatusChange }: { onStatusChange?: (access: Access | null) => void } = {}) {
   const [access, setAccess] = useState<Access | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
@@ -37,10 +37,11 @@ export function LocalMcpSettings() {
       const result = enabled === undefined
         ? await invoke<Access>("get_mcp_access")
         : await invoke<Access>(followThrough ? "set_mcp_follow_through_access" : "set_mcp_access", { enabled });
-      if (id === request.current) setAccess(result);
+      if (id === request.current) { setAccess(result); onStatusChange?.(result); }
     } catch {
       if (id === request.current) {
         setAccess(null);
+        onStatusChange?.(null);
         setError("Could not verify local assistant access. Retry to check the current setting.");
       }
     } finally {

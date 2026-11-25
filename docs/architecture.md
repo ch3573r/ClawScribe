@@ -127,7 +127,9 @@ The file is limited to 4 KiB.
 
 The save command works offline with the report held in memory. The Tauri core
 opens the native save dialog and writes the report atomically to the chosen
-file. The webview receives the outcome of the save.
+file. The webview receives the outcome of the save. The Diagnostics snapshot
+also supplies the Codex row. **Open logs folder** resolves the platform log
+directory in the core before opening it.
 
 ## Recording And Inference Lifetimes
 

@@ -1,24 +1,15 @@
 "use client";
 
 import React, { useState, useEffect, useSyncExternalStore } from "react";
-import {
-  ArrowLeft,
-  Settings2,
-  ShieldCheck,
-  Palette,
-  Mic,
-  Keyboard,
-  AudioLines,
-  Sparkles,
-  BrainCircuit,
-  CalendarClock,
-  Bot,
-  Activity,
-  Webhook,
-} from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { ConfluenceIcon, Microsoft365Icon } from "@/components/IntegrationIcons";
+import { About } from "@/components/About";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { filterSettingsGroups, SETTINGS_ITEMS } from "@/components/settings/settings-sections";
+import { useConnectionStatus } from "@/components/settings/useConnectionStatus";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
 import { PrivacySettings } from "@/components/settings/PrivacySettings";
 import { ThemeSettings } from "@/components/ThemeSettings";
@@ -34,63 +25,15 @@ import { WebhookSettings } from "@/components/settings/WebhookSettings";
 import { AssistantAccessSettings } from "@/components/settings/AssistantAccessSettings";
 import { DiagnosticsSettings } from "@/components/settings/DiagnosticsSettings";
 import { resolveSettingsTab } from "@/components/settings/settings-tabs";
-import { StatusDot, type StatusTone } from "@/components/ui/settings-layout";
+import { StatusDot } from "@/components/ui/settings-layout";
 import { useMicrosoftExport } from "@/hooks/useMicrosoftExport";
 import { getICalendarServerSnapshot, getICalendarSnapshot, subscribeToICalendars } from "@/services/icalService";
-
-type SectionItem = {
-  value: string;
-  label: string;
-  icon: React.ElementType;
-  desc: string;
-};
-
-// Grouped so the nav reads as a structure, not a flat row of tabs. `value`s are
-// stable (the sidebar deep-links via ?tab= and the open-settings-tab event).
-const GROUPS: { label: string; items: SectionItem[] }[] = [
-  {
-    label: "Workspace",
-    items: [
-      { value: "general", label: "General", icon: Settings2, desc: "Updates, notifications and where recordings are stored" },
-      { value: "privacy", label: "Privacy", icon: ShieldCheck, desc: "What stays on this PC and what leaves it" },
-      { value: "appearance", label: "Appearance", icon: Palette, desc: "Theme, accent colour and interface font" },
-      { value: "recording", label: "Recording", icon: Mic, desc: "Capture, audio devices and call detection" },
-      { value: "shortcuts", label: "Shortcuts", icon: Keyboard, desc: "Choose keys for recording controls and saved meeting playback" },
-    ],
-  },
-  {
-    label: "Intelligence",
-    items: [
-      { value: "transcription", label: "Transcription", icon: AudioLines, desc: "Speech-to-text engine, model and options" },
-      { value: "summary", label: "Summary", icon: Sparkles, desc: "Summary model, language, live assistance and templates" },
-      { value: "memory", label: "Meeting memory", icon: BrainCircuit, desc: "Search across your meetings, on this PC" },
-    ],
-  },
-  {
-    label: "Connections",
-    items: [
-      { value: "ms365", label: "Microsoft 365", icon: Microsoft365Icon, desc: "Where exports go in OneNote, OneDrive, Planner and To Do" },
-      { value: "calendars", label: "Calendars", icon: CalendarClock, desc: "Meeting titles and invitees for your recordings" },
-      { value: "confluence", label: "Confluence", icon: ConfluenceIcon, desc: "Publish meeting notes as a Confluence page" },
-      { value: "webhook", label: "Webhook", icon: Webhook, desc: "Send saved meeting data to your automation endpoint" },
-      { value: "assistant", label: "Assistant access", icon: Bot, desc: "Let an MCP-compatible assistant read your saved meetings" },
-    ],
-  },
-  {
-    label: "Advanced",
-    items: [
-      { value: "diagnostics", label: "Diagnostics", icon: Activity, desc: "Build, engine and connection health for troubleshooting" },
-    ],
-  },
-];
-
-const ALL_ITEMS = GROUPS.flatMap((g) => g.items);
-
-type NavDot = { tone: StatusTone; label: string };
 
 export default function SettingsPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState("general");
+  const [sectionQuery, setSectionQuery] = useState("");
+  const connections = useConnectionStatus(activeTab);
   const microsoft = useMicrosoftExport();
   const calendars = useSyncExternalStore(subscribeToICalendars, getICalendarSnapshot, getICalendarServerSnapshot);
 
@@ -101,27 +44,29 @@ export default function SettingsPage() {
     if (requested) setActiveTab(requested);
     const onOpenTab = (e: Event) => {
       const tab = resolveSettingsTab((e as CustomEvent<string>).detail);
-      if (tab) setActiveTab(tab);
+      if (tab) { setActiveTab(tab); setSectionQuery(""); }
     };
     window.addEventListener("open-settings-tab", onOpenTab as EventListener);
     return () => window.removeEventListener("open-settings-tab", onOpenTab as EventListener);
   }, []);
 
-  const active = ALL_ITEMS.find((i) => i.value === activeTab) ?? ALL_ITEMS[0];
+  const active = SETTINGS_ITEMS.find((i) => i.value === activeTab) ?? SETTINGS_ITEMS[0];
 
-  // Status lamps for the Connections entries. They read state that hooks and
-  // stores already hold, so they add no polling and no backend calls.
+  const groups = filterSettingsGroups(sectionQuery);
   const microsoftConnected = microsoft.connection.state === "connected";
   const microsoftCalendar = microsoftConnected && !microsoft.connection.unavailableExports?.includes("Calendar lookup");
-  const calendarIssue = Object.keys(calendars.issues).length > 0;
-  const dots: Record<string, NavDot> = {
-    ms365: microsoftConnected ? { tone: "ok", label: "Connected" } : { tone: "off", label: "Signed out" },
+  const calendarIssue = !!calendars.error || Object.keys(calendars.issues).length > 0;
+  const dots: typeof connections.dots = {
+    ...connections.dots,
+    ms365: microsoftConnected ? { tone: "ok", label: "Connected" }
+      : microsoft.connection.state === "connecting" ? { tone: "active", label: "Signing in" }
+        : microsoft.error || microsoft.connection.state !== "not_connected"
+          ? { tone: "warning", label: "Sign-in needs attention" } : { tone: "off", label: "Signed out" },
     calendars: calendarIssue
       ? { tone: "warning", label: "A calendar has a problem" }
       : calendars.sources.length > 0 || microsoftCalendar
         ? { tone: "ok", label: "Calendars connected" }
-        : { tone: "off", label: "No calendars" },
-    confluence: { tone: "neutral", label: "Optional" },
+        : calendars.loading ? { tone: "neutral", label: "Checking calendars" } : { tone: "off", label: "No calendars" },
   };
 
   const renderPanel = () => {
@@ -147,11 +92,13 @@ export default function SettingsPage() {
       case "calendars":
         return <CalendarsSettings />;
       case "confluence":
-        return <ConfluenceSettings />;
+        return <ConfluenceSettings onStatusChange={connections.setConfluence} />;
       case "webhook":
         return <WebhookSettings />;
       case "assistant":
-        return <AssistantAccessSettings />;
+        return <AssistantAccessSettings onStatusChange={connections.setAssistant} />;
+      case "about":
+        return <About />;
       case "diagnostics":
         return <DiagnosticsSettings />;
       default:
@@ -163,13 +110,12 @@ export default function SettingsPage() {
     <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
       {/* Top bar */}
       <header className="flex shrink-0 items-center gap-4 border-b border-border px-6 py-4">
-        <button
-          onClick={() => router.back()}
+        <Button variant="ghost" onClick={() => router.back()}
           className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <ArrowLeft className="h-4 w-4" />
           Back
-        </button>
+        </Button>
         <div className="h-5 w-px bg-border" />
         <h1 className="text-lg font-semibold tracking-tight">Settings</h1>
       </header>
@@ -177,7 +123,10 @@ export default function SettingsPage() {
       <div className="flex min-h-0 flex-1">
         {/* Left nav rail */}
         <nav aria-label="Settings sections" className="w-60 shrink-0 overflow-y-auto border-r border-border px-3 py-5">
-          {GROUPS.map((group) => (
+          <Input aria-label="Filter settings" placeholder="Filter settings…" value={sectionQuery}
+            onChange={event => setSectionQuery(event.target.value)} className="mb-5" />
+          {!groups.length && <p role="status" className="px-2 text-sm text-muted-foreground">No matching settings.</p>}
+          {groups.map((group) => (
             <div key={group.label} className="mb-6">
               <p className="px-3 pb-2 text-xs text-muted-foreground">{group.label}</p>
               <div className="space-y-0.5">
@@ -186,13 +135,14 @@ export default function SettingsPage() {
                   const isActive = item.value === active.value;
                   const dot = dots[item.value];
                   return (
-                    <button
+                    <Button
                       key={item.value}
                       type="button"
+                      variant="ghost"
                       onClick={() => setActiveTab(item.value)}
                       aria-current={isActive ? "page" : undefined}
                       className={cn(
-                        "relative flex h-[34px] w-full items-center gap-2.5 rounded-md px-3 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        "relative h-[34px] w-full justify-start gap-2.5 px-3 text-left text-sm font-normal",
                         isActive
                           ? "bg-primary/10 text-foreground"
                           : "text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -202,12 +152,12 @@ export default function SettingsPage() {
                       <Icon className={cn("h-4 w-4 shrink-0", isActive && "text-primary")} />
                       <span className="min-w-0 flex-1 truncate">{item.label}</span>
                       {dot && (
-                        <>
-                          <StatusDot tone={dot.tone} />
-                          <span className="sr-only">{dot.label}</span>
-                        </>
+                        <Tooltip>
+                          <TooltipTrigger asChild><span><StatusDot tone={dot.tone} /><span className="sr-only">, {dot.label}</span></span></TooltipTrigger>
+                          <TooltipContent>{dot.label}</TooltipContent>
+                        </Tooltip>
                       )}
-                    </button>
+                    </Button>
                   );
                 })}
               </div>
@@ -217,7 +167,7 @@ export default function SettingsPage() {
 
         {/* Content pane */}
         <main className="min-w-0 flex-1 overflow-y-auto">
-          <div className="w-full px-12 pb-14 pt-8">
+          <div className="w-full px-6 pb-14 pt-8 min-[1500px]:px-12">
             <div className="mb-6">
               <h2 className="text-2xl font-semibold tracking-tight">{active.label}</h2>
               <p className="mt-1 text-sm text-muted-foreground">{active.desc}</p>

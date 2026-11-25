@@ -10,10 +10,13 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SettingsCard, SettingsFooter, SettingsRow, SettingsStack, StatusText } from "@/components/ui/settings-layout";
 import { getExportDestinations, setExportDestinations, type ConfluenceExportMode } from "@/lib/exportDestinations";
 import { confluenceExportService, type ConfluenceConnectionStatus } from "@/services/confluenceExportService";
+import { confluenceDot } from "./useConnectionStatus";
 
 const FIELD = "w-[26rem] max-w-full";
 
-export function ConfluenceCard() {
+type StatusObserver = (status: ReturnType<typeof confluenceDot>) => void;
+
+export function ConfluenceCard({ onStatusChange }: { onStatusChange?: StatusObserver } = {}) {
   const saved = getExportDestinations();
   const [mode, setMode] = useState<ConfluenceExportMode>(saved.confluenceMode ?? "draft");
   const [createUrl, setCreateUrl] = useState(saved.confluenceCreateUrl ?? "");
@@ -35,6 +38,9 @@ export function ConfluenceCard() {
   };
   const trimmedUrl = createUrl.trim();
   const trimmedBaseUrl = baseUrl.trim();
+  useEffect(() => {
+    onStatusChange?.(confluenceDot(mode, !!trimmedUrl, status, testFailed));
+  }, [mode, trimmedUrl, status, testFailed, onStatusChange]);
   useEffect(() => {
     let active = true;
     const revision = ++httpOptionRevision.current;
@@ -304,6 +310,6 @@ export function ConfluenceCard() {
   );
 }
 
-export function ConfluenceSettings() {
-  return <SettingsStack><ConfluenceCard /></SettingsStack>;
+export function ConfluenceSettings({ onStatusChange }: { onStatusChange?: StatusObserver } = {}) {
+  return <SettingsStack><ConfluenceCard onStatusChange={onStatusChange} /></SettingsStack>;
 }

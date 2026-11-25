@@ -1,82 +1,34 @@
-import React from "react";
-import Image from 'next/image';
-import { UpdateChannelSettings } from './UpdateChannelSettings';
-import { useUpdateCheckContext } from './UpdateCheckProvider';
+import Image from "next/image";
+import { Button } from "@/components/ui/button";
+import { SettingsCard, SettingsRow, SettingsStack } from "@/components/ui/settings-layout";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { UpdateChannelSettings } from "./UpdateChannelSettings";
+import { useUpdateCheckContext } from "./UpdateCheckProvider";
 
-export function About() {
-    const { currentVersion } = useUpdateCheckContext();
-
-    return (
-        <div className="p-4 space-y-4 h-[80vh] overflow-y-auto">
-            {/* Compact Header */}
-            <div className="text-center">
-                <div className="mb-3">
-                    <Image
-                        src="icon_128x128.png"
-                        alt="ClawScribe Logo"
-                        width={64}
-                        height={64}
-                        className="mx-auto"
-                    />
-                </div>
-                <h1 className="text-xl font-bold text-foreground">ClawScribe</h1>
-                <span className="text-sm text-muted-foreground"> v{currentVersion}</span>
-                <p className="text-xs text-muted-foreground mt-1">
-                    Based on Meetily Community Edition 0.4.0
-                </p>
-                <p className="text-medium text-muted-foreground mt-1">
-                    Local meeting capture, transcripts, and summaries.
-                </p>
-                <div className="mt-4 rounded-md border border-border bg-card p-4">
-                    <UpdateChannelSettings id="about-prerelease-updates" />
-                </div>
-            </div>
-
-            {/* Features Grid - Compact */}
-            <div className="space-y-3">
-                <h2 className="text-base font-semibold text-foreground">What makes ClawScribe different</h2>
-                <div className="grid grid-cols-2 gap-2">
-                    <div className="bg-muted rounded p-3 hover:bg-muted transition-colors">
-                        <h3 className="font-bold text-sm text-foreground mb-1">Privacy-first</h3>
-                        <p className="text-xs text-muted-foreground leading-relaxed">Your data & AI processing workflow can now stay within your premise. No cloud, no leaks.</p>
-                    </div>
-                    <div className="bg-muted rounded p-3 hover:bg-muted transition-colors">
-                        <h3 className="font-bold text-sm text-foreground mb-1">Use Any Model</h3>
-                        <p className="text-xs text-muted-foreground leading-relaxed">Prefer local open-source model? Great. Want to plug in an external API? Also fine. No lock-in.</p>
-                    </div>
-                    <div className="bg-muted rounded p-3 hover:bg-muted transition-colors">
-                        <h3 className="font-bold text-sm text-foreground mb-1">Cost-Smart</h3>
-                        <p className="text-xs text-muted-foreground leading-relaxed">Avoid pay-per-minute bills by running models locally (or pay only for the calls you choose).</p>
-                    </div>
-                    <div className="bg-muted rounded p-3 hover:bg-muted transition-colors">
-                        <h3 className="font-bold text-sm text-foreground mb-1">Works everywhere</h3>
-                        <p className="text-xs text-muted-foreground leading-relaxed">Google Meet, Zoom, Teams-online or offline.</p>
-                    </div>
-                </div>
-            </div>
-
-            {/* CTA Section - Compact */}
-            <div className="text-center space-y-2">
-                <h3 className="text-medium font-semibold text-foreground">Need a private meeting workflow?</h3>
-                <p className="text-s text-muted-foreground">
-                    ClawScribe captures meetings locally without requiring a meeting bot.
-                </p>
-            </div>
-
-            {/* Footer - Compact */}
-            <div className="pt-2 border-t border-border text-center">
-                <p className="text-xs text-muted-foreground">
-                    ClawScribe is an OpenClaw fork of Meetily Community Edition. Meetily is copyright Zackriya Solutions and contributors under the MIT License.
-                </p>
-                <p className="text-xs text-muted-foreground mt-2">
-                    Advanced Codex app-server bundles @openai/codex 0.169.0 for Windows x64 under Apache-2.0. Runtime SHA256: ce1945eb440b5481ed1233ebaf32b7056ee7e4e452fa62ffe1cbfb26103cdee0.
-                </p>
-                <p className="text-xs text-muted-foreground mt-2">
-                    Claude Code uses the program you installed and signed in to yourself. Your Claude plan&apos;s limits apply. Claude Code is not bundled with ClawScribe.
-                </p>
-            </div>
-
+export function About({ compact = false }: { compact?: boolean }) {
+  const { currentVersion } = useUpdateCheckContext();
+  return (
+    <SettingsStack>
+      <SettingsCard>
+        <div className="flex items-center gap-4 px-5 py-4">
+          <Image src="/brand/clawscribe-icon-64.png" alt="" width={48} height={48} className="rounded-md" />
+          <div className="min-w-0">
+            <p className="font-semibold">ClawScribe{currentVersion ? ` ${currentVersion}` : ""}</p>
+            <p className="mt-1 text-sm text-muted-foreground">Local meeting recording, transcription and summaries.</p>
+          </div>
         </div>
-
-    )
+        <UpdateChannelSettings id={compact ? "about-dialog-prerelease" : "about-settings-prerelease"} />
+      </SettingsCard>
+      <SettingsCard title="Licensing and bundled software">
+        <SettingsRow title="Meetily Community Edition" description="ClawScribe is an OpenClaw fork of Meetily Community Edition 0.4.0, copyright Zackriya Solutions and contributors under the MIT License." />
+        <SettingsRow title="Codex app-server" description="The optional Codex provider bundles @openai/codex 0.169.0 for Windows x64 under Apache-2.0.">
+          <Tooltip>
+            <TooltipTrigger asChild><Button type="button" variant="outline" size="sm">Runtime checksum</Button></TooltipTrigger>
+            <TooltipContent className="max-w-72 break-all">SHA-256 ce1945eb440b5481ed1233ebaf32b7056ee7e4e452fa62ffe1cbfb26103cdee0</TooltipContent>
+          </Tooltip>
+        </SettingsRow>
+        <SettingsRow title="Claude Code" description="Uses your own Claude Code installation and sign-in. Your plan's limits apply." />
+      </SettingsCard>
+    </SettingsStack>
+  );
 }

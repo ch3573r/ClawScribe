@@ -47,6 +47,7 @@ import { ThemeInitializer } from '@/components/ThemeSettings'
 import { AppShortcuts } from '@/components/AppShortcuts'
 import { RecordingRequests } from '@/components/RecordingRequests'
 import { ArchiveStorageDialog } from '@/components/Archive/ArchiveStorageDialog'
+import { CommandPalette } from '@/components/CommandPalette'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -380,6 +381,7 @@ export default function RootLayout({
                               {/* Download progress toast provider - listens for background downloads */}
                               <DownloadProgressToastProvider />
                               <ArchiveStorageDialog />
+                              {showOnboarding === false && <CommandPalette />}
 
                               <RecordingRequests ready={showOnboarding === false} />
 

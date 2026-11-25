@@ -1,5 +1,56 @@
 use super::*;
 
+#[tokio::test]
+async fn per_meeting_storage_checks_roots_and_returns_bounded_pages() {
+    let fixture = Fixture::new().await;
+    fs::create_dir(fixture.folder.join(".checkpoints")).unwrap();
+    fs::write(fixture.folder.join(".checkpoints/part"), "recovery").unwrap();
+    let outside = fixture
+        .folder
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("audio.mp4"), "outside").unwrap();
+    add_meeting(&fixture.pool, "outside", &outside).await;
+    for index in 0..STORAGE_PAGE_SIZE {
+        add_meeting(&fixture.pool, &format!("new-{index}"), &fixture.folder).await;
+    }
+    let (first, next) = read_storage_folders(&fixture.pool, None).await.unwrap();
+    assert_eq!(first.len(), STORAGE_PAGE_SIZE);
+    let (last, next) = read_storage_folders(&fixture.pool, Some(next.unwrap().parse().unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(last.len(), 2);
+    assert!(next.is_none());
+    let mut last = last
+        .into_iter()
+        .map(|row| measure_meeting_folder(&fixture.roots, row));
+    let inaccessible = last.next().unwrap();
+    assert!(inaccessible.unavailable);
+    assert_eq!(inaccessible.audio_bytes, 0);
+    let measured = last.next().unwrap();
+    assert_eq!(measured.audio_bytes, 11);
+    assert_eq!(measured.recovery_bytes, 8);
+    assert!(measured.other_bytes >= "Synthetic snapshotbackup copy".len() as u64);
+    assert!(!measured.partial);
+}
+
+#[test]
+fn storage_tree_stops_when_the_entry_budget_is_exhausted() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("first"), [0u8; 3]).unwrap();
+    fs::write(temp.path().join("second"), [0u8; 3]).unwrap();
+    let mut partial = false;
+    assert_eq!(
+        bounded_storage_bytes(temp.path(), 0, &mut 1, &mut partial),
+        3
+    );
+    assert!(partial);
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     roots: Vec<PathBuf>,

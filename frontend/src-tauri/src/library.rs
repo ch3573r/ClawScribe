@@ -124,6 +124,72 @@ pub async fn set_meeting_tags(
 }
 
 #[tauri::command]
+pub(crate) async fn add_archive_project_tags(
+    app: AppHandle,
+    ids: Vec<String>,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    add_tags_to_meetings(app.state::<AppState>().db_manager.pool(), ids, tags).await?;
+    let _ = app.emit("library-changed", ());
+    Ok(())
+}
+
+async fn add_tags_to_meetings(
+    pool: &SqlitePool,
+    ids: Vec<String>,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    use std::collections::HashSet;
+    const SAVE: &str = "Could not save project tags.";
+    archive::storage::validate_selection(ids.iter().map(String::as_str))?;
+    if tags.is_empty() || tags.len() > 20 {
+        return Err("Enter between 1 and 20 project tags.".into());
+    }
+    let tags = tags
+        .iter()
+        .map(|tag| clean_label(tag, 60))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(|_| SAVE)?;
+    for id in ids {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?)")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| SAVE)?;
+        if !exists {
+            return Err(
+                "A selected meeting is no longer in the library. Select the meetings again.".into(),
+            );
+        }
+        let existing: Vec<String> =
+            sqlx::query_scalar("SELECT tag FROM meeting_tags WHERE meeting_id = ?")
+                .bind(&id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|_| SAVE)?;
+        let mut seen: HashSet<_> = existing.iter().map(|tag| tag.to_lowercase()).collect();
+        let added: Vec<_> = tags
+            .iter()
+            .filter(|tag| seen.insert(tag.to_lowercase()))
+            .collect();
+        if existing.len() + added.len() > 20 {
+            return Err(
+                "Adding these tags would exceed the 20-tag limit for a selected meeting.".into(),
+            );
+        }
+        for tag in added {
+            sqlx::query("INSERT INTO meeting_tags (meeting_id, tag) VALUES (?, ?)")
+                .bind(&id)
+                .bind(tag)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| SAVE)?;
+        }
+    }
+    tx.commit().await.map_err(|_| SAVE.into())
+}
+
+#[tauri::command]
 pub async fn list_meeting_bookmarks(
     app: AppHandle,
     meeting_id: String,
@@ -683,6 +749,40 @@ async fn read_word_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn archive_tags_are_additive_and_a_full_meeting_rolls_back_the_batch() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        for id in ["bulk-a", "bulk-b"] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+                .bind(id).bind(id).execute(&pool).await.unwrap();
+        }
+        let ids = || vec!["bulk-a".to_owned(), "bulk-b".to_owned()];
+        add_tags_to_meetings(&pool, ids(), vec!["Müller".into(), "Roadmap".into()])
+            .await
+            .unwrap();
+        add_tags_to_meetings(&pool, ids(), vec!["MÜLLER".into()])
+            .await
+            .unwrap();
+        add_tags_to_meetings(
+            &pool,
+            vec!["bulk-b".into()],
+            (1..=18).map(|index| format!("Tag {index}")).collect(),
+        )
+        .await
+        .unwrap();
+        assert!(add_tags_to_meetings(&pool, ids(), vec!["New tag".into()])
+            .await
+            .is_err());
+        let tags: Vec<String> = sqlx::query_scalar(
+            "SELECT tag FROM meeting_tags WHERE meeting_id = 'bulk-a' ORDER BY tag",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(tags, ["Müller", "Roadmap"]);
+    }
+
     #[test]
     fn export_times_prefer_recording_offsets_and_keep_legacy_fallback() {
         for (start, expected) in [

@@ -15,6 +15,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { archiveRecordingFacts, archiveReview, formatArchiveDate, visibleSelection, type ArchiveAction, type ArchiveRow } from "@/lib/archive-review";
 import { ArchiveAudioRemoval, type ArchiveMeeting } from "./ArchiveAudioRemoval";
+import type { BulkAction } from "./ArchiveBulkActions";
 
 const selectionLimit = 100;
 function meetingHref(id: string, action: ArchiveAction = "review") {
@@ -78,12 +79,14 @@ export function useArchiveMetadata(active: boolean, revision: number, librarySiz
 }
 
 export function ArchiveMeetingRows({
-  meetings, projectTags, status: { metadata, error, refresh }, onOpen, renderTitle, renderExcerpts,
+  meetings, projectTags, status: { metadata, error, refresh }, onOpen, onBulk, onAsk, renderTitle, renderExcerpts,
 }: {
   meetings: readonly ArchiveMeeting[];
   projectTags: readonly { meeting_id: string; tag: string }[];
   status: ReturnType<typeof useArchiveMetadata>;
   onOpen: (meeting: { id: string; title: string }) => void;
+  onBulk: (action: BulkAction, meetings: ArchiveMeeting[], opener: HTMLElement | null) => void;
+  onAsk: (ids: string[]) => void;
   renderTitle?: (meeting: ArchiveMeeting) => ReactNode;
   renderExcerpts?: (meeting: ArchiveMeeting) => ReactNode;
 }) {
@@ -93,6 +96,7 @@ export function ArchiveMeetingRows({
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [removal, setRemoval] = useState<ArchiveMeeting[] | null>(null);
   const removalOpener = useRef<HTMLElement | null>(null);
+  const bulkOpener = useRef<HTMLButtonElement>(null);
   const filteredIds = useMemo(() => meetings.map(meeting => meeting.id), [meetings]);
   const visibleSelected = visibleSelection(selected, filteredIds);
   useEffect(() => {
@@ -216,6 +220,17 @@ export function ArchiveMeetingRows({
               removalOpener.current = event.currentTarget;
               setRemoval(bulkCandidates);
             }}>Review selected audio</Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button ref={bulkOpener} variant="outline" size="sm" disabled={!bulkCandidates.length}>Bulk actions</Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => onBulk("tag", bulkCandidates, bulkOpener.current)}>Bulk tag…</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => onBulk("export", bulkCandidates, bulkOpener.current)}>Bulk export…</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => onAsk(bulkCandidates.map(meeting => meeting.id))}>Ask in Meeting memory</DropdownMenuItem>
+              <DropdownMenuItem className="text-destructive" onSelect={() => onBulk("delete", bulkCandidates, bulkOpener.current)}>Bulk delete…</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </>}
         <Button variant="ghost" size="sm" onClick={() => {
           setSelecting(!selecting);

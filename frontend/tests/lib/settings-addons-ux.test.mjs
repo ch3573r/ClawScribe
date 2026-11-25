@@ -221,11 +221,12 @@ function diagnostics(options={}) {
     transcription:{selectedProvider:'parakeet',selectedModel:'Parakeet Ultra',apiKeyConfigured:false,engines:[{provider:'parakeet',selectedModelPresent:true,downloadedModels:1,totalModels:5}]},
     audio:{inputDevices:3,outputDevices:5,totalDevices:8,deviceNames:[]},recording:{},
     diarization:{inProgress:false,directmlFast:true,directmlSlow:false,directmlUnavailable:false,preferredProvider:'directml',runtimeDlls:[{name:'a',present:true}]},
-    integrations:{},errors:[],...options.snapshot,
+    integrations:{codex:{found:true,authStatus:'authenticated',message:'ok'}},errors:[],...options.snapshot,
   };
+  const calls=[];
   const invoke=async name=>{
+    calls.push(name);
     if(name==='get_diagnostics_snapshot') return snapshot;
-    if(name==='codex_check_installation') return {found:true,authStatus:'authenticated',message:'ok'};
   };
   const mod=loadTsModule('src/components/settings/DiagnosticsSettings.tsx',baseMocks(hooks,{
     '@tauri-apps/api/core':{invoke},
@@ -233,7 +234,7 @@ function diagnostics(options={}) {
     '@/services/teamsDetectionService':{getCallDetectionStatus:async()=>({supported:true,complete:true,active:[],ended:[],openWindows:['1-a','2-b']})},
     '@/services/icalService':{getICalendarServerSnapshot:()=>({}),getICalendarSnapshot:()=>options.calendars??{sources:[],events:[],issues:{},loading:false,error:null},subscribeToICalendars:()=>()=>{},refreshICalendars:async()=>{}},
   }));
-  return {...hooks,mod,render:()=>hooks.render(mod.DiagnosticsSettings)};
+  return {...hooks,mod,calls,render:()=>hooks.render(mod.DiagnosticsSettings)};
 }
 
 test('diagnostics lists problems first, keeps healthy rows quiet and shows the call check driven by the selected apps',async()=>{
@@ -245,6 +246,10 @@ test('diagnostics lists problems first, keeps healthy rows quiet and shows the c
   assert.ok(rows.slice(1).every(row=>row.tone==='ok'),'only the calendar problem is coloured');
   assert.deepEqual(rows.map(row=>row.name).slice(0,2),['Calendars','Whisper backend']);
   assert.ok(rows.some(row=>row.name==='Codex app-server'));
+  assert.deepEqual(app.calls,['get_diagnostics_snapshot']);
+  nodes(tree).find(node=>node.type==='Button' && text(node).includes('Open logs folder')).props.onClick();
+  await flush();
+  assert.deepEqual(app.calls,['get_diagnostics_snapshot','open_diagnostics_logs_folder']);
   assert.match(text(tree),/ClawScribe 0\.5\.60 · windows x64 · release/);
   const call=nodes(tree).find(node=>node.type?.name==='CallDetectionCard');
   assert.ok(call);
@@ -276,5 +281,5 @@ test('settings tabs keep deep links working and resolve the old names',()=>{
   assert.equal(resolveSettingsTab('beta'),'transcription');
   assert.equal(resolveSettingsTab('nope'),null);
   assert.equal(resolveSettingsTab(null),null);
-  assert.deepEqual([...SETTINGS_TABS],['general','privacy','appearance','recording','shortcuts','transcription','summary','memory','ms365','calendars','confluence','webhook','assistant','diagnostics']);
+  assert.deepEqual([...SETTINGS_TABS],['general','privacy','appearance','recording','shortcuts','transcription','summary','memory','ms365','calendars','confluence','webhook','assistant','diagnostics','about']);
 });

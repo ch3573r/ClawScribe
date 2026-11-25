@@ -15,6 +15,8 @@ function setup(invoke) {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@tauri-apps/api/core': { invoke }, 'lucide-react': { X: 'X' },
     '@/components/ui/button': { Button: 'Button' }, '@/components/ui/input': { Input: 'Input' },
+    '@/components/ui/textarea': { Textarea: 'Textarea' },
+    '@/components/ui/tooltip': names('Tooltip TooltipContent TooltipTrigger'),
     '@/components/ui/settings-layout': names('Meta SettingsCard SettingsFooter SettingsRow'),
     '@/components/ui/switch': { Switch: 'Switch' },
   });
@@ -119,6 +121,27 @@ test('native vocabulary read errors remain actionable in settings', async t => {
   await flush();
   assert.deepEqual(writes.map(words => Array.from(words)), [['Müller']]);
   assert.ok(ui.find('Button', n => n.props['aria-label'] === 'Remove Müller'));
+});
+
+test('bulk paste keeps the first spelling and commits unique terms in one save', async t => {
+  const writes = [];
+  const ui = setup((command, args) => {
+    if (command === 'get_custom_vocabulary') return Promise.resolve(['Müller']);
+    writes.push(Array.from(args.words));
+    return Promise.resolve(args.words);
+  });
+  t.after(() => ui.hooks.unmount());
+  ui.render();
+  await flush();
+  ui.find('Button', n => text(n) === 'Paste a list').props.onClick();
+  ui.find('Textarea').props.onChange({ target: { value: 'MÜLLER, Atlas\r\n atlas\n日本橋,  Beta' } });
+  ui.find('form', n => n.props.id === 'custom-vocabulary-paste').props.onSubmit({ preventDefault() {} });
+  await flush();
+  assert.deepEqual(writes, [['Müller', 'Atlas', '日本橋', 'Beta']]);
+  assert.match(text(ui.render()), /3 terms added/);
+  ui.find('Button', n => n.props['aria-label'] === 'Prioritize Beta for Whisper').props.onClick();
+  await flush();
+  assert.deepEqual(writes.at(-1), ['Beta', 'Müller', 'Atlas', '日本橋']);
 });
 
 test('an empty recovered vocabulary can be replaced from settings', async t => {

@@ -179,7 +179,9 @@ source's language unchanged. See [live transcript behavior](docs/meeting-quality
 **Settings → Transcription → Custom vocabulary** stores up to 500 names or
 terms (64 characters each) and corrects similar spellings in new recordings,
 imports, and retranscription. A recording uses the list loaded when its live
-transcription starts. Matching supports Unicode names and terms, including
+transcription starts for spelling correction. Paste several terms at once by
+separating them with commas or line breaks. Move important terms to the front
+to prioritize them in Whisper. Matching supports Unicode names and terms, including
 German umlauts and ß. Short terms require an exact match apart from case and
 punctuation; single-letter keys such as C# and C++ are left unchanged.
 
@@ -197,12 +199,19 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 
 ## Meeting Notes And Exports
 
+Press **Ctrl+K** to open the command palette. Search meetings, transcript
+passages, and open actions, or jump to a Settings page. The palette also
+offers recording controls, audio import, and Meeting memory.
+
 Search saved meeting titles, current transcripts, summaries, personal notes
 and bookmarks from the sidebar or **Meetings → Archive**. Search for several
 terms in any order or put an exact phrase in quotes. Results are grouped by
 meeting and highlight matches in the saved text. Open a source in its meeting
 or play a timed transcript result. The Archive keeps the current search,
-project, date and attention filters when you return.
+project, date and attention filters when you return. Choose **Hybrid** to add
+semantic transcript matches when the local semantic index is ready. Use
+**Select meetings** for bulk tagging, local export, deletion, or to scope a
+Meeting memory conversation.
 
 Read and correct the transcript while the speaker timeline loads. The text
 stays available when the recording is missing. Use **Find and replace** to

@@ -659,16 +659,44 @@ pub(crate) fn classify_folder_request(
 #[tauri::command]
 pub async fn set_recording_preferences<R: Runtime>(
     app: AppHandle<R>,
-    mut preferences: RecordingPreferences,
+    preferences: RecordingPreferences,
     preserve_device_preferences: Option<bool>,
 ) -> Result<(), String> {
     let _write = PREFERENCE_WRITE.lock().await;
+    let current = load_recording_preferences(&app).await.ok();
+    persist_recording_preferences(
+        app,
+        preferences,
+        current,
+        preserve_device_preferences.unwrap_or(false),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn set_recording_save_folder<R: Runtime>(
+    app: AppHandle<R>,
+    folder: PathBuf,
+) -> Result<(), String> {
+    let _write = PREFERENCE_WRITE.lock().await;
+    let current = load_recording_preferences(&app)
+        .await
+        .map_err(|_| "Could not load recording preferences")?;
+    let mut preferences = current.clone();
+    preferences.save_folder = folder;
+    persist_recording_preferences(app, preferences, Some(current), true).await
+}
+
+async fn persist_recording_preferences<R: Runtime>(
+    app: AppHandle<R>,
+    mut preferences: RecordingPreferences,
+    current: Option<RecordingPreferences>,
+    preserve_devices: bool,
+) -> Result<(), String> {
     // The folder is not taken from the text the webview sends. Unchanged, it
     // stays; the default folder is always allowed; anything else must be a
     // folder the user chose in the core's folder picker (`select_recording_folder`)
     // in this session, and becomes a trusted root.
-    let current = load_recording_preferences(&app).await.ok();
-    let preserve_devices = preserve_device_preferences.unwrap_or(false);
     if preserve_devices {
         let current = current
             .as_ref()

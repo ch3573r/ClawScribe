@@ -24,6 +24,12 @@ count each shared recording folder once. Unavailable recording folders and
 skipped files are reported. Unattached interrupted recordings, user-created
 backup ZIPs, and model downloads are outside these totals.
 
+**Settings → General → Storage** also opens **Library storage** and **Backup and
+restore**. Use **Show storage by meeting** for a paginated breakdown of audio,
+recovery files, and other files in each meeting's recording folder. Folders
+that exceed the file scan limit show a partial measurement. **Choose folder**
+changes where future recordings are saved.
+
 To free space, choose **Review saved audio** in a meeting row's menu, or use
 **Select meetings → Review selected audio**. Selection applies to the currently
 visible rows, up to 100 at a time. The confirmation lists the eligible copies
@@ -39,6 +45,13 @@ copy. The meeting, its measured duration and source, transcript, summaries, note
 recording-folder support files, and existing backups remain available.
 Imported originals outside the meeting folder remain where they were.
 ClawScribe only removes audio after confirmation.
+
+Use **Bulk actions** to add project tags to the selection, export a Markdown
+or Word file per meeting, start a Meeting memory conversation with those
+meetings selected, or delete them. Export asks where to save each file. Cancel
+a save dialog to stop the batch. Deleting requires confirmation and keeps
+recording files on disk unless you also select their removal. Opening a scoped
+Meeting memory conversation leaves the question and sending under your control.
 
 ## Open actions and saved live answers
 
@@ -146,6 +159,9 @@ result or time limit display a notice. Browse or narrow the query and filters to
 a smaller set. Literal search uses a local substring index to find candidates,
 then checks the saved text and its exact offset. Short searches and terms without
 an indexable substring use a bounded scan. No download or answer provider is required.
+Select **Hybrid** beside Archive search to also find passages with similar
+meaning. This option requires a ready local semantic index in **Settings →
+Meeting memory**.
 
 **Ask about these results** opens a fresh Meeting memory conversation scoped
 to the displayed matching meetings, including when results are limited.
