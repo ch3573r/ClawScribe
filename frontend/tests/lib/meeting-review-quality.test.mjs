@@ -58,7 +58,7 @@ function summaryGeneration(provider, invoke, toast = { info() {}, error: message
   const { useSummaryGeneration } = loadTsModule('src/hooks/meeting-details/useSummaryGeneration.ts', {
     react: hooks.react,
     '@tauri-apps/api/core': { invoke },
-    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ startSummaryPolling() {} }) },
+    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ attachSummaryPolling: () => () => {}, stopSummaryPolling() {} }) },
     '@/lib/analytics': { __esModule: true, default: { async trackSummaryGenerationStarted() {} } },
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
     '@/lib/meetingDrafts': { confirmSummaryRegeneration: async () => true },
@@ -93,6 +93,21 @@ test('concurrent Ollama summary actions share one provider check and one start',
     assert.deepEqual(commands.map(([command]) => command), ['get_ollama_models', 'api_generate_meeting_summary']);
     assert.equal(render().isCheckingModels, false);
   } finally { unmount(); }
+});
+
+test('leaving before the Ollama check returns prevents summary generation', async () => {
+  const models = deferred();
+  const commands = [];
+  const { render, unmount } = summaryGeneration('ollama', async command => {
+    commands.push(command);
+    return models.promise;
+  });
+  const pending = render().handleGenerateSummary();
+  await flush();
+  unmount();
+  models.resolve([{ name: 'synthetic-model' }]);
+  await pending;
+  assert.deepEqual(commands, ['get_ollama_models']);
 });
 
 test('Built-in AI preflight reports a missing download and opens settings without generating', async () => {

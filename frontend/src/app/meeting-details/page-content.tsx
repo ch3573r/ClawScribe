@@ -294,8 +294,9 @@ export default function PageContent({
 
       toast.success('Model settings saved successfully');
     } catch (error) {
-      console.error('Failed to save model config:', error);
+      console.error('Failed to save model config');
       toast.error('Failed to save model settings');
+      throw error;
     }
   };
 

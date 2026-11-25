@@ -75,6 +75,7 @@ export function SummaryConfigProvider({ children }: { children: ReactNode }) {
   // Load Ollama models only when Ollama is selected. Other providers should not
   // probe a local Ollama service during startup.
   useEffect(() => {
+    let active = true;
     const loadModels = async () => {
       if (modelConfig.provider !== 'ollama') {
         setModels([]);
@@ -85,14 +86,17 @@ export function SummaryConfigProvider({ children }: { children: ReactNode }) {
       try {
         const endpoint = modelConfig.ollamaEndpoint || null;
         const modelList = await invoke<OllamaModel[]>('get_ollama_models', { endpoint });
+        if (!active) return;
         setModels(modelList);
         setError('');
       } catch (err) {
+        if (!active) return;
         setError(err instanceof Error ? err.message : 'Failed to load Ollama models');
         console.error('Error loading models:', err);
       }
     };
-    loadModels();
+    void loadModels();
+    return () => { active = false; };
   }, [modelConfig.provider, modelConfig.ollamaEndpoint]);
 
   // Load model configuration on mount

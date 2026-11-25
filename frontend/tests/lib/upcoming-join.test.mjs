@@ -184,6 +184,8 @@ test('Upcoming opens plain Join independently and binds a double click to one un
   assert.equal(button('Cancel recording request'), undefined);
   pending = { id: 'second', subject: 'Planning', opening: false, promptKey: 'second-observation' };
   changed(); await flush();
+  const status = nodes(hooks.render(UpcomingMeetings)).find(node => node.props.role === 'status');
+  assert.match(status.props.children, /Is this the call for “Planning”\?/);
   button('Record this call').props.onClick();
   assert.deepEqual(confirmed, ['second-observation']);
 });

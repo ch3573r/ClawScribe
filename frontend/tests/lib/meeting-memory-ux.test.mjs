@@ -23,7 +23,7 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
     './ArchiveAudioRemoval':{ArchiveAudioRemoval:'audio-removal'},
     '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
     '@/components/MeetingDetails/AttachReferenceButton':{AttachReferenceButton:'attach'},
-    '@/components/ui/button':{Button:'button'},'@/components/ui/dropdown-menu':{},'@/components/ui/select':{},'@/components/ui/input-group':{InputGroupInput:'title-filter'},
+    '@/components/ui/button':{Button:'button'},'@/components/ui/dropdown-menu':{},'@/components/ui/select':{Select:'select'},'@/components/ui/input-group':{InputGroupInput:'title-filter'},
     '@/components/ui/textarea':{Textarea:'textarea'},'@/components/ui/scroll-area':{ScrollArea:'scroll-area'},'@/components/ui/tooltip':{},
     '@/components/ui/dialog':{},
     '@/components/ui/input':{Input:'input'},'@/components/ui/checkbox':{Checkbox:'checkbox'},'@/components/ui/switch':{Switch:'switch'},
@@ -117,9 +117,13 @@ test('archive empty state starts recording and imports through the shared flows'
 });
 
 test('archive filtering keeps controls and clear filters restores all rows',()=>{
-  const app=surface('src/app/meetings/page.tsx','default');
+  const metadata = new Map([['a', { id: 'a', series: { id: 'weekly', label: 'Weekly review' } }]]);
+  const app=surface('src/app/meetings/page.tsx','default', {}, undefined, { metadata });
   let tree=app.render();assert.match(text(tree),/2 meetings/);
   assert.deepEqual([...nodes(tree).find(node=>node.type==='archive-rows').props.meetings.map(meeting=>meeting.id)],['b','a']);
+  nodes(tree).find(node=>node.type==='select'&&node.props.value==='all').props.onValueChange('weekly');
+  tree=app.render();
+  assert.equal(nodes(tree).find(node=>node.type==='archive-rows').props.meetings.length,1);
   nodes(tree).find(node=>node.type==='title-filter').props.onChange({target:{value:'missing'}});
   tree=app.render();assert.match(text(tree),/No meetings match/);
   nodes(tree).find(node=>node.type==='button'&&text(node)==='Clear filters').props.onClick();

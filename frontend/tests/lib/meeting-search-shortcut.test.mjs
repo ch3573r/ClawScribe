@@ -14,7 +14,7 @@ test('Ctrl+K opens the command palette only outside editors and other dialogs', 
   };
   globalThis.document = { querySelector: () => dialog };
   const { AppShortcuts } = loadTsModule('src/components/AppShortcuts.tsx', {
-    react: { useEffect: effect => effect() }, 'next/navigation': { useRouter: () => ({}) },
+    react: { useEffect: effect => effect() }, 'next/navigation': { useRouter: () => ({ push: path => calls.push(path) }) },
   });
   AppShortcuts();
   const shortcut = (target, overrides = {}) => keydown({
@@ -30,5 +30,11 @@ test('Ctrl+K opens the command palette only outside editors and other dialogs', 
   shortcut(null, { repeat: true });
   dialog = true;
   shortcut(null);
+  shortcut(null, { key: ',' });
+  shortcut(null, { key: 'g' });
   assert.deepEqual(calls, ['prevented', 'shortcut:open-command-palette']);
+  dialog = false;
+  shortcut(null, { key: ',' });
+  shortcut(null, { key: 'g' });
+  assert.deepEqual(calls.slice(2), ['prevented', '/settings', 'prevented', 'shortcut:generate-summary']);
 });

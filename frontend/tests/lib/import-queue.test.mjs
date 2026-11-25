@@ -44,6 +44,7 @@ test('speaker detection for an imported meeting is explicitly submitted once wit
     } },
   });
   const queue = () => hooks.render(() => ImportDialogProvider({})).props.children.props.value;
+  assert.equal(queue(), queue(), 'an unchanged queue retains its context identity');
   const action = queue().detectSpeakers;
   const run = action('imported');
   assert.equal(await action('imported'), false);

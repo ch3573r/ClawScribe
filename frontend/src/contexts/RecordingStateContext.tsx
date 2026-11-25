@@ -8,6 +8,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { drainEta } from '@/lib/recording-progress';
+import { isNothingToStop } from '@/lib/stop-error';
 export type RecordingMode = 'live' | 'audio_only';
 
 /**
@@ -52,6 +53,7 @@ interface RecordingStateContextType extends RecordingState {
   setRecordingMode: (mode: RecordingMode) => Promise<boolean>;
   // NEW: Setters for status management
   setStatus: (status: RecordingStatus, message?: string) => void;
+  reconcileNothingToStop: (result: unknown) => Promise<boolean>;
   subscribeLifecycle: (callback: (status: RecordingStatus) => void) => () => void;
   subscribeStopped: (callback: RecordingStoppedListener) => () => void;
   retryVerification: () => void;
@@ -170,6 +172,20 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     lifecycleListeners.current.forEach(callback => callback(status));
     setState(prev => ({ ...prev, status, statusMessage: message, verificationError: null }));
   }, []);
+
+  const reconcileNothingToStop = useCallback(async (result: unknown) => {
+    if (result !== false && !isNothingToStop(result)) return false;
+    const revision = lifecycleRevision.current;
+    const backend = await recordingService.getRecordingState().catch(() => null);
+    if (!backend || (backend.is_recording && result !== false)) return false;
+    // A newer lifecycle event owns the UI if it arrived during the state read.
+    if (!backend.is_recording && revision === lifecycleRevision.current && lifecycleStatus.current === RecordingStatus.STOPPING) {
+      setStatus(RecordingStatus.IDLE);
+      setElapsedSeconds(0);
+      setState(prev => ({ ...prev, sessionId: null, isRecording: false, isPaused: false, isActive: false }));
+    }
+    return true;
+  }, [setStatus]);
 
   useEffect(() => {
     let active = true;
@@ -418,12 +434,12 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     recordingMode, modeError, isSavingMode, setRecordingMode,
     floatingControlsVisible,
     ...state,
-    setStatus, subscribeLifecycle, subscribeStopped, retryVerification,
+    setStatus, reconcileNothingToStop, subscribeLifecycle, subscribeStopped, retryVerification,
     isStarting: state.status === RecordingStatus.STARTING,
     isStopping: state.status === RecordingStatus.STOPPING,
     isProcessing: state.status === RecordingStatus.PROCESSING_TRANSCRIPTS,
     isSaving: state.status === RecordingStatus.SAVING,
-  }), [state, setStatus, subscribeLifecycle, subscribeStopped, retryVerification, recordingMode, modeError, isSavingMode, setRecordingMode, floatingControlsVisible]);
+  }), [state, setStatus, reconcileNothingToStop, subscribeLifecycle, subscribeStopped, retryVerification, recordingMode, modeError, isSavingMode, setRecordingMode, floatingControlsVisible]);
 
   return (
     <RecordingStateContext.Provider value={contextValue}>

@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
 
+test('Confluence preserves asterisks in link URLs and formats link labels', () => {
+  const { markdownToConfluenceHtml } = loadTsModule('src/lib/confluenceDraft.ts');
+  const html = markdownToConfluenceHtml('[**Guide**](https://example.com/a*b*c?first=1&second=2)');
+  assert.ok(html.includes('<a href="https://example.com/a*b*c?first=1&amp;second=2"><strong>Guide</strong></a>'));
+});
+
 test('Confluence tables escape cells, preserve inline formatting and normalize row lengths', () => {
   const { markdownToConfluenceHtml } = loadTsModule('src/lib/confluenceDraft.ts');
   const table = '| **Name** | Note |\n| :--- | ---: |\n| Ana | <script>alert(1)</script> |\n| Ben | left \\| right | extra |\n| Sam |';

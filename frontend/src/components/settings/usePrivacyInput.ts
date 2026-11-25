@@ -116,7 +116,7 @@ export function usePrivacyInput(): PrivacyInput {
     recording: recording.status === "ready" && recordingMode === "audio_only"
       ? { status: "ready", value: { ...recording.value, saveAudio: true } }
       : recording,
-    transcription: cloud.loaded ? transcription : { status: "loading" },
+    transcription: cloud.failed ? { status: "error" } : cloud.loaded ? transcription : { status: "loading" },
     cloudTranscription: cloud.enabled,
     summary,
     autoSummary: isAutoSummary,

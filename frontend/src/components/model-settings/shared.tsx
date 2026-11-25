@@ -128,7 +128,7 @@ export function ProviderTextField({ onDraft, ...props }: ComponentProps<typeof C
 }) {
   if (!onDraft) return <CommitInputRow {...props} />;
   const { id, title, description, placeholder, type, inputMode, maxLength, value, disabled, validate } = props;
-  const error = value.trim() ? validate?.(value) : null;
+  const error = validate?.(value);
   return <SettingsRow title={title} htmlFor={id} description={withError(description, error)}>
     <Input id={id} value={value} type={type} inputMode={inputMode} placeholder={placeholder} maxLength={maxLength}
       disabled={disabled} onChange={event => onDraft(event.target.value)} aria-invalid={error ? true : undefined}

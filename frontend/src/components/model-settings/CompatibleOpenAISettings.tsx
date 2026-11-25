@@ -43,6 +43,18 @@ function readFields(config: CustomOpenAIConfig | null) {
 type Fields = ReturnType<typeof readFields>;
 type CustomCheck = { state: 'idle' | 'checking' | 'ok' | 'error'; message?: string };
 
+function fieldProblem(fields: Fields): string | null {
+  const connectionProblem = requiredProblem('The API base URL')(fields.endpoint) ?? urlProblem(fields.endpoint.trim())
+    ?? requiredProblem('The model name')(fields.model) ?? keyProblem(fields.apiKey);
+  if (connectionProblem) return connectionProblem;
+  for (const field of ADVANCED_FIELDS) {
+    if (!('validate' in field)) continue;
+    const problem = field.validate(fields[field.name]);
+    if (problem) return problem;
+  }
+  return null;
+}
+
 function requestConfig(fields: Fields) {
   return {
     endpoint: fields.endpoint.trim(),
@@ -50,10 +62,10 @@ function requestConfig(fields: Fields) {
     apiKey: newKeyPayload(fields.apiKey),
     allowUnencrypted: fields.allowUnencrypted,
     contextWindow: Number(fields.contextWindow) || 8192,
-    maxTokens: fields.maxTokens ? Number(fields.maxTokens) : null,
-    temperature: fields.temperature ? Number(fields.temperature) : null,
-    topP: fields.topP ? Number(fields.topP) : null,
-    timeoutSeconds: fields.timeoutSeconds ? Number(fields.timeoutSeconds) : null,
+    maxTokens: fields.maxTokens.trim() ? Number(fields.maxTokens) : null,
+    temperature: fields.temperature.trim() ? Number(fields.temperature) : null,
+    topP: fields.topP.trim() ? Number(fields.topP) : null,
+    timeoutSeconds: fields.timeoutSeconds.trim() ? Number(fields.timeoutSeconds) : null,
     organization: fields.organization.trim() || null,
     project: fields.project.trim() || null,
   };
@@ -125,11 +137,12 @@ export function useCompatibleOpenAISettings({ active, modelConfig, updateConfig,
       setKeyStatus(status);
       setKeyRevision(revision => revision + 1);
     } catch { setKeyStatus(NO_SECRET); }
-    await refreshKeyStatus?.('custom-openai');
     return status;
   };
 
   const persist = async (values: Fields) => {
+    const problem = fieldProblem(values);
+    if (problem) throw new SaveError(problem);
     const payload = requestConfig(values);
     try { await invoke('api_save_custom_openai_config', payload); }
     catch (error) {
@@ -157,6 +170,7 @@ export function useCompatibleOpenAISettings({ active, modelConfig, updateConfig,
       const config: ModelConfig = { ...modelConfig, ...saved, provider: 'custom-openai', apiKey: null };
       const held = await saveConfig(config, 'Could not save the model settings');
       updateConfig(config);
+      if (newKeyPayload(next.apiKey)) await refreshKeyStatus?.('custom-openai');
       rememberModel('custom-openai', config.model);
       setConnection({ state: 'idle' });
       return held;
@@ -166,16 +180,16 @@ export function useCompatibleOpenAISettings({ active, modelConfig, updateConfig,
     }
   };
 
-  const blocked = !ready || !endpoint || !fields.model.trim() || keyRequired || !!keyProblem(fields.apiKey);
+  const problem = fieldProblem(fields) ?? (keyRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null);
+  const blocked = !ready || !!problem;
   const save = async () => {
-    if (blocked) throw new SaveError('Complete the connection settings before saving');
+    if (blocked) throw new SaveError(problem ?? 'Complete the connection settings before saving');
     return persist(fields);
   };
 
   const checkProblem = () => {
-    if (!ready || !endpoint || !fields.model.trim()) return 'Enter an API base URL and a model name first';
-    if (keyRequired) return KEY_REQUIRED_FOR_NEW_ADDRESS;
-    if (keyProblem(fields.apiKey)) return keyProblem(fields.apiKey);
+    if (!ready) return 'Could not load the compatible provider settings';
+    if (problem) return problem;
     if (needsHttpOptIn(endpoint, credentialed) && !fields.allowUnencrypted) {
       return 'Allow unencrypted HTTP for this endpoint or use HTTPS';
     }
@@ -225,7 +239,7 @@ export function useCompatibleOpenAISettings({ active, modelConfig, updateConfig,
     : { tone: 'neutral', text: 'Not checked yet' };
 
   return {
-    load, ready, retry, fields, draft, commit, save, blocked, keyStatus, keyRequired, credentialed, removeKey, destinationProblem,
+    load, ready, retry, fields, draft, commit, save, blocked, problem, keyStatus, keyRequired, credentialed, removeKey, destinationProblem,
     catalog, connection, processing, saving, checking: connection.state === 'checking' || catalog.status === 'loading',
     status, runTest, feedback,
   };
@@ -274,15 +288,14 @@ export function CompatibleOpenAISettings({ state, autosave, removeWarning }: {
       required={keyRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null} onRemove={removeKey} removeWarning={removeWarning} />
       : <SettingsRow title="API key" htmlFor="custom-api-key">
         <SecretKeyControl id="custom-api-key" status={keyStatus} draft={fields.apiKey} disabled={disabled}
-          onDraftChange={value => draft({ apiKey: value })} required={keyRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null}
-          onRemove={removeKey} removeWarning={removeWarning} />
+          onDraftChange={value => draft({ apiKey: value })} required={keyRequired ? KEY_REQUIRED_FOR_NEW_ADDRESS : null} />
       </SettingsRow>}
     {connection.state === 'error' && <NoteRow tone="error">{connection.message}</NoteRow>}
   </>;
 }
 
 const ADVANCED_FIELDS = [
-  { name: 'timeoutSeconds', id: 'timeout', title: 'Timeout', description: 'Seconds, 5 or more', placeholder: '300', validate: numberProblem(5, 86400, true, true), inputMode: 'numeric' },
+  { name: 'timeoutSeconds', id: 'timeout', title: 'Timeout', description: 'Optional, in seconds', placeholder: '300', validate: numberProblem(5, 86400, true), inputMode: 'numeric' },
   { name: 'organization', id: 'organization', title: 'OpenAI organization', description: 'Optional', placeholder: 'org_...' },
   { name: 'project', id: 'project', title: 'OpenAI project', description: 'Optional', placeholder: 'proj_...' },
   { name: 'contextWindow', id: 'context-window', title: 'Context window', description: 'Tokens. Longer meetings are summarized in sections to fit', validate: numberProblem(4096, 2000000, true, true), inputMode: 'numeric' },
@@ -297,19 +310,18 @@ export function CompatibleOpenAIAdvanced({ state, autosave }: { state: Compatibl
     {ADVANCED_FIELDS.map(({ name, id, ...props }) => <ProviderTextField key={id} id={`custom-${id}`} {...props}
       disabled={saving || checking} value={fields[name]} onCommit={value => commit({ [name]: value })}
       onDraft={autosave ? undefined : value => draft({ [name]: value })} />)}
-    <SettingsRow title="Tests and credentials" description="Test a full meeting summary, or remove the saved key, organization and project">
+    <SettingsRow title={autosave ? 'Tests and credentials' : 'Tests'} description={autosave
+      ? 'Test a full meeting summary, or remove the saved key, organization and project' : 'Test a full meeting summary'}>
       <Button type="button" variant="outline" disabled={saving || checking || state.blocked} onClick={() => void runTest(true)}>
         {processing && <RefreshCw aria-hidden="true" className="animate-spin motion-reduce:animate-none" />}Test meeting processing
       </Button>
-      <Button type="button" variant="outline" disabled={saving || checking || feedback.busy} onClick={() => {
+      {autosave && <Button type="button" variant="outline" disabled={saving || checking || feedback.busy} onClick={() => {
         void feedback.run('custom-clear', async () => {
           try { await removeKey(); } catch { throw new SaveError('Could not remove the saved key'); }
           const cleared = { apiKey: '', organization: '', project: '' };
-          if (autosave) return commit(cleared);
-          draft(cleared);
-          toast.success('The saved key was removed. Choose Save to clear the organization and project');
+          return commit(cleared);
         });
-      }}>Clear credentials</Button>
+      }}>Clear credentials</Button>}
     </SettingsRow>
     {feedback.states['custom-clear']?.status === 'error' &&
       <NoteRow tone="error">{feedback.states['custom-clear'].message}</NoteRow>}

@@ -42,11 +42,14 @@ const DEFAULT_CONFIG: CodexConfig = {
   codexHomeMode: 'clawscribe-isolated', useExistingUserCodexSession: false, codexHomePath: null, codexBinaryPath: null,
   model: DEFAULT_MODEL, timeoutSeconds: 600,
 };
+const timeoutProblem = numberProblem(30, 86400, true, true);
 
 type CodexAction = 'codex_login_browser' | 'codex_login_device' | 'codex_logout' | 'codex_test_app_server' | 'codex_test_processing';
 
 export function useCodexSettings(active: boolean, preview: boolean, selected: string, updateConfig: UpdateConfig) {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
+  const [timeoutDraft, setTimeoutDraft] = useState<string | null>(null);
+  const timeout = timeoutDraft ?? String(config.timeoutSeconds);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [models, setModels] = useState<CodexModel[]>([]);
   const [modelError, setModelError] = useState(false);
@@ -71,9 +74,11 @@ export function useCodexSettings(active: boolean, preview: boolean, selected: st
 
   const save = useCallback(async (next: CodexConfig) => {
     if (!canStart.current) throw new SaveError('Select Use Codex before saving Codex settings');
+    const problem = timeoutProblem(String(next.timeoutSeconds));
+    if (problem) throw new SaveError(problem);
     const normalized: CodexConfig = {
       ...next, codexHomeMode: 'clawscribe-isolated', useExistingUserCodexSession: false, codexBinaryPath: null,
-      model: next.model.trim() || DEFAULT_MODEL, timeoutSeconds: next.timeoutSeconds || DEFAULT_CONFIG.timeoutSeconds,
+      model: next.model.trim() || DEFAULT_MODEL,
     };
     try {
       const saved = await invoke<{ processing?: { codex?: CodexConfig } }>('codex_save_config', { config: normalized });
@@ -102,6 +107,7 @@ export function useCodexSettings(active: boolean, preview: boolean, selected: st
   }, [loadModels, save]);
 
   useEffect(() => {
+    setTimeoutDraft(null);
     if (!active) return;
     let current = true;
     void (async () => {
@@ -182,7 +188,8 @@ export function useCodexSettings(active: boolean, preview: boolean, selected: st
     : { tone: 'warning', text: 'Runtime missing or damaged' };
 
   return {
-    config, setConfig, runtime, busy, loading, modelError, options, result, signedIn, status, save, run, check: () => check(config),
+    config, timeout, setTimeoutDraft, timeoutError: timeoutProblem(timeout),
+    runtime, busy, loading, modelError, options, result, signedIn, status, save, run, check: () => check(config),
     findRuntime, repair, chooseHome,
   };
 }
@@ -208,7 +215,7 @@ export function CodexSettings({ state, model, chooseModel, preview, disabled, fe
 }
 
 export function CodexAdvanced({ state, autosave, preview }: { state: CodexState; autosave: boolean; preview: boolean }) {
-  const { config, setConfig, runtime, busy, result, run, save } = state;
+  const { config, timeout, setTimeoutDraft, runtime, busy, result, run, save } = state;
   return <>
     <SettingsRow title="Isolated Codex profile" description={<>
       A new or empty folder on a local drive for ClawScribe’s Codex profile
@@ -217,9 +224,9 @@ export function CodexAdvanced({ state, autosave, preview }: { state: CodexState;
       <Button type="button" variant="outline" onClick={() => void state.chooseHome()} disabled={busy || preview}>Choose folder</Button>
     </SettingsRow>
     <ProviderTextField id="codex-timeout" title="Timeout" description="Seconds, 30 or more" inputMode="numeric"
-      value={String(config.timeoutSeconds)} disabled={preview || busy} validate={numberProblem(30, 86400, true, true)}
+      value={timeout} disabled={preview || busy} validate={timeoutProblem}
       onCommit={async value => { await save({ ...config, timeoutSeconds: Number(value) }); }}
-      onDraft={autosave ? undefined : value => setConfig({ ...config, timeoutSeconds: Number(value) || DEFAULT_CONFIG.timeoutSeconds })} />
+      onDraft={autosave ? undefined : setTimeoutDraft} />
     <SettingsRow title="Runtime" description={runtime?.found ? runtime.version || 'Bundled Codex app-server found' : (runtime?.message || 'Bundled Codex runtime has not been checked')}>
       <Button type="button" variant="outline" onClick={() => void state.findRuntime()} disabled={busy || preview}>Check bundled runtime</Button>
       <Button type="button" variant="outline" onClick={() => void state.repair()} disabled={busy}><Wrench aria-hidden="true" />Install or repair</Button>

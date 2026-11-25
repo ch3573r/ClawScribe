@@ -102,8 +102,7 @@ export function HostedProviderSettings({ provider, model, options, loading, choo
         : <SecretKeyRow key={provider} id="summary-api-key" title="API key" status={keyStatus} onCommit={commit} onRemove={remove} removeWarning={removeWarning}
           description={provider === 'openai' ? 'For ChatGPT sign-in, choose Codex app-server' : 'Protected by your operating system'} />
     ) : <SettingsRow title="API key" htmlFor="legacy-api-key">
-      <SecretKeyControl key={provider} id="legacy-api-key" status={keyStatus} draft={draft} onDraftChange={setDraft}
-        onRemove={remove} removeWarning={removeWarning} />
+      <SecretKeyControl key={provider} id="legacy-api-key" status={keyStatus} draft={draft} onDraftChange={setDraft} />
     </SettingsRow>}
     <ModelPicker value={model} options={options} onChoose={chooseModel} loading={loading} feedback={feedback} disabled={disabled} />
   </>;

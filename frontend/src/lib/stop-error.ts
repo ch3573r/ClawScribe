@@ -20,7 +20,7 @@ function rawText(error: unknown): string {
 
 /** Nothing was running, so there is nothing to report. */
 export function isNothingToStop(error: unknown): boolean {
-  return rawText(error).includes('No recording in progress');
+  return rawText(error).trim() === 'No recording in progress';
 }
 
 /** The text to show for a failed Stop. */

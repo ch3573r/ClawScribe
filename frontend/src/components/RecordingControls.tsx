@@ -19,7 +19,8 @@ import { LiveRecordingNotes } from '@/components/LiveRecordingNotes';
 import { Button } from '@/components/ui/button';
 import { RecordingLevelMeter } from '@/components/RecordingLevelMeter';
 import { describeStartError } from '@/lib/start-error';
-import { STOP_FAILED_TITLE, isNothingToStop, stopFailureMessage } from '@/lib/stop-error';
+import { STOP_FAILED_TITLE, stopFailureMessage } from '@/lib/stop-error';
+import { recordingService } from '@/services/recordingService';
 import { toast } from 'sonner';
 import { useActiveGlobalShortcuts } from '@/hooks/useActiveGlobalShortcuts';
 import { shortcutHint } from '@/lib/shortcuts';
@@ -120,25 +121,22 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       const dataDir = await appDataDir();
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const savePath = `${dataDir}/recording-${timestamp}.wav`;
-      await invoke('stop_recording', {
-        args: {
-          save_path: savePath,
-        },
-      });
-      setIsProcessing(false);
+      const stopped = await recordingService.stopRecording(savePath);
+      if (stopped === false) {
+        if (await recordingState.reconcileNothingToStop(stopped)) return;
+        throw new Error('Could not verify whether the recording stopped. Try again.');
+      }
       // Track successful transcription
       Analytics.trackTranscriptionSuccess();
     } catch (error) {
-      console.error("Failed to stop recording:");
-      if (isNothingToStop(error)) {
-        return;
-      }
+      if (await recordingState.reconcileNothingToStop(error)) return;
+      console.error('Failed to stop recording');
       // The recording is still running: say why, skip the save flow, and go
       // back to the recording state at once instead of waiting for a poll.
       toast.error(STOP_FAILED_TITLE, { description: stopFailureMessage(error) });
-      setIsProcessing(false);
       recordingState.setStatus(RecordingStatus.RECORDING);
     } finally {
+      setIsProcessing(false);
       setIsStopping(false);
     }
   }, [recordingState]);

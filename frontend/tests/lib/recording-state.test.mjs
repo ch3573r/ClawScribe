@@ -60,6 +60,37 @@ function createView(delaySubscriptions = false, snapshotOverride) {
 
 const recording = { session_id: 'session-current', recording_generation: '2', is_recording: true, is_paused: false, is_active: true, recording_duration: 10, active_duration: 10, recording_mode: 'live' };
 
+test('a duplicate stop reconciles an idle backend without swallowing an actual failure', async t => {
+  const view = createView();
+  t.after(() => view.unmount());
+  view.render();
+  await flush();
+  view.requests[0].resolve(recording);
+  await flush();
+  view.render().setStatus('stopping');
+  const reconcile = view.render().reconcileNothingToStop;
+  assert.equal(await reconcile('Could not save: No recording in progress'), false);
+  assert.equal(view.requests.length, 1);
+  const duplicate = reconcile('No recording in progress');
+  view.requests[1].resolve({ is_recording: false });
+  assert.equal(await duplicate, true);
+  const state = view.render();
+  assert.equal(state.status, 'idle');
+  assert.equal(state.isRecording, false);
+  assert.equal(state.sessionId, null);
+  state.setStatus('stopping');
+  const nativeNoOp = reconcile(false);
+  view.requests[2].resolve({ is_recording: false });
+  assert.equal(await nativeNoOp, true);
+  assert.equal(view.render().status, 'idle');
+  state.setStatus('stopping');
+  const staleProbe = reconcile(false);
+  state.setStatus('starting');
+  view.requests[3].resolve({ is_recording: false });
+  assert.equal(await staleProbe, true);
+  assert.equal(view.render().status, 'starting');
+});
+
 test('elapsed ticks update the clock without changing the lifecycle context value', async () => {
   const view = createView();
   view.render();

@@ -46,6 +46,18 @@ test('leaving modal state unregisters a model download listener that resolves la
   assert.ok(app.unregistered.includes(event));
 });
 
+for (const event of ['chunk-drop-warning', 'transcription-error']) {
+  test(`leaving Home unregisters a late ${event} listener`, async t => {
+    const app = withListeners(t, event);
+    const { useModalState } = loadTsModule('src/hooks/useModalState', app.mocks);
+    app.render(useModalState);
+    app.reset();
+    app.waiting.resolve();
+    await flush();
+    assert.ok(app.unregistered.includes(event));
+  });
+}
+
 test('recording controls label Stop and release both registrations when unmounted during setup', async t => {
   const app = withListeners(t, 'transcription-error');
   const { RecordingControls } = loadTsModule('src/components/RecordingControls', {
@@ -65,6 +77,39 @@ test('recording controls label Stop and release both registrations when unmounte
   assert.deepEqual(app.unregistered, ['transcript-error', 'transcription-error']);
   assert.ok(nodes(tree).some(node => node.type === 'Button' && node.props['aria-label'] === 'Stop recording'));
   assert.ok(nodes(tree).some(node => node.props.children === 'Stop recording (Ctrl+F9)'));
+});
+
+test('Home can start another recording after a concurrent Stop finishes first', async t => {
+  const pending = deferred();
+  const app = withListeners(t);
+  const errors = [];
+  const state = { isRecording: true, status: 'recording', reconcileNothingToStop: async result => {
+    if (result !== false) return false;
+    state.isRecording = false;
+    state.status = 'idle';
+    return true;
+  } };
+  const { RecordingControls } = loadTsModule('src/components/RecordingControls', {
+    ...app.mocks,
+    '@tauri-apps/api/path': { appDataDir: async () => 'synthetic-data' },
+    '@/lib/analytics': { trackButtonClick: noop },
+    '@/services/recordingService': { recordingService: { stopRecording: () => pending.promise } },
+    sonner: { toast: { error: (...args) => errors.push(args) } },
+    '@/contexts/RecordingStateContext': { RecordingStatus: {}, useRecordingState: () => state },
+    '@/components/MeetingDetails/MeetingBookmarks': components('LiveBookmarkButton'),
+    '@/components/LiveRecordingNotes': components('LiveRecordingNotes'),
+    '@/components/RecordingLevelMeter': components('RecordingLevelMeter'),
+    '@/hooks/useActiveGlobalShortcuts': { useActiveGlobalShortcuts: () => ({}) },
+  });
+  const render = () => nodes(app.render(() => RecordingControls({ isRecording: state.isRecording })));
+  const button = label => render().find(node => node.type === 'Button' && node.props['aria-label'] === label);
+  button('Stop recording').props.onClick();
+  await flush();
+  assert.equal(button('Stop recording'), undefined);
+  pending.resolve(false);
+  await flush();
+  assert.ok(button('Start recording'));
+  assert.deepEqual(errors, []);
 });
 
 test('Ollama removes listeners registered before and after disposal without setting up another one', async t => {
@@ -94,6 +139,7 @@ test('finishing onboarding switches to the app through React state', () => {
   assert.match(handler, /setShowOnboarding\(false\)/);
   assert.doesNotMatch(handler, /reload\(/);
   assert.match(layout, /<ConfigProvider key=\{setupCompletedHere/);
+  assert.match(layout, /\{showOnboarding === false && <AppShortcuts \/>\}/);
 });
 
 test('Home keeps recovery open for the next interrupted recording and clears its session flag after the last', async t => {

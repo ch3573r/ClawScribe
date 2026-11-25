@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
-import { createHookHarness, flush } from './hook-harness.mjs';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
 const jsx = (type, props) => ({ type, props });
 const nodes = node => !node || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(nodes)
@@ -165,7 +165,7 @@ test('See everything in Privacy opens the Privacy tab', () => {
 
 // ---- Model settings: immediate-save mode versus the explicit Save button ----------------
 
-function modalHarness({ provider = 'claude', stored = false, onSave, catalogResponse, autosave = true, model = 'claude-sonnet-5', responses = {}, skipInitialFetch = true, downloads } = {}) {
+function modalHarness({ provider = 'claude', stored = false, onSave, catalogResponse, autosave = true, model = 'claude-sonnet-5', responses = {}, skipInitialFetch = true, downloads, claudeCode = {} } = {}) {
   const hooks = createHookHarness();
   const pickerHooks = createHookHarness();
   const calls = [];
@@ -216,7 +216,7 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
     '@/contexts/ConfigContext': { useSummaryConfig: () => context },
     '@/components/ClaudeCodeProviderCard': {
       ClaudeCodeProviderCard: 'claude-code-card', CLAUDE_CODE_MODELS: ['sonnet', 'opus', 'haiku'],
-      useClaudeCodeSettings: () => ({ status: null, programPath: '', setProgramPath() {}, busy: false, check: async () => {}, save: async () => {} }),
+      useClaudeCodeSettings: () => ({ status: null, programPath: '', setProgramPath() {}, busy: false, check: async () => {}, save: async () => {}, ...claudeCode }),
     },
     '@/components/ui/button': { Button: 'button' }, '@/components/ui/input': { Input: 'input' }, '@/components/ui/label': { Label: 'label' },
     '@/components/ui/select': { Select: 'select', SelectContent: 'select-content', SelectGroup: 'select-group', SelectItem: 'select-item', SelectLabel: 'select-label', SelectTrigger: 'select-trigger', SelectValue: 'select-value' },
@@ -284,6 +284,121 @@ test('Summary config hydrates the stored compatible provider fields together', a
   for (const field of ['timeoutSeconds', 'organization', 'project', 'allow_unencrypted', 'destination_problem']) {
     assert.equal(config[field], customOpenAI[field], field);
   }
+});
+
+test('an obsolete Ollama failure cannot replace the response for the current endpoint', async t => {
+  const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
+  const obsolete = deferred();
+  const { SummaryConfigProvider } = loadTsModule('src/contexts/SummaryConfigContext.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx },
+    '@tauri-apps/api/core': { invoke: async (command, args) => command === 'get_ollama_models'
+      ? args.endpoint === 'http://old.example.com' ? obsolete.promise : [{ name: 'current-model' }] : null },
+    '@tauri-apps/api/event': { listen: async () => () => {} },
+  });
+  const render = () => hooks.render(() => SummaryConfigProvider({})).props.value;
+  render().setModelConfig(config => ({ ...config, provider: 'ollama', ollamaEndpoint: 'http://old.example.com' }));
+  render().setModelConfig(config => ({ ...config, ollamaEndpoint: 'http://new.example.com' }));
+  render(); await flush();
+  obsolete.reject(new Error('Old endpoint failed'));
+  await flush();
+  assert.equal(render().models[0].name, 'current-model');
+  assert.equal(render().error, '');
+});
+
+test('the model dialog keeps changes private and preserves a draft when Save fails', async t => {
+  let rejectSave = true;
+  const app = modalHarness({ autosave: false, stored: true, onSave: async () => {
+    if (rejectSave) throw new Error('Synthetic save failure');
+  } });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('groq');
+  find(node => node.props.id === 'legacy-api-key').props.onDraftChange(KEY);
+  assert.equal(app.context.modelConfig.provider, 'claude');
+  const submit = () => find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  submit(); await flush();
+  assert.equal(app.context.modelConfig.provider, 'claude');
+  assert.equal(find(node => node.props.id === 'legacy-api-key').props.draft, KEY);
+  rejectSave = false;
+  submit(); await flush();
+  assert.equal(app.context.modelConfig.provider, 'groq');
+  assert.equal(app.context.modelConfig.apiKey, null);
+});
+
+test('reopening a canceled model dialog shows the shared provider', t => {
+  const app = modalHarness({ autosave: false, stored: true });
+  t.after(() => app.hooks.unmount());
+  const provider = () => nodes(app.render()).find(node => node.type === 'select');
+  provider().props.onValueChange('groq');
+  assert.equal(provider().props.value, 'groq');
+  app.hooks.reset();
+  assert.equal(provider().props.value, 'claude');
+  assert.equal(app.saves.length, 0);
+});
+
+test('provider switching waits for Claude Code readiness and rejects a short hosted key', t => {
+  const claudeCode = { busy: true, status: { state: 'ready', version: 'Fixture' } };
+  const app = modalHarness({ stored: true, claudeCode });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  const preview = provider => find(node => node.type === 'select').props.onValueChange(provider);
+  const use = () => find(node => node.type === 'button' && /^Use /.test(text(node)));
+  preview('claude-code');
+  assert.equal(use().props.disabled, true);
+  claudeCode.busy = false;
+  assert.equal(use().props.disabled, false);
+  preview('groq');
+  find(node => node.props.id === 'summary-api-key').props.onDraftChange('short');
+  assert.equal(use().props.disabled, true);
+});
+
+test('compatible preview validates drafts and only persists settings on switch', async t => {
+  const app = modalHarness({ responses: { api_get_custom_openai_config: customOpenAI } });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  const button = label => find(node => node.type === 'button' && text(node) === label);
+  const field = id => find(node => node.props?.id === id && node.type === 'input');
+  const change = (id, value) => field(id).props.onChange({ target: { value } });
+  const writes = () => app.calls.filter(([command]) => command === 'api_save_custom_openai_config');
+  find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('custom-openai');
+  app.render(); await flush();
+  const use = () => find(node => node.type === 'button' && /^Use /.test(text(node)));
+  change('custom-endpoint', 'invalid');
+  assert.equal(use().props.disabled, true);
+  change('custom-endpoint', customOpenAI.endpoint);
+  change('custom-model', 'new-model');
+  button('Advanced').props.onClick();
+  assert.equal(button('Clear credentials'), undefined);
+  assert.equal(find(node => node.props.id === 'custom-api-key').props.onRemove, undefined);
+  change('custom-temperature', 'abc');
+  assert.equal(use().props.disabled, true);
+  change('custom-temperature', '0.7');
+  assert.equal(use().props.disabled, false);
+  assert.equal(writes().length, 0);
+  assert.equal(app.context.modelConfig.provider, 'claude');
+  use().props.onClick(); await flush();
+  assert.equal(writes().length, 1);
+  assert.equal(writes()[0][1].temperature, 0.7);
+  assert.equal(app.saves[0].model, 'new-model');
+});
+
+test('the Codex dialog keeps an empty timeout visible and blocks timeouts outside the supported range', async t => {
+  const app = modalHarness({ provider: 'codex', autosave: false });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  const button = label => find(node => node.type === 'button' && text(node) === label);
+  app.render(); await flush();
+  button('Advanced').props.onClick();
+  const timeout = () => find(node => node.type === 'input' && node.props.id === 'codex-timeout');
+  for (const value of ['', '1', '86401', 'abc']) {
+    timeout().props.onChange({ target: { value } });
+    assert.equal(timeout().props.value, value);
+    assert.equal(timeout().props['aria-invalid'], true);
+    assert.equal(button('Save').props.disabled, true);
+  }
+  timeout().props.onChange({ target: { value: '30' } });
+  assert.equal(button('Save').props.disabled, false);
 });
 
 test('the compatibility hook exposes all domains and keeps its value stable until one changes', () => {
@@ -576,7 +691,7 @@ test('compatible provider stays read-only after a failed load, then hydrates on 
   const button = label => find(node => node.type === 'button' && text(node) === label);
   find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('custom-openai');
   app.render();
-  const field = () => find(node => node.type === 'commit-input-row' && node.props.id === 'custom-endpoint');
+  const field = () => find(node => node.type === 'input' && node.props.id === 'custom-endpoint');
   assert.equal(field(), undefined);
   reject(new Error('Fixture load failed'));
   await flush();

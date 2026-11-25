@@ -249,7 +249,7 @@ test('the mail client receives only the checked attendee and the edited draft on
   } finally { review.hooks.unmount(); }
 });
 
-function exportPreview(kind, { groups, summary = false } = {}) {
+function exportPreview(kind, { groups, summary = false, overall = 'succeeded' } = {}) {
   const hooks = createHookHarness();
   const calls = [];
   const items = [
@@ -264,7 +264,7 @@ function exportPreview(kind, { groups, summary = false } = {}) {
   };
   const send = async (...args) => {
     calls.push(['export', ...args]);
-    return { overall: 'succeeded', items: [] };
+    return { overall, items: [] };
   };
   const component = loadTsModule(`src/components/MeetingDetails/${filename}.tsx`, {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
@@ -304,7 +304,7 @@ function exportPreview(kind, { groups, summary = false } = {}) {
   })[filename];
   const getMarkdown = async () => 'Summary';
   const props = {
-    open: true, onOpenChange() {}, onReport() {},
+    open: true, onOpenChange(open) { props.open = open; }, onReport() {},
     ...(groups ? { actionGroups: groups } : { meetingId: 'meeting', meetingTitle: 'Meeting', getMarkdown }),
     ...(kind === 'planner' ? { planId: 'plan', defaultBucketId: 'bucket' } : { listId: 'list' }),
   };
@@ -315,6 +315,19 @@ function exportPreview(kind, { groups, summary = false } = {}) {
   const click = label => render().find(node => node.type === 'Button' && node.props.children === label).props.onClick();
   return { hooks, calls, render, click };
 }
+
+test('a failed Planner report keeps the preview and its edited task open', async t => {
+  const review = exportPreview('planner', { overall: 'failed' });
+  t.after(() => review.hooks.unmount());
+  review.render();
+  await flush();
+  review.render().find(node => node.type === 'Input').props.onChange({ target: { value: 'Revised task' } });
+  review.click('Export 2 tasks');
+  await flush();
+  assert.equal(review.calls.at(-1)[0], 'export');
+  assert.equal(review.render().find(node => node.type === 'Dialog').props.open, true);
+  assert.equal(review.render().find(node => node.type === 'Input').props.value, 'Revised task');
+});
 
 for (const kind of ['planner', 'todo']) {
   test(`${kind} requires explicit polish and saves edited titles and notes locally without exporting`, async t => {

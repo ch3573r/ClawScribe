@@ -129,3 +129,16 @@ test('switching recording sessions invalidates an outstanding history read', asy
   assert.equal(view.render().transcripts[0].id, 'current');
   view.hooks.unmount();
 });
+
+test('recording history cannot replace the title supplied by Started', async t => {
+  const previousStorage = globalThis.sessionStorage;
+  globalThis.sessionStorage = { setItem() {} };
+  const view = transcriptView();
+  t.after(() => { view.hooks.unmount(); globalThis.sessionStorage = previousStorage; });
+  view.render();
+  await flush();
+  view.start('live', 'first', '1', { recording_id: 'cache-first', meeting_name: 'Q4 planning' });
+  view.histories[0].resolve([]);
+  await flush();
+  assert.equal(view.render().meetingTitle, 'Q4 planning');
+});

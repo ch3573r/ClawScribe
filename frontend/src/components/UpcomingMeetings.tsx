@@ -52,8 +52,8 @@ export function renderJoinRecordingStatus(recording: ReturnType<typeof useJoinRe
   return <>
     <span role="status" className="min-w-0 flex-1 break-words text-sm text-muted-foreground">
       {pending.opening ? `Opening “${pending.subject}”…`
-        : pending.promptKey ? `Is this Teams call “${pending.subject}”?`
-        : `Waiting for the Teams call for “${pending.subject}”.`}
+        : pending.promptKey ? `Is this the call for “${pending.subject}”?`
+        : `Waiting for the call for “${pending.subject}”.`}
     </span>
     {pending.promptKey && <Button size="sm" disabled={recording.busy} onClick={recording.confirm}>Record this call</Button>}
     <Button size="sm" variant="ghost" onClick={recording.cancel}>Cancel recording request</Button>

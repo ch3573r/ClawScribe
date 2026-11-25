@@ -119,6 +119,7 @@ test('Privacy uses the shared recording mode and the current automatic destinati
   const modelConfig = { provider: 'openai', model: 'fixture' };
   let recordingMode = 'audio_only';
   let approved = false;
+  let cloud = { loaded: true, failed: false, enabled: false };
   const { usePrivacyInput } = loadTsModule('src/components/settings/usePrivacyInput', {
     react: hooks.react,
     '@tauri-apps/api/core': { invoke: async command => ({
@@ -130,7 +131,7 @@ test('Privacy uses the shared recording mode and the current automatic destinati
     '@/contexts/ConfigContext': { useSummaryConfig: () => ({ isAutoSummary: true, modelConfig }) },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ recordingMode }) },
     '@/hooks/useSummaryDestination': { useSummaryDestination: (_active, config) => ({ destination: { provider: config.provider, approved } }) },
-    '@/hooks/useCloudTranscription': { useCloudTranscription: () => ({ loaded: true, enabled: false }) },
+    '@/hooks/useCloudTranscription': { useCloudTranscription: () => cloud },
     '@/hooks/useWebhookSettings': { useWebhookSettings: () => base().webhook },
     '@/lib/exportDestinations': { getExportDestinations: () => ({}) },
     '@/services/knowledgeService': { knowledgeService: { liveSharing: async () => false, modelStatus: async () => ({ enabled: true }) } },
@@ -144,6 +145,8 @@ test('Privacy uses the shared recording mode and the current automatic destinati
   approved = true;
   assert.equal(rowOf(render(), 'recording').detail, 'Audio is not saved');
   assert.equal(factOf(render(), 'text').value, 'Leaves automatically');
+  cloud = { loaded: false, failed: true, enabled: false };
+  assert.equal(hooks.render(usePrivacyInput).transcription.status, 'error');
 });
 
 test('providers are classified from their endpoint where the provider alone cannot tell', () => {

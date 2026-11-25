@@ -225,7 +225,7 @@ export default function MeetingsPage() {
   }, [refetchMeetings]);
 
   const shownCount = visibleMeetings.length;
-  const clearFilters = () => { setQuery(""); setProjectFilter(noProjectFilter); setFrom(""); setTo(""); setAttentionOnly(false); };
+  const clearFilters = () => { setQuery(""); setProjectFilter(noProjectFilter); setFrom(""); setTo(""); setAttentionOnly(false); setSeries(""); };
   const recordingBusy = recording.isRecording || recording.isStarting || recording.isStopping || recording.isProcessing || recording.isSaving;
 
   return (

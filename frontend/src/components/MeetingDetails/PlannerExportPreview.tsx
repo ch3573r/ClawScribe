@@ -323,7 +323,8 @@ export function TaskExportPreview({
       if (processed < selected.length && actionGroups) {
         toast.warning(`${selected.length - processed} selected tasks were not attempted.`);
       }
-      if (processed === selected.length && needsReview.size === 0) onOpenChange(false);
+      if (processed === selected.length && needsReview.size === 0 &&
+          reports.length > 0 && reports.every(report => report.overall === "succeeded")) onOpenChange(false);
     });
   }
 

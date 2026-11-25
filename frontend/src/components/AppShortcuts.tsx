@@ -23,9 +23,8 @@ export function AppShortcuts() {
       const mod = e.ctrlKey || e.metaKey;
       if (!mod || e.altKey || e.defaultPrevented || e.isComposing) return;
       const key = e.key.toLowerCase();
+      if (document.querySelector('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]')) return;
 
-      // Settings is harmless nav and "," isn't an editor key, so allow it
-      // anywhere.
       if (key === ",") {
         e.preventDefault();
         router.push("/settings");
@@ -38,7 +37,7 @@ export function AppShortcuts() {
       if (typing) return;
 
       if (key === "k") {
-        if (e.repeat || e.shiftKey || document.querySelector('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]')) return;
+        if (e.repeat || e.shiftKey) return;
         e.preventDefault();
         window.dispatchEvent(new CustomEvent("shortcut:open-command-palette"));
       } else if (key === "g") {

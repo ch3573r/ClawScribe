@@ -103,66 +103,29 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
 
   // Set up chunk drop warning listener
   useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
-
-    const setupChunkDropListener = async () => {
-      try {
-        console.log('Setting up chunk-drop-warning listener...');
-        unlistenFn = await listen<string>('chunk-drop-warning', (event) => {
-          console.log('Chunk drop warning received:', event.payload);
-          showModal('chunkDropWarning', event.payload);
-        });
-        console.log('Chunk drop warning listener setup complete');
-      } catch (error) {
-        console.error('Failed to setup chunk drop warning listener:', error);
-      }
-    };
-
-    setupChunkDropListener();
-
+    let active = true;
+    const subscription = listen<string>('chunk-drop-warning', ({ payload }) => {
+      if (active) showModal('chunkDropWarning', payload);
+    });
+    void subscription.catch(() => { if (active) console.error('Could not subscribe to chunk drop warnings'); });
     return () => {
-      console.log('Cleaning up chunk drop warning listener...');
-      if (unlistenFn) {
-        unlistenFn();
-      }
+      active = false;
+      void subscription.then(unlisten => unlisten()).catch(() => {});
     };
   }, [showModal]);
 
   // Set up transcription error listener for model loading failures
   useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
-
-    const setupTranscriptionErrorListener = async () => {
-      try {
-        console.log('Setting up transcription-error listener...');
-        unlistenFn = await listen<{ error: string, userMessage: string, actionable: boolean }>('transcription-error', (event) => {
-          console.log('Transcription error received:', event.payload);
-          const { userMessage, actionable } = event.payload;
-
-          if (actionable) {
-            // This is a model-related error that requires user action
-            showModal('modelSelector', userMessage);
-          } else {
-            // Show toast instead of modal for non-actionable errors (consistent with sidebar)
-            toast.error('', {
-              description: userMessage,
-              duration: 5000,
-            });
-          }
-        });
-        console.log('Transcription error listener setup complete');
-      } catch (error) {
-        console.error('Failed to setup transcription error listener:', error);
-      }
-    };
-
-    setupTranscriptionErrorListener();
-
+    let active = true;
+    const subscription = listen<{ userMessage: string, actionable: boolean }>('transcription-error', ({ payload }) => {
+      if (!active) return;
+      if (payload.actionable) showModal('modelSelector', payload.userMessage);
+      else toast.error('', { description: payload.userMessage, duration: 5000 });
+    });
+    void subscription.catch(() => { if (active) console.error('Could not subscribe to transcription errors'); });
     return () => {
-      console.log('Cleaning up transcription error listener...');
-      if (unlistenFn) {
-        unlistenFn();
-      }
+      active = false;
+      void subscription.then(unlisten => unlisten()).catch(() => {});
     };
   }, [showModal]);
 

@@ -39,7 +39,7 @@ export function ImportDialogProvider({ children, onOpen }: ImportDialogProviderP
     onOpen(filePath);
   }, [onOpen]);
   const dialog = useMemo(() => ({ openImportDialog }), [openImportDialog]);
-  const queue = useImportQueue(true);
+  const { items, error, recoveryNotice, loading } = useImportQueue(true);
   const [detecting, setDetecting] = useState<string | null>(null);
   const [detected, setDetected] = useState<ReadonlySet<string>>(() => new Set());
   const detectionPending = useRef(false);
@@ -60,10 +60,12 @@ export function ImportDialogProvider({ children, onOpen }: ImportDialogProviderP
       setDetecting(null);
     }
   }, []);
+  const queue = useMemo(() => ({ items, error, recoveryNotice, loading, detecting, detected, detectSpeakers }),
+    [items, error, recoveryNotice, loading, detecting, detected, detectSpeakers]);
 
   return (
     <ImportDialogContext.Provider value={dialog}>
-      <ImportQueueContext.Provider value={{ ...queue, detecting, detected, detectSpeakers }}>
+      <ImportQueueContext.Provider value={queue}>
         {children}
       </ImportQueueContext.Provider>
     </ImportDialogContext.Provider>

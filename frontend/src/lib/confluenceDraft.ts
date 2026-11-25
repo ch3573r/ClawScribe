@@ -21,13 +21,20 @@ function escapeHtml(value: string): string {
 }
 
 function inlineMarkdownToHtml(value: string): string {
-  return value.split(/(`[^`]+`)/g).map((part, index) => {
-    if (index % 2) return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
-    return escapeHtml(part)
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
-  }).join("");
+  const tokens: string[] = [];
+  const token = (html: string) => `\u0000${tokens.push(html) - 1}\u0000`;
+  const emphasize = (text: string) => text
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  const formatLabel = (label: string) => label.split(/(`[^`]+`)/g)
+    .map((part, index) => index % 2 ? `<code>${part.slice(1, -1)}</code>` : emphasize(part)).join("");
+  const text = escapeHtml(value.replace(/\u0000/g, '\uFFFD')).replace(
+    /`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_match, code: string | undefined, label: string, href: string) => code === undefined
+      ? token(`<a href="${href}">${formatLabel(label)}</a>`)
+      : token(`<code>${code}</code>`),
+  );
+  return emphasize(text).replace(/\u0000(\d+)\u0000/g, (_match, index) => tokens[Number(index)]);
 }
 
 function splitTableRow(line: string): string[] {

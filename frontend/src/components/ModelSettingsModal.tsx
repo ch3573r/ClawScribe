@@ -50,25 +50,30 @@ export function ModelSettingsModal({
   const shared = context?.modelConfig ?? propsModelConfig;
   const setShared = context?.setModelConfig ?? propsSetModelConfig;
   const refreshKeyStatus = context?.refreshProviderKeyStatus;
-  const [preview, setPreviewState] = useState<ModelConfig | null>(null);
-  const previewRef = useRef<ModelConfig | null>(null);
-  const setPreview = useCallback((next: ModelConfig | null) => {
-    previewRef.current = next;
-    setPreviewState(next);
+  const [draft, setDraftState] = useState<ModelConfig | null>(null);
+  const draftRef = useRef<ModelConfig | null>(null);
+  const sharedRef = useRef(shared);
+  sharedRef.current = shared;
+  const setDraft = useCallback((next: ModelConfig | null) => {
+    draftRef.current = next;
+    setDraftState(next);
   }, []);
   const updateConfig: UpdateConfig = useCallback((next) => {
-    const previous = previewRef.current;
-    if (typeof next === 'function') {
-      if (previous) setPreview(next(previous));
-      else setShared(next);
-    } else if (previous?.provider === next.provider) {
-      setPreview(next);
+    const pending = draftRef.current;
+    if (!autosave || pending) {
+      const previous = pending ?? sharedRef.current;
+      const updated = typeof next === 'function' ? next(previous) : next;
+      if (updated !== previous && updated.provider === previous.provider) setDraft(updated);
+    } else if (typeof next === 'function') {
+      setShared(next);
     } else {
       setShared(current => current.provider === next.provider ? next : current);
     }
-  }, [setPreview, setShared]);
+  }, [autosave, setDraft, setShared]);
 
-  const config = preview ?? shared;
+  const preview = autosave ? draft : null;
+  const config = draft ?? shared;
+  const compatibleAutosave = autosave && !preview;
   const { provider, model } = config;
   const [advancedProvider, setAdvancedProvider] = useState<ModelConfig['provider'] | null>(null);
   const feedback = useSaveFeedback();
@@ -79,7 +84,7 @@ export function ModelSettingsModal({
     if (preview && !switching) return 'held';
     try { await onSave(next); }
     catch { throw new SaveError(failure); }
-    if (switching) setPreview(null);
+    if (switching) setDraft(null);
   };
 
   const hosted = useHostedProviderSettings(provider, keyStatus);
@@ -99,10 +104,13 @@ export function ModelSettingsModal({
     if (skipInitialFetch) return;
     let current = true;
     void invoke<ModelConfig | null>('api_get_model_config').then(data => {
-      if (current && data?.provider) setShared({ ...withoutSecrets(data), apiKeyStatus: readSecretStatus(data.apiKeyStatus) });
+      if (!current || !data?.provider) return;
+      const loaded = { ...withoutSecrets(data), apiKeyStatus: readSecretStatus(data.apiKeyStatus) };
+      if (autosave) setShared(loaded);
+      else if (!draftRef.current) setDraft(loaded);
     }).catch(() => { console.error('Could not load model settings'); });
     return () => { current = false; };
-  }, [skipInitialFetch, setShared]);
+  }, [autosave, skipInitialFetch, setDraft, setShared]);
 
   useEffect(() => {
     if (provider === 'custom-openai' || (provider === 'builtin-ai' && !model) || currentOptions.includes(model)) return;
@@ -114,8 +122,7 @@ export function ModelSettingsModal({
     const selected = value as ModelConfig['provider'];
     if (selected === provider) return;
     setAdvancedProvider(null);
-    if (autosave && selected === shared.provider) { setPreview(null); return; }
-    if (!autosave && model) rememberModel(provider, model);
+    if (autosave && selected === shared.provider) { setDraft(null); return; }
     const saved = readModelMap()[selected];
     const models = options[selected] ?? [];
     const next = {
@@ -123,17 +130,23 @@ export function ModelSettingsModal({
       model: models.includes(saved) ? saved : models[0] ?? '',
       apiKeyStatus: context?.providerKeyStatus?.[selected as KeyProvider],
     };
-    if (autosave) setPreview(next);
-    else setShared(next);
+    setDraft(next);
     if (selected === 'builtin-ai') void builtin.load();
   };
 
   const missing = () => {
     if (provider === 'custom-openai' && !compatible.ready) return compatible.load === 'error'
       ? 'Could not load the compatible provider settings' : 'Checking compatible provider settings…';
-    if (isHostedProvider(provider) && !hosted.usable) return 'Enter an API key first';
+    if (provider === 'custom-openai' && compatible.problem) return compatible.problem;
+    if (provider === 'custom-openai' && compatible.connection.state === 'checking') return 'Checking the connection…';
+    if (isHostedProvider(provider)) {
+      const problem = keyProblem(hosted.key);
+      if (problem) return problem;
+      if (!hosted.usable) return 'Enter an API key first';
+    }
     if (provider !== 'codex' && provider !== 'claude-code' && provider !== 'custom-openai' && !model.trim()) return 'Choose a model first';
-    if (provider === 'claude-code' && claudeCode.status && claudeCode.status.state !== 'ready') return 'Claude Code is not ready yet';
+    if (provider === 'claude-code' && (claudeCode.busy || !claudeCode.status)) return 'Checking Claude Code…';
+    if (provider === 'claude-code' && claudeCode.status?.state !== 'ready') return 'Claude Code is not ready yet';
     return null;
   };
 
@@ -143,10 +156,10 @@ export function ModelSettingsModal({
     void feedback.run('provider', async () => {
       try {
         let next: ModelConfig = { ...config, apiKey: isHostedProvider(provider) ? newKeyPayload(hosted.key) : null, customOpenAIApiKey: null };
-        if (!switching && provider === 'custom-openai') next = { ...next, ...await compatible.save() };
+        if (provider === 'custom-openai') next = { ...next, ...await compatible.save() };
         if (!switching && provider === 'ollama') next.ollamaEndpoint = ollama.endpoint.trim() || null;
         if (!switching && provider === 'codex') {
-          const saved = await codex.save({ ...codex.config, model: codex.config.model || model });
+          const saved = await codex.save({ ...codex.config, model, timeoutSeconds: Number(codex.timeout) });
           next.model = saved.model;
         }
         if (!switching && provider === 'claude-code') {
@@ -156,7 +169,7 @@ export function ModelSettingsModal({
         await saveConfig(next, switching ? 'Could not save the provider' : 'Could not save model settings', switching);
         if (switching && shared.model) rememberModel(shared.provider, shared.model);
         if (next.model) rememberModel(provider, next.model);
-        setShared({ ...next, apiKey: null });
+        setShared({ ...next, apiKey: null, customOpenAIApiKey: null });
         if (isHostedProvider(provider)) hosted.markKeyChanged();
         await refreshKeyStatus?.(provider);
       } finally { savePending.current = false; }
@@ -165,8 +178,7 @@ export function ModelSettingsModal({
 
   const chooseModel = (selected: string) => {
     if (selected === model) return;
-    if (!autosave) {
-      if (provider === 'codex') codex.setConfig({ ...codex.config, model: selected });
+    if (!autosave || preview) {
       updateConfig({ ...config, model: selected });
       return;
     }
@@ -220,8 +232,8 @@ export function ModelSettingsModal({
     status: ollama.status, check: ollama.check, checking: ollama.loading,
   };
   else if (provider === 'custom-openai') view = {
-    content: <CompatibleOpenAISettings state={compatible} autosave={autosave} removeWarning={removeWarning} />,
-    advanced: compatible.ready && <CompatibleOpenAIAdvanced state={compatible} autosave={autosave} />,
+    content: <CompatibleOpenAISettings state={compatible} autosave={compatibleAutosave} removeWarning={removeWarning} />,
+    advanced: compatible.ready && <CompatibleOpenAIAdvanced state={compatible} autosave={compatibleAutosave} />,
     status: compatible.ready ? compatible.status : undefined, check: compatible.ready ? () => compatible.runTest() : undefined,
     checkLabel: compatible.connection.state === 'idle' && compatible.catalog.status === 'idle' ? 'Check connection' : 'Check again',
     checking: compatible.checking, checkDisabled: compatible.saving,
@@ -244,7 +256,7 @@ export function ModelSettingsModal({
     || (provider === 'custom-openai' && (compatible.blocked || compatible.connection.state === 'checking'))
     || (provider === 'ollama' && ollama.needsCheck && ollama.endpoint.trim() !== (config.ollamaEndpoint ?? '').trim())
     || (provider === 'claude-code' && claudeCode.busy)
-    || (provider === 'codex' && codex.busy);
+    || (provider === 'codex' && (codex.busy || !!codex.timeoutError));
 
   const content = <>
     {!autosave && <h3 className="px-5 pb-2 text-lg font-semibold">Model settings</h3>}

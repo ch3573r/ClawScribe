@@ -42,6 +42,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   const seenSequences = useRef(new Set<number>());
   const initializingCache = useRef<{ id: string; task: Promise<void> } | null>(null);
   const producer = useRef<{ sessionId: string; cacheId: string | null } | null>(null);
+  const startedTitleSession = useRef<string | null>(null);
   const retiredSession = useRef<string | null>(null);
   const listenerReady = useRef<Promise<void> | null>(null);
   const finalFlushRef = useRef<(() => void) | null>(null);
@@ -145,7 +146,9 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
           (lastGeneration && compareGeneration(identity.generation, lastGeneration) <= 0)) return;
       lastGeneration = identity.generation;
       setCurrentMeetingId(cacheId);
-      const title = metadata.meeting_name || 'New Meeting';
+      const startedTitle = metadata.meeting_name?.trim();
+      startedTitleSession.current = startedTitle ? identity.id : null;
+      const title = startedTitle || 'New Meeting';
       setMeetingTitle(title);
       const task = indexedDBService.saveMeetingMetadata({
         meetingId: cacheId, title, folderPath: metadata.folder_path ?? undefined,
@@ -191,8 +194,9 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
           speaker: segment.speaker || undefined,
         })));
 
+        if (startedTitleSession.current === sessionId) return;
         const meetingName = await recordingService.getRecordingMeetingName();
-        if (isCurrent() && meetingName) setMeetingTitle(meetingName);
+        if (isCurrent() && startedTitleSession.current !== sessionId && meetingName) setMeetingTitle(meetingName);
       } catch {
         if (isCurrent()) console.error('Could not synchronize transcript history.');
       }

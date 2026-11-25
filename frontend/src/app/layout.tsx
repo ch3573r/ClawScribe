@@ -363,7 +363,7 @@ export default function RootLayout({
     <html lang="en" className={fontVariables}>
       <body className="font-sans antialiased">
         <ThemeInitializer />
-        <AppShortcuts />
+        {showOnboarding === false && <AppShortcuts />}
         <AppTitlebar />
           <RecordingStateProvider>
             <TranscriptProvider>

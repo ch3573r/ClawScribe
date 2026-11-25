@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createHookHarness, flush } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
 
-function setup(t, { recording = { is_recording: true, is_paused: false, is_active: true }, uiStatus = 'RECORDING', uiRecording = true, stopRecordingFails = null } = {}) {
+function setup(t, { recording = { is_recording: true, is_paused: false, is_active: true }, uiStatus = 'RECORDING', uiRecording = true, stopRecordingFails = null, stopped = true, reconcileNothingToStop = async () => false } = {}) {
   const previousWindow = globalThis.window;
   const hooks = createHookHarness();
   const events = new Map();
@@ -30,7 +30,7 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
     } },
     '@/hooks/useRecordingStop': { useRecordingStop: () => {} },
     '@/contexts/RecordingStateContext': {
-      useRecordingState: () => ({ isRecording: uiRecording, isStopping: false, status: uiStatus, setStatus: value => calls.push(['setStatus', value]) }),
+      useRecordingState: () => ({ isRecording: uiRecording, isStopping: false, status: uiStatus, setStatus: value => calls.push(['setStatus', value]), reconcileNothingToStop }),
       RecordingStatus: Object.fromEntries(['IDLE', 'STARTING', 'RECORDING', 'STOPPING'].map(value => [value, value])),
     },
     '@/services/recordingService': { recordingService: {
@@ -38,6 +38,7 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
       stopRecording: async path => {
         calls.push(['stop_recording', path.startsWith('synthetic-data/recording-')]);
         if (stopRecordingFails !== null) throw stopRecordingFails;
+        return stopped;
       },
     } },
     '@/lib/recording-capture': loadTsModule('src/lib/recording-capture.ts'),
@@ -48,6 +49,15 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
   render();
   return { render, events, windowListeners, toasts, calls, subscriptions, dismissed };
 }
+
+test('a native no-op from sidebar Stop is reconciled without a failure toast', async t => {
+  const reconciled = [];
+  const app = setup(t, { stopped: false, reconcileNothingToStop: async result => { reconciled.push(result); return true; } });
+  app.windowListeners.get('stop-recording-from-sidebar')();
+  await flush();
+  assert.deepEqual(reconciled, [false]);
+  assert.deepEqual(app.toasts, []);
+});
 
 test('Stop from the sidebar saves the recording without needing the Home page', async t => {
   const app = setup(t);
