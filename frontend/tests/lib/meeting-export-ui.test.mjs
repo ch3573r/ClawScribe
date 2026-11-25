@@ -13,12 +13,13 @@ function nodes(root) {
 const text = root => typeof root === 'string' ? root : Array.isArray(root) ? root.map(text).join('') : text(root?.props?.children ?? '');
 const find = (root, type, label) => nodes(root).find(node => node.type === type && (label === undefined || text(node) === label));
 
-async function setup({ connected = true, rest = false, restFailure = false, restOutcome = 'published', save = async () => 'export.docx', readFailure = false, resumes = [], history = [], candidates = [], webhook = null } = {}) {
+async function setup({ connected = true, planner = true, todo = true, rest = false, restFailure = false, restOutcome = 'published', save = async () => 'export.docx', readFailure = false, resumes = [], history = [], candidates = [], webhook = null } = {}) {
   const harness = createHookHarness();
   const calls = [], errors = [], notices = [];
   const draft = loadTsModule('src/lib/confluenceDraft.ts');
   const { MeetingExportButtons } = loadTsModule('src/components/MeetingDetails/MeetingExportButtons.tsx', {
     react: harness.react,
+    'next/navigation': { useRouter: () => ({ push: path => calls.push({ kind: 'navigate', path }) }) },
     'react/jsx-runtime': { jsx, jsxs: jsx },
     'lucide-react': names('FileText Loader2 Upload ChevronDown Webhook'),
     '@/hooks/useWebhookSettings': { useWebhookSettings: () => ({ status: 'ready', value: webhook }) },
@@ -49,7 +50,7 @@ async function setup({ connected = true, rest = false, restFailure = false, rest
     sonner: { toast: { success: (...args) => notices.push(['success', ...args]), info: (...args) => notices.push(['info', ...args]), warning: (...args) => notices.push(['warning', ...args]), error: (...args) => errors.push(args) } },
     '@/lib/exportDestinations': {
       getExportDestinations: () => ({ notebookId: 'notebook', notebookName: 'Saved notebook', confluenceMode: rest ? 'rest' : 'draft', confluenceBaseUrl: 'https://confluence.example.com', confluenceSpaceKey: 'TEST' }),
-      setExportDestinations() {}, hasPlannerDestination: () => true, hasToDoDestination: () => true,
+      setExportDestinations() {}, hasPlannerDestination: () => planner, hasToDoDestination: () => todo,
     },
     '@/services/microsoftExportService': {
       isOneNoteLargeLibraryError: () => false,
@@ -197,7 +198,7 @@ test('One Confluence page can be opened after a repeat or an edited draft withou
 
 test('Planner reports selected tasks that had no attempt when the batch stopped', async () => {
   const view = await setup();
-  find(view.render(), 'DropdownMenuItem', 'Planner action items').props.onClick();
+  find(view.render(), 'DropdownMenuItem', 'Planner action items').props.onSelect();
   find(view.render(), 'PlannerExportPreview').props.onReport({
     overall: 'partial',
     items: [
@@ -210,6 +211,20 @@ test('Planner reports selected tasks that had no attempt when the batch stopped'
   assert.equal(kind, 'warning');
   assert.equal(title, 'Planner export finished with issues');
   assert.match(detail.description, /2 tasks were not attempted/);
+});
+
+test('unconfigured task destinations navigate to Microsoft 365 settings', async () => {
+  const view = await setup({ planner: false, todo: false });
+  const tree = view.render();
+  for (const label of ['Set up Planner', 'Set up Microsoft To Do']) {
+    find(tree, 'DropdownMenuItem', label).props.onSelect();
+  }
+  assert.deepEqual(view.calls, [
+    { kind: 'navigate', path: '/settings?tab=ms365' },
+    { kind: 'navigate', path: '/settings?tab=ms365' },
+  ]);
+  assert.equal(find(view.render(), 'PlannerExportPreview').props.open, false);
+  assert.equal(find(view.render(), 'ToDoExportPreview').props.open, false);
 });
 
 test('failed transcript reads prevent remote exports and leave the dialog open for retry', async () => {

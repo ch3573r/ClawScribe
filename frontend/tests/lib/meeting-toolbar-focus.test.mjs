@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
-import { createHookHarness } from './hook-harness.mjs';
+import { createHookHarness, flush } from './hook-harness.mjs';
 
 const jsx = (type, props) => ({ type, props });
 const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.props?.children)] : [];
@@ -42,6 +42,7 @@ const primitives = {
   '@/lib/utils': { isOllamaNotInstalledError: () => false },
   '@/lib/analytics': { default: { trackButtonClick() {} } },
   '@tauri-apps/api/core': { invoke: async () => {} },
+  '@tauri-apps/api/event': { listen: async () => () => {} },
   sonner: { toast: {} },
 };
 
@@ -80,9 +81,19 @@ test('Rename retains title focus after overflow closes and normal dismissal stil
   headerHooks.unmount(); titleHooks.unmount();
 });
 
-test('the saved header preserves attendance and returns focus after reviewing meeting actions', () => {
+test('the saved header shows counted actions, flags suggestions, and restores pill focus', async () => {
   const hooks = createHookHarness();
-  const { MeetingHeader } = loadTsModule('src/components/MeetingDetails/MeetingHeader.tsx', { ...primitives, react: hooks.react });
+  const listeners = new Map();
+  let status = { openCount: 2, hasSuggestions: true };
+  const { MeetingHeader } = loadTsModule('src/components/MeetingDetails/MeetingHeader.tsx', {
+    ...primitives,
+    react: hooks.react,
+    '@tauri-apps/api/event': { listen: async (name, callback) => {
+      listeners.set(name, callback);
+      return () => listeners.delete(name);
+    } },
+    '@/services/meetingActionsService': { getMeetingActionsOverview: async () => status },
+  });
   const attendance = jsx('attendance', {});
   const props = {
     meeting: { id: 'example', created_at: '2026-01-01T12:00:00Z' }, title: 'Review', segmentCount: 2, disabled: false,
@@ -92,18 +103,31 @@ test('the saved header preserves attendance and returns focus after reviewing me
   const render = () => nodes(hooks.render(() => MeetingHeader(props)));
   let tree = render();
   assert.ok(tree.includes(attendance));
-  let focused = false;
-  tree.find(node => node.type === 'action-icon').props.ref.current = { focus() { focused = true; } };
-  tree.find(node => node.type === 'menu-item' && text(node) === 'Meeting actions').props.onSelect();
+  await flush();
   tree = render();
-  closeMenu(tree.find(node => node.type === 'menu-content'), () => assert.fail('menu steals dialog focus'));
+  const pill = tree.find(node => node.props?.['aria-haspopup'] === 'dialog');
+  assert.equal(text(pill), 'Actions (2)');
+  assert.equal(pill.props['aria-label'], 'Actions (2), new summary suggestions');
+  let focused = false;
+  pill.props.ref.current = { focus() { focused = true; } };
+  pill.props.onClick();
+  tree = render();
   const dialog = tree.find(node => node.type === 'reviewed-actions');
   assert.equal(dialog.props.open, true);
   dialog.props.onReturnFocus();
   assert.equal(focused, true);
+  status = { openCount: 3, hasSuggestions: false };
+  listeners.get('reviewed-actions-changed')({ payload: 'another-meeting' });
+  await flush();
+  assert.equal(render().find(node => node.props?.['aria-haspopup'] === 'dialog').props['aria-label'], 'Actions (2), new summary suggestions');
+  listeners.get('reviewed-actions-changed')({ payload: 'example' });
+  await flush();
+  assert.equal(render().find(node => node.props?.['aria-haspopup'] === 'dialog').props['aria-label'], 'Actions (3)');
   tree.find(node => typeof node.props.onReviewEmail === 'function').props.onReviewEmail();
   assert.equal(render().find(node => node.type === 'follow-up-email').props.initialDraft, props.emailDraft);
   hooks.unmount();
+  await flush();
+  assert.equal(listeners.size, 0);
 });
 
 const summaryProps = {

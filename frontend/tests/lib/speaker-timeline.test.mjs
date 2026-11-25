@@ -301,10 +301,12 @@ test('meeting header metadata displays the total segment count', () => {
     './ReviewedActions': { ReviewedActions: 'reviewed-actions' },
     './SeriesPreparation': { SavedSeriesReview: 'series-review' },
     './FollowUpEmail': { FollowUpEmail: 'follow-up-email' },
+    '@/components/ui/button': { Button: 'button' },
     '@/components/ui/dropdown-menu': {},
+    '@tauri-apps/api/event': { listen: async () => () => {} },
   });
   try {
-    const tree = hooks.render(() => MeetingHeader({ meeting: { id: 'synthetic-meeting', created_at: '2026-01-01T12:00:00Z' }, title: 'Synthetic meeting', segmentCount: 250 }));
+    const tree = hooks.render(() => MeetingHeader({ meeting: { id: 'synthetic-meeting', created_at: '2026-01-01T12:00:00Z' }, title: 'Synthetic meeting', segmentCount: 250, getMarkdown: async () => '' }));
     assert.match(text(tree), /250 segments/);
     assert.doesNotMatch(text(tree), /100\/250/);
   } finally {

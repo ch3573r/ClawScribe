@@ -3,6 +3,7 @@
 import { openExternal } from '@/lib/openExternal';
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { FileText, Loader2, Upload, ChevronDown, Webhook } from "lucide-react";
 import {
@@ -57,7 +58,7 @@ import {
 } from "@/lib/exportDestinations";
 import { confluenceExportService } from "@/services/confluenceExportService";
 import { PlannerExportPreview } from "./PlannerExportPreview";
-import type { FollowUpDestination } from "@/lib/meeting-follow-through";
+import { MICROSOFT_EXPORT_SETTINGS, type FollowUpDestination } from "@/lib/meeting-follow-through";
 import { ToDoExportPreview } from "./ToDoExportPreview";
 import { ExportContentOptions } from "./ExportContentOptions";
 import { defaultExportOptions, prepareMeetingExport, readExportSummary } from "@/lib/meetingExportContent";
@@ -164,6 +165,7 @@ export function MeetingExportButtons({
   onReviewEmail,
   seriesDestination,
 }: MeetingExportButtonsProps) {
+  const router = useRouter();
   const webhook = useWebhookSettings();
   const webhookConfig = webhook.status === "ready" ? webhook.value : null;
   const [connected, setConnected] = useState(false);
@@ -450,27 +452,23 @@ export function MeetingExportButtons({
   const selectedNotebookMissing =
     !!oneNoteNotebookId && !oneNoteNotebooks.some((n) => n.id === oneNoteNotebookId);
 
-  // Planner export opens a review dialog (pick/edit/route action items) rather
-  // than creating tasks immediately.
+  const plannerReady = connected && hasPlannerDestination();
+  const toDoReady = connected && hasToDoDestination();
   const openPlanner = useCallback(() => {
-    if (!hasPlannerDestination(getExportDestinations())) {
-      toast.info("Pick a Planner plan and default bucket first", {
-        description: "Settings → Microsoft 365 → Planner.",
-      });
+    if (!connected || !hasPlannerDestination()) {
+      router.push(MICROSOFT_EXPORT_SETTINGS);
       return;
     }
     setPlannerOpen(true);
-  }, []);
+  }, [connected, router]);
 
   const openToDo = useCallback(() => {
-    if (!hasToDoDestination(getExportDestinations())) {
-      toast.info("Pick a Microsoft To Do list first", {
-        description: "Settings → Microsoft 365 → To Do.",
-      });
+    if (!connected || !hasToDoDestination()) {
+      router.push(MICROSOFT_EXPORT_SETTINGS);
       return;
     }
     setToDoOpen(true);
-  }, []);
+  }, [connected, router]);
 
   const exportConfluence = useCallback(async () => {
     if (pending.current) return;
@@ -717,18 +715,16 @@ export function MeetingExportButtons({
               OneDrive DOCX/PDF
             </DropdownMenuItem>
           )}
-          {connected && (
-            <DropdownMenuItem onClick={openPlanner}>
-              <PlannerIcon className="mr-2 h-4 w-4" />
-              Planner action items{seriesDestination === "planner" && " · Series preference"}
-            </DropdownMenuItem>
-          )}
-          {connected && (
-            <DropdownMenuItem onClick={openToDo}>
-              <ToDoIcon className="mr-2 h-4 w-4" />
-              Microsoft To Do tasks{seriesDestination === "todo" && " · Series preference"}
-            </DropdownMenuItem>
-          )}
+          <DropdownMenuItem onSelect={openPlanner}>
+            <PlannerIcon className="mr-2 h-4 w-4" />
+            {plannerReady ? "Planner action items" : "Set up Planner"}
+            {plannerReady && seriesDestination === "planner" && " · Series preference"}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={openToDo}>
+            <ToDoIcon className="mr-2 h-4 w-4" />
+            {toDoReady ? "Microsoft To Do tasks" : "Set up Microsoft To Do"}
+            {toDoReady && seriesDestination === "todo" && " · Series preference"}
+          </DropdownMenuItem>
           <DropdownMenuItem onClick={() => openDocumentExport("confluence")}>
             <ConfluenceIcon className="mr-2 h-4 w-4" />
             Confluence

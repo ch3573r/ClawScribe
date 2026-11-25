@@ -924,6 +924,7 @@ pub struct PlannerTaskPreview {
     pub title: String,
     pub original_title_hash: Option<String>,
     pub details: String,
+    pub saved_details: Option<String>,
     pub owner: Option<String>,
     pub due_date: Option<String>,
 }
@@ -970,7 +971,7 @@ pub async fn preview_planner_tasks(
                 task: action.title,
                 owner: action.owner,
                 due_date: action.due_date,
-                details: None,
+                details: action.details,
                 legacy_action: action.legacy_action,
             })
             .collect();
@@ -997,10 +998,10 @@ pub async fn preview_planner_tasks(
             title: action.task.clone(),
             original_title_hash: super::ledger::is_positional_action_id(&action.local_action_id)
                 .then(|| super::planner::action_hash(action)),
-            details: crate::exports::planner::build_task_details_description(
-                &meeting_export,
-                action,
-            ),
+            details: action.details.clone().unwrap_or_else(|| {
+                crate::exports::planner::build_task_details_description(&meeting_export, action)
+            }),
+            saved_details: action.details.clone(),
             owner: action.owner.clone(),
             due_date: action.due_date.clone(),
         })

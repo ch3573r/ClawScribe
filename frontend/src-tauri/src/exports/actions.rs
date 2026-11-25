@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use tauri::Emitter;
 
 use crate::exports::markdown_notes::{
     action_suggestion, parse_action_suggestions, source_key, ActionSuggestion,
@@ -28,6 +29,8 @@ pub struct ReviewedAction {
     pub done: bool,
     pub source_key: Option<String>,
     pub legacy_action: Option<LegacyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<SummarySource>,
 }
@@ -149,6 +152,13 @@ fn validate(actions: &mut Vec<ReviewedAction>) -> Result<(), String> {
         }) {
             return Err("Use a valid due date or leave it blank.".into());
         }
+        if action
+            .details
+            .as_ref()
+            .is_some_and(|details| details.chars().count() > 4000)
+        {
+            return Err("Action notes must fit within 4,000 characters.".into());
+        }
         if action.source_key.as_ref().is_some_and(|key| {
             key.is_empty() || key.len() > 64 || !key.bytes().all(|b| b.is_ascii_hexdigit())
         }) {
@@ -192,15 +202,11 @@ fn revision(raw: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-#[tauri::command]
-pub(crate) async fn get_reviewed_action_editor(
-    state: tauri::State<'_, AppState>,
-    meeting_id: String,
-) -> Result<ActionReview, String> {
+async fn editor(pool: &SqlitePool, meeting_id: &str) -> Result<ActionReview, String> {
     let raw: Option<String> =
         sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = ?")
             .bind(meeting_id)
-            .fetch_optional(state.db_manager.pool())
+            .fetch_optional(pool)
             .await
             .map_err(|_| "Could not load meeting actions.")?
             .ok_or("Meeting no longer exists.")?;
@@ -208,6 +214,211 @@ pub(crate) async fn get_reviewed_action_editor(
         revision: revision(raw.as_deref()),
         actions: raw.as_deref().map(decode).transpose()?.unwrap_or_default(),
     })
+}
+
+#[tauri::command]
+pub(crate) async fn get_reviewed_action_editor(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<ActionReview, String> {
+    editor(state.db_manager.pool(), &meeting_id).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MeetingActionsOverview {
+    open_count: usize,
+    has_suggestions: bool,
+}
+
+#[tauri::command]
+pub(crate) async fn get_meeting_actions_overview(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    markdown: String,
+) -> Result<MeetingActionsOverview, String> {
+    meeting_actions_overview(state.db_manager.pool(), &meeting_id, &markdown).await
+}
+
+async fn meeting_actions_overview(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    markdown: &str,
+) -> Result<MeetingActionsOverview, String> {
+    let saved = load_saved(pool, meeting_id).await?.unwrap_or_default();
+    let summary = sources::saved_result(pool, meeting_id).await?;
+    let markdown = summary
+        .as_ref()
+        .and_then(|value| value.get("markdown"))
+        .and_then(|value| value.as_str())
+        .unwrap_or(markdown);
+    Ok(MeetingActionsOverview {
+        open_count: saved.actions.iter().filter(|action| !action.done).count(),
+        has_suggestions: !remaining_suggestions(
+            summary_suggestions(markdown, summary.as_ref()),
+            &saved.actions,
+            &saved.dismissed,
+        )
+        .is_empty(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FieldEdit<T> {
+    from: T,
+    to: T,
+}
+
+impl<T: PartialEq> FieldEdit<T> {
+    fn apply(self, field: &mut T) -> Result<(), String> {
+        if *field != self.from && *field != self.to {
+            return Err("This action changed. Reload its latest values before saving.".into());
+        }
+        *field = self.to;
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ReviewedActionEdit {
+    id: String,
+    title: Option<FieldEdit<String>>,
+    details: Option<FieldEdit<Option<String>>>,
+    done: Option<FieldEdit<bool>>,
+    owner: Option<FieldEdit<Option<String>>>,
+    due_date: Option<FieldEdit<Option<String>>>,
+}
+
+async fn edit_actions(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    edits: Vec<ReviewedActionEdit>,
+) -> Result<Vec<ReviewedAction>, String> {
+    let review = editor(pool, meeting_id).await?;
+    let mut actions = review.actions;
+    let mut seen = HashSet::new();
+    if edits.is_empty()
+        || edits.len() > 250
+        || edits.iter().any(|edit| !seen.insert(edit.id.clone()))
+    {
+        return Err("Invalid meeting action edits.".into());
+    }
+    for edit in edits {
+        let action = actions
+            .iter_mut()
+            .find(|action| action.id == edit.id)
+            .ok_or("This action is no longer saved. Reload the meeting actions.")?;
+        if let Some(change) = edit.title {
+            change.apply(&mut action.title)?;
+        }
+        if let Some(change) = edit.details {
+            change.apply(&mut action.details)?;
+        }
+        if let Some(change) = edit.done {
+            change.apply(&mut action.done)?;
+        }
+        if let Some(change) = edit.owner {
+            change.apply(&mut action.owner)?;
+        }
+        if let Some(change) = edit.due_date {
+            change.apply(&mut action.due_date)?;
+        }
+    }
+    validate(&mut actions)?;
+    let edited: Vec<_> = actions
+        .iter()
+        .filter(|action| seen.contains(&action.id))
+        .cloned()
+        .collect();
+    save_checked(
+        pool,
+        meeting_id,
+        actions,
+        Vec::new(),
+        Some(&review.revision),
+    )
+    .await?;
+    Ok(edited)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SummaryActionEdit {
+    local_id: String,
+    original_title_hash: String,
+    title: Option<String>,
+    details: Option<String>,
+}
+
+async fn save_summary_action_review(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    markdown: &str,
+    edits: Vec<SummaryActionEdit>,
+) -> Result<Vec<ReviewedAction>, String> {
+    let fallback = parse_action_suggestions(markdown);
+    if fallback.is_empty() || fallback.len() > 250 || edits.len() > fallback.len() {
+        return Err("Reopen the export preview before saving these actions.".into());
+    }
+    // Keep all visible positional siblings and completed checklist entries.
+    // Structured-only suggestions still go through the meeting's action editor.
+    let summary = sources::saved_result(pool, meeting_id).await?;
+    let suggestions = summary_suggestions(markdown, summary.as_ref());
+    let mut actions = remaining_suggestions(
+        suggestions.into_iter().take(fallback.len()).collect(),
+        &[],
+        &[],
+    );
+    let mut ids = HashSet::new();
+    for edit in edits {
+        if !ids.insert(edit.local_id.clone()) {
+            return Err("Duplicate action edits.".into());
+        }
+        let action = actions
+            .iter_mut()
+            .find(|action| {
+                !action.done
+                    && action.legacy_action.as_ref().is_some_and(|legacy| {
+                        legacy.id == edit.local_id && legacy.title_hash == edit.original_title_hash
+                    })
+            })
+            .ok_or("Reopen the export preview before saving these actions.")?;
+        if let Some(title) = edit.title {
+            action.title = title;
+        }
+        action.details = edit.details;
+    }
+    validate(&mut actions)?;
+    save_checked(pool, meeting_id, actions.clone(), Vec::new(), Some("")).await?;
+    Ok(actions)
+}
+
+#[tauri::command]
+pub(crate) async fn save_previewed_summary_actions(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    markdown: String,
+    edits: Vec<SummaryActionEdit>,
+) -> Result<Vec<ReviewedAction>, String> {
+    let actions =
+        save_summary_action_review(state.db_manager.pool(), &meeting_id, &markdown, edits).await?;
+    let _ = app.emit("reviewed-actions-changed", &meeting_id);
+    Ok(actions)
+}
+
+#[tauri::command]
+pub(crate) async fn edit_reviewed_meeting_actions(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    edits: Vec<ReviewedActionEdit>,
+) -> Result<Vec<ReviewedAction>, String> {
+    let actions = edit_actions(state.db_manager.pool(), &meeting_id, edits).await?;
+    let _ = app.emit("reviewed-actions-changed", &meeting_id);
+    Ok(actions)
 }
 
 pub(super) fn remaining_suggestions(
@@ -253,6 +464,7 @@ pub(super) fn remaining_suggestions(
                 done: suggestion.done,
                 source_key: suggestion.source_key,
                 legacy_action: Some(legacy_action),
+                details: None,
                 source: None,
             }
         })
@@ -409,6 +621,7 @@ async fn resolve_action_source(
 
 #[tauri::command]
 pub async fn save_reviewed_meeting_actions(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     actions: Vec<ReviewedAction>,
@@ -422,7 +635,9 @@ pub async fn save_reviewed_meeting_actions(
         dismissed.unwrap_or_default(),
         expected_revision.as_deref(),
     )
-    .await
+    .await?;
+    let _ = app.emit("reviewed-actions-changed", &meeting_id);
+    Ok(())
 }
 
 fn merge_dismissals(
@@ -563,6 +778,137 @@ async fn save_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn old_saved_actions_load_and_accept_local_edits_without_losing_identity() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let id = uuid::Uuid::from_u128(1).to_string();
+        let raw = json!([
+            {"id": id, "title": "Original title", "done": false, "owner": "Dana",
+                "dueDate": "2026-12-01", "sourceKey": "1234",
+                "legacyAction": {"id": "action-1", "titleHash": "1234567890abcdef"}},
+            {"id": uuid::Uuid::from_u128(2).to_string(),
+                "legacyAction": {"id": "action-2", "titleHash": "1234567890abcdea"}}
+        ]);
+        sqlx::query("UPDATE meetings SET reviewed_actions = ? WHERE id = 'review-test'")
+            .bind(raw.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let original = load_saved(&pool, "review-test").await.unwrap().unwrap();
+        assert_eq!(original.actions[0].details, None);
+        let edit = |value| serde_json::from_value(value).unwrap();
+        let edited = edit_actions(
+            &pool,
+            "review-test",
+            vec![edit(json!({
+                "id": id, "title": {"from": "Original title", "to": "Edited title"},
+                "details": {"from": null, "to": "Reviewed notes"},
+                "done": {"from": false, "to": true}
+            }))],
+        )
+        .await
+        .unwrap();
+        assert!(edited[0].done);
+        assert_eq!(edited[0].details.as_deref(), Some("Reviewed notes"));
+        assert!(edit_actions(
+            &pool,
+            "review-test",
+            vec![edit(json!({
+                "id": id, "title": {"from": "Original title", "to": "Stale title"}
+            }))]
+        )
+        .await
+        .is_err());
+        edit_actions(
+            &pool,
+            "review-test",
+            vec![edit(json!({
+                "id": id, "done": {"from": true, "to": false},
+                "owner": {"from": "Dana", "to": null},
+                "dueDate": {"from": "2026-12-01", "to": "2026-12-02"}
+            }))],
+        )
+        .await
+        .unwrap();
+        let saved = load_saved(&pool, "review-test").await.unwrap().unwrap();
+        let result = &saved.actions[0];
+        assert!(!result.done);
+        assert_eq!(result.title, "Edited title");
+        assert_eq!(result.details.as_deref(), Some("Reviewed notes"));
+        assert_eq!(result.id, id);
+        assert_eq!(result.owner, None);
+        assert_eq!(result.due_date.as_deref(), Some("2026-12-02"));
+        assert_eq!(result.source_key, original.actions[0].source_key);
+        assert_eq!(result.legacy_action, original.actions[0].legacy_action);
+        assert_eq!(saved.dismissed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn action_overview_flags_only_unreviewed_summary_items() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let markdown = "## Action items\n- Send revised quote";
+        let overview = meeting_actions_overview(&pool, "review-test", markdown)
+            .await
+            .unwrap();
+        assert!(overview.has_suggestions);
+        assert_eq!(overview.open_count, 0);
+        let mut actions = remaining_suggestions(summary_suggestions(markdown, None), &[], &[]);
+        save(&pool, "review-test", actions.clone(), vec![])
+            .await
+            .unwrap();
+        let overview = meeting_actions_overview(&pool, "review-test", markdown)
+            .await
+            .unwrap();
+        assert!(!overview.has_suggestions);
+        assert_eq!(overview.open_count, 1);
+        actions[0].done = true;
+        save(&pool, "review-test", actions, vec![]).await.unwrap();
+        let overview = meeting_actions_overview(&pool, "review-test", markdown)
+            .await
+            .unwrap();
+        assert!(!overview.has_suggestions);
+        assert_eq!(overview.open_count, 0);
+    }
+
+    #[tokio::test]
+    async fn saving_a_preview_keeps_positional_siblings_and_completed_rows() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let markdown = "## Action items\n- [x] Send a quote\n- [ ] Send a quote";
+        let fallback = parse_action_suggestions(markdown);
+        assert_eq!(fallback.len(), 2);
+        let edits = || {
+            vec![SummaryActionEdit {
+                local_id: fallback[1].action.local_action_id.clone(),
+                original_title_hash: super::super::planner::action_hash(&fallback[1].action),
+                title: Some("Send a revised quote".into()),
+                details: Some("Confirm the new dates.".into()),
+            }]
+        };
+        let saved = save_summary_action_review(&pool, "review-test", markdown, edits())
+            .await
+            .unwrap();
+        assert_eq!(saved.len(), 2);
+        assert!(saved[0].done);
+        assert!(!saved[1].done);
+        assert_eq!(saved[1].title, "Send a revised quote");
+        assert_eq!(saved[1].details.as_deref(), Some("Confirm the new dates."));
+        for (action, original) in saved.iter().zip(&fallback) {
+            let legacy = action.legacy_action.as_ref().unwrap();
+            assert_eq!(legacy.id, original.action.local_action_id);
+            assert_eq!(
+                legacy.title_hash,
+                super::super::planner::action_hash(&original.action)
+            );
+        }
+        assert!(
+            save_summary_action_review(&pool, "review-test", markdown, edits())
+                .await
+                .is_err()
+        );
+        assert_eq!(load(&pool, "review-test").await.unwrap().unwrap(), saved);
+    }
 
     #[tokio::test]
     async fn stale_action_editor_cannot_reopen_a_completed_action() {
@@ -575,6 +921,7 @@ mod tests {
             done: false,
             source_key: None,
             legacy_action: None,
+            details: None,
             source: None,
         };
         save(&pool, "review-test", vec![action.clone()], vec![])

@@ -1,7 +1,7 @@
 //! Local follow-through over stable, user-reviewed meeting records.
 use super::calendar::{self, CalendarLink};
 use crate::{exports::actions, state::AppState};
-use chrono::NaiveDate;
+use chrono::{Days, Local, NaiveDate};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
@@ -20,6 +20,7 @@ pub(crate) struct OpenAction {
     owner: Option<String>,
     due_date: Option<String>,
     source_key: Option<String>,
+    done: bool,
 }
 
 impl From<actions::ReviewedAction> for OpenAction {
@@ -30,6 +31,7 @@ impl From<actions::ReviewedAction> for OpenAction {
             owner: action.owner,
             due_date: action.due_date,
             source_key: action.source_key,
+            done: action.done,
         }
     }
 }
@@ -45,10 +47,42 @@ fn open_actions(raw: Option<&str>) -> Result<impl Iterator<Item = OpenAction>, S
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ActionFilters {
+    search: Option<String>,
+    #[serde(default)]
+    status: ActionStatus,
     owner: Option<String>,
     due_from: Option<String>,
     due_to: Option<String>,
     series: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ActionStatus {
+    #[default]
+    Open,
+    Overdue,
+    DueSoon,
+    Completed,
+}
+
+impl ActionStatus {
+    fn matches(&self, done: bool, due: Option<NaiveDate>, today: NaiveDate) -> bool {
+        match self {
+            Self::Completed => done,
+            Self::Open => !done,
+            Self::Overdue => !done && due.is_some_and(|due| due < today),
+            Self::DueSoon => {
+                !done
+                    && due.is_some_and(|due| {
+                        due >= today
+                            && today
+                                .checked_add_days(Days::new(7))
+                                .is_none_or(|end| due <= end)
+                    })
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -110,6 +144,7 @@ async fn list(
     pool: &SqlitePool,
     filters: ActionFilters,
     page: u32,
+    today: NaiveDate,
 ) -> Result<OpenActionsPage, String> {
     let from = parse_date(filters.due_from.as_deref())?;
     let to = parse_date(filters.due_to.as_deref())?;
@@ -117,7 +152,16 @@ async fn list(
         return Err("Choose an end date on or after the start date.".into());
     }
     let owner = filters.owner.as_deref().unwrap_or("").trim().to_lowercase();
-    if owner.chars().count() > 160 || filters.series.as_ref().is_some_and(|id| id.len() > 512) {
+    let search = filters
+        .search
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if owner.chars().count() > 160
+        || search.chars().count() > 255
+        || filters.series.as_ref().is_some_and(|id| id.len() > 512)
+    {
         return Err("Invalid action filter.".into());
     }
     let mut meetings = sqlx::query_as::<_, MeetingRow>(
@@ -129,15 +173,13 @@ async fn list(
     let mut series = BTreeMap::new();
     let mut rows = Vec::new();
     let mut skipped_meetings = 0;
-    let mut skip = u64::from(page) * PAGE_SIZE as u64;
     while let Some(meeting) = meetings.try_next().await.map_err(|_| READ_ERROR)? {
-        let Ok(mut actions) =
-            open_actions(meeting.reviewed_actions.as_deref()).map(Iterator::peekable)
+        let Ok(actions) = actions::decode(meeting.reviewed_actions.as_deref().unwrap_or("[]"))
         else {
             skipped_meetings += 1;
             continue;
         };
-        if actions.peek().is_none() {
+        if actions.is_empty() {
             continue;
         }
         let calendar = meeting.calendar();
@@ -156,38 +198,50 @@ async fn list(
                 created_at: meeting.created_at.clone(),
             });
         }
-        if rows.len() > PAGE_SIZE || (filters.series.is_some() && filters.series != series_id) {
+        if filters.series.is_some() && filters.series != series_id {
             continue;
         }
+        let meeting_matches = search.is_empty() || meeting.title.to_lowercase().contains(&search);
         for action in actions {
             let due = parse_date(action.due_date.as_deref())?;
-            if (!owner.is_empty()
-                && !action
-                    .owner
-                    .as_ref()
-                    .is_some_and(|s| s.to_lowercase().contains(&owner)))
+            if !filters.status.matches(action.done, due, today)
+                || (!meeting_matches
+                    && !action.title.to_lowercase().contains(&search)
+                    && !action
+                        .owner
+                        .as_deref()
+                        .is_some_and(|owner| owner.to_lowercase().contains(&search)))
+                || (!owner.is_empty()
+                    && !action
+                        .owner
+                        .as_ref()
+                        .is_some_and(|s| s.to_lowercase().contains(&owner)))
                 || from.is_some_and(|from| due.is_none_or(|due| due < from))
                 || to.is_some_and(|to| due.is_none_or(|due| due > to))
             {
                 continue;
             }
-            if skip > 0 {
-                skip -= 1;
-                continue;
-            }
-            rows.push(ActionRow {
-                meeting_id: meeting.id.clone(),
-                meeting_title: meeting.title.clone(),
-                created_at: meeting.created_at.clone(),
-                action,
-            });
-            if rows.len() > PAGE_SIZE {
-                break;
-            }
+            rows.push((
+                due,
+                ActionRow {
+                    meeting_id: meeting.id.clone(),
+                    meeting_title: meeting.title.clone(),
+                    created_at: meeting.created_at.clone(),
+                    action: action.into(),
+                },
+            ));
         }
     }
-    let has_more = rows.len() > PAGE_SIZE;
-    rows.truncate(PAGE_SIZE);
+    // Preserve meeting recency and stored action order for equal dates.
+    rows.sort_by_key(|(due, _)| (due.is_none(), *due));
+    let offset = (page as usize).saturating_mul(PAGE_SIZE).min(rows.len());
+    let has_more = rows.len() - offset > PAGE_SIZE;
+    let rows = rows
+        .into_iter()
+        .skip(offset)
+        .take(PAGE_SIZE)
+        .map(|(_, row)| row)
+        .collect();
     let mut series: Vec<_> = series.into_values().collect();
     series.sort_by(|a, b| {
         a.label
@@ -209,7 +263,13 @@ pub(crate) async fn list_open_reviewed_actions(
     filters: ActionFilters,
     page: u32,
 ) -> Result<OpenActionsPage, String> {
-    list(state.db_manager.pool(), filters, page).await
+    list(
+        state.db_manager.pool(),
+        filters,
+        page,
+        Local::now().date_naive(),
+    )
+    .await
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, sqlx::Type)]
@@ -860,14 +920,73 @@ mod tests {
                 series: Some(
                     json!(["microsoft", format!("graph:v1:{}", "a".repeat(64))]).to_string(),
                 ),
+                ..Default::default()
             },
             0,
+            NaiveDate::from_ymd_opt(2026, 11, 25).unwrap(),
         )
         .await
         .unwrap();
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].meeting_id, "included");
         assert_eq!(page.series.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn filters_and_due_order_apply_before_pagination() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let today = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+        occurrence(&pool, "first", "a", "2026-11-20T10:00:00Z", true).await;
+        occurrence(&pool, "older", "a", "2026-11-19T10:00:00Z", true).await;
+        let mut actions: Vec<_> = (3..=43).map(|id| action(id, "Due soon", false)).collect();
+        let mut undated = action(44, "Undated", false);
+        undated["dueDate"] = serde_json::Value::Null;
+        actions.push(undated);
+        let mut overdue = action(45, "Überfällig", false);
+        overdue["dueDate"] = json!("2026-11-24");
+        let mut late = action(46, "Later", false);
+        late["dueDate"] = json!("2026-12-03");
+        for (meeting, actions) in [
+            ("first", actions),
+            ("older", vec![overdue, late, action(2, "Completed", true)]),
+        ] {
+            sqlx::query("UPDATE meetings SET reviewed_actions = ? WHERE id = ?")
+                .bind(json!(actions).to_string())
+                .bind(meeting)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let first = list(&pool, ActionFilters::default(), 0, today)
+            .await
+            .unwrap();
+        assert_eq!(first.rows.first().unwrap().action.title, "Überfällig");
+        assert!(first.has_more);
+        let second = list(&pool, ActionFilters::default(), 1, today)
+            .await
+            .unwrap();
+        assert_eq!(second.rows.last().unwrap().action.title, "Undated");
+        assert!(!second.has_more);
+        for (status, search, title) in [
+            (ActionStatus::Overdue, "ÜBER", "Überfällig"),
+            (ActionStatus::DueSoon, "änne", "Due soon"),
+            (ActionStatus::Completed, "synthetic meeting", "Completed"),
+        ] {
+            let result = list(
+                &pool,
+                ActionFilters {
+                    status,
+                    search: Some(search.into()),
+                    ..Default::default()
+                },
+                0,
+                today,
+            )
+            .await
+            .unwrap();
+            assert!(!result.rows.is_empty());
+            assert!(result.rows.iter().all(|row| row.action.title == title));
+        }
     }
 
     #[test]
