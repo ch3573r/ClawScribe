@@ -7,11 +7,12 @@ import { usePermissionCheck } from '@/hooks/usePermissionCheck';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useLiveAssistanceOwner } from '@/contexts/LiveAssistanceContext';
 import { StatusOverlays } from '@/app/_components/StatusOverlays';
 import Analytics from '@/lib/analytics';
 import { SettingsModals } from './_components/SettingsModal';
 import { TranscriptPanel } from './_components/TranscriptPanel';
-import { LiveAssistancePanel } from '@/components/LiveAssistancePanel';
+import { LiveAssistanceDock } from '@/components/LiveAssistanceDock';
 import { HomeDashboard } from '@/components/HomeDashboard';
 import { RecordingControls } from '@/components/RecordingControls';
 import { useModalState } from '@/hooks/useModalState';
@@ -34,6 +35,7 @@ export default function Home() {
   const { meetingTitle, transcripts } = useTranscripts();
   const { transcriptModelConfig, selectedDevices } = useConfig();
   const recordingState = useRecordingState();
+  const liveAssistance = useLiveAssistanceOwner();
 
   // Extract status from global state
   const { status, isRecording, isStarting, isStopping, isProcessing, isSaving } = recordingState;
@@ -228,11 +230,12 @@ export default function Home() {
       <div className="flex flex-1 overflow-hidden">
         {isRecordingOrStarting || transcripts.length > 0 || isProcessingStop || isStopping ? (
           <>
-            <TranscriptPanel
-              isProcessingStop={isProcessingStop}
-              isStopping={isStopping}
-              assistance={<LiveAssistancePanel />}
-            />
+            <LiveAssistanceDock sessionId={isRecording && !isStopping && !isProcessingStop && recordingState.sessionMode === 'live'
+              ? recordingState.sessionId ?? null : null}
+              verificationError={isRecordingOrStarting && !isStopping ? recordingState.verificationError : null}
+              onRetryStatus={() => { recordingState.retryVerification(); void liveAssistance.refresh(); }}>
+              <TranscriptPanel isProcessingStop={isProcessingStop} isStopping={isStopping} />
+            </LiveAssistanceDock>
 
             {/* Floating pause/stop controls for the active recording. Hidden once
                 we move into transcript processing/saving (StatusOverlays take over). */}

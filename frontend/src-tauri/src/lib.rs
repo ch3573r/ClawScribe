@@ -1223,6 +1223,8 @@ pub fn run() {
             knowledge::live_notes::delete_saved_live_answer,
             knowledge::commands::knowledge_create_library_conversation,
             knowledge::commands::knowledge_list_library_conversations,
+            knowledge::commands::knowledge_rename_library_conversation,
+            knowledge::commands::knowledge_delete_library_conversation,
             knowledge::commands::knowledge_library_conversation_scope,
             knowledge::commands::knowledge_clear_history,
             knowledge::indexer::knowledge_index_status,

@@ -251,12 +251,11 @@ The **Conversation** readout estimates talk time, pace, questions and uninterrup
 speaking stretches during live transcription. It runs on this PC and can be hidden
 in **Settings → Recording**. See [conversation metrics](docs/meeting-quality.md#conversation-metrics).
 
-Source also includes a collapsible **Live assistance** panel above the Home
-transcript. Explicitly choose **Ask**, **Summarize the last 10 minutes**, or **List open
+During a recording with live transcription, choose **Live assistance** on Home
+to open a panel alongside the transcript. Explicitly choose **Ask**, **Summarize the last 10 minutes**, or **List open
 questions** using the configured summary provider; no provider request runs
 automatically. **Share live transcript with the provider** is off by default
-and remembered for future recordings. Switch it on in Memory settings; the panel
-shows during a recording only while it is on.
+and remembered for future recordings. Switch it on in the panel or in Summary settings before asking.
 Selected saved meetings can supplement the current recording. Document selection
 is explicit, and document sharing is independent and resets for each recording.
 The panel and each answer show finalized-through time and incomplete status;

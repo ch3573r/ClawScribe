@@ -24,6 +24,7 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
     '@/components/MeetingDetails/AttachReferenceButton':{AttachReferenceButton:'attach'},
     '@/components/ui/button':{Button:'button'},'@/components/ui/dropdown-menu':{},'@/components/ui/select':{},'@/components/ui/input-group':{InputGroupInput:'title-filter'},
     '@/components/ui/textarea':{Textarea:'textarea'},'@/components/ui/scroll-area':{ScrollArea:'scroll-area'},'@/components/ui/tooltip':{},
+    '@/components/ui/dialog':{},
     '@/components/ui/input':{Input:'input'},'@/components/ui/checkbox':{Checkbox:'checkbox'},'@/components/ui/switch':{Switch:'switch'},
     '@/components/ui/tabs':{Tabs:'tabs',TabsList:'tablist',TabsTrigger:'tab',TabsContent:'tab-panel'},
     '@/services/knowledgeService':{knowledgeService:{indexStatus:async()=>indexStatus,history:async()=>[]}},
@@ -67,6 +68,18 @@ test('configured library chat enables the first question before a conversation e
   const app=surface('src/components/Knowledge/KnowledgeChat.tsx','KnowledgeChat',{state,mode:'keyword',provider:'fixture',model:'fixture'});
   nodes(app.render()).find(node=>node.type==='textarea').props.onChange({target:{value:'Decision?'}});
   assert.equal(nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,false);app.unmount();
+});
+
+test('project and date filters activate Ask without switching on all meetings',()=>{
+  for (const filter of [{tags:['Roadmap']}, {from:'2026-02-01'}]) {
+    const state={scope:{kind:'library',filter:{all_meetings:false,meeting_ids:[],tags:[],tag_mode:'any',untagged:false,from:null,to:null,...filter}},
+      owner:null,messages:[],threads:[],historyLoading:false,sending:false,creating:false};
+    const app=surface('src/components/Knowledge/KnowledgeChat.tsx','KnowledgeChat',{state,mode:'keyword',provider:'fixture',model:'fixture'});
+    try {
+      nodes(app.render()).find(node=>node.type==='textarea').props.onChange({target:{value:'Decision?'}});
+      assert.equal(nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,false);
+    } finally { app.unmount(); }
+  }
 });
 
 test('archive empty state starts recording and imports through the shared flows',()=>{

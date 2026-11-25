@@ -40,6 +40,7 @@ export interface BlockNoteSummaryViewRef {
   getMarkdown: () => Promise<string>;
   previewReplacement: (options: ReplaceOptions) => ReplacePreview;
   replaceText: (options: ReplaceOptions, token: string) => void;
+  appendMarkdown: (markdown: string) => Promise<void>;
   isDirty: boolean;
 }
 
@@ -64,6 +65,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const [loadError, setLoadError] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const isContentLoaded = useRef(false);
+  const editing = useRef({ data, readOnly, isSaving });
+  editing.current = { data, readOnly, isSaving };
   const directEditor = useRef<BlockNoteEditor | null>(null);
   const onEditorReady = useCallback((value: BlockNoteEditor) => { directEditor.current = value; }, []);
 
@@ -92,7 +95,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       setCurrentBlocks(data.summary_json);
       ready();
     }
-    return () => { active = false; if (timer) clearTimeout(timer); };
+    return () => { active = false; isContentLoaded.current = false; if (timer) clearTimeout(timer); };
   }, [format, data?.markdown, data?.summary_json, editor]);
 
   useEffect(() => { if (saveState === 'saved') setIsDirty(false); }, [saveState]);
@@ -158,6 +161,22 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         active.replaceBlocks(active.document, plan.blocks);
         handleEditorChange(active.document);
       }
+    },
+    appendMarkdown: async (markdown) => {
+      const active = format === 'markdown' ? editor : format === 'blocknote' ? directEditor.current : null;
+      const canInsert = () => isContentLoaded.current && editing.current.data === data &&
+        !editing.current.readOnly && !editing.current.isSaving && !saveInFlight.current;
+      if (!active || !canInsert()) throw new Error('Wait for the summary to finish loading or saving.');
+      // An answer can include remote media URLs. Keep its text and formatting
+      // without adding editor blocks that fetch those URLs when displayed.
+      const withoutMedia = (blocks: Block[]): Block[] => blocks.flatMap(block =>
+        ['image', 'video', 'audio', 'file'].includes(block.type) ? [] : [{ ...block, children: withoutMedia(block.children) }]);
+      const blocks = withoutMedia(await active.tryParseMarkdownToBlocks(markdown));
+      const last = active.document.at(-1);
+      if (!last || !canInsert()) throw new Error('The summary changed. Reopen the saved answer to retry.');
+      if (!blocks.length) return;
+      active.insertBlocks(blocks, last, 'after');
+      handleEditorChange(active.document);
     },
     getMarkdown: async () => {
       try {

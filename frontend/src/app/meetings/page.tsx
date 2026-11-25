@@ -1,9 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
-  ChevronDown,
   FileText,
   Mic,
   RefreshCw,
@@ -34,16 +33,7 @@ import { useResultNotes } from "@/hooks/useResultNotes";
 import { useLibrarySearch, type TranscriptHit } from "@/hooks/useLibrarySearch";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuCheckboxItem,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuSeparator,
-  DropdownMenuItem,
-} from "@/components/ui/dropdown-menu";
+import { ProjectFilterMenu } from "@/components/Knowledge/ProjectFilterMenu";
 import {
   Select,
   SelectContent,
@@ -76,9 +66,6 @@ export default function MeetingsPage() {
     handleRecordingToggle,
     refetchMeetings,
     projectTags,
-    projectTagsError,
-    projectTagsLoading,
-    refreshProjectTags,
   } = useSidebar();
   const [query, setQuery] = useState(archiveView.query);
   const [from, setFrom] = useState(archiveView.from);
@@ -102,7 +89,6 @@ export default function MeetingsPage() {
   const archiveStatus = useArchiveMetadata(tab === "archive", archiveRevision, meetings.length);
   const attentionIds = useMemo(() => new Set(Array.from(archiveStatus.metadata?.values() ?? [])
     .filter(row => archiveReview(row).needsAttention).map(row => row.id)), [archiveStatus.metadata]);
-  const tagOptions = useMemo(() => [...new Map(projectTags.map(row => [row.tag.toLowerCase(), row.tag])).values()].sort((a, b) => a.localeCompare(b)), [projectTags]);
 
   const hasQuery = !!query.trim();
   const hasScope = !!(attentionOnly || from || to || projectFilter.untagged || projectFilter.tags.length);
@@ -197,62 +183,6 @@ export default function MeetingsPage() {
   const clearFilters = () => { setQuery(""); setProjectFilter(noProjectFilter); setFrom(""); setTo(""); setAttentionOnly(false); };
   const recordingBusy = recording.isRecording || recording.isStarting || recording.isStopping || recording.isProcessing || recording.isSaving;
 
-  const projectControl = (projectFilter: ProjectFilter, setProjectFilter: Dispatch<SetStateAction<ProjectFilter>>) => {
-    const projectFilterLabel = projectFilter.untagged ? 'Untagged'
-      : projectFilter.tags.length === 0 ? 'All projects'
-      : projectFilter.tags.length === 1 ? projectFilter.tags[0]
-      : `${projectFilter.tags.length} projects`;
-    return <>
-<div className="flex items-center gap-2 text-sm">Project
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost"
-                      type="button"
-                      aria-label={`Project: ${projectFilterLabel}`}
-                      className="flex h-9 max-w-48 items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={projectTagsLoading || !!projectTagsError}
-                    >
-                      <span className="truncate">{projectFilterLabel}</span>
-                      <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
-                    <DropdownMenuRadioGroup
-                      aria-label="Project matching"
-                      value={projectFilter.mode}
-                      onValueChange={mode => setProjectFilter(current => ({ ...current, mode: mode as ProjectFilter['mode'] }))}
-                    >
-                      <DropdownMenuRadioItem value="any" disabled={projectFilter.tags.length < 2} onSelect={event => event.preventDefault()}>Match any</DropdownMenuRadioItem>
-                      <DropdownMenuRadioItem value="all" disabled={projectFilter.tags.length < 2} onSelect={event => event.preventDefault()}>Match all</DropdownMenuRadioItem>
-                    </DropdownMenuRadioGroup>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuCheckboxItem
-                      checked={projectFilter.untagged}
-                      onSelect={event => event.preventDefault()}
-                      onCheckedChange={checked => setProjectFilter(current => ({ ...current, tags: [], untagged: checked === true }))}
-                    >Untagged</DropdownMenuCheckboxItem>
-                    {tagOptions.map(tag => (
-                      <DropdownMenuCheckboxItem
-                        key={tag.toLowerCase()}
-                        checked={projectFilter.tags.some(selected => selected.toLowerCase() === tag.toLowerCase())}
-                        onSelect={event => event.preventDefault()}
-                        onCheckedChange={checked => setProjectFilter(current => ({
-                          ...current,
-                          untagged: false,
-                          tags: [...current.tags.filter(selected => selected.toLowerCase() !== tag.toLowerCase()), ...(checked === true ? [tag] : [])],
-                        }))}
-                      >{tag}</DropdownMenuCheckboxItem>
-                    ))}
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onSelect={() => setProjectFilter({ tags: [], untagged: false, mode: 'any' })}>Clear filter</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-              {projectTagsLoading && <span role="status">Loading project tags…</span>}
-              {projectTagsError && <Button variant="ghost" className="text-destructive underline" onClick={() => { void refreshProjectTags(); }}>Retry loading tags</Button>}
-  </>;
-  };
-
   return (
     <div className="h-full min-h-0 overflow-hidden bg-background text-foreground">
       <div className="mx-auto flex h-full min-h-0 w-full max-w-[1600px] flex-col gap-4 px-5 py-5">
@@ -282,7 +212,7 @@ export default function MeetingsPage() {
             <TabsTrigger value="actions" id="meetings-actions-tab" aria-controls="meetings-actions-panel">Open actions</TabsTrigger>
           </TabsList>
           <TabsContent value="memory" forceMount id="meeting-memory-panel" hidden={tab !== "memory"} className={tab === "memory" ? "m-0 min-h-0 flex-1" : "hidden"}>
-            <KnowledgeArchive key={matchSession?.key ?? 0} initialMatches={matchSession?.scope} active={tab === "memory"} meetings={memoryMeetings} meetingTitles={meetings} projectFilter={memoryProject} setProjectFilter={setMemoryProject} projectControl={projectControl(memoryProject, setMemoryProject)} />
+            <KnowledgeArchive key={matchSession?.key ?? 0} initialMatches={matchSession?.scope} active={tab === "memory"} meetings={memoryMeetings} meetingTitles={meetings} projectFilter={memoryProject} setProjectFilter={setMemoryProject} projectControl={<ProjectFilterMenu filter={memoryProject} setFilter={setMemoryProject} />} />
           </TabsContent>
           <TabsContent value="actions" id="meetings-actions-panel" className="m-0 min-h-0 flex-1 overflow-y-auto">
             <OpenMeetingActions />
@@ -312,7 +242,7 @@ export default function MeetingsPage() {
             </InputGroup></div>
 
             <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
-              {projectControl(projectFilter, setProjectFilter)}
+              <ProjectFilterMenu filter={projectFilter} setFilter={setProjectFilter} />
               {(attentionOnly || attentionIds.size > 0) && <Button variant={attentionOnly ? "secondary" : "ghost"} size="sm" aria-pressed={attentionOnly} onClick={() => setAttentionOnly(value => !value)}>Needs attention</Button>}
               <Popover>
                 <PopoverTrigger asChild><Button variant="outline" size="sm">Date range{from || to ? " · active" : ""}</Button></PopoverTrigger>

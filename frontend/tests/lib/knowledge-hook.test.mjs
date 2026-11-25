@@ -32,9 +32,9 @@ test('navigation invalidates reply before any old-owner history read and hides o
   app.render();await flush();const first=app.render().ask('question','keyword');app.navigate('two');assert.equal(app.render().messages.length,0);await flush();answer.resolve({});await first;
   assert.deepEqual(historyOwners,['one','two']);assert.equal(app.render().messages[0].id,'two');app.unmount();
 });
-test('empty selected meetings never broaden through a project filter and cancellation stops context resolution',async()=>{
-  let searches=0;const origin=deferred();const refs=[];const scope={kind:'library',filter:{all_meetings:false,meeting_ids:[],tags:['Öffnung'],tag_mode:'any',untagged:false,from:null,to:null}};
-  const app=view({search:async()=>{searches++;},resolve:ref=>{refs.push(ref);return origin.promise;}},{scope,owner:null});app.render();await flush();await app.render().search('query','keyword');assert.equal(searches,0);assert.match(app.render().error,/Select one/);
+test('an empty unfiltered scope never broadens and cancellation stops context resolution',async()=>{
+  let searches=0;const origin=deferred();const refs=[];const scope={kind:'library',filter:{all_meetings:false,meeting_ids:[],tags:[],tag_mode:'any',untagged:false,from:null,to:null}};
+  const app=view({search:async()=>{searches++;},resolve:ref=>{refs.push(ref);return origin.promise;}},{scope,owner:null});app.render();await flush();await app.render().search('query','keyword');assert.equal(searches,0);assert.match(app.render().error,/Choose meetings/);
   const inspect=app.render().inspect({source_id:'target'},{title:'Public fixture'},{source_id:'origin'});app.render().cancel();origin.resolve({status:'current'});await inspect;assert.equal(refs.length,1);assert.equal(app.render().preview,null);app.unmount();
 });
 
@@ -104,7 +104,7 @@ test('changing scope during first conversation creation never submits or adopts 
 });
 test('empty library scope never creates a conversation on first question',async()=>{
   let creates=0;const app=view({createConversation:async()=>{creates++;return {kind:'library',id:'wrong'};}},{scope:{...libraryScope,filter:{...libraryScope.filter,meeting_ids:[]}},owner:null});
-  app.render();await flush();await app.render().ask('Decision?','keyword');assert.equal(creates,0);assert.match(app.render().error,/Select one/);app.unmount();
+  app.render();await flush();await app.render().ask('Decision?','keyword');assert.equal(creates,0);assert.match(app.render().error,/Choose meetings/);app.unmount();
 });
 test('failed first answer retains the new durable conversation and actionable error for retry',async()=>{
   let creates=0,asks=0;const requests=[];

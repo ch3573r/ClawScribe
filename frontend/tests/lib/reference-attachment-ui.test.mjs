@@ -128,13 +128,13 @@ test('empty library offers a clear disabled attachment action',()=>{
   assert.match(text(app.render()),/Save a meeting/i);app.unmount();
 });
 
-test('Meeting memory exposes attachment beside Sources and includes the destination without choosing document excerpts',()=>{
-  const hooks=createHookHarness();let reloads=0;
+test('Meeting memory attaches beside Sources and selects the imported file without granting sharing',()=>{
+  const hooks=createHookHarness();const imports=[];
   const {KnowledgeArchive}=loadTsModule('src/components/Knowledge/KnowledgeArchive.tsx',{
     ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
     'lucide-react':{ChevronDown:'down',X:'x'},
     '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'ollama',model:'fixture'}})},
-    '@/hooks/useKnowledgeSearch':{useKnowledgeSearch:scope=>({scope,documents:[],messages:[],selectedDocumentIds:[],reloadDocuments:()=>reloads++,refreshDocuments(){}})},
+    '@/hooks/useKnowledgeSearch':{useKnowledgeSearch:scope=>({scope,documents:[],messages:[],selectedDocumentIds:[],selectImportedDocument:file=>imports.push(file)})},
     '@/services/knowledgeService':{knowledgeService:{indexStatus:async()=>({})}},
     '@/components/MeetingDetails/AttachReferenceButton':{AttachReferenceButton:'attach'},
     '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
@@ -148,17 +148,21 @@ test('Meeting memory exposes attachment beside Sources and includes the destinat
     const sourcePanel=nodes(initialChat.props.secondary).find(node=>node.type==='fieldset');
     const action=nodes(sourcePanel).find(node=>node.type==='attach');
     assert.ok(action,'Attach file must be available alongside the source controls before a conversation starts');
-    action.props.onAttached('two');
+    const file = {id:'file',display_name:'Plan.pdf'};
+    action.props.onAttached('two', file);
     const chat=nodes(render()).find(node=>node.type==='chat');
     assert.deepEqual([...chat.props.state.scope.filter.meeting_ids],['two']);
-    assert.deepEqual([...chat.props.state.selectedDocumentIds],[],'attaching must not authorize excerpts');
-    assert.equal(reloads,1);
+    assert.equal(chat.props.state.sharingEnabled,undefined,'attaching must not authorize excerpts');
+    assert.deepEqual(imports,[file]);
   } finally { hooks.unmount(); }
 });
 
 function cornerChat(service, options = {}) {
   const hooks=createHookHarness();
-  const selected=[],state={scope:{kind:'meeting',meeting_id:'one'},messages:[],documents:[{attachment:{id:'file',display_name:'Plan.pdf'},meeting_ids:['one']}],selectedDocumentIds:[],cancel(){},reloadHistory(){},reloadDocuments(){},refreshDocuments(){},selectDocument:(id,enabled)=>selected.push([id,enabled])};
+  const { indexReady = () => false, ...chatOptions } = options;
+  const selected=[], imports=[], state={scope:{kind:'meeting',meeting_id:'one'},messages:[],threads:[],documents:[{attachment:{id:'file',display_name:'Plan.pdf'},meeting_ids:['one']}],selectedDocumentIds:[],
+    get selectedFiles(){return this.documents.filter(row=>this.selectedDocumentIds.includes(row.attachment.id)).map(row=>row.attachment);},
+    cancel(){},reloadHistory(){},reloadDocuments(){},refreshDocuments(){},selectDocument:(id,enabled)=>selected.push([id,enabled]),selectImportedDocument:file=>imports.push(file)};
   const {useKnowledgeSearch}=service?loadTsModule('src/hooks/useKnowledgeSearch.ts',{
     react:hooks.react,'@tauri-apps/api/event':{listen:async()=>()=>{}},
     '@/services/knowledgeService':{knowledgeService:{conversations:async()=>[],conversationScope:async()=>({all_meetings:false,meeting_ids:['one'],tags:[],tag_mode:'any',untagged:false,from:null,to:null}),cancel:async()=>{},history:async()=>[],scopeDocuments:async()=>[],documentSharing:async()=>false,...service}},
@@ -167,7 +171,9 @@ function cornerChat(service, options = {}) {
     ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
     'react-dom':{createPortal:(children,container)=>jsx('portal',{children,container})},
     'lucide-react':{MessageSquare:'chat-icon',X:'close',ChevronDown:'down'},
+    '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{}})},
     '@/hooks/useKnowledgeSearch':{useKnowledgeSearch},
+    '@/hooks/useKnowledgeIndexStatus':{useKnowledgeIndexStatus:()=>({semanticReady:indexReady()})},
     '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsError:null,projectTagsLoading:false})},
     '@/components/ui/popover':{Popover:'popover',PopoverTrigger:'trigger',PopoverContent:'popup'},
     '@/components/ui/checkbox':{Checkbox:'checkbox'},'@/components/ui/switch':{Switch:'switch'},'@/components/ui/select':{},'@/components/ui/multi-select':{},
@@ -177,8 +183,8 @@ function cornerChat(service, options = {}) {
     './ReferenceDocuments':{ReferenceDocuments:'references'},
     './AttachReferenceButton':{AttachReferenceButton:'attach'},
   });
-  const render=()=>hooks.render(()=>MeetingChat({meetingId:'one',provider:'ollama',model:'fixture',...options}));
-  return {...hooks,render,state,selected,chat:()=>nodes(render()).find(node=>node.type==='knowledge-chat')};
+  const render=()=>hooks.render(()=>MeetingChat({meetingId:'one',provider:'ollama',model:'fixture',...chatOptions}));
+  return {...hooks,render,state,selected,imports,chat:()=>nodes(render()).find(node=>node.type==='knowledge-chat')};
 }
 
 test('corner chat keeps fixed sizing, non-modal behavior and configuration in a context overlay',()=>{
@@ -221,6 +227,8 @@ test('meeting chat docks at 1280px and returns to its popover without changing s
     assert.equal(nodes(tree).some(node => node.type === 'popup'), false);
     assert.equal(dockChanges.at(-1), true);
     assert.deepEqual(app.chat().props.state.scope, scope);
+    nodes(tree).find(node => node.type === 'preview').props.onNavigate({meetingId:'one',play:false});
+    assert.ok(app.chat(), 'revealing this meeting’s cited transcript keeps the dock open');
     media.matches = false; onResize(); tree = app.render();
     assert.ok(nodes(tree).some(node => node.type === 'popup'));
     assert.equal(nodes(tree).some(node => node.type === 'portal'), false);
@@ -348,7 +356,7 @@ test('context summarizes scope and selected file count and bounds the searchable
   } finally {app.unmount();}
 });
 
-test('composer attachment and context Add file share one importer and selected chips deselect only',()=>{
+test('composer attachment and context Add file share one importer and select the returned file',()=>{
   const app=cornerChat();let clicks=0;
   try {
     app.state.selectedDocumentIds=['file'];const chat=app.chat();
@@ -356,8 +364,9 @@ test('composer attachment and context Add file share one importer and selected c
     assert.equal(chat.props.composerStart.props.variant,'icon');assert.equal(chat.props.composerStart.props.meetingId,'one');
     chat.props.composerStart.props.buttonRef.current={click:()=>clicks++};
     nodes(chat.props.contextBar).find(node=>node.type==='references').props.onAddFile();assert.equal(clicks,1);
-    const remove=nodes(chat.props.attachments).find(node=>node.props?.['aria-label']==='Remove Plan.pdf from this question');
-    assert.ok(remove);remove.props.onClick();assert.deepEqual(app.selected,[['file',false]]);
+    const file = {id:'new-file',display_name:'Agenda.md'};
+    chat.props.composerStart.props.onAttached('one', file);
+    assert.deepEqual(app.imports,[file]);
     chat.props.composerStart.props.onBusyChange(true);
     assert.equal(app.chat().props.composerStart.props.disabled,true,'a remounted composer cannot start another import before the old one settles');
     assert.equal(nodes(app.chat().props.contextBar).find(node=>node.type==='references').props.attachmentBusy,true);
@@ -367,30 +376,53 @@ test('composer attachment and context Add file share one importer and selected c
   } finally {app.unmount();}
 });
 
-test('search mode uses header radio menu and cancels before changing mode',()=>{
-  const app=cornerChat();let cancelled=0;app.state.cancel=()=>cancelled++;
+test('search mode follows index readiness and preserves an explicit keyword choice',()=>{
+  let ready = false;
+  const app=cornerChat(undefined,{indexReady:()=>ready});let cancelled=0;app.state.cancel=()=>cancelled++;
   try {
     const chat=app.chat(),extra=chat.props.headerMenuExtra;
     assert.equal(nodes(extra).find(node=>node.type==='menu-label').props.children,'Search mode');
     const radio=nodes(extra).find(node=>node.type==='radio-group');assert.equal(radio.props.value,'keyword');
-    radio.props.onValueChange('hybrid');assert.equal(app.chat().props.mode,'hybrid');assert.equal(cancelled,1);
+    assert.equal(nodes(extra).find(node=>node.type==='radio-item'&&node.props.value==='hybrid').props.disabled,true);
+    ready=true;assert.equal(app.chat().props.mode,'hybrid');
+    nodes(app.chat().props.headerMenuExtra).find(node=>node.type==='radio-group').props.onValueChange('keyword');
+    assert.equal(app.chat().props.mode,'keyword');assert.equal(cancelled,1);
     assert.equal(nodes(chat.props.contextBar).some(node=>node.type==='radio-group'||text(node)==='Retrieval'),false);
     assert.deepEqual([...chat.props.suggestions],['What did we decide?','List the action items','Summarize the key points']);
   } finally {app.unmount();}
 });
 
-test('long file selections keep the composer bounded and offer Context for the remaining files',()=>{
+test('file chips are bounded and asking requires explicit external reference sharing',()=>{
   const app=cornerChat();
+  const hooks=createHookHarness(); let allowed=0, asked=0;
+  const {KnowledgeChat}=loadTsModule('src/components/Knowledge/KnowledgeChat.tsx',{
+    ...ui,react:hooks.react,'react/jsx-runtime':{jsx,jsxs:jsx},
+    '@/components/ui/button':{Button:'button'},'@/components/ui/textarea':{Textarea:'textarea'},
+    '@/components/ui/page-section':{PageSection:'section'},'@/components/ui/dropdown-menu':{},
+    '@/components/ConfirmationModel/confirmation-modal':{},
+  });
   try {
     app.state.documents=Array.from({length:20},(_,index)=>({attachment:{id:`file-${index}`,display_name:`Long reference filename ${index}.pdf`},meeting_ids:['one']}));
     app.state.selectedDocumentIds=app.state.documents.map(row=>row.attachment.id);
-    const chips=app.chat().props.attachments;
-    assert.equal(nodes(chips).filter(node=>node.props?.['aria-label']?.startsWith('Remove ')).length,2);
-    const more=nodes(chips).find(node=>node.props?.['aria-label']==='Manage 18 more reference files in Context');
+    const chat=app.chat();
+    const state={...chat.props.state,owner:{kind:'meeting',id:'one'},sharingEnabled:false,sharingLoading:false,
+      setDocumentSharing(enabled){assert.equal(enabled,true);allowed++;},async ask(){asked++;}};
+    const render=()=>hooks.render(()=>KnowledgeChat({...chat.props,state}));
+    const button=label=>nodes(render()).find(node=>node.type==='button'&&text(node)===label);
+    assert.equal(nodes(render()).filter(node=>node.props?.['aria-label']?.startsWith('Remove ')).length,2);
+    const remove=nodes(render()).find(node=>node.props?.['aria-label']==='Remove Long reference filename 0.pdf from this question');
+    remove.props.onClick();assert.deepEqual(app.selected,[['file-0',false]]);
+    const more=button('+18 more files');
     assert.ok(more);more.props.onClick();
     assert.equal(nodes(app.chat().props.contextBar).find(node=>node.type==='popover').props.open,true);
     assert.match(text(nodes(app.chat().props.contextBar).find(node=>node.props?.['aria-label']?.startsWith('Context:'))),/20 files/);
-  } finally {app.unmount();}
+    nodes(render()).find(node=>node.type==='textarea').props.onChange({target:{value:'What changed?'}});
+    assert.equal(button('Ask').props.disabled,true);
+    button('Allow reference sharing').props.onClick();
+    assert.equal(allowed,1);assert.equal(asked,0);
+    state.sharingEnabled=true;
+    assert.equal(button('Ask').props.disabled,false);
+  } finally {app.unmount();hooks.unmount();}
 });
 
 test('reference completion refreshes the current state owner after Context closes',()=>{
@@ -437,7 +469,8 @@ test('old-scope retry completion preserves a new library conversation transcript
 for(const scenario of [{action:'delete',otherScope:true},{action:'detach',otherScope:false}]) {
   test(`${scenario.otherScope?'other-scope delete':'same-scope detach'} completion deselects the active file and cancels its answer`,async()=>{
     const answer=deferred(),cancelled=[],requests=[];let documentReads=0,historyReads=0;
-    const app=cornerChat({scopeDocuments:async()=>{documentReads++;return [referenceFile];},cancel:async id=>cancelled.push(id),ask:request=>{requests.push(request);return answer.promise;},history:async()=>{historyReads++;return [];}});
+    const app=cornerChat({scopeDocuments:async()=>{documentReads++;return [referenceFile];},documentSharing:async()=>true,
+      cancel:async id=>cancelled.push(id),ask:request=>{requests.push(request);return answer.promise;},history:async()=>{historyReads++;return [];}});
     try {
       await readyChat(app);const complete=references(app).props.onDocumentsChanged;
       if(scenario.otherScope)await libraryChat(app);

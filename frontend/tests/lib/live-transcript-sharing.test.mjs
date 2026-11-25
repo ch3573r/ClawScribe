@@ -49,3 +49,17 @@ test('both sharing call sites render JSX rather than calling the component as a 
   const source = fs.readFileSync(new URL('../../src/components/LiveTranscriptSharing.tsx', import.meta.url), 'utf8');
   assert.match(source, /\buseId\(\)/, 'IDs must come from the React instance lifecycle');
 });
+
+test('Built-in AI settings warn before enabling and allow revoking existing sharing', () => {
+  const actions = { setTranscriptSharing() {} };
+  const state = { provider: 'builtin-ai', transcriptSharing: false, sharingReady: true, sharingBusy: false };
+  const { LiveSharingSetting } = loadTsModule('src/components/LiveTranscriptSharing.tsx', {
+    '@/components/ui/switch': { Switch: ({ disabled }) => createElement('button', { role: 'switch', disabled }) },
+    '@/hooks/useLiveAssistance': { useLiveAssistance: () => ({ state, actions }) },
+  });
+  const disabled = renderToStaticMarkup(createElement(LiveSharingSetting));
+  assert.match(disabled, /Built-in AI is unavailable during recording/);
+  assert.match(disabled, /<button[^>]*disabled/);
+  state.transcriptSharing = true;
+  assert.doesNotMatch(renderToStaticMarkup(createElement(LiveSharingSetting)), /<button[^>]*disabled/);
+});

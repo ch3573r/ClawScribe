@@ -250,6 +250,26 @@ pub async fn knowledge_list_library_conversations(
     conversations::library_list(state.db_manager.pool()).await
 }
 #[tauri::command]
+pub async fn knowledge_rename_library_conversation(
+    state: State<'_, AppState>,
+    owner: ConversationOwner,
+    title: String,
+) -> Result<(), String> {
+    conversations::rename_library(state.db_manager.pool(), &owner, &title).await
+}
+#[tauri::command]
+pub async fn knowledge_delete_library_conversation(
+    state: State<'_, AppState>,
+    runtime: State<'_, KnowledgeState>,
+    owner: ConversationOwner,
+) -> Result<(), String> {
+    if !matches!(&owner, ConversationOwner::Library(_)) {
+        return Err("Choose a saved library conversation".into());
+    }
+    runtime.answers.cancel_owner(&owner)?;
+    conversations::delete_library(state.db_manager.pool(), &owner).await
+}
+#[tauri::command]
 pub async fn knowledge_library_conversation_scope(
     state: State<'_, AppState>,
     owner: ConversationOwner,

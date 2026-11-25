@@ -1,11 +1,12 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { createKnowledgeController, scopeReady } from "@/lib/knowledge-state";
+import { createKnowledgeController, scopeReady, selectedReferences } from "@/lib/knowledge-state";
 import type { SavedReference } from "@/lib/archive-search";
 import { knowledgeService, type NotePreview } from "@/services/knowledgeService";
 import type {
   ConversationOwner,
+  DocumentAttachment,
   EvidenceDisplay,
   EvidenceRef,
   HistoryMessage,
@@ -51,6 +52,11 @@ export function useKnowledgeSearch(
   );
   const owner = initialOwner ?? savedOwner;
   const [threads, setThreads] = useState<LibraryConversation[]>([]);
+  const threadRead = useRef(0);
+  const historyMutation = useRef(false);
+  const [managingConversation, setManagingConversation] = useState(false);
+  const [threadsLoading, setThreadsLoading] = useState(false);
+  const [threadsError, setThreadsError] = useState("");
   const [response, setResponse] = useState<SearchResponse | null>(null);
   const [messages, setMessages] = useState<HistoryMessage[]>([]);
   const [loading, setLoading] = useState(false);
@@ -61,7 +67,7 @@ export function useKnowledgeSearch(
   const [libraryRevision, setLibraryRevision] = useState(0);
   const [documentRevision, setDocumentRevision] = useState(0);
   const [documentRows, setDocumentRows] = useState<{scope: string; rows: ScopedDocument[]}>({scope:'',rows:[]});
-  const [chosenDocuments, setChosenDocuments] = useState<{ owner: string; ids: string[] }>({ owner: "", ids: [] });
+  const [chosenDocuments, setChosenDocuments] = useState<{ owner: string; ids: string[]; imports?: DocumentAttachment[] }>({ owner: "", ids: [] });
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [documentsError, setDocumentsError] = useState('');
   const [sharing, setSharing] = useState<{owner:string;enabled:boolean}>({owner:'',enabled:false});
@@ -74,9 +80,11 @@ export function useKnowledgeSearch(
   const documentScope = JSON.stringify({scope,libraryRevision});
   const ownerIdentity = JSON.stringify(owner);
   const documents = documentRows.scope === documentScope ? documentRows.rows : [];
-  const selectedDocumentIds = chosenDocuments.owner === ownerIdentity
-    ? chosenDocuments.ids.filter(id => documents.some(row => row.attachment.id === id))
-    : [];
+  const chosen = chosenDocuments.owner === ownerIdentity ? chosenDocuments : null;
+  const { files: selectedFiles, ids: selectedDocumentIds, verifying: verifyingImports } =
+    selectedReferences(documents, chosen?.ids ?? [], chosen?.imports ?? []);
+  const verifyingDocuments = verifyingImports || (!!chosen?.ids.length &&
+    (documentRows.scope !== documentScope || documentsLoading || !!documentsError));
   const sharingEnabled = sharing.owner === ownerIdentity && sharing.enabled;
   const [creating, setCreating] = useState(false);
   const createPending = useRef(false);
@@ -167,14 +175,24 @@ export function useKnowledgeSearch(
     // JSON identity keeps equal scope objects from restarting history on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [identity, controller, surfaceActive]);
+  const reloadThreads = useCallback(async () => {
+    const sequence = ++threadRead.current;
+    setThreadsLoading(true);
+    setThreadsError("");
+    try {
+      const value = await knowledgeService.conversations();
+      if (sequence === threadRead.current) setThreads(value);
+    } catch (e) {
+      if (sequence === threadRead.current) setThreadsError(errorText(e));
+    } finally {
+      if (sequence === threadRead.current) setThreadsLoading(false);
+    }
+  }, []);
   useEffect(() => {
     if (!surfaceActive || scope.kind !== "library") return;
-    let current = true;
-    void knowledgeService.conversations().then(value => {
-      if (current) setThreads(rows => [...rows.filter(row => !value.some(thread => thread.id === row.id)), ...value]);
-    }).catch(e => { if (current) setError(errorText(e)); });
-    return () => { current = false; };
-  }, [scope.kind, surfaceActive]);
+    void reloadThreads();
+    return () => { threadRead.current++; };
+  }, [scope.kind, surfaceActive, reloadThreads]);
   useEffect(() => {
     if (!surfaceActive) return;
     let active = true;
@@ -203,7 +221,7 @@ export function useKnowledgeSearch(
     setDocumentsError('');
     if (!scopeReady(scope)) {
       setDocumentRows({scope:documentScope,rows:[]});
-      setChosenDocuments(current => ({ owner: current.owner, ids: [] }));
+      setChosenDocuments(current => ({ ...current, ids: [] }));
       setDocumentsLoading(false);
       return () => { active = false; };
     }
@@ -211,11 +229,18 @@ export function useKnowledgeSearch(
     void knowledgeService.scopeDocuments(scope).then(rows => {
       if (!active) return;
       setDocumentRows({scope:documentScope,rows});
-      setChosenDocuments(current => ({ owner: current.owner, ids: current.ids.filter(id => rows.some(row => row.attachment.id === id)) }));
+      setChosenDocuments(current => {
+        const found = new Set(rows.map(row => row.attachment.id));
+        const imports = current.imports ?? [];
+        return {
+          owner: current.owner,
+          ids: [...new Set([...current.ids, ...imports.map(file => file.id)].filter(id => found.has(id)))],
+          imports: imports.filter(file => !found.has(file.id)),
+        };
+      });
     }).catch(() => {
       if (active) {
-        setDocumentRows({scope:documentScope,rows:[]});
-        setChosenDocuments(current => ({ owner: current.owner, ids: [] }));
+        setDocumentRows(current => current.scope === documentScope ? current : { scope: documentScope, rows: [] });
         setDocumentsError('Reference documents could not be loaded. Retry loading references.');
       }
     }).finally(() => { if (active) setDocumentsLoading(false); });
@@ -239,7 +264,7 @@ export function useKnowledgeSearch(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ownerIdentity, surfaceActive]);
   async function setDocumentSharing(enabled: boolean) {
-    if (!surfaceActive || scopeSwitchPending.current || sharingPending.current || createPending.current || controller.pendingRequest()) return;
+    if (!surfaceActive || scopeSwitchPending.current || historyMutation.current || sharingPending.current || createPending.current || controller.pendingRequest()) return;
     if (!owner && (scope.kind !== 'library' || !scopeReady(scope))) return;
     sharingPending.current = true;
     sharingRead.current++;
@@ -279,6 +304,7 @@ export function useKnowledgeSearch(
         if (createdOwner) {
           setThreads(rows => [createdOwner!, ...rows.filter(row => row.id !== createdOwner!.id)]);
           adoptOwner(createdOwner);
+          void reloadThreads();
         }
       }
     }
@@ -290,7 +316,7 @@ export function useKnowledgeSearch(
     if (!query.trim()) return;
     if (!scopeReady(scope)) {
       setError(
-        "Select one or more meetings, or explicitly choose all saved meetings. Check the date range.",
+        "Choose meetings, a project or date filter, or select all saved meetings.",
       );
       return;
     }
@@ -319,7 +345,7 @@ export function useKnowledgeSearch(
     }
   }
   async function newConversation() {
-    if (!surfaceActive || scopeSwitchPending.current || createPending.current) return;
+    if (!surfaceActive || scopeSwitchPending.current || historyMutation.current || createPending.current) return;
     createPending.current = true;
     reset();
     setCreating(true);
@@ -330,6 +356,7 @@ export function useKnowledgeSearch(
       setThreads((rows) => [value, ...rows]);
       setChosenDocuments({ owner: JSON.stringify(value), ids: [] });
       setOwner(value);
+      void reloadThreads();
     } catch (e) {
       if (current()) setError(errorText(e));
     } finally {
@@ -342,11 +369,13 @@ export function useKnowledgeSearch(
     confirm: (preview: NotePreview) => Promise<boolean>;
     current: () => boolean;
   }) {
-    if (!surfaceActive || scopeSwitchPending.current || !question.trim() || historyLoading) return;
-    if (controller.pendingRequest() || createPending.current || sharingPending.current) return;
+    if (!surfaceActive || scopeSwitchPending.current || !question.trim() || historyLoading || verifyingDocuments) return;
+    if (controller.pendingRequest() || historyMutation.current || createPending.current || sharingPending.current) return;
+    if (selectedDocumentIds.length && answerConfiguration?.provider !== "builtin-ai" &&
+      (!sharingEnabled || sharingLoading || sharingSaving || sharing.owner !== ownerIdentity)) return;
     if (!scopeReady(scope)) {
       setError(
-        "Select one or more meetings, or explicitly choose all saved meetings. Check the date range.",
+        "Choose meetings, a project or date filter, or select all saved meetings.",
       );
       return;
     }
@@ -431,24 +460,51 @@ export function useKnowledgeSearch(
           }
           setThreads((rows) => [value, ...rows.filter((row) => row.id !== value.id)]);
           adoptOwner(value);
+          void reloadThreads();
+        } else if (owner?.kind === "library") {
+          void reloadThreads();
         }
       }
     }
     return answered;
   }
-  async function clear() {
-    if (!owner) return;
+  async function clear(remove = false) {
+    if (!owner || historyMutation.current || controller.pendingRequest()) return;
+    historyMutation.current = true;
+    setManagingConversation(true);
     reset();
     setHistoryLoading(true);
     const current = controller.ticket("clear-operation");
     try {
-      await knowledgeService.clear(owner);
+      if (remove) await knowledgeService.deleteConversation(owner);
+      else await knowledgeService.clear(owner);
+      if (owner.kind === "library") {
+        conversationDrafts.delete(owner.id);
+        setThreads(rows => rows.filter(row => row.id !== owner.id));
+        setOwner(value => value?.id === owner.id ? null : value);
+        void reloadThreads();
+      }
       if (!current()) return;
       setMessages([]);
     } catch (e) {
       if (current()) setError(errorText(e));
     } finally {
+      historyMutation.current = false;
+      setManagingConversation(false);
       if (current()) setHistoryLoading(false);
+    }
+  }
+  async function renameConversation(title: string) {
+    if (owner?.kind !== "library" || historyMutation.current || controller.pendingRequest()) return;
+    historyMutation.current = true;
+    setManagingConversation(true);
+    try {
+      await knowledgeService.renameConversation(owner, title.trim());
+      setThreads(rows => rows.map(row => row.id === owner.id ? { ...row, title: title.trim() } : row));
+      void reloadThreads();
+    } finally {
+      historyMutation.current = false;
+      setManagingConversation(false);
     }
   }
   async function reloadHistory() {
@@ -470,18 +526,6 @@ export function useKnowledgeSearch(
         setError(errorText(e));
         setHistoryLoading(false);
       }
-    }
-  }
-  async function reloadThreads() {
-    const current = controller.ticket("threads-operation");
-    try {
-      await controller.run(
-        "threads",
-        knowledgeService.conversations,
-        setThreads,
-      );
-    } catch (e) {
-      if (current()) setError(errorText(e));
     }
   }
   const inspect = useCallback(async (
@@ -526,7 +570,7 @@ export function useKnowledgeSearch(
   }, [controller]);
   async function selectConversation({kind, id}: ConversationOwner) {
     const value = {kind, id};
-    if (!surfaceActive || scopeSwitchPending.current || owner?.id === value.id) return;
+    if (!surfaceActive || scopeSwitchPending.current || historyMutation.current || owner?.id === value.id) return;
     reset();
     if (!options?.restoreScope) {
       setChosenDocuments({ owner: JSON.stringify(value), ids: [] });
@@ -558,6 +602,8 @@ export function useKnowledgeSearch(
     scope,
     documents,
     selectedDocumentIds,
+    selectedFiles,
+    verifyingDocuments,
     documentsLoading: documentRows.scope !== documentScope || documentsLoading,
     documentsError,
     sharingEnabled,
@@ -566,16 +612,34 @@ export function useKnowledgeSearch(
     setDocumentSharing,
     reloadDocuments: () => { reset(); setDocumentRevision(value => value + 1); },
     refreshDocuments: () => setDocumentRevision(value => value + 1),
+    selectImportedDocument: (attachment: DocumentAttachment) => {
+      reset();
+      setChosenDocuments(current => ({
+        owner: ownerIdentity,
+        ids: current.owner === ownerIdentity ? current.ids : [],
+        imports: [...(current.owner === ownerIdentity ? current.imports ?? [] : [])
+          .filter(file => file.id !== attachment.id), attachment],
+      }));
+      setDocumentRevision(value => value + 1);
+    },
     selectDocument: (id: string, enabled: boolean) => {
-      if (!documents.some(row => row.attachment.id === id)) return;
+      if (enabled && !documents.some(row => row.attachment.id === id)) return;
       reset();
       setChosenDocuments(current => {
         const ids = current.owner === ownerIdentity ? current.ids : [];
-        return { owner: ownerIdentity, ids: enabled ? [...new Set([...ids,id])] : ids.filter(value => value !== id) };
+        const imports = current.owner === ownerIdentity ? current.imports : undefined;
+        return {
+          owner: ownerIdentity,
+          ids: enabled ? [...new Set([...ids,id])] : ids.filter(value => value !== id),
+          imports: enabled ? imports : imports?.filter(file => file.id !== id),
+        };
       });
     },
     owner,
     threads,
+    threadsLoading,
+    threadsError,
+    managingConversation,
     creating,
     eventError,
     response: visible ? response : null,
@@ -591,6 +655,7 @@ export function useKnowledgeSearch(
     search,
     ask,
     clear,
+    renameConversation,
     inspect,
     newConversation,
     reloadHistory,

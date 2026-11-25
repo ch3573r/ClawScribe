@@ -2,9 +2,11 @@
 import { Children, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Copy, Info, MoreHorizontal } from "lucide-react";
+import { Copy, Info, MoreHorizontal, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { PageSection } from "@/components/ui/page-section";
@@ -14,7 +16,7 @@ import { ConfirmationModal } from "@/components/ConfirmationModel/confirmation-m
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { citationParts, contextLinks, scopeReady, MAX_EVIDENCE_ENTRIES } from "@/lib/knowledge-state";
-import { documentAnchor } from "@/lib/knowledge-documents";
+import { documentAnchor, knowledgeProviderLabel } from "@/lib/knowledge-documents";
 import { friendlyModel } from "@/lib/friendly-model";
 import { openExternal } from "@/lib/openExternal";
 import type { KnowledgeSearchState } from "@/hooks/useKnowledgeSearch";
@@ -34,11 +36,12 @@ function Citation({ reply, state, tag }: { reply: AssistantReply; state: Pick<Kn
     aria-label={`Open source ${tag}`} onClick={event => { event.preventDefault(); event.stopPropagation(); void state.inspect(reply.evidence[tag - 1], reply.evidence_metadata[tag - 1], undefined, event.currentTarget); }}>{reply.evidence[tag - 1].locator.kind === "document" ? sourceTime(reply, tag) : tag}</Button></TooltipTrigger>
     <TooltipContent>{reply.evidence_metadata[tag - 1].title} · {sourceTime(reply, tag)}</TooltipContent></Tooltip>;
 }
-export function CitedAnswer({ reply, state }: { reply: AssistantReply; state: Pick<KnowledgeSearchState, 'inspect'> }) {
-  const count = reply.evidence.length === reply.evidence_metadata.length && reply.evidence.length <= MAX_EVIDENCE_ENTRIES ? reply.evidence.length : 0;
+export function CitedMarkdown({ content, count, tags, renderCitation }: {
+  content: string; count: number; tags: number[]; renderCitation: (tag: number, key: string) => ReactNode;
+}) {
   const inline = (children: ReactNode) => Children.map(children, child => typeof child === "string"
-    ? citationParts(child, count, reply.cited_tags).map((part, index) => part.tags
-      ? part.tags.map((tag, n) => <Citation key={`${index}-${tag}-${n}`} reply={reply} state={state} tag={tag} />)
+    ? citationParts(child, count, tags).map((part, index) => part.tags
+      ? part.tags.map((tag, n) => renderCitation(tag, `${index}-${tag}-${n}`))
       : part.text.replace(/\[[^\]]*\bK\d+[^\]]*\]/g, "(source unavailable)")) : child);
   const components: Components = {
     p: ({children}) => <p className="my-2">{inline(children)}</p>,
@@ -58,10 +61,17 @@ export function CitedAnswer({ reply, state }: { reply: AssistantReply; state: Pi
     table: ({children}) => <table className="my-2 w-full table-fixed border-collapse">{children}</table>,
     th: ({children}) => <th className="border border-border p-2 text-left">{inline(children)}</th>,
     td: ({children}) => <td className="border border-border p-2">{inline(children)}</td>,
-    a: ({children, href}) => <Button variant="link" asChild className="inline h-auto whitespace-normal p-0"><a href={href} onClick={event => { event.preventDefault(); if (href) void openExternal(href); }}>{inline(children)}</a></Button>,
+    a: ({children, href}) => <Button variant="link" asChild className="inline h-auto whitespace-normal p-0"><a href={href} onClick={event => { event.preventDefault(); if (href) void openExternal(href); }}>{children}</a></Button>,
+    img: ({alt}) => alt ? <span>{alt}</span> : null,
     pre: ({children}) => <pre className="my-2 whitespace-pre-wrap rounded bg-background p-3">{children}</pre>,
   };
-  return <TooltipProvider><div className="break-words text-sm leading-6"><ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{reply.content}</ReactMarkdown></div>
+  return <div className="break-words text-sm leading-6"><ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{content}</ReactMarkdown></div>;
+}
+
+export function CitedAnswer({ reply, state }: { reply: AssistantReply; state: Pick<KnowledgeSearchState, 'inspect'> }) {
+  const count = reply.evidence.length === reply.evidence_metadata.length && reply.evidence.length <= MAX_EVIDENCE_ENTRIES ? reply.evidence.length : 0;
+  return <TooltipProvider><CitedMarkdown content={reply.content} count={count} tags={reply.cited_tags}
+    renderCitation={(tag, key) => <Citation key={key} reply={reply} state={state} tag={tag} />} />
     <div className="mt-2 flex flex-wrap items-center gap-2">
       {contextLinks(reply).map((link, index) => <Tooltip key={index}><TooltipTrigger asChild>
         <Button variant="ghost" size="sm" className="h-6 rounded-full bg-muted px-2 text-xs text-muted-foreground"
@@ -83,22 +93,29 @@ function conversationLabel(question?: string | null, createdAt?: string) {
   const label = question.replace(/\s+/g, " ").trim().slice(0, 60);
   return `${label}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}`;
 }
-export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachments, suggestions, headerMenuExtra, emptyState, initialQuestion, selectedNotes, removeNote, clearNotes, reviewActive = true, destinationRevision }: {
+export function KnowledgeChat({ state, mode, provider, model, title = "Ask about these meetings", secondary, compact = false, headerActions, contextBar, composerStart, attachmentBusy, onManageAttachments, suggestions, headerMenuExtra, emptyState, initialQuestion, selectedNotes, removeNote, clearNotes, reviewActive = true, destinationRevision, destinationLabel }: {
   state: KnowledgeSearchState; mode: SearchMode; provider?: string; model?: string; title?: string; secondary?: ReactNode; compact?: boolean; headerActions?: ReactNode;
-  contextBar?: ReactNode; composerStart?: ReactNode; attachments?: ReactNode; suggestions?: readonly string[]; headerMenuExtra?: ReactNode;
+  contextBar?: ReactNode; composerStart?: ReactNode; attachmentBusy?: boolean; onManageAttachments?: () => void; suggestions?: readonly string[]; headerMenuExtra?: ReactNode;
   emptyState?: ReactNode;
   initialQuestion?: string;
   selectedNotes?: SavedReference[]; removeNote?: (reference: SavedReference) => void; clearNotes?: () => void;
-  reviewActive?: boolean; destinationRevision?: string;
+  reviewActive?: boolean; destinationRevision?: string; destinationLabel?: string;
 }) {
   const [question, setQuestion] = useState(initialQuestion ?? "");
   const [menuOpen, setMenuOpen] = useState(false);
-  const [clearTarget, setClearTarget] = useState<ConversationOwner | null>(null);
+  const [clearTarget, setClearTarget] = useState<{ owner: ConversationOwner; remove: boolean } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<ConversationOwner | null>(null);
+  const [name, setName] = useState("");
+  const [renameError, setRenameError] = useState("");
   useEffect(() => setClearTarget(null), [state.owner?.kind, state.owner?.id]);
+  useEffect(() => setRenameTarget(null), [state.owner?.kind, state.owner?.id]);
   const [settled, setSettled] = useState(0);
   const end = useRef<HTMLDivElement>(null);
   const menuTrigger = useRef<HTMLButtonElement>(null);
-  const busy = state.sending || state.creating || state.historyLoading;
+  const busy = Boolean(state.sending || state.creating || state.historyLoading || state.managingConversation);
+  const library = state.owner?.kind === "library";
+  const thread = state.threads.find(owner => owner.id === state.owner?.id);
+  const currentName = thread?.title || conversationName(state.messages);
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const pending = useRef<{ text: string; scope: string; owner?: string; provider?: string; model?: string; started: boolean; finished: boolean } | null>(null);
   const scope = JSON.stringify({scope:state.scope,documents:state.selectedDocumentIds});
@@ -123,9 +140,12 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
   const hasNotes = !!selectedNotes?.length;
   const notesInScope = !hasNotes || (state.scope.kind === "library" && !state.scope.filter.all_meetings
     && selectedNotes.every(ref => state.scope.kind === "library" && state.scope.filter.meeting_ids.includes(ref.meeting_id)));
-  const externalReferences = !!state.selectedDocumentIds?.length && provider !== "builtin-ai";
+  const selectedFiles = state.selectedFiles ?? [];
+  const externalReferences = selectedFiles.length > 0 && !!provider && provider !== "builtin-ai";
+  const destination = destinationLabel ?? knowledgeProviderLabel(provider);
   const needsSharing = externalReferences && !state.sharingEnabled;
-  const ready = notesInScope && !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !state.historyLoading && !state.creating && !needsSharing && (!externalReferences || !state.sharingLoading);
+  const ready = notesInScope && !!provider && !!model && (!!state.owner || state.scope.kind === "library") && scopeReady(state.scope) && !busy &&
+    !attachmentBusy && !state.verifyingDocuments && !needsSharing && (!externalReferences || !state.sharingLoading);
   // Draft keystrokes must not rebuild the Markdown/citation tree for the entire history.
   const messages = useMemo(() => state.messages.map(message => <article key={message.id} className={`rounded-lg p-3 ${message.role === "user" ? "ml-6 bg-primary/10" : "bg-muted"}`}>
     <div className="mb-1 flex items-center justify-between gap-2">
@@ -191,27 +211,71 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
           {compact && headerMenuExtra}
           <DropdownMenuLabel>Conversations</DropdownMenuLabel>
           {state.scope.kind === "library" && <DropdownMenuItem onSelect={() => void state.newConversation()}>New conversation</DropdownMenuItem>}
-          <DropdownMenuItem disabled={!state.messages.length || !state.owner || busy} onSelect={() => setClearTarget(state.owner)}>Clear conversation</DropdownMenuItem>
+            <DropdownMenuItem disabled={(!library && !state.messages.length) || !state.owner || busy}
+              onSelect={() => { if (state.owner) setClearTarget({ owner: state.owner, remove: false }); }}>Clear conversation</DropdownMenuItem>
+            {library && <>
+              <DropdownMenuItem onSelect={() => {
+                setRenameTarget(state.owner);
+                setName(thread?.title ?? "");
+                setRenameError("");
+              }}>Rename conversation…</DropdownMenuItem>
+              <DropdownMenuItem className="text-destructive" onSelect={() => {
+                if (state.owner) setClearTarget({ owner: state.owner, remove: true });
+              }}>Delete conversation…</DropdownMenuItem>
+            </>}
           {state.scope.kind === "library" && <><DropdownMenuSeparator />
-            {state.threads.map(owner => <DropdownMenuItem key={owner.id} className="max-w-xs truncate" onSelect={() => state.selectConversation(owner)}>{owner.id === state.owner?.id ? conversationName(state.messages) : conversationLabel(owner.first_question, owner.created_at)}</DropdownMenuItem>)}
-            {!state.threads.length && <DropdownMenuLabel>No saved conversations</DropdownMenuLabel>}
+            {state.threadsLoading && <DropdownMenuLabel>Loading conversations…</DropdownMenuLabel>}
+            {state.threadsError && <DropdownMenuItem onSelect={event => { event.preventDefault(); void state.reloadThreads(); }}>Could not load conversations. Retry</DropdownMenuItem>}
+            {state.threads.map(owner => <DropdownMenuItem key={owner.id} className="max-w-xs truncate" onSelect={() => state.selectConversation(owner)}>
+              {owner.title || (owner.id === state.owner?.id ? currentName : conversationLabel(owner.first_question, owner.created_at))}
+            </DropdownMenuItem>)}
+            {!state.threads.length && !state.threadsLoading && !state.threadsError && <DropdownMenuLabel>No saved conversations</DropdownMenuLabel>}
           </>}
         </DropdownMenuContent>
       </DropdownMenu>
       {headerActions}
     </header>
-    {clearTarget && clearTarget.kind === state.owner?.kind && clearTarget.id === state.owner.id &&
-      <ConfirmationModal isOpen title="Clear conversation?" confirmLabel="Clear conversation"
-        text={`Remove all messages and saved citations from “${conversationName(state.messages)}”?${busy ? " Wait for the current answer to finish." : ""}`}
+    {clearTarget && clearTarget.owner.kind === state.owner?.kind && clearTarget.owner.id === state.owner.id &&
+      <ConfirmationModal isOpen title={clearTarget.remove ? "Delete conversation?" : "Clear conversation?"}
+        confirmLabel={clearTarget.remove ? "Delete conversation" : "Clear conversation"}
+        text={`${library ? `Remove “${currentName}” from saved conversations, including its messages and citations?` : "Remove all messages and saved citations from this meeting’s chat?"}${busy ? " Wait for the current answer to finish." : ""}`}
         returnFocus={menuTrigger} confirmDisabled={busy}
         onCancel={() => setClearTarget(null)}
         onConfirm={() => {
           // Stay open instead of closing with nothing done.
           if (busy) return;
           setClearTarget(null);
-          void state.clear();
+          void state.clear(clearTarget.remove);
         }}
       />}
+    {renameTarget && renameTarget.id === state.owner?.id && <Dialog open
+      onOpenChange={open => { if (!open && !state.managingConversation) setRenameTarget(null); }}>
+      <DialogContent onCloseAutoFocus={event => { event.preventDefault(); menuTrigger.current?.focus(); }}>
+        <DialogHeader>
+          <DialogTitle>Rename conversation</DialogTitle>
+          <DialogDescription>This name appears in the saved conversations menu.</DialogDescription>
+        </DialogHeader>
+        <form className="space-y-3" onSubmit={async event => {
+          event.preventDefault();
+          if (!name.trim() || busy) return;
+          setRenameError("");
+          try {
+            await state.renameConversation(name);
+            setRenameTarget(null);
+          } catch (error) {
+            setRenameError(typeof error === "string" ? error : "Could not rename the conversation. Try again.");
+          }
+        }}>
+          <label htmlFor="knowledge-conversation-name" className="text-sm font-medium">Conversation name</label>
+          <Input id="knowledge-conversation-name" autoFocus value={name} maxLength={100} disabled={busy} onChange={event => setName(event.target.value)} />
+          {renameError && <p role="alert" className="text-sm text-destructive">{renameError}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" disabled={busy} onClick={() => setRenameTarget(null)}>Cancel</Button>
+            <Button type="submit" disabled={busy || !name.trim()}>{state.managingConversation ? "Saving name…" : "Save name"}</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>}
     {review && <ConfirmationModal isOpen title="Review personal excerpts" text="Confirm the exact text and destination for this question."
       confirmLabel="Confirm and send" confirmVariant="default" onCancel={() => closeReview()} onConfirm={() => closeReview(true, review.token)}>
       <div className="max-h-[55vh] space-y-3 overflow-y-auto">
@@ -249,14 +313,37 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
       <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={clearNotes}>Remove all excerpts</Button></div>}
     <form className={`shrink-0 border-t border-border bg-card ${compact ? "sticky bottom-0 space-y-2 p-3" : "space-y-3 p-5"}`} onSubmit={event => { event.preventDefault(); submit(); }}>
       <label className={compact ? "sr-only" : "block text-xs font-medium"} htmlFor={`knowledge-question-${state.owner?.id ?? "library"}`}>Question</label>
-      {compact && attachments}
+      {selectedFiles.length > 0 && <div className="flex flex-wrap gap-1" aria-label="Selected reference files">
+        {(compact && onManageAttachments && !state.verifyingDocuments ? selectedFiles.slice(0, 2) : selectedFiles).map(file => (
+          <span key={file.id} className="inline-flex max-w-full items-center gap-1 rounded-full bg-muted pl-2 text-xs">
+            <span className="truncate">{file.display_name}</span>
+            <Button type="button" variant="ghost" size="icon" className="h-6 w-6 shrink-0 rounded-full"
+              aria-label={`Remove ${file.display_name} from this question`} onClick={() => state.selectDocument(file.id, false)}><X /></Button>
+          </span>
+        ))}
+        {compact && onManageAttachments && !state.verifyingDocuments && selectedFiles.length > 2 &&
+          <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onManageAttachments}>+{selectedFiles.length - 2} more files</Button>}
+      </div>}
+      {state.verifyingDocuments && (state.documentsLoading ? <p role="status" className="text-xs text-muted-foreground">Checking the attached file…</p>
+        : <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
+          This file could not be verified in the current sources. Check the scope or remove the file to continue.
+          <Button type="button" variant="outline" size="sm" onClick={state.refreshDocuments}>Retry references</Button>
+        </div>)}
+      {externalReferences && (needsSharing || state.sharingLoading) && <div className="rounded-md border border-warning bg-warning/10 p-2 text-xs">
+        <p>Allow future questions in this conversation to send excerpts from selected files to {destination}.</p>
+        {state.sharingError && <p role="alert" className="mt-1 text-destructive">{state.sharingError}</p>}
+        <Button type="button" variant="outline" size="sm" className="mt-2" disabled={busy || state.sharingLoading || state.verifyingDocuments}
+          onClick={() => void state.setDocumentSharing(true)}>{state.sharingLoading ? "Checking reference sharing…" : "Allow reference sharing"}</Button>
+      </div>}
+      {provider && provider !== "builtin-ai" && <p className="text-xs text-muted-foreground">
+        {hasNotes ? "Confirming the preview sends" : "Choosing Ask sends"} your question, relevant transcript and summary excerpts{externalReferences && state.sharingEnabled ? ", and selected reference excerpts" : ""} to {destination}.
+      </p>}
       {compact ? <div className="flex flex-wrap items-end gap-2">{composerStart}<div className="min-w-0 flex-1">{questionInput}</div></div> : <div className="flex items-end gap-3"><div className="min-w-0 flex-1">{questionInput}</div><Button type="submit" disabled={!ready || state.sending || !question.trim()}>{hasNotes ? "Review and ask" : "Ask"}</Button></div>}
       <div className="flex items-center gap-2">{compact && <Button type="submit" disabled={!ready || state.sending || !question.trim()}>Ask</Button>}
         {state.sending && <Button type="button" variant="outline" onClick={() => { closeReview(); state.cancel(); }}>Cancel answer</Button>}
         <span className="text-xs text-muted-foreground">Shift+Enter for a new line</span>
       </div>
       {!provider || !model ? <p className="text-xs text-muted-foreground">Choose a summary provider and model in Settings.</p> : null}
-      {needsSharing && <p className="text-xs text-muted-foreground">{compact ? "Enable reference sharing in Context, or remove files to ask about transcripts only." : "Enable reference sharing above, or deselect references to ask about transcripts only."}</p>}
     </form>
   </PageSection>;
 }

@@ -54,7 +54,11 @@ During live assistance, choose **Save answer to meeting notes** on a completed
 reply. **Saved live answers** in the saved meeting shows the provider, the
 finalized-through time, and the original excerpts from the recording. Citations
 to other saved meetings or documents display only while the original references
-still verify. Deleting a source meeting or reference document also removes any
+still verify. Use **Show in transcript** to open a uniquely matched passage or
+**Play from here** when the cited recording and its offset are available.
+Use **Copy** to copy the answer as Markdown or **Insert into summary** to append
+it to an existing summary. Source numbers refer to the original saved answer.
+Deleting a source meeting or reference document also removes any
 saved live answer that used it, including answers without a citation. Detaching
 a shared document from a meeting removes answers that used it through that meeting.
 Early development builds saved answers without a complete record of their
@@ -183,8 +187,9 @@ in place. A verified citation to an unchanged passage can still open it.
 
 Switch to **Meeting memory** for ranked source search and cited questions. Its
 searchable picker lets you select meetings and remove selected chips, or check
-**Search all saved meetings**. Project filters and inclusive dates constrain
-that conversation's sources. All-meetings mode searches every meeting eligible under those filters;
+**Search all saved meetings**. A project or inclusive date filter is enough to
+start asking about matching meetings. When meetings are selected, filters
+constrain that selection. All-meetings mode searches every meeting eligible under those filters;
 turning it off restores your previous meeting selection. Empty constrained meeting selections never broaden into a library
 search. You can draft a question before choosing its sources. Leaving Meetings
 and returning in the same window restores the selected meetings and filters.
@@ -192,8 +197,9 @@ Ranked results show the canonical excerpt, original title/date/speaker,
 and actual keyword or semantic + keyword mode. Keyword search stays usable
 without enabling or downloading an embedding model.
 
-The first question creates a saved library conversation automatically. You can
-also create a new conversation or choose an existing one. Opening an existing
+The first question creates a saved library conversation automatically. The
+conversations menu lists them newest first and lets you start, rename or
+delete a saved conversation. Opening an existing
 conversation restores its last submitted meeting scope, including the project
 and date filters. Changes made since the last question are remembered while the
 app is open. Select reference files for the current conversation before asking
@@ -201,8 +207,9 @@ with them. Use **Copy answer** to copy an assistant response as Markdown.
 Questions use the summary provider configured in Settings. That provider may
 be local or cloud; retrieval and embedding inference remain local. Answers
 show the executed provider/model and retrieval mode. Cancel and scope changes
-invalidate pending work; retries reuse the pending request identity. Clear
-removes the selected conversation's history. Existing saved meeting chat,
+invalidate pending work; retries reuse the pending request identity. Clearing
+a library conversation removes it from the list. Clearing meeting chat removes
+its history. Existing saved meeting chat,
 including legacy messages, remains readable. In a meeting, chat defaults to
 only that meeting. Open **Context** and choose **Other saved meetings** to expand
 the scope with a searchable meeting picker and project filters. **Search mode**
@@ -257,7 +264,8 @@ Use **Meetings → Meeting memory → Attach file** to choose a PDF, DOCX, TXT o
 Markdown file. A single selected meeting is used automatically; otherwise pick
 the destination meeting in the searchable dialog. The destination respects the
 current project/date filters and joins the selected sources after attachment.
-With no meetings available, save a meeting or adjust those filters first.
+With no meetings available, save a meeting or adjust those filters first. An
+attached file is selected for the current question once its scope is verified.
 You can also use the paperclip beside the compact chat's question field, or
 **Context → Add file**. Selected references appear above the question field;
 remove a chip to exclude that file from the question. Suggested questions fill
@@ -268,10 +276,10 @@ A file near the text limit may need splitting because anchor metadata also count
 toward the bounded extraction response.
 
 Preview references locally and select the ones a question may use. Library chat
-lists references attached to the currently selected meetings. Adding an attachment
-does not select it automatically. **Use selected references for answers** is off by default
-and applies to the current saved conversation. Enable it before a non-Built-in AI
-provider receives document excerpts. Disabling it cancels active answers that use
+lists references attached to the meetings in scope. **Allow reference sharing**
+above the question enables reference excerpts for non-Built-in AI providers
+in the current conversation. This permission is off by default and can be
+revoked in the reference controls. Disabling it cancels active answers that use
 references. Keyword search and previews work offline without that permission.
 
 Document citation chips open the extracted page or paragraph. They describe

@@ -23,7 +23,7 @@ import { Button } from '@/components/ui/button';
 import { Copy } from 'lucide-react';
 import { FollowUpEmail } from './FollowUpEmail';
 import { SavedLiveAnswers } from './SavedLiveAnswers';
-import { LOCAL_SUMMARY_HINT, type summaryDetails } from '@/lib/meeting-summary';
+import { isEditorSummary, LOCAL_SUMMARY_HINT, type summaryDetails } from '@/lib/meeting-summary';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
 import { useRecentLanguages } from '@/hooks/useRecentLanguages';
@@ -494,7 +494,20 @@ export function SummaryPanel({
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
-          <SavedLiveAnswers key={meeting.id} meetingId={meeting.id} />
+          <SavedLiveAnswers key={meeting.id} meetingId={meeting.id} onReveal={onRevealSource} onPlay={onPlaySource}
+            summaryBusy={isSummaryLoading || isSaving}
+            onInsert={aiSummary ? async markdown => {
+              if (isEditorSummary(aiSummary)) {
+                if (!summaryRef.current) throw new Error('The summary is still loading. Try again.');
+                await summaryRef.current.appendMarkdown(markdown);
+              } else {
+                const id = globalThis.crypto.randomUUID();
+                onSummaryChange({ ...aiSummary, [id]: {
+                  title: 'Saved live answer',
+                  blocks: [{ id, type: 'text', content: markdown, color: 'default' }],
+                } });
+              }
+            } : undefined} />
           {isSummaryLoading && (
             <p role="status" className="flex items-center gap-2 border-b border-border px-4 py-2 text-sm text-muted-foreground">
               {jobState === 'deferred' ? 'Automatic notes will resume after local inference is free.'

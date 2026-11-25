@@ -47,6 +47,16 @@ pub struct MeetingFilter {
     pub from: Option<String>,
     pub to: Option<String>,
 }
+impl MeetingFilter {
+    pub(super) fn has_selection(&self) -> bool {
+        self.all_meetings
+            || !self.meeting_ids.is_empty()
+            || !self.tags.is_empty()
+            || self.untagged
+            || self.from.is_some()
+            || self.to.is_some()
+    }
+}
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TagMatch {

@@ -53,13 +53,7 @@ pub(super) async fn freeze_scope_rows(
         KnowledgeScope::Library { filter } => filter.clone(),
         KnowledgeScope::Live { .. } => return Err(KnowledgeError::InvalidInput),
     };
-    if !filter.all_meetings
-        && filter.meeting_ids.is_empty()
-        && filter.tags.is_empty()
-        && !filter.untagged
-        && filter.from.is_none()
-        && filter.to.is_none()
-    {
+    if !filter.has_selection() {
         return Err(KnowledgeError::InvalidInput);
     }
     let parse_bound = |value: &str| {

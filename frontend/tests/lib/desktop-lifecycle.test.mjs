@@ -110,6 +110,7 @@ test('Home keeps recovery open for the next interrupted recording and clears its
     '@/app/_components/StatusOverlays': components('StatusOverlays'),
     '@/components/HomeDashboard': components('HomeDashboard'),
     '@/components/LiveAssistancePanel': components('LiveAssistancePanel'),
+    '@/contexts/LiveAssistanceContext': { useLiveAssistanceOwner: () => ({ refresh: async () => {} }) },
     '@/components/RecordingControls': components('RecordingControls'),
     '@/components/TranscriptRecovery': components('TranscriptRecovery'),
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ refetchMeetings: async () => {} }) },

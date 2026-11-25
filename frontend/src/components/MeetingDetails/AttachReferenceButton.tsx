@@ -8,12 +8,13 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { knowledgeService } from '@/services/knowledgeService';
 import { referenceError } from '@/lib/knowledge-documents';
+import type { DocumentAttachment } from '@/types/knowledge';
 
 export interface AttachmentMeeting { id: string; title: string }
 
 export function AttachReferenceButton({ meetingId, meetings = [], scopeKey, disabled = false, onAttached, onBusyChange, variant = 'label', buttonRef }: {
   meetingId?: string; meetings?: AttachmentMeeting[]; scopeKey?: string; disabled?: boolean;
-  onAttached: (meetingId: string) => void;
+  onAttached: (meetingId: string, attachment: DocumentAttachment) => void;
   onBusyChange?: (busy: boolean) => void;
   variant?: 'label' | 'icon'; buttonRef?: Ref<HTMLButtonElement>;
 }) {
@@ -50,8 +51,8 @@ export function AttachReferenceButton({ meetingId, meetings = [], scopeKey, disa
       const path = await invoke<string | null>('pick_reference_document');
       if (current !== generation.current || typeof path !== 'string') return;
       request = globalThis.crypto.randomUUID(); activeImport.current = request; setExtracting(true);
-      await knowledgeService.importDocument(target, path, request);
-      if (current === generation.current) onAttached(target);
+      const attachment = await knowledgeService.importDocument(target, path, request);
+      if (current === generation.current) onAttached(target, attachment);
     } catch (failure) {
       if (current === generation.current) setError(referenceError(failure));
     } finally {
