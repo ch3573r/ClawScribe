@@ -425,8 +425,17 @@ async fn upload_file<T: GraphTransport, S: Sleeper>(
         content_type,
         bytes,
     );
+    write_file_content(client, token, &request, &parent.drive_id).await
+}
+
+async fn write_file_content<T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    request: &super::transport::GraphBinaryRequest,
+    drive_id: &str,
+) -> Result<DriveFile, UploadFailure> {
     let response = client
-        .execute_binary(&request, token)
+        .execute_binary(request, token)
         .await
         .map_err(|_| UploadFailure::Unconfirmed)?;
     if !response.is_success() {
@@ -441,9 +450,8 @@ async fn upload_file<T: GraphTransport, S: Sleeper>(
     }
     let item: GraphDriveItem =
         serde_json::from_slice(&response.body).map_err(|_| UploadFailure::Unconfirmed)?;
-    let file =
-        drive_file_from_item(item, &parent.drive_id).map_err(|_| UploadFailure::Unconfirmed)?;
-    if !valid_remote_id(&file.item_id) || file.drive_id != parent.drive_id {
+    let file = drive_file_from_item(item, drive_id).map_err(|_| UploadFailure::Unconfirmed)?;
+    if !valid_remote_id(&file.item_id) || file.drive_id != drive_id {
         return Err(UploadFailure::Unconfirmed);
     }
     Ok(file)
@@ -533,6 +541,10 @@ pub(super) async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
     ];
     revision_parts.extend(header.bookmark_revision.as_deref());
     let revision = artifact_key_hash(&revision_parts);
+    let metadata_revision = header
+        .revision
+        .clone()
+        .unwrap_or_else(|| artifact_key_hash(&["empty meeting metadata"]));
     let title: String = sanitize_drive_item_name(&request.meeting_title, "Meeting notes")
         .chars()
         .take(100)
@@ -552,8 +564,8 @@ pub(super) async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
     };
     let docx_name = format!("{stem}.docx");
     let docx = match saved_file(client, ledger, &docx_key, account, &binding, "docx").await {
-        Ok(Some(file)) => file,
-        Ok(None) => {
+        Ok(Some(file)) if !file_metadata_changed(ledger, &docx_key, &metadata_revision) => file,
+        Ok(saved) => {
             let bytes = build_meeting_docx(
                 &request.meeting_title,
                 &format!("{}\n{}", header.markdown, request.markdown),
@@ -569,6 +581,8 @@ pub(super) async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
                 bytes,
                 &docx_key,
                 &binding,
+                &metadata_revision,
+                saved,
             )
             .await
             {
@@ -590,8 +604,10 @@ pub(super) async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
     let pdf = if request.include_pdf {
         let pdf_name = format!("{stem}.pdf");
         let outcome = match saved_file(client, ledger, &pdf_key, account, &binding, "pdf").await {
-            Ok(Some(file)) => Ok(file),
-            Ok(None) => match convert_docx_to_pdf(client, token, &docx).await {
+            Ok(Some(file)) if !file_metadata_changed(ledger, &pdf_key, &metadata_revision) => {
+                Ok(file)
+            }
+            Ok(saved) => match convert_docx_to_pdf(client, token, &docx).await {
                 Ok(bytes) => {
                     export_file(
                         client,
@@ -603,22 +619,26 @@ pub(super) async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
                         bytes,
                         &pdf_key,
                         &binding,
+                        &metadata_revision,
+                        saved,
                     )
                     .await
                 }
                 Err(_) => {
-                    ledger.record_failure(
-                        &pdf_key,
-                        ExportStatus::Failed,
-                        Some("pdf_conversion_failed".into()),
-                        now_rfc3339(),
-                    );
-                    if ledger.checkpoint().await.is_err() {
-                        report.files.push(exported_file("docx", &docx, None));
-                        report
-                            .issues
-                            .push("Could not save PDF conversion status.".into());
-                        return Ok(report);
+                    if saved.is_none() {
+                        ledger.record_failure(
+                            &pdf_key,
+                            ExportStatus::Failed,
+                            Some("pdf_conversion_failed".into()),
+                            now_rfc3339(),
+                        );
+                        if ledger.checkpoint().await.is_err() {
+                            report.files.push(exported_file("docx", &docx, None));
+                            report
+                                .issues
+                                .push("Could not save PDF conversion status.".into());
+                            return Ok(report);
+                        }
                     }
                     Err(FileExportFailure::Remote(
                         "Could not convert the Word document to PDF.".into(),
@@ -849,6 +869,13 @@ fn can_retry_file(ledger: &ExportLedger, key: &str) -> bool {
     })
 }
 
+fn file_metadata_changed(ledger: &ExportLedger, key: &str, revision: &str) -> bool {
+    ledger
+        .entry(key)
+        .and_then(|entry| entry.content_revision.as_deref())
+        != Some(revision)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn export_file<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
@@ -860,7 +887,49 @@ async fn export_file<T: GraphTransport, S: Sleeper>(
     bytes: Vec<u8>,
     key: &str,
     binding: &DriveBinding,
+    metadata_revision: &str,
+    saved: Option<DriveFile>,
 ) -> Result<DriveFile, FileExportFailure> {
+    if let Some(file) = saved {
+        // Keep the confirmed item binding. If a response is lost, a retry
+        // still targets this ID, even if the selected metadata has changed again.
+        ledger
+            .entries
+            .get_mut(key)
+            .expect("saved drive file")
+            .content_revision = None;
+        ledger
+            .checkpoint()
+            .await
+            .map_err(FileExportFailure::History)?;
+        let request = binary_request(
+            "PUT",
+            format!(
+                "{GRAPH_BASE}/drives/{}/items/{}/content",
+                file.drive_id, file.item_id
+            ),
+            content_type,
+            bytes,
+        );
+        let updated = write_file_content(client, token, &request, &file.drive_id)
+            .await
+            .is_ok_and(|updated| updated.item_id == file.item_id);
+        if !updated {
+            return Err(FileExportFailure::Remote(
+                "Could not confirm the OneDrive file update. Retry to update the same file.".into(),
+            ));
+        }
+        ledger
+            .entries
+            .get_mut(key)
+            .expect("saved drive file")
+            .content_revision = Some(metadata_revision.into());
+        ledger
+            .checkpoint()
+            .await
+            .map_err(FileExportFailure::History)?;
+        return Ok(file);
+    }
     ledger.begin_attempt(key, now_rfc3339());
     ledger.label_attempt(key, name);
     ledger
@@ -873,6 +942,13 @@ async fn export_file<T: GraphTransport, S: Sleeper>(
         .await
         .map_err(FileExportFailure::History)?;
     let outcome = upload_file(client, token, destination, name, content_type, bytes).await;
+    if outcome.is_ok() {
+        ledger
+            .entries
+            .get_mut(key)
+            .expect("pending drive file")
+            .content_revision = Some(metadata_revision.into());
+    }
     let (id, url) = outcome.as_ref().map_or((None, None), |file| {
         (Some(file.item_id.as_str()), file.web_url.as_deref())
     });
@@ -1186,14 +1262,59 @@ mod tests {
             ["PUT", "GET", "GET", "GET", "PUT"]
         );
         let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
-        assert!(
-            export_meeting_files(&client, &mut ledger, &account, request, &Default::default())
-                .await
-                .unwrap()
-                .issues
-                .is_empty()
-        );
+        assert!(export_meeting_files(
+            &client,
+            &mut ledger,
+            &account,
+            request.clone(),
+            &Default::default(),
+        )
+        .await
+        .unwrap()
+        .issues
+        .is_empty());
         assert_eq!(client.transport().recorded().len(), 7);
+
+        let metadata = super::super::metadata::Header {
+            tags: vec!["Planning".into()],
+            ..Default::default()
+        }
+        .document(false);
+        queue_confirmed_file(client.transport(), "word-id", "Notes.docx", 2);
+        queue_confirmed_file(client.transport(), "pdf-id", "Notes.pdf", 2);
+        client.transport().queue_binary_default([
+            GraphBinaryResponse::success(200, br#"{"id":"word-id","name":"Notes.docx"}"#.to_vec()),
+            GraphBinaryResponse::success(200, b"%PDF-1.7 refreshed".to_vec()),
+            GraphBinaryResponse::failure(503, None),
+            GraphBinaryResponse::success(200, b"%PDF-1.7 refreshed".to_vec()),
+            GraphBinaryResponse::success(200, br#"{"id":"pdf-id","name":"Notes.pdf"}"#.to_vec()),
+        ]);
+        let partial =
+            export_meeting_files(&client, &mut ledger, &account, request.clone(), &metadata)
+                .await
+                .unwrap();
+        assert_eq!(partial.files[0].item_id, "word-id");
+        assert_eq!(partial.files.len(), 1);
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        let refreshed = export_meeting_files(&client, &mut ledger, &account, request, &metadata)
+            .await
+            .unwrap();
+        assert!(refreshed.issues.is_empty());
+        assert_eq!(refreshed.files[1].item_id, "pdf-id");
+        let calls = client.transport().recorded();
+        let puts: Vec<_> = calls[7..]
+            .iter()
+            .filter(|call| call.method == "PUT")
+            .map(|call| call.url.as_str())
+            .collect();
+        assert_eq!(
+            puts,
+            [
+                format!("{GRAPH_BASE}/drives/drive-1/items/word-id/content"),
+                format!("{GRAPH_BASE}/drives/drive-1/items/pdf-id/content"),
+                format!("{GRAPH_BASE}/drives/drive-1/items/pdf-id/content"),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1239,6 +1360,17 @@ mod tests {
         export_meeting_files(&client, &mut ledger, &account, request.clone(), &legacy)
             .await
             .unwrap();
+        let original_key = ledger.entries.keys().next().unwrap().clone();
+        let legacy_revision = artifact_key_hash(&["meeting", "Notes", "Reviewed content", ""]);
+        assert!(original_key.ends_with(&format!(":{legacy_revision}:docx")));
+        // Simulate a successful legacy row that never tracked metadata.
+        ledger
+            .entries
+            .get_mut(&original_key)
+            .unwrap()
+            .content_revision = None;
+        ledger.checkpoint().await.unwrap();
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
         export_meeting_files(
             &client,
             &mut ledger,
@@ -1248,21 +1380,48 @@ mod tests {
         )
         .await
         .unwrap();
-        queue_confirmed_file(client.transport(), "original", "Notes.docx", 1);
+        client.transport().queue_binary_default([
+            GraphBinaryResponse::success(200, br#"{"id":"original","name":"Notes.docx"}"#.to_vec()),
+            GraphBinaryResponse::success(200, br#"{"id":"original","name":"Notes.docx"}"#.to_vec()),
+        ]);
+        queue_confirmed_file(client.transport(), "original", "Notes.docx", 3);
         let repeated = export_meeting_files(
             &client,
             &mut ledger,
             &account,
-            request,
+            request.clone(),
             &no_bookmarks.document(false),
         )
         .await
         .unwrap();
         assert_eq!(repeated.files[0].item_id, "original");
+        let changed = super::super::metadata::Header {
+            attendees: vec!["Alex".into()],
+            tags: vec!["Planning".into()],
+            ..no_bookmarks
+        }
+        .document(false);
+        assert!(file_metadata_changed(
+            &ledger,
+            &original_key,
+            changed.revision.as_deref().unwrap()
+        ));
+        for _ in 0..2 {
+            let report =
+                export_meeting_files(&client, &mut ledger, &account, request.clone(), &changed)
+                    .await
+                    .unwrap();
+            assert!(report.issues.is_empty());
+            assert_eq!(report.files[0].item_id, "original");
+        }
         let calls = client.transport().recorded();
         let uploads: Vec<_> = calls.iter().filter(|call| call.method == "PUT").collect();
-        assert_eq!(uploads.len(), 2);
+        assert_eq!(uploads.len(), 4);
         assert_ne!(uploads[0].body_hash, uploads[1].body_hash);
+        assert_ne!(uploads[2].body_hash, uploads[3].body_hash);
+        assert!(uploads[2..]
+            .iter()
+            .all(|call| call.url.ends_with("/items/original/content")));
         assert_eq!(
             ledger
                 .entries
@@ -1332,6 +1491,12 @@ mod tests {
         .await
         .unwrap();
         let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        client
+            .transport()
+            .queue_binary_default([GraphBinaryResponse::success(
+                200,
+                br#"{"id":"uploaded-word","name":"Notes.docx"}"#.to_vec(),
+            )]);
         let confirmed = export_meeting_files(
             &client,
             &mut ledger,
@@ -1354,6 +1519,9 @@ mod tests {
         assert!(calls.iter().any(|call| {
             call.method == "POST" && call.url.ends_with("/uploaded-word/createLink")
         }));
-        assert_eq!(calls.iter().filter(|call| call.method == "PUT").count(), 1);
+        assert_eq!(calls.iter().filter(|call| call.method == "PUT").count(), 2);
+        assert!(calls
+            .iter()
+            .any(|call| call.method == "PUT" && call.url.ends_with("/uploaded-word/content")));
     }
 }

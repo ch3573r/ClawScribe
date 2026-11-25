@@ -38,7 +38,7 @@ export function AppShortcuts() {
       if (typing) return;
 
       if (key === "k") {
-        if (e.repeat || e.shiftKey || document.querySelector('[role="dialog"][data-state="open"]')) return;
+        if (e.repeat || e.shiftKey || document.querySelector('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]')) return;
         e.preventDefault();
         window.dispatchEvent(new CustomEvent("shortcut:open-command-palette"));
       } else if (key === "g") {

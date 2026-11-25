@@ -117,6 +117,10 @@ pub struct LedgerEntry {
     pub confluence: Option<ConfluenceBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drive: Option<DriveBinding>,
+    /// Content confirmed for a saved drive file, or the expected OneNote marker
+    /// for a pending page update. Older history has no revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) content_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +202,7 @@ impl LedgerEntry {
             display_name: None,
             confluence: None,
             drive: None,
+            content_revision: None,
         }
     }
 }
@@ -376,6 +381,10 @@ impl ExportLedger {
                         .as_deref()
                         .is_some_and(|id| !text(id, 2048))
                     || entry.code.as_deref().is_some_and(|code| !text(code, 128))
+                    || entry.content_revision.as_deref().is_some_and(|revision| {
+                        !(key.starts_with("onedrive:") || key.starts_with("onenote:"))
+                            || !hash(revision, 64)
+                    })
                     || entry.confluence.as_ref().is_some_and(|binding| {
                         !key.starts_with("confluence:")
                             || !hash(&binding.account_hash, 64)
@@ -572,6 +581,11 @@ impl ExportLedger {
                     if prefer_incoming {
                         ex.status = inc_status;
                         ex.code = inc.code.clone();
+                        ex.content_revision = if new_resource_id == inc.resource_id {
+                            inc.content_revision.clone()
+                        } else {
+                            None
+                        };
                         ex.web_url = inc.web_url.clone().or_else(|| ex.web_url.clone());
                         ex.last_attempt_at = max_opt_timestamp(
                             ex.last_attempt_at.as_deref(),
@@ -579,6 +593,14 @@ impl ExportLedger {
                         );
                     } else {
                         ex.web_url = ex.web_url.clone().or_else(|| inc.web_url.clone());
+                        if key.starts_with("onedrive:")
+                            && ex.status.is_terminal_success()
+                            && inc_status.is_terminal_success()
+                            && ex.content_revision != inc.content_revision
+                        {
+                            // Neither snapshot proves which content is currently remote.
+                            ex.content_revision = None;
+                        }
                     }
                     ex.resource_id = new_resource_id;
                     if ex.display_name.is_none() {
@@ -877,6 +899,10 @@ impl ExportLedger {
             if key.starts_with("onedrive:")
                 && matches!(key.rsplit(':').next(), Some("docx" | "pdf"))
             {
+                self.entries
+                    .get_mut(key)
+                    .expect("resolved file")
+                    .content_revision = None;
                 self.entries.remove(&format!("{key}-link"));
             }
             if let (Some(previous), Some(scope)) = (previous, key.strip_prefix("onenote:")) {

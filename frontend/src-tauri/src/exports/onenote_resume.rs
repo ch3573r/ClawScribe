@@ -25,6 +25,19 @@ pub(super) struct SectionRequest {
     pub replace_existing: bool,
 }
 
+fn section_content_hash(request: &SectionRequest) -> String {
+    let mut revisions = vec![request.markdown.as_str()];
+    revisions.extend(request.metadata.bookmark_revision.as_deref());
+    if let Some(metadata) = request.metadata.revision.as_deref() {
+        revisions.extend(["metadata", metadata]);
+    }
+    if revisions.len() == 1 {
+        format!("{:x}", Sha256::digest(request.markdown.as_bytes()))
+    } else {
+        super::ledger::artifact_key_hash(&revisions)
+    }
+}
+
 pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     ledger: &mut ExportLedger,
@@ -38,10 +51,7 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
     {
         return Err("Enter a page title and choose the content you want to export.".into());
     }
-    let content_hash = match request.metadata.bookmark_revision.as_deref() {
-        Some(bookmarks) => super::ledger::artifact_key_hash(&[&request.markdown, bookmarks]),
-        None => format!("{:x}", Sha256::digest(request.markdown.as_bytes())),
-    };
+    let content_hash = section_content_hash(&request);
     let (attempt_id, section_id, title) = if let Some(resume_id) = &request.resume_id {
         let section = ledger
             .onenote_sections
@@ -203,7 +213,6 @@ async fn export_saved_section_notes<T: GraphTransport, S: Sleeper>(
     section_id: &str,
     account: &ExportContext<'_>,
 ) -> ExportReport {
-    let revision = onenote::notes_revision(meeting);
     let target = OneNoteTarget {
         section_id: section_id.into(),
     };
@@ -211,18 +220,23 @@ async fn export_saved_section_notes<T: GraphTransport, S: Sleeper>(
         "onenote:{}:{}:{section_id}:",
         account.tenant_id, account.user_id
     );
+    let revision = saved_notes_revision(ledger, meeting, &prefix);
+    exporter::export_onenote_revision(client, ledger, meeting, &target, account, &revision).await
+}
+
+fn saved_notes_revision(ledger: &ExportLedger, meeting: &MeetingExport, prefix: &str) -> String {
+    let revision = onenote::notes_revision(meeting);
     let legacy = meeting.artifact_hash();
-    let revision = if meeting.metadata.bookmark_revision.is_none()
+    if meeting.metadata.bookmark_revision.is_none()
         && ledger
             .entry(&format!("{prefix}{revision}:notes:0"))
             .is_none()
         && ledger.entry(&format!("{prefix}{legacy}:notes:0")).is_some()
     {
-        &legacy
+        legacy
     } else {
-        &revision
-    };
-    exporter::export_onenote_revision(client, ledger, meeting, &target, account, revision).await
+        revision
+    }
 }
 
 fn page_id_from_report(report: &ExportReport) -> Option<String> {
@@ -247,7 +261,7 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
         "onenote:{}:{}:{section_id}:",
         account.tenant_id, account.user_id
     );
-    let revision = onenote::notes_revision(meeting);
+    let revision = saved_notes_revision(ledger, meeting, &prefix);
     let key = format!("{prefix}{revision}:notes:0");
     let mut pages = std::collections::BTreeMap::new();
     for (history_key, entry) in ledger.entries.range(prefix.clone()..) {
@@ -280,18 +294,10 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
     }
     // A prior reviewed re-export in this section may already have created
     // a separate replacement page for this exact revision.
-    if let Some(entry) = ledger.already_succeeded(&key) {
-        if entry.resource_id.is_some()
-            && entry.resource_id != saved_page_id
-            && (saved_page_id.is_some() || pages.len() > 1)
-        {
-            return Ok(ExportReport {
-                overall: ExportStatus::Succeeded,
-                connection_state: None,
-                items: vec![from_ledger(key, "notes-0".into(), ledger)],
-            });
-        }
-    }
+    let existing_revision = ledger.already_succeeded(&key);
+    let saved_page_id = existing_revision
+        .and_then(|entry| entry.resource_id.clone())
+        .or(saved_page_id);
     let (page_id, web_url) = if let Some(id) = saved_page_id {
         let url = pages
             .remove(&id)
@@ -326,6 +332,9 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
         .is_some_and(|entry| entry.code.as_deref() == Some(UNCONFIRMED_UPDATE));
     let marker_prefix = onenote::notes_marker_prefix(&meeting.meeting_id);
     let outcome = match prepare_notes_patch(client, account.bearer_token, &page_id, &page, &marker_prefix).await {
+        Ok(None) if existing_revision.is_some() => {
+            return Err("The saved OneNote page no longer contains an editable notes block.".into());
+        }
         Ok(None) if !retrying_update => {
             return Ok(exporter::export_onenote_revision(
                 client,
@@ -348,6 +357,7 @@ async fn replace_notes_page<T: GraphTransport, S: Sleeper>(
             entry.web_url.clone_from(&web_url);
             entry.status = ExportStatus::UnknownAfterSubmit;
             entry.code = Some(UNCONFIRMED_UPDATE.into());
+            entry.content_revision = Some(onenote::notes_content_revision(meeting));
             ledger.checkpoint().await?;
             graph_body(client.execute(&patch, account.bearer_token).await).map(|_| ())
         }
@@ -716,6 +726,125 @@ mod tests {
             resume_id,
             replace_existing: false,
         }
+    }
+
+    #[tokio::test]
+    async fn metadata_only_revision_updates_the_same_page_under_the_same_key() {
+        let mut ledger = ExportLedger::new("meeting");
+        let transport = MockGraphTransport::new();
+        let sections = format!("{GRAPH_BASE}/me/onenote/notebooks/notebook/sections");
+        let pages = format!("{GRAPH_BASE}/me/onenote/sections/section-a/pages");
+        let content = format!("{GRAPH_BASE}/me/onenote/pages/page-a/content");
+        let legacy = request(None);
+        let old = super::super::markdown_notes::meeting_export_for_onenote(
+            "meeting",
+            &legacy.page_title,
+            None,
+            &legacy.markdown,
+        );
+        let html = |revision| {
+            let prefix = onenote::notes_marker_prefix("meeting");
+            format!(
+                r#"<div><div data-id="{prefix}{revision}" id="div:{{abc}}{{14}}"><p>Notes</p></div></div>"#
+            )
+        };
+        let old_html = html(onenote::notes_revision(&old));
+        transport.queue_for_url(
+            &sections,
+            [GraphResponse::success(
+                201,
+                r#"{"id":"section-a","displayName":"Weekly sync"}"#,
+            )],
+        );
+        transport.queue_for_url(&pages, [GraphResponse::success(201, r#"{"id":"page-a"}"#)]);
+        queue_section_details(&transport, 1);
+        transport.queue_for_url(PAGE_DETAILS, [page_details()]);
+        transport.queue_for_url(&content, [GraphResponse::success(204, "")]);
+        let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
+        let account = ExportContext {
+            tenant_id: "tenant",
+            user_id: "user",
+            bearer_token: "<redacted>",
+        };
+        let first = export_section(&client, &mut ledger, &account, legacy)
+            .await
+            .unwrap();
+        let key = &first.items[0].dedupe_key;
+        assert!(key.ends_with(&format!(":{}:notes:0", onenote::notes_revision(&old))));
+        let id = ledger.onenote_sections.keys().next().unwrap().clone();
+        let before_hash = ledger.onenote_sections[&id].content_hash.clone();
+        let mut updated = request(Some(id.clone()));
+        updated.replace_existing = true;
+        updated.metadata = super::super::metadata::Header {
+            attendees: vec!["Alex".into()],
+            tags: vec!["Planning".into()],
+            ..Default::default()
+        }
+        .onenote(false);
+        let mut updated_meeting = old;
+        updated_meeting.metadata = updated.metadata.clone();
+        let updated_marker = onenote::notes_content_revision(&updated_meeting);
+        client.transport().queue_for_url(
+            &format!("{content}?includeIDs=true"),
+            [
+                GraphResponse::success(200, old_html.clone()),
+                GraphResponse::success(200, old_html),
+                GraphResponse::success(200, html(updated_marker.clone())),
+            ],
+        );
+        let second = export_section(&client, &mut ledger, &account, updated)
+            .await
+            .unwrap();
+        assert_eq!(second.items[0].dedupe_key, *key);
+        assert_eq!(second.items[0].resource_id.as_deref(), Some("page-a"));
+        assert_ne!(ledger.onenote_sections[&id].content_hash, before_hash);
+        assert_eq!(client.transport().calls_for(&pages), 1);
+        assert_eq!(client.transport().calls_for(&content), 1);
+        assert!(verify_updated_notes(
+            &client,
+            account.bearer_token,
+            "page-a",
+            "meeting",
+            &updated_marker
+        )
+        .await
+        .is_err());
+        verify_updated_notes(
+            &client,
+            account.bearer_token,
+            "page-a",
+            "meeting",
+            &updated_marker,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn metadata_keeps_the_original_short_key_for_legacy_pages_without_bookmarks() {
+        let mut ledger = ExportLedger::new("meeting");
+        let mut meeting = super::super::markdown_notes::meeting_export_for_onenote(
+            "meeting",
+            "Weekly sync",
+            None,
+            "Reviewed notes",
+        );
+        let prefix = "onenote:tenant:user:section:";
+        let legacy = meeting.artifact_hash();
+        ledger.record_success(
+            &format!("{prefix}{legacy}:notes:0"),
+            Some("legacy-page".into()),
+            None,
+            None,
+        );
+        let old_marker = onenote::notes_content_revision(&meeting);
+        meeting.metadata = super::super::metadata::Header {
+            tags: vec!["Planning".into()],
+            ..Default::default()
+        }
+        .onenote(false);
+        assert_eq!(saved_notes_revision(&ledger, &meeting, prefix), legacy);
+        assert_ne!(onenote::notes_content_revision(&meeting), old_marker);
     }
 
     #[tokio::test]

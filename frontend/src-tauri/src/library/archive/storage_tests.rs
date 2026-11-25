@@ -1,5 +1,47 @@
 use super::*;
 
+#[test]
+fn storage_breakdown_distinguishes_missing_and_inaccessible_recording_folders() {
+    let row = |folder_path| StorageFolder {
+        cursor: 1,
+        title: "Saved notes".into(),
+        folder_path,
+    };
+    let missing = measure_meeting_folder(&[], row(None));
+    assert!(missing.no_folder);
+    assert!(!missing.unavailable);
+    let inaccessible = measure_meeting_folder(&[], row(Some("outside-roots".into())));
+    assert!(!inaccessible.no_folder);
+    assert!(inaccessible.unavailable);
+}
+
+#[cfg(windows)]
+#[test]
+fn storage_breakdown_does_not_require_pinning_ancestors_against_deletion() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("meeting");
+    fs::create_dir(&folder).unwrap();
+    fs::write(folder.join("audio.wav"), b"audio").unwrap();
+    let _can_rename_root = fs::OpenOptions::new()
+        .access_mode(DELETE.0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(root.path())
+        .unwrap();
+    let row = StorageFolder {
+        cursor: 1,
+        title: "Saved notes".into(),
+        folder_path: Some(folder.to_str().unwrap().into()),
+    };
+    let measured = measure_meeting_folder(&[root.path().into()], row);
+    assert!(!measured.unavailable);
+    assert_eq!(measured.audio_bytes, 5);
+}
+
 #[tokio::test]
 async fn per_meeting_storage_checks_roots_and_returns_bounded_pages() {
     let fixture = Fixture::new().await;

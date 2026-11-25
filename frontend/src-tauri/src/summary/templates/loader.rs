@@ -194,6 +194,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn personal_files_with_new_built_in_ids_still_load_as_overrides() {
+        let personal = tempfile::tempdir().unwrap();
+        for id in [
+            "one_on_one",
+            "customer_discovery",
+            "technical_design_review",
+            "interview",
+            "executive_brief",
+        ] {
+            let bundled = defaults::get_builtin_template(id).unwrap();
+            let mut custom: serde_json::Value = serde_json::from_str(bundled).unwrap();
+            custom["name"] = serde_json::json!("Personal meeting notes");
+            std::fs::write(
+                personal.path().join(format!("{id}.json")),
+                custom.to_string(),
+            )
+            .unwrap();
+
+            let content = read_personal(id, Some(personal.path()), None)
+                .or_else(|| defaults::get_builtin_template(id).map(str::to_owned))
+                .unwrap();
+            assert_eq!(
+                validate_and_parse_template(&content).unwrap().name,
+                "Personal meeting notes"
+            );
+        }
+    }
+
+    #[test]
     fn corrected_bundled_filename_uses_the_shipped_id() {
         let dir = tempfile::tempdir().unwrap();
         let content = include_str!("../../../templates/psychiatric_session.json");

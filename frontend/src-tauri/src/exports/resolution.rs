@@ -353,9 +353,10 @@ pub(super) async fn reconcile<T: GraphTransport, S: Sleeper>(
                 entry.code.as_deref() == Some(super::onenote_resume::UNCONFIRMED_UPDATE)
             })
         {
-            let revision = key
-                .split(':')
-                .nth(4)
+            let revision = ledger
+                .entry(key)
+                .and_then(|entry| entry.content_revision.as_deref())
+                .or_else(|| key.split(':').nth(4))
                 .ok_or("Invalid OneNote revision in export history.")?;
             super::onenote_resume::verify_updated_notes(
                 client,

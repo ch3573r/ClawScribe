@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { addTag } from "@/lib/library";
+import { discardMeetingDraft } from "@/lib/meetingDrafts";
 import { indexedDBService } from "@/services/indexedDBService";
 import { openStorageDialog } from "@/lib/storage-dialog-controller";
 import type { ArchiveMeeting } from "./ArchiveAudioRemoval";
@@ -69,10 +70,11 @@ export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onRet
               if (!await exportArchiveMeeting(meeting, format)) { summary.stopped = true; break; }
             } else {
               const outcome = await invoke<{ cleanup_pending: boolean }>("api_delete_meeting", { meetingId: meeting.id, deleteFiles });
+              discardMeetingDraft(meeting.id);
               summary.cleanup ||= outcome.cleanup_pending;
               deleted.push(meeting.id);
               setMeetings(rows => rows.filter(row => row.id !== meeting.id));
-              setCurrentMeeting(current => current?.id === meeting.id ? null : current);
+              setCurrentMeeting(current => current?.id === meeting.id ? { id: "intro-call", title: "+ New Call" } : current);
               try { await indexedDBService.deleteMeeting(meeting.id); }
               catch { summary.cacheFailure = true; }
             }

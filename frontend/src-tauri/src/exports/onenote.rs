@@ -52,10 +52,25 @@ pub fn escape_xml(input: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
+            '\u{9}'
+            | '\u{a}'
+            | '\u{d}'
+            | '\u{20}'..='\u{d7ff}'
+            | '\u{e000}'..='\u{fffd}'
+            | '\u{10000}'..='\u{10ffff}' => out.push(c),
+            _ => {}
         }
     }
     out
+}
+
+#[cfg(test)]
+#[test]
+fn xhtml_strips_xml_invalid_characters_from_saved_text() {
+    assert_eq!(
+        escape_xml("<A\u{0}\u{b}\u{1f}\u{fffe}\u{ffff}>\t\n\r&😀"),
+        "&lt;A&gt;\t\n\r&amp;😀"
+    );
 }
 
 /// Build the OneNote page series for a meeting.
@@ -144,7 +159,7 @@ fn build_notes_xhtml(meeting: &MeetingExport) -> String {
     let marker = format!(
         "{}{}",
         notes_marker_prefix(&meeting.meeting_id),
-        notes_revision(meeting)
+        notes_content_revision(meeting)
     );
     wrap_page(
         &title,
@@ -168,6 +183,14 @@ pub(super) fn notes_revision(meeting: &MeetingExport) -> String {
     ];
     parts.extend(meeting.metadata.bookmark_revision.as_deref());
     super::ledger::artifact_key_hash(&parts)
+}
+
+pub(super) fn notes_content_revision(meeting: &MeetingExport) -> String {
+    let revision = notes_revision(meeting);
+    match &meeting.metadata.revision {
+        Some(metadata) => super::ledger::artifact_key_hash(&[&revision, metadata]),
+        None => revision,
+    }
 }
 
 /// Split the transcript into page bodies that each stay under the byte budget.

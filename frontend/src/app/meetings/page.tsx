@@ -102,7 +102,15 @@ export default function MeetingsPage() {
     };
     const onTab = (event: Event) => navigate((event as CustomEvent).detail);
     if (typeof window === "undefined") return;
-    navigate(new URLSearchParams(window.location?.search).get("tab"));
+    if (window.location?.href) {
+      const url = new URL(window.location.href);
+      const target = url.searchParams.get("tab");
+      if (target === "archive" || target === "memory" || target === "actions") {
+        navigate(target);
+        url.searchParams.delete("tab");
+        window.history.replaceState(window.history.state, "", url);
+      }
+    }
     window.addEventListener("open-meetings-tab", onTab);
     return () => window.removeEventListener("open-meetings-tab", onTab);
   }, []);

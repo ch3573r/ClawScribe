@@ -29,7 +29,8 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const returnFocus = useRef<HTMLElement | null>(null);
-  const actionOnClose = useRef<(() => void) | null>(null);
+  const actionOnClose = useRef<string | (() => void) | null>(null);
+  const currentCommands = useRef<readonly { id: string; action: () => void; disabled?: string | null }[]>([]);
   const { semanticReady } = useKnowledgeIndexStatus(open);
   const text = query.trim();
 
@@ -59,7 +60,7 @@ export function CommandPalette() {
   const titles = text ? meetings.filter(meeting => matches(meeting.title)).slice(0, maxResults) : [];
   const sections = SETTINGS_ITEMS.filter(section => matches(`Settings ${section.label}`) || (text && matches(section.desc)));
 
-  function choose(action: () => void) {
+  function choose(action: string | (() => void)) {
     actionOnClose.current = action;
     setOpen(false);
   }
@@ -67,13 +68,15 @@ export function CommandPalette() {
     if (pathname === "/meetings") window.dispatchEvent(new CustomEvent("open-meetings-tab", { detail: tab }));
     else router.push(`/meetings?tab=${tab}`);
   }
-  const quick = [
-    { label: recording.isRecording ? "Stop recording" : "Start recording", icon: recording.isRecording ? Square : Mic, action: handleRecordingToggle, disabled: recordingActionReason },
-    { label: "Import audio or video", icon: Upload, action: () => openImportDialog() },
-    { label: "Open Archive", icon: FileText, action: () => goToMeetings("archive") },
-    { label: "Open Meeting memory", icon: BrainCircuit, action: () => goToMeetings("memory") },
-    { label: "Open actions", icon: ListChecks, action: () => goToMeetings("actions") },
-  ].filter(command => matches(command.label));
+  const commands = [
+    { id: "recording", label: recording.isRecording ? "Stop recording" : "Start recording", icon: recording.isRecording ? Square : Mic, action: handleRecordingToggle, disabled: recordingActionReason },
+    { id: "import", label: "Import audio or video", icon: Upload, action: () => openImportDialog() },
+    { id: "archive", label: "Open Archive", icon: FileText, action: () => goToMeetings("archive") },
+    { id: "memory", label: "Open Meeting memory", icon: BrainCircuit, action: () => goToMeetings("memory") },
+    { id: "actions", label: "Open actions", icon: ListChecks, action: () => goToMeetings("actions") },
+  ];
+  currentCommands.current = commands;
+  const quick = commands.filter(command => matches(command.label));
 
   return <Dialog open={open} onOpenChange={setOpen}>
     <DialogContent className="w-[calc(100vw-2rem)] gap-0 overflow-hidden p-0 sm:max-w-2xl"
@@ -82,7 +85,12 @@ export function CommandPalette() {
         returnFocus.current?.focus();
         const action = actionOnClose.current;
         actionOnClose.current = null;
-        action?.();
+        if (typeof action === "string") {
+          const command = currentCommands.current.find(command => command.id === action);
+          if (command && !command.disabled) command.action();
+        } else {
+          action?.();
+        }
       }}>
       <DialogTitle className="sr-only">Command palette</DialogTitle>
       <DialogDescription className="sr-only">Search meetings, transcripts, actions and settings, or run a command.</DialogDescription>
@@ -91,8 +99,8 @@ export function CommandPalette() {
           aria-label="Search ClawScribe" placeholder="Search meetings, actions or commands…" className="h-12 pr-9" />
         <CommandList className="max-h-[min(26rem,65vh)] px-1">
           {quick.length > 0 && <CommandGroup heading="Quick commands">
-            {quick.map(({ label, icon: Icon, action, disabled }) => <CommandItem key={label} value={`command:${label}`}
-              onSelect={() => choose(action)} disabled={!!disabled}>
+            {quick.map(({ id, label, icon: Icon, disabled }) => <CommandItem key={id} value={`command:${id}`}
+              onSelect={() => choose(id)} disabled={!!disabled}>
               <Icon aria-hidden="true" /><span>{label}</span>{disabled && <span className="text-xs text-muted-foreground">{disabled}</span>}
             </CommandItem>)}
           </CommandGroup>}

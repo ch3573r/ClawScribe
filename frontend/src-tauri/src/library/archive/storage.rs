@@ -708,6 +708,7 @@ struct MeetingStorage {
     audio_bytes: u64,
     recovery_bytes: u64,
     other_bytes: u64,
+    no_folder: bool,
     unavailable: bool,
     partial: bool,
 }
@@ -760,14 +761,13 @@ fn measure_meeting_folder(roots: &[PathBuf], row: StorageFolder) -> MeetingStora
         ..Default::default()
     };
     let Some(path) = row.folder_path.filter(|path| !path.trim().is_empty()) else {
+        measured.no_folder = true;
         return measured;
     };
-    let opened = (|| {
-        let folder = safe_folder(Path::new(&path), roots).ok()?;
-        let pins = pin_backup_folder(&folder).ok()?;
-        Some((fs::read_dir(folder).ok()?, pins))
-    })();
-    let Some((entries, _pins)) = opened else {
+    let entries = safe_folder(Path::new(&path), roots)
+        .ok()
+        .and_then(|folder| fs::read_dir(folder).ok());
+    let Some(entries) = entries else {
         measured.unavailable = true;
         return measured;
     };

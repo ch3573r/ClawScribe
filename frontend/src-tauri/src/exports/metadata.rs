@@ -18,12 +18,14 @@ pub(crate) struct Header {
 pub(super) struct DocumentHeader {
     pub markdown: String,
     pub bookmark_revision: Option<String>,
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct OneNoteHeader {
     pub(super) html: String,
     pub(super) bookmark_revision: Option<String>,
+    pub(super) revision: Option<String>,
 }
 
 impl Header {
@@ -107,6 +109,17 @@ impl Header {
         })
     }
 
+    fn revision(&self) -> Option<String> {
+        let fields: Vec<_> = self.fields().collect();
+        (!fields.is_empty()).then(|| {
+            let parts: Vec<_> = fields
+                .iter()
+                .flat_map(|(label, value)| [*label, value.as_str()])
+                .collect();
+            super::ledger::artifact_key_hash(&parts)
+        })
+    }
+
     // Bookmarks are a reviewed content selection. Keep them in artifact
     // identity while retaining the legacy keys when none are included.
     fn bookmark_revision(&self, timestamps: bool) -> Option<String> {
@@ -123,6 +136,7 @@ impl Header {
         DocumentHeader {
             markdown: self.markdown(timestamps),
             bookmark_revision: self.bookmark_revision(timestamps),
+            revision: self.revision(),
         }
     }
 
@@ -130,6 +144,7 @@ impl Header {
         OneNoteHeader {
             html: self.xhtml(timestamps),
             bookmark_revision: self.bookmark_revision(timestamps),
+            revision: self.revision(),
         }
     }
 

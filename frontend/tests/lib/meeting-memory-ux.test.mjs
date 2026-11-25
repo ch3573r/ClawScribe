@@ -45,6 +45,28 @@ test('Meetings opens the archive and keeps Meeting memory mounted across tab cha
   nodes(tree).find(node=>node.type==='tabs').props.onValueChange('archive');
   assert.equal(nodes(panel(app.render())).filter(node=>node.type==='memory').length,1);app.unmount();
 });
+test('Meetings consumes the deep-linked tab and preserves other URL parameters and history state', t => {
+  const previousWindow = globalThis.window;
+  const state = { fixture: true };
+  const window = {
+    location: new URL('https://example.com/meetings?tab=actions&source=fixture#saved'),
+    history: { state, replaceState(nextState, _title, url) {
+      assert.equal(nextState, state);
+      window.location = new URL(url, window.location);
+    } },
+    addEventListener() {}, removeEventListener() {},
+  };
+  globalThis.window = window;
+  const app = surface('src/app/meetings/page.tsx', 'default');
+  t.after(() => { app.unmount(); globalThis.window = previousWindow; });
+  const tab = () => nodes(app.render()).find(node => node.type === 'tabs');
+  tab();
+  assert.equal(tab().props.value, 'actions');
+  assert.equal(window.location.search, '?source=fixture');
+  assert.equal(window.location.hash, '#saved');
+  tab().props.onValueChange('archive');
+  tab();
+});
 test('meeting picker searches titles and exposes selected chips without broadening the scope',()=>{
   const app=surface('src/components/Knowledge/KnowledgeArchive.tsx','KnowledgeArchive',{meetings,projectFilter:{tags:[],untagged:false,mode:'any'}});
   const search=nodes(app.render()).find(node=>node.props?.['aria-label']==='Find meetings');assert.ok(search);

@@ -34,11 +34,25 @@ pub struct Bookmark {
 }
 
 fn clean_label(value: &str, max: usize) -> Result<String, String> {
-    let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let stripped: String = value
+        .chars()
+        .filter(|&c| matches!(c, '\t' | '\n' | '\r') || !c.is_control())
+        .collect();
+    let clean = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
     if clean.is_empty() || clean.chars().count() > max {
         return Err(format!("Enter between 1 and {max} characters."));
     }
     Ok(clean)
+}
+
+#[cfg(test)]
+#[test]
+fn bookmark_labels_strip_controls_and_normalize_tabs_and_newlines() {
+    assert_eq!(
+        clean_label("  Rés\u{0}umé\tand\n\u{85}review\u{7f}\u{1f}\u{9f}", 30).unwrap(),
+        "Résumé and review"
+    );
+    assert!(clean_label("\u{0}\t\u{85}", 30).is_err());
 }
 
 pub(crate) async fn attach_bookmarks(pool: &SqlitePool) -> Result<(), sqlx::Error> {

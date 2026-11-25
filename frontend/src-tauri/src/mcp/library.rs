@@ -24,8 +24,8 @@ use std::{
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
-    sync::atomic::AtomicBool,
-    time::{Duration, Instant},
+    sync::{atomic::AtomicBool, Mutex},
+    time::{Duration, Instant, SystemTime},
 };
 
 const DATABASE: &str = "meeting_minutes.sqlite";
@@ -36,6 +36,105 @@ const MAX_STORED_JSON: i64 = 8 * 1024 * 1024;
 const INVALID_FILTERS: &str = "Invalid meeting filters.";
 const INVALID_PASSAGE_FILTERS: &str = "Invalid passage search filters.";
 static SEMANTIC_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+static EMBEDDING_CACHE: Mutex<Option<CachedEmbedding>> = Mutex::new(None);
+
+#[derive(Debug, PartialEq, Eq)]
+struct EmbeddingCacheKey {
+    root: PathBuf,
+    files: Vec<(u64, SystemTime)>,
+}
+
+struct CachedEmbedding {
+    key: EmbeddingCacheKey,
+    _verified: VerifiedModel,
+    backend: OnnxEmbedding,
+}
+
+fn embedding_cache_key(root: &Path) -> std::io::Result<EmbeddingCacheKey> {
+    let files = PINS
+        .files
+        .iter()
+        .map(|file| {
+            let metadata = fs::symlink_metadata(root.join(&file.path))?;
+            if !metadata.is_file() || linked(&metadata) {
+                return Err(std::io::ErrorKind::InvalidData.into());
+            }
+            Ok((metadata.len(), metadata.modified()?))
+        })
+        .collect::<std::io::Result<_>>()?;
+    Ok(EmbeddingCacheKey {
+        root: root.into(),
+        files,
+    })
+}
+
+fn embed_query(root: &Path, query: &str) -> Result<Vec<f32>, KnowledgeError> {
+    let mut cache = EMBEDDING_CACHE
+        .lock()
+        .map_err(|_| KnowledgeError::ModelUnavailable)?;
+    let key = match embedding_cache_key(root) {
+        Ok(key) => key,
+        Err(_) => {
+            *cache = None;
+            return Err(KnowledgeError::ModelUnavailable);
+        }
+    };
+    if let Some(cached) = cache.as_mut().filter(|cached| cached.key == key) {
+        return cached.backend.embed(query, EmbeddingPurpose::Query);
+    }
+    // Release the old session before loading the new one to cap peak memory.
+    *cache = None;
+    let verified = VerifiedModel::verify_blocking(root, &AtomicBool::new(false))?;
+    let backend = OnnxEmbedding::load(&verified)?;
+    if embedding_cache_key(root).ok().as_ref() != Some(&key) {
+        return Err(KnowledgeError::ModelUnavailable);
+    }
+    let cached = cache.insert(CachedEmbedding {
+        key,
+        _verified: verified,
+        backend,
+    });
+    cached.backend.embed(query, EmbeddingPurpose::Query)
+}
+
+#[cfg(test)]
+#[test]
+fn embedding_cache_key_tracks_root_size_and_modification_time() {
+    let root = tempfile::tempdir().unwrap();
+    let other_root = tempfile::tempdir().unwrap();
+    let baseline = SystemTime::UNIX_EPOCH + Duration::from_secs(86_400);
+    for root in [root.path(), other_root.path()] {
+        for file in &PINS.files {
+            let path = root.join(&file.path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"fixture").unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(baseline)
+                .unwrap();
+        }
+    }
+    let key = embedding_cache_key(root.path()).unwrap();
+    let other_key = embedding_cache_key(other_root.path()).unwrap();
+    assert_eq!(key, embedding_cache_key(root.path()).unwrap());
+    assert_eq!(key.files, other_key.files);
+    assert_ne!(key, other_key);
+
+    let path = root.path().join(&PINS.files[0].path);
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(baseline + Duration::from_secs(86_400))
+        .unwrap();
+    let modified = embedding_cache_key(root.path()).unwrap();
+    assert_eq!(key.files[0].0, modified.files[0].0);
+    assert_ne!(key, modified);
+    file.set_len(1).unwrap();
+    file.set_modified(modified.files[0].1).unwrap();
+    let resized = embedding_cache_key(root.path()).unwrap();
+    assert_eq!(modified.files[0].1, resized.files[0].1);
+    assert_ne!(modified, resized);
+}
 
 fn read_options(app_data: &Path) -> Result<SqliteConnectOptions, &'static str> {
     let path = app_data.join(DATABASE);
@@ -227,8 +326,7 @@ async fn related_passages(
         // Hold the permit until the native inference returns, even if the tool
         // call times out or the client cancels.
         let _permit = permit;
-        let verified = VerifiedModel::verify_blocking(&model_root, &AtomicBool::new(false))?;
-        OnnxEmbedding::load(&verified)?.embed(&input, EmbeddingPurpose::Query)
+        embed_query(&model_root, &input)
     })
     .await
     .ok()?

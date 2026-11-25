@@ -49,6 +49,7 @@ interface MeetingStoragePage {
     audio_bytes: number;
     recovery_bytes: number;
     other_bytes: number;
+    no_folder: boolean;
     unavailable: boolean;
     partial: boolean;
   }[];
@@ -80,7 +81,7 @@ function MeetingStorageBreakdown() {
             {result.rows.map((row, index) => <li key={index} className="py-2 text-sm">
               <p className="break-words font-medium">{row.title || "Untitled meeting"}</p>
               <p className="text-muted-foreground">
-                {row.unavailable ? "Folder unavailable" : [
+                {row.no_folder ? "No recording folder" : row.unavailable ? "Folder unavailable" : [
                   `Audio ${formatArchiveBytes(row.audio_bytes)}`,
                   `Recovery ${formatArchiveBytes(row.recovery_bytes)}`,
                   `Other files ${formatArchiveBytes(row.other_bytes)}`,
