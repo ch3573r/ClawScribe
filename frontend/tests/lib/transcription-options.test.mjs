@@ -28,7 +28,7 @@ function setup(t, options = {}) {
     '@/components/ui/dialog': names('Dialog DialogContent DialogDescription DialogFooter DialogHeader DialogTitle'),
     '@/components/ui/settings-layout': names('SettingsCard SettingsRow SettingsTag'),
     '@/lib/parakeetAccel': {
-      getParakeetBackendSettings: async () => ({ ...state.backend }),
+      getParakeetBackendSettings: async () => state.backendRead ?? { ...state.backend },
       getParakeetDirectml: () => state.storedDirectml,
       getParakeetWorker: () => state.storedWorker,
       setParakeetDirectml: async enabled => { calls.push(['directml', enabled]); if (state.directmlFails) throw new Error('not saved'); state.backend.directml = enabled; state.storedDirectml = enabled; },
@@ -92,6 +92,20 @@ test('GPU and separate-process switches follow backend truth and report an unapp
   assert.match(text(ui.row('parakeet-directml')), /Not active yet/);
 });
 
+test('the DirectML switch explains why it is disabled while the status resolves', async t => {
+  const pending = deferred();
+  const ui = setup(t, { backendRead: pending.promise });
+  ui.render();
+  const row = () => ui.row('parakeet-directml');
+  assert.equal(ui.control('parakeet-directml').props.disabled, true);
+  assert.ok(nodes(row()).some(node => node.props.role === 'status' && text(node) === 'Checking DirectML…'));
+  pending.resolve({ directml: true, directmlAutomatic: true, worker: false });
+  await flush();
+  assert.equal(ui.control('parakeet-directml').props.checked, true);
+  assert.equal(ui.control('parakeet-directml').props.disabled, false);
+  assert.doesNotMatch(text(row()), /Checking DirectML/);
+});
+
 test('a refused separate-process change is explained and the switch keeps backend state', async t => {
   const ui = setup(t, { workerBusy: true });
   ui.render();
@@ -113,7 +127,7 @@ test('an unavailable automatic DirectML default explains CPU use', async t => {
   ui.render();
   await flush();
   assert.equal(ui.control('parakeet-directml').props.checked, false);
-  assert.match(text(ui.row('parakeet-directml')), /DirectML could not initialize.*Parakeet will use the CPU/);
+  assert.match(text(ui.row('parakeet-directml')), /DirectML is unavailable in automatic mode.*Parakeet will use the CPU/);
 });
 
 test('a successful automatic DirectML default is active without a stored choice', async t => {

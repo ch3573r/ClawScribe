@@ -1,4 +1,4 @@
-use super::super::model::TimestampedResult;
+use super::super::model::{warn_encoder_length_clamped, TimestampedResult};
 use super::protocol::{read_frame, write_frame, Request, Response};
 use std::ffi::OsString;
 #[cfg(windows)]
@@ -202,6 +202,7 @@ pub struct TranscriptionWorker {
     directml_registered: bool,
     successful_loads: u64,
     directml_disabled: Arc<AtomicBool>,
+    automatic_directml_marker_dir: Option<PathBuf>,
     load_timeout: Duration,
     #[cfg(test)]
     spawned: usize,
@@ -229,12 +230,18 @@ impl TranscriptionWorker {
             directml_disabled: DIRECTML_DISABLED
                 .get_or_init(|| Arc::new(AtomicBool::new(false)))
                 .clone(),
+            automatic_directml_marker_dir: None,
             load_timeout: LOAD_TIMEOUT,
             #[cfg(test)]
             spawned: 0,
             #[cfg(test)]
             reaped: 0,
         }
+    }
+
+    #[cfg(all(windows, feature = "directml"))]
+    pub(crate) fn set_automatic_directml_marker_dir(&mut self, directory: Option<PathBuf>) {
+        self.automatic_directml_marker_dir = directory;
     }
 
     #[cfg(any(test, all(windows, feature = "directml")))]
@@ -256,11 +263,10 @@ impl TranscriptionWorker {
         let first = self.load_once(spec.clone(), self.load_timeout, is_cancelled);
         match first {
             Err(WorkerError::Crashed | WorkerError::TimedOut) if using_directml => {
-                self.disable_directml();
                 if is_cancelled() {
                     return Err(WorkerError::Cancelled);
                 }
-                // One CPU retry for an explicit GPU load, never nested inside
+                // One CPU retry for a GPU load, never nested inside
                 // the transcribe retry's reload budget.
                 self.load_once(spec, self.load_timeout, is_cancelled)
             }
@@ -271,6 +277,14 @@ impl TranscriptionWorker {
     fn disable_directml(&self) {
         if !self.directml_disabled.swap(true, Ordering::AcqRel) {
             log::warn!("Parakeet GPU path disabled for this session after a worker failure");
+        }
+        if let Some(directory) = &self.automatic_directml_marker_dir {
+            if let Err(error) = super::directml_probe::record_runtime_failure(directory) {
+                log::warn!(
+                    "Could not persist the Parakeet automatic DirectML failure ({:?})",
+                    error.kind()
+                );
+            }
         }
     }
 
@@ -292,8 +306,14 @@ impl TranscriptionWorker {
             Arc::new(vec![]),
             timeout,
             is_cancelled,
-        )?;
-        match response {
+        );
+        if spec.use_directml
+            && !timeout.is_zero()
+            && matches!(response, Err(WorkerError::Crashed | WorkerError::TimedOut))
+        {
+            self.disable_directml();
+        }
+        match response? {
             Response::Loaded {
                 directml_registered,
             } => {
@@ -330,13 +350,6 @@ impl TranscriptionWorker {
         let first = self.transcribe_once(samples.clone(), timeout, is_cancelled);
         match first {
             Err(WorkerError::Crashed | WorkerError::TimedOut) => {
-                if self
-                    .last_load
-                    .as_ref()
-                    .is_some_and(|spec| spec.use_directml)
-                {
-                    self.disable_directml();
-                }
                 if is_cancelled() {
                     return Err(WorkerError::Cancelled);
                 }
@@ -376,16 +389,30 @@ impl TranscriptionWorker {
             }
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        match self.exchange(Request::Transcribe, samples, remaining, is_cancelled)? {
+        let using_directml = self.directml_registered;
+        let response = self.exchange(Request::Transcribe, samples, remaining, is_cancelled);
+        if using_directml
+            && !remaining.is_zero()
+            && matches!(response, Err(WorkerError::Crashed | WorkerError::TimedOut))
+        {
+            self.disable_directml();
+        }
+        match response? {
             Response::Transcript {
                 text,
                 timestamps,
                 tokens,
-            } => Ok(TimestampedResult {
-                text,
-                timestamps,
-                tokens,
-            }),
+                encoder_length_clamped,
+            } => {
+                if encoder_length_clamped {
+                    warn_encoder_length_clamped();
+                }
+                Ok(TimestampedResult {
+                    text,
+                    timestamps,
+                    tokens,
+                })
+            }
             Response::Error(message) => Err(WorkerError::Engine(message)),
             _ => {
                 self.stop_child();
@@ -591,6 +618,11 @@ mod job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn automatic_probe_can_run(app_data: &std::path::Path) -> bool {
+        super::super::directml_probe::resolve(&OnceLock::new(), app_data, || Ok(true))
+    }
 
     fn spec(use_directml: bool) -> LoadSpec {
         LoadSpec {
@@ -813,6 +845,7 @@ while ($true) {{
             let directory = tempfile::tempdir().unwrap();
             let state = directory.path().join("state");
             let mut worker = fake(mode, &state);
+            worker.automatic_directml_marker_dir = Some(directory.path().into());
             worker.load(spec(true), &|| false).unwrap();
             assert_eq!(worker.session_status(), (true, 1));
             let result = worker
@@ -828,6 +861,7 @@ while ($true) {{
             assert_eq!(attempts[0], attempts[1]);
             assert!(!worker.last_load.as_ref().unwrap().use_directml);
             assert_eq!(worker.session_status(), (false, 2));
+            assert!(!automatic_probe_can_run(directory.path()));
             worker.load(spec(true), &|| false).unwrap();
             worker.shutdown();
             let loads = std::fs::read_to_string(state.with_extension("loads")).unwrap();
@@ -873,10 +907,12 @@ while ($true) {{
             let directory = tempfile::tempdir().unwrap();
             let state = directory.path().join("state");
             let mut worker = fake(mode, &state);
+            worker.automatic_directml_marker_dir = Some(directory.path().into());
             worker.load_timeout = Duration::from_secs(8);
             worker.load(spec(true), &|| false).unwrap();
             assert!(worker.directml_disabled.load(Ordering::Acquire));
             assert!(!worker.last_load.as_ref().unwrap().use_directml);
+            assert!(!automatic_probe_can_run(directory.path()));
             assert_eq!(worker.spawned, 2);
             assert_eq!(worker.reaped, 1);
             worker.shutdown();
@@ -936,6 +972,7 @@ while ($true) {{
         assert_eq!(worker.spawned, 2);
         assert_eq!(worker.reaped, 2);
         assert!(worker.child.is_none());
+        assert!(automatic_probe_can_run(directory.path()));
     }
 
     #[test]
@@ -972,7 +1009,8 @@ while ($true) {{
         ] {
             let directory = tempfile::tempdir().unwrap();
             let mut worker = fake(mode, &directory.path().join("state"));
-            worker.load(spec(false), &|| false).unwrap();
+            worker.automatic_directml_marker_dir = Some(directory.path().into());
+            worker.load(spec(true), &|| false).unwrap();
             assert_eq!(
                 worker
                     .transcribe(vec![], Duration::from_secs(10), &|| false)
@@ -980,6 +1018,7 @@ while ($true) {{
                 expected
             );
             assert_eq!(worker.spawned, 1);
+            assert!(automatic_probe_can_run(directory.path()));
             if mode == "protocol" {
                 assert_eq!(worker.reaped, 1);
                 assert!(worker.child.is_none());

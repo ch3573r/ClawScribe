@@ -7,9 +7,10 @@ use crate::audio::recording_commands;
 use crate::database::repositories::setting::SettingsRepository;
 use crate::nemotron_engine::commands::{nemotron_get_available_models, NEMOTRON_ENGINE};
 use crate::parakeet_engine::commands::{
-    get_parakeet_use_directml, parakeet_get_available_models, parakeet_get_current_model,
-    parakeet_get_models_directory, parakeet_init, parakeet_is_model_loaded,
+    parakeet_get_available_models, parakeet_get_current_model, parakeet_get_models_directory,
+    parakeet_init, parakeet_is_model_loaded,
 };
+use crate::parakeet_engine::parakeet_engine::cached_directml_requested;
 use crate::state::AppState;
 use crate::summary::codex_provider::{codex_check_installation, CodexInstallationStatus};
 use crate::teams_detection::{get_teams_detection_status, TeamsDetectionStatus};
@@ -55,6 +56,7 @@ pub struct TranscriptionDiagnostics {
     pub selected_provider: String,
     pub selected_model: String,
     pub api_key_configured: bool,
+    /// Null means the automatic preference has not been checked yet.
     pub parakeet_directml_enabled: Option<bool>,
     pub engines: Vec<ModelEngineDiagnostics>,
 }
@@ -147,13 +149,7 @@ pub(crate) async fn get_diagnostics_snapshot<R: Runtime>(
         default_transcript_config()
     });
 
-    let parakeet_directml_enabled = match get_parakeet_use_directml().await {
-        Ok(enabled) => Some(enabled),
-        Err(error) => {
-            errors.push(format!("parakeet_directml: {error}"));
-            None
-        }
-    };
+    let parakeet_directml_enabled = cached_directml_requested();
 
     let audio = match audio_diagnostics().await {
         Ok(audio) => audio,

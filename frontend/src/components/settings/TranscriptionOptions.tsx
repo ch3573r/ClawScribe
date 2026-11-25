@@ -196,12 +196,13 @@ export function TranscriptionOptions() {
         title={<BetaTitle>Run Parakeet on the GPU with DirectML</BetaTitle>}
         description={<>
           On by default when Windows can initialize DirectML. Operations the GPU cannot run use the CPU. Applies to the next recording.
+          {!parakeetSettings && !parakeetReadError && <Note>Checking DirectML…</Note>}
           {dmlStatus && <Note>{dmlStatus}</Note>}
           {parakeetSettings?.directmlDefaultUnavailable && (
-            <Note>DirectML could not initialize on this device. Parakeet will use the CPU.</Note>
+            <Note>DirectML is unavailable in automatic mode. Parakeet will use the CPU.</Note>
           )}
           {parakeetSettings?.directmlSessionDisabled && (
-            <Note>GPU acceleration was turned off for this session after the speech model stopped responding.</Note>
+            <Note>GPU acceleration was turned off for this session after the speech worker failed.</Note>
           )}
           {parakeetSettings?.directmlLastLoadFellBack && !parakeetSettings.directmlSessionDisabled && (
             <Note>The last speech model could not load with DirectML and used the CPU.</Note>

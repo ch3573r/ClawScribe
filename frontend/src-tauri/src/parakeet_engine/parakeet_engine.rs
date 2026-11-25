@@ -69,6 +69,19 @@ pub(crate) fn directml_requested() -> bool {
     resolved_directml().0
 }
 
+/// Read the requested setting for diagnostics without initializing DirectML.
+/// An unresolved automatic preference is reported as unknown.
+pub(crate) fn cached_directml_requested() -> Option<bool> {
+    directml_preference().or_else(|| {
+        #[cfg(all(windows, feature = "directml"))]
+        {
+            super::worker::cached_automatic_directml()
+        }
+        #[cfg(not(all(windows, feature = "directml")))]
+        Some(false)
+    })
+}
+
 pub(crate) fn resolved_directml() -> (bool, bool) {
     let preference = directml_preference();
     let requested = resolve_directml_preference(preference, automatic_directml_available);
@@ -605,9 +618,15 @@ impl ParakeetEngine {
                 let use_worker = USE_PARAKEET_WORKER.load(std::sync::atomic::Ordering::Relaxed);
                 let path = model_info.path.clone();
                 let model = crate::audio::inference::run(move |cancelled| {
-                    let use_directml = directml_requested();
+                    let (use_directml, _automatic) = resolved_directml();
                     let model = if use_worker || (use_directml && cfg!(feature = "directml")) {
                         let mut worker = TranscriptionWorker::new()?;
+                        #[cfg(all(windows, feature = "directml"))]
+                        if use_directml && _automatic {
+                            worker.set_automatic_directml_marker_dir(
+                                DIRECTML_PROBE_DIRECTORY.get().cloned(),
+                            );
+                        }
                         worker.load(
                             LoadSpec {
                                 model_dir: path,

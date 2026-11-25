@@ -55,6 +55,24 @@ pub struct CallScan {
     pub(crate) open_meet_rooms: Vec<(String, [u8; 32])>,
 }
 
+impl CallScan {
+    fn browser_surface(
+        &mut self,
+        inspect_meet_tabs: bool,
+        address: Option<&str>,
+    ) -> Option<(Provider, String, Option<[u8; 32]>)> {
+        let address = address.filter(|address| !address.trim().is_empty());
+        if inspect_meet_tabs && address.is_none() {
+            self.complete = false;
+        }
+        address.and_then(browser_surface)
+    }
+}
+
+fn should_inspect_window(desktop: Option<Provider>, title: &str) -> bool {
+    desktop.is_some() || title.contains("meet") || title.contains("teams")
+}
+
 #[tauri::command]
 pub async fn get_call_detection_status(
     providers: Vec<Provider>,
@@ -453,11 +471,7 @@ mod native {
             }
             let title = String::from_utf16_lossy(&title[..count as usize]).to_lowercase();
             let desktop = desktop_provider(exe);
-            if desktop.is_none()
-                && !inspect_meet_tabs
-                && !title.contains("meet")
-                && !title.contains("teams")
-            {
+            if !should_inspect_window(desktop, &title) {
                 continue;
             }
             if Instant::now() >= deadline {
@@ -465,12 +479,16 @@ mod native {
                 continue;
             }
             let Ok(root) = (unsafe { api.ElementFromHandle(hwnd) }) else {
+                if inspect_meet_tabs && desktop.is_none() {
+                    scan.complete = false;
+                }
                 continue;
             };
             let (provider, room, room_identity) = match desktop {
                 Some(p) => (p, String::new(), None),
                 None => {
-                    let Some(surface) = address(&api, &root).and_then(|url| browser_surface(&url))
+                    let address = address(&api, &root);
+                    let Some(surface) = scan.browser_surface(inspect_meet_tabs, address.as_deref())
                     else {
                         continue;
                     };
@@ -575,6 +593,33 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_potential_meeting_titles_reach_browser_automation() {
+        assert!(!should_inspect_window(None, "unrelated browser tab"));
+        assert!(should_inspect_window(None, "meet - abc-defg-hij"));
+        assert!(should_inspect_window(None, "microsoft teams"));
+        assert!(should_inspect_window(
+            Some(Provider::Zoom),
+            "zoom workplace"
+        ));
+    }
+
+    #[test]
+    fn unreadable_candidate_address_makes_only_the_meet_baseline_incomplete() {
+        let mut scan = CallScan {
+            complete: true,
+            ..Default::default()
+        };
+        assert!(scan.browser_surface(false, None).is_none());
+        assert!(scan.complete);
+        assert!(scan
+            .browser_surface(true, Some("https://example.org/"))
+            .is_none());
+        assert!(scan.complete);
+        assert!(scan.browser_surface(true, None).is_none());
+        assert!(!scan.complete);
+    }
     #[test]
     fn only_a_meeting_path_on_a_trusted_teams_origin_can_identify_a_room() {
         let room = |value: &str| teams_room(&url::Url::parse(value).unwrap());

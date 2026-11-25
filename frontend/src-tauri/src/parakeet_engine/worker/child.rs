@@ -57,6 +57,7 @@ pub(super) fn run() -> i32 {
                         text: result.text,
                         timestamps: result.timestamps,
                         tokens: result.tokens,
+                        encoder_length_clamped: std::mem::take(&mut model.encoder_length_clamped),
                     },
                     Err(_) => Response::Error("Parakeet transcription failed".into()),
                 },
