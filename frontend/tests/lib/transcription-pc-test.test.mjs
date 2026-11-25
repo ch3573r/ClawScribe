@@ -86,8 +86,10 @@ test('the basic Whisper recommendation identifies the catalog default and downlo
   const { DEFAULT_WHISPER_MODEL } = loadTsModule('src/constants/modelDefaults');
   const { ModelManager } = loadTsModule('src/components/WhisperModelManager.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
-    'framer-motion': { motion: () => 'MotionButton' },
     '@/components/ui/button': { Button: 'Button' }, '@/components/ui/accordion': {},
+    '@/components/ConfirmationModel/confirmation-modal': {},
+    '@/components/ui/settings-layout': { SettingsCard: 'SettingsCard', SettingsRow: 'SettingsRow' },
+    '@/components/settings/ParakeetModelTable': { TranscriptionModelTable: 'TranscriptionModelTable' },
     '@/components/settings/pcTestResults': { usePcTestResults: () => ({}), recommendedForSpeed: () => new Map() },
     '@tauri-apps/api/event': { listen: async (event, fn) => { listeners.set(event, fn); return () => {}; } },
     '@tauri-apps/api/core': { invoke: async command => command === 'whisper_get_available_models'
@@ -98,11 +100,10 @@ test('the basic Whisper recommendation identifies the catalog default and downlo
   const render = () => hooks.render(() => ModelManager({ selectedModel: 'small', onModelSelect: name => selections.push(name) }));
   render();
   await flush();
-  const tree = render();
-  const cards = tree.props.children[0].props.children;
-  assert.deepEqual([...cards.filter(card => card.props.recommendation).map(card => card.props.model.name)], [DEFAULT_WHISPER_MODEL]);
+  const table = nodes(render()).find(node => node.type === 'TranscriptionModelTable');
+  assert.deepEqual(Array.from(table.props.models.filter(row => row.recommendation), row => row.name), [DEFAULT_WHISPER_MODEL]);
   listeners.get('model-download-complete')({ payload: { modelName: DEFAULT_WHISPER_MODEL } });
   assert.deepEqual(selections, []);
-  cards.find(card => card.props.model.name === DEFAULT_WHISPER_MODEL).props.onSelect();
+  table.props.onSelect(DEFAULT_WHISPER_MODEL);
   assert.deepEqual(selections, [DEFAULT_WHISPER_MODEL]);
 });

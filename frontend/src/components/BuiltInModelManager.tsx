@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { ConfirmationModal } from '@/components/ConfirmationModel/confirmation-modal';
+import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 import { Download, RefreshCw, BadgeAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -55,6 +57,11 @@ export function BuiltInModelManager({
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
   const [downloadProgressInfo, setDownloadProgressInfo] = useState<Record<string, DownloadProgressInfo>>({});
   const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
+  const [pendingDelete, setPendingDelete] = useState<BuiltInModelInfo | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const deleting = useRef(false);
+  const deleteTrigger = useRef<HTMLElement | null>(null);
+  const modelList = useRef<HTMLDivElement | null>(null);
 
   const fetchRevision = useRef(0);
   const fetchModels = useCallback(async () => {
@@ -178,19 +185,28 @@ export function BuiltInModelManager({
     }
   };
 
-  const deleteModel = async (modelName: string) => {
+  const confirmDelete = async () => {
+    if (!pendingDelete || deleting.current) return;
+    const modelName = pendingDelete.name;
+    deleting.current = true;
+    setIsDeleting(true);
     try {
       await invoke('builtin_ai_delete_model', { modelName });
       toast.success(`Model ${modelName} deleted`);
-      fetchModels();
+      deleteTrigger.current = modelList.current;
+      await fetchModels();
+      setPendingDelete(null);
     } catch (error) {
       console.error('Failed to delete model:', error);
       toast.error(`Failed to delete ${modelName}`);
+    } finally {
+      deleting.current = false;
+      setIsDeleting(false);
     }
   };
 
   // Don't show loading spinner if we have downloads in progress - show the model list instead
-  if (isLoading && downloadingModels.size === 0) {
+  if (isLoading && models.length === 0 && downloadingModels.size === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground">
         <RefreshCw className="mx-auto h-8 w-8 animate-spin mb-2" />
@@ -211,7 +227,7 @@ export function BuiltInModelManager({
   }
 
   return (
-    <div>
+    <div ref={modelList} tabIndex={-1}>
       <div className="flex items-center justify-between mb-4">
         <h4 className="text-sm font-bold">Built-in AI models</h4>
       </div>
@@ -230,31 +246,41 @@ export function BuiltInModelManager({
           const isNotDownloaded = model.status.type === 'not_downloaded';
           const isCorrupted = model.status.type === 'corrupted';
           const isError = model.status.type === 'error';
+          const canSelect = isAvailable && !modelIsDownloading;
+          const modelLabel = model.display_name || model.name;
+          const requestDelete = (event: React.MouseEvent<HTMLButtonElement>) => {
+            deleteTrigger.current = event.currentTarget;
+            setPendingDelete(model);
+          };
 
           return (
             <div
               key={model.name}
               className={cn(
-                'p-4 rounded-lg border transition-colors',
+                'relative p-4 rounded-lg border transition-colors',
                 modelIsDownloading
                   ? 'bg-card border-border'
                   : 'bg-card',
                 selectedModel === model.name
                   ? 'ring-2 ring-primary border-primary'
-                  : 'border-border hover:border-muted-foreground',
-                isAvailable && !modelIsDownloading && 'cursor-pointer'
+                  : 'border-border hover:border-muted-foreground'
               )}
-              onClick={() => {
-                if (isAvailable && !modelIsDownloading) {
-                  onModelSelect(model.name);
-                }
-              }}
             >
             <div className="space-y-3">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0 flex-1">
                   <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                    <span className="min-w-0 break-words text-base font-bold leading-snug text-foreground">{model.display_name || model.name}</span>
+                    {canSelect ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        aria-pressed={selectedModel === model.name}
+                        className="h-auto min-w-0 cursor-pointer whitespace-normal break-words p-0 text-left text-base font-bold leading-snug text-foreground hover:bg-transparent focus-visible:ring-0 after:absolute after:inset-0 after:rounded-lg focus-visible:after:ring-2 focus-visible:after:ring-ring focus-visible:after:ring-offset-2 focus-visible:after:ring-offset-background"
+                        onClick={() => onModelSelect(model.name)}
+                      >
+                        {modelLabel}
+                      </Button>
+                    ) : <span className="min-w-0 break-words text-base font-bold leading-snug text-foreground">{modelLabel}</span>}
                     {isAvailable && (
                       <>
                         <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-success-foreground">
@@ -281,7 +307,7 @@ export function BuiltInModelManager({
                     )}
                   </div>
                 </div>
-                <div className="flex w-full shrink-0 flex-wrap items-center gap-2 sm:ml-4 sm:w-auto sm:justify-end">
+                <div className="relative z-10 flex w-full shrink-0 flex-wrap items-center gap-2 empty:hidden sm:ml-4 sm:w-auto sm:justify-end">
                   {/* Not Downloaded - Show Download button */}
                   {isNotDownloaded && !modelIsDownloading && (
                     <Button
@@ -343,10 +369,8 @@ export function BuiltInModelManager({
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteModel(model.name);
-                        }}
+                        onClick={requestDelete}
+                        aria-label={`Delete ${modelLabel}`}
                       >
                         <Trash2 className="mr-2 h-4 w-4" />
                         Delete
@@ -355,15 +379,12 @@ export function BuiltInModelManager({
                   )}
                   {/* Available - Show small trash icon (only if not currently selected) */}
                   {isAvailable && !modelIsDownloading && selectedModel !== model.name && (
-                    <Button variant="ghost"
-                      className="p-2 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-destructive h-auto w-auto"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteModel(model.name);
-                      }}
-                      title="Delete model"
+                    <Button type="button" variant="ghost" size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                      onClick={requestDelete}
+                      aria-label={`Delete ${modelLabel}`}
                     >
-                      <Trash2 className="h-4 w-4" />
+                      <Trash2 aria-hidden="true" />
                     </Button>
                   )}
                 </div>
@@ -410,18 +431,23 @@ export function BuiltInModelManager({
                       <span>{formatSummaryModelSizeLabelFromMb(model.size_mb)}</span>
                     )}
                   </div>
-                  <div className="w-full h-2.5 bg-muted rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-primary to-primary/80 rounded-full transition-all duration-300"
-                      style={{ width: `${progress}%` }}
-                    />
-                  </div>
+                  <Progress value={progress} className="h-2.5" aria-label={`Download progress for ${modelLabel}`} />
                 </div>
               )}
             </div>
           );
         })}
       </div>
+      <ConfirmationModal
+        isOpen={pendingDelete !== null}
+        title="Delete model?"
+        text={pendingDelete ? `This removes ${pendingDelete.display_name || pendingDelete.name} (${formatSummaryModelSizeLabelFromMb(pendingDelete.size_mb)}) from this PC. You can download it again later.` : ''}
+        confirmLabel={isDeleting ? 'Deleting…' : 'Delete model'}
+        confirmDisabled={isDeleting}
+        returnFocus={deleteTrigger}
+        onCancel={() => { if (!deleting.current) setPendingDelete(null); }}
+        onConfirm={confirmDelete}
+      />
     </div>
   );
 }

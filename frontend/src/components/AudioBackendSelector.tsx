@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 export interface BackendInfo {
   id: string;
@@ -25,7 +26,6 @@ export function AudioBackendSelector({
   const [currentBackend, setCurrentBackend] = useState<string>('coreaudio');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showTooltip, setShowTooltip] = useState(false);
 
   // Load available backends and current selection
   useEffect(() => {
@@ -93,35 +93,25 @@ export function AudioBackendSelector({
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
-        <label className="text-sm font-medium text-foreground">
+        <span className="text-sm font-medium text-foreground">
           System audio backend
-        </label>
-        <div className="relative">
-          <Button variant="ghost"
-            type="button"
-            onMouseEnter={() => setShowTooltip(true)}
-            onMouseLeave={() => setShowTooltip(false)}
-            className="text-muted-foreground hover:text-muted-foreground transition-colors h-auto w-auto p-0 hover:bg-transparent"
-            aria-label="Audio capture methods"
-          >
-            <Info className="h-4 w-4" />
-          </Button>
-          {showTooltip && (
-            <div className="absolute z-10 left-6 top-0 w-64 p-3 text-xs bg-popover text-popover-foreground border border-border rounded-lg shadow-lg">
-              <p className="font-semibold mb-1">Audio capture methods:</p>
-              <ul className="space-y-1">
-                {backends.map((backend) => (
-                  <li key={backend.id}>
-                    <span className="font-medium">{backend.name}:</span> {backend.description}
-                  </li>
-                ))}
-              </ul>
-              <p className="mt-2 text-muted-foreground">
-                Try different backends to find which works best for your system.
-              </p>
-            </div>
-          )}
-        </div>
+        </span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="icon" type="button" className="h-7 w-7 text-muted-foreground" aria-label="Audio capture methods">
+              <Info aria-hidden="true" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-64 space-y-1 border border-border bg-popover p-3 text-popover-foreground shadow-lg">
+            <ul className="space-y-1">
+              {backends.map((backend) => (
+                <li key={backend.id}>
+                  <span className="font-medium">{backend.name}:</span> {backend.description}
+                </li>
+              ))}
+            </ul>
+          </TooltipContent>
+        </Tooltip>
       </div>
 
       {error && (

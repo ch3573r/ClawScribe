@@ -192,7 +192,7 @@ export function TranscriptionOptions() {
       <SettingsRow
         icon={<Cpu aria-hidden="true" />}
         htmlFor="parakeet-directml"
-        title={<BetaTitle>Run on the GPU with DirectML</BetaTitle>}
+        title={<BetaTitle>Run Parakeet on the GPU with DirectML</BetaTitle>}
         description={<>
           On by default when Windows can initialize DirectML. Operations the GPU cannot run use the CPU. Applies to the next recording.
           {dmlStatus && <Note>{dmlStatus}</Note>}

@@ -2,11 +2,6 @@
   "schema": 1,
   "sourceCommit": "9178fb2828844c5599b61a23b540775c65e61c08",
   "files": {
-    "frontend/src/app/_components/SettingsModal.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
     "frontend/src/app/meeting-details/page.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
@@ -22,17 +17,7 @@
       "hexColors": 0,
       "nativeControls": 0
     },
-    "frontend/src/components/AudioBackendSelector.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
     "frontend/src/components/AudioLevelMeter.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
-    "frontend/src/components/BuiltInModelManager.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0
@@ -162,11 +147,6 @@
       "hexColors": 0,
       "nativeControls": 0
     },
-    "frontend/src/components/NemotronModelManager.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
     "frontend/src/components/ParakeetModelManager.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
@@ -233,11 +213,6 @@
       "nativeControls": 0
     },
     "frontend/src/components/WhisperAccelerationStatus.tsx": {
-      "paletteColors": 0,
-      "hexColors": 0,
-      "nativeControls": 0
-    },
-    "frontend/src/components/WhisperModelManager.tsx": {
       "paletteColors": 0,
       "hexColors": 0,
       "nativeControls": 0

@@ -66,7 +66,7 @@ test('the card has the four beta options, each tagged Beta', async t => {
   assert.equal(nodes(tree).find(node => node.type === 'SettingsCard').props.title, 'Options');
   const rows = nodes(tree).filter(node => node.type === 'SettingsRow');
   assert.deepEqual(rows.map(row => text(row.props.title)), [
-    'Run on the GPU with DirectMLBeta', 'Run transcription in a separate processBeta',
+    'Run Parakeet on the GPU with DirectMLBeta', 'Run transcription in a separate processBeta',
     'Label lines as Me or ParticipantsBeta', 'Cloud transcriptionBeta',
   ]);
   assert.equal(nodes(tree).filter(node => node.type === 'SettingsTag').length, 4);

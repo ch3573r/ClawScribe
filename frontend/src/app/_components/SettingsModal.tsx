@@ -1,6 +1,7 @@
+import { useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { TranscriptSettings } from "@/components/TranscriptSettings";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useConfig } from "@/contexts/ConfigContext";
 
 type modalType = "modelSelector" | "errorAlert" | "chunkDropWarning";
@@ -32,87 +33,53 @@ export function SettingsModals({
 }: SettingsModalsProps) {
   const { transcriptModelConfig, setTranscriptModelConfig } = useConfig();
 
-  return <>
-    {/* Model Selection Modal */}
-    {modals.modelSelector && (
-      <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50">
-        <div className="bg-card rounded-lg max-w-4xl w-full mx-4 shadow-xl max-h-[90vh] flex flex-col">
-          {/* Fixed Header */}
-          <div className="flex justify-between items-center p-6 pb-4 border-b border-border">
-            <h3 className="text-lg font-semibold text-foreground">
-              {messages.modelSelector ? 'Speech recognition setup required' : 'Transcription model settings'}
-            </h3>
-            <Button
-              variant="ghost"
-              aria-label="Close transcription model settings"
-              onClick={() => onClose('modelSelector')}
-              className="h-auto whitespace-normal p-0 font-normal hover:bg-transparent text-muted-foreground hover:text-foreground transition-colors"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="!h-6 !w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </Button>
-          </div>
+  const previousFocus = useRef<HTMLElement | null>(null);
+  const activeModal = modals.chunkDropWarning ? "chunkDropWarning"
+    : modals.errorAlert ? "errorAlert"
+      : modals.modelSelector ? "modelSelector" : null;
+  const choosingModel = activeModal === "modelSelector";
+  const setupRequired = choosingModel && Boolean(messages.modelSelector);
 
-          {/* Scrollable Content */}
-          <div className="flex-1 overflow-y-auto p-6 pt-4">
+  const title = choosingModel
+    ? setupRequired ? "Speech recognition setup required" : "Transcription model settings"
+    : activeModal === "errorAlert" ? "Recording stopped" : "Transcription performance warning";
+
+  return (
+    <Dialog open={activeModal !== null} onOpenChange={open => {
+      if (!open && activeModal) onClose(activeModal);
+    }}>
+      <DialogContent
+        className={choosingModel ? "flex max-h-[90vh] w-[calc(100%-2rem)] max-w-4xl flex-col gap-0 bg-card p-0" : "w-[calc(100%-2rem)] bg-card"}
+        onOpenAutoFocus={() => {
+          previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        }}
+        onCloseAutoFocus={event => {
+          event.preventDefault();
+          if (previousFocus.current?.isConnected) previousFocus.current.focus();
+          previousFocus.current = null;
+        }}
+      >
+        <DialogHeader className={choosingModel ? "border-b border-border px-6 pb-4 pt-6 pr-12" : "pr-6"}>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>
+            {(activeModal && messages[activeModal]) || (choosingModel ? "Choose a model for speech recognition." : "")}
+          </DialogDescription>
+        </DialogHeader>
+        {choosingModel && (
+          <div className="min-h-0 overflow-y-auto px-6 py-4">
             <TranscriptSettings
               transcriptModelConfig={transcriptModelConfig}
               setTranscriptModelConfig={setTranscriptModelConfig}
-              onModelSelect={() => onClose('modelSelector')}
+              onModelSelect={() => onClose("modelSelector")}
             />
           </div>
-
-          {/* Fixed Footer */}
-          <div className="p-6 pt-4 border-t border-border flex items-center justify-end">
-            <Button
-              variant="ghost"
-              onClick={() => onClose('modelSelector')}
-              className="h-auto whitespace-normal px-4 py-2 text-sm font-medium text-foreground bg-secondary rounded-md hover:bg-secondary/80 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-ring transition-colors hover:text-foreground"
-            >
-              {messages.modelSelector ? 'Cancel' : 'Done'}
-            </Button>
-          </div>
-        </div>
-      </div>
-    )}
-
-    {/* Error Alert Modal */}
-    {modals.errorAlert && (
-      <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50">
-        <Alert className="max-w-md mx-4 border-error-border/30 bg-card shadow-xl">
-          <AlertTitle className="text-error-foreground">Recording stopped</AlertTitle>
-          <AlertDescription className="text-error-foreground">
-            {messages.errorAlert}
-            <Button
-              variant="ghost"
-              onClick={() => onClose('errorAlert')}
-              className="h-auto whitespace-normal p-0 font-normal hover:bg-transparent ml-2 text-error-foreground hover:text-error-foreground underline"
-            >
-              Dismiss
-            </Button>
-          </AlertDescription>
-        </Alert>
-      </div>
-    )}
-
-    {/* Chunk Drop Warning Modal */}
-    {modals.chunkDropWarning && (
-      <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-50">
-        <Alert className="max-w-lg mx-4 border-warning-border/30 bg-card shadow-xl">
-          <AlertTitle className="text-warning-foreground">Transcription performance warning</AlertTitle>
-          <AlertDescription className="text-warning-foreground">
-            {messages.chunkDropWarning}
-            <Button
-              variant="ghost"
-              onClick={() => onClose('chunkDropWarning')}
-              className="h-auto whitespace-normal p-0 font-normal hover:bg-transparent ml-2 text-warning-foreground hover:text-warning-foreground underline"
-            >
-              Dismiss
-            </Button>
-          </AlertDescription>
-        </Alert>
-      </div>
-    )}
-  </>
+        )}
+        <DialogFooter className={choosingModel ? "border-t border-border px-6 py-4" : undefined}>
+          <DialogClose asChild>
+            <Button variant="outline">{choosingModel ? setupRequired ? "Cancel" : "Done" : "Dismiss"}</Button>
+          </DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
