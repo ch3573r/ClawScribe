@@ -9,14 +9,14 @@ import { useSummaryDestination } from "@/hooks/useSummaryDestination";
 import { useWebhookSettings } from "@/hooks/useWebhookSettings";
 import { getExportDestinations } from "@/lib/exportDestinations";
 import type { Loadable, PrivacyInput } from "@/lib/privacy";
-import { AUTO_UPDATE_CHECK_CHANGED_EVENT, getAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
+import { AUTO_UPDATE_CHECK_CHANGED_EVENT, loadAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
 import { knowledgeService } from "@/services/knowledgeService";
 import { microsoftExportService } from "@/services/microsoftExportService";
 
 /**
- * Reads the settings the Privacy page reports on. Every read is read-only and
- * goes through the same commands and services as the page that edits the
- * setting. Values are refreshed when the page is shown again.
+ * Reads the settings the Privacy page reports on through the same commands
+ * and services as the settings controls. Values are refreshed when Privacy
+ * is shown again.
  */
 function useLoadable<T>(load: () => Promise<T>, tick: number): Loadable<T> {
   const [state, setState] = useState<Loadable<T>>({ status: "loading" });
@@ -44,8 +44,9 @@ export function usePrivacyInput(): PrivacyInput {
 
   // Refresh when the window or tab comes back into view.
   useEffect(() => {
+    let active = true;
     const sync = () => {
-      setUpdateCheck(getAutoUpdateCheckEnabled());
+      void loadAutoUpdateCheckEnabled().then(enabled => { if (active) setUpdateCheck(enabled); });
       const destinations = getExportDestinations();
       setConfluenceRest(destinations.confluenceMode === "rest" && !!destinations.confluenceBaseUrl?.trim());
     };
@@ -60,6 +61,7 @@ export function usePrivacyInput(): PrivacyInput {
     window.addEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, refresh);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      active = false;
       window.removeEventListener("focus", refresh);
       window.removeEventListener("storage", refresh);
       window.removeEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, refresh);

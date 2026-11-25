@@ -38,20 +38,27 @@ async function settings(press, { initialGlobals = savedGlobals, onCapture, trans
   const hooks = createHookHarness();
   let globals = { ...initialGlobals };
   let captureChannel = null;
+  const core = { Channel: class {}, invoke: async (command, args) => {
+    if (command === 'get_shortcuts') return globals;
+    if (command === 'load_player_shortcuts') return args.legacyBindings ?? {};
+    if (command === 'set_player_shortcuts') return;
+    if (command === 'shortcut_key_characters') return args.keys.map(translate);
+    if (command === 'set_shortcut_capture') {
+      await onCapture?.(args.channel);
+      captureChannel = args.channel;
+      return 30_000;
+    }
+    assert.equal(command, 'set_shortcuts');
+    globals = args.bindings;
+    return { bindings: globals, conflicts: [] };
+  } };
+  // The app resolves these imports to a single module. The test loader uses
+  // a new VM per nested import unless it receives the existing module here.
+  const playerBindings = loadTsModule('src/lib/player-bindings.ts', { '@tauri-apps/api/core': core });
   const { KeyboardShortcutsSettings } = loadTsModule('src/components/KeyboardShortcutsSettings.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
-    '@tauri-apps/api/core': { Channel: class {}, invoke: async (command, args) => {
-      if (command === 'get_shortcuts') return globals;
-      if (command === 'shortcut_key_characters') return args.keys.map(translate);
-      if (command === 'set_shortcut_capture') {
-        await onCapture?.(args.channel);
-        captureChannel = args.channel;
-        return 30_000;
-      }
-      assert.equal(command, 'set_shortcuts');
-      globals = args.bindings;
-      return { bindings: globals, conflicts: [] };
-    } },
+    '@tauri-apps/api/core': core,
+    '@/lib/player-bindings': playerBindings,
     '@/components/ui/button': { Button: 'button' },
     '@/components/ui/settings-layout': names('Kbd SettingsCard SettingsFooter SettingsRow SettingsStack'),
     '@/components/settings/settings-parts': { NoteRow: 'NoteRow' },

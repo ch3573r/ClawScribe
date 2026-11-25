@@ -41,6 +41,8 @@ struct Schedule {
     parent: PathBuf,
     namespace: Uuid,
     enabled: bool,
+    #[serde(default)]
+    exclude_audio: bool,
     last_success: Option<i64>,
     last_failure: Option<i64>,
     last_error: Option<String>,
@@ -63,6 +65,7 @@ struct OwnedArchive {
 #[derive(Serialize)]
 pub(crate) struct ScheduleStatus {
     enabled: bool,
+    exclude_audio: bool,
     running: bool,
     destination: Option<PathBuf>,
     last_success: Option<i64>,
@@ -78,6 +81,7 @@ impl Schedule {
             parent,
             namespace: Uuid::new_v4(),
             enabled: true,
+            exclude_audio: false,
             last_success: None,
             last_failure: None,
             last_error: None,
@@ -235,6 +239,9 @@ pub(crate) async fn scheduled_backup_status(app: AppHandle) -> Result<ScheduleSt
         let schedule = read(&path)?;
         Ok(ScheduleStatus {
             enabled: schedule.as_ref().is_some_and(|schedule| schedule.enabled),
+            exclude_audio: schedule
+                .as_ref()
+                .is_some_and(|schedule| schedule.exclude_audio),
             running: RUNNING.load(Ordering::Acquire),
             destination: schedule.as_ref().map(Schedule::folder),
             last_success: schedule.as_ref().and_then(|schedule| schedule.last_success),
@@ -257,7 +264,10 @@ pub(crate) async fn scheduled_backup_status(app: AppHandle) -> Result<ScheduleSt
 }
 
 #[tauri::command]
-pub(crate) async fn choose_scheduled_backup_folder(app: AppHandle) -> Result<(), String> {
+pub(crate) async fn choose_scheduled_backup_folder(
+    app: AppHandle,
+    exclude_audio: Option<bool>,
+) -> Result<(), String> {
     if app.try_state::<AppState>().is_none() {
         return Err("Open the meeting library first.".into());
     }
@@ -285,7 +295,11 @@ pub(crate) async fn choose_scheduled_backup_folder(app: AppHandle) -> Result<(),
         let mut schedule = Schedule::new(parent);
         if let Ok(Some(mut previous)) = read(&settings) {
             schedule.enabled = previous.enabled;
+            schedule.exclude_audio = previous.exclude_audio;
             let _ = previous.clean_staging();
+        }
+        if let Some(exclude_audio) = exclude_audio {
+            schedule.exclude_audio = exclude_audio;
         }
         let folder = schedule.folder();
         fs::create_dir(&folder).map_err(|_| "Could not create the scheduled backups folder.")?;
@@ -302,7 +316,11 @@ pub(crate) async fn choose_scheduled_backup_folder(app: AppHandle) -> Result<(),
 }
 
 #[tauri::command]
-pub(crate) async fn set_scheduled_backups(app: AppHandle, enabled: bool) -> Result<(), String> {
+pub(crate) async fn set_scheduled_backups(
+    app: AppHandle,
+    enabled: Option<bool>,
+    exclude_audio: Option<bool>,
+) -> Result<(), String> {
     if app.try_state::<AppState>().is_none() {
         return Err("Open the meeting library first.".into());
     }
@@ -314,7 +332,12 @@ pub(crate) async fn set_scheduled_backups(app: AppHandle, enabled: bool) -> Resu
         let _job = job;
         let mut schedule =
             read(&settings)?.ok_or("Choose a folder for scheduled backups first.")?;
-        schedule.enabled = enabled;
+        if let Some(enabled) = enabled {
+            schedule.enabled = enabled;
+        }
+        if let Some(exclude_audio) = exclude_audio {
+            schedule.exclude_audio = exclude_audio;
+        }
         schedule.last_failure = None;
         schedule.last_error = None;
         save(&settings, &schedule)
@@ -422,8 +445,14 @@ async fn run_backup(
     .await
     .map_err(|_| "Could not prepare the scheduled backup.")??;
     schedule.staging = stage.clone();
-    let result =
-        backup::try_scheduled_backup(app.clone(), destination.clone(), output, control).await;
+    let result = backup::try_scheduled_backup(
+        app.clone(),
+        destination.clone(),
+        output,
+        control,
+        schedule.exclude_audio,
+    )
+    .await;
     let mut cleanup = schedule.clone();
     let (cleanup, pins) = tokio::task::spawn_blocking(move || {
         cleanup.clean_staging()?;
@@ -474,6 +503,18 @@ async fn run_backup(
 mod tests {
     use super::*;
     use crate::library::archive::storage::backup_identity;
+
+    #[test]
+    fn older_schedules_include_audio() {
+        let schedule = Schedule::new(PathBuf::new());
+        let mut old = serde_json::to_value(schedule).unwrap();
+        old.as_object_mut().unwrap().remove("exclude_audio");
+        assert!(
+            !serde_json::from_value::<Schedule>(old)
+                .unwrap()
+                .exclude_audio
+        );
+    }
 
     #[test]
     fn retention_only_removes_identified_old_files() {

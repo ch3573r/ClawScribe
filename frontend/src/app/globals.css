@@ -103,11 +103,8 @@
     --kontron-mid-blue: 206 42% 50%;
     --kontron-light-blue: 207 33% 72%;
     --kontron-black: 0 0% 0%;
-    --kontron-dark-grey: 240 1% 35%;
     --kontron-grey: 0 0% 50%;
-    --kontron-light-grey: 0 0% 95%;
     --kontron-magenta: 329 100% 45%;
-    --kontron-cyan: 180 100% 50%;
 
     /* ClawScribe brand — the electric cyan→blue of the mark. Theme-independent;
        reserved for the signature (recording/active state, logo, the claw). The

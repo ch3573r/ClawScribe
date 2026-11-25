@@ -86,6 +86,7 @@ test('automatic checks keep running in the tray, change channel and stop when di
   const hook = createHookHarness();
   t.after(() => hook.unmount());
   let enabled = true;
+  const initialPreference = deferred();
   let nextCheck;
   const calls = [], notifications = [];
   const snapshot = { ready: true, channel: 'stable' };
@@ -101,13 +102,24 @@ test('automatic checks keep running in the tray, change channel and stop when di
     react: { ...hook.react, useSyncExternalStore: () => snapshot },
     'react/jsx-runtime': { jsx: () => null, jsxs: () => null },
     '@/services/updateService': { updateService },
-    '@/lib/updatePreferences': { AUTO_UPDATE_CHECK_CHANGED_EVENT: 'auto-update', getAutoUpdateCheckEnabled: () => enabled },
+    '@/lib/updatePreferences': {
+      AUTO_UPDATE_CHECK_CHANGED_EVENT: 'auto-update',
+      getAutoUpdateCheckEnabled: () => enabled,
+      loadAutoUpdateCheckEnabled: () => initialPreference.promise,
+    },
     './UpdateDialog': { UpdateDialog: () => null },
     './UpdateNotification': { showUpdateNotification: info => notifications.push(info) },
     sonner: { toast: { dismiss() {} } },
   });
   const render = () => hook.render(() => UpdateCheckProvider({ children: null }));
   render(); render();
+  window.dispatchEvent(new Event('storage'));
+  render();
+  t.mock.timers.tick(2000);
+  assert.deepEqual(calls, []);
+  initialPreference.resolve(true);
+  await flush();
+  render();
   t.mock.timers.tick(2000);
   assert.deepEqual(calls, [['stable', false]]);
   t.mock.timers.tick(60 * 60 * 1000);

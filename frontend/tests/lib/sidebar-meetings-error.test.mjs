@@ -28,7 +28,7 @@ function setup(t, meetingsReply, recording = { isRecording: false }, recordingMo
     } },
     '@tauri-apps/api/event': { listen: async () => noop },
     '@/contexts/RecordingStateContext': { useRecordingState: () => recording },
-    '@/contexts/ConfigContext': { useConfig: () => ({
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
       audioDeviceInventory: { data: null, status: 'checking', refresh() {} },
       selectedDevices: {}, transcriptModelConfig: {},
     }) },
@@ -56,7 +56,7 @@ test('Sidebar starts on the current route and ignores a repeated or blocked Star
   };
   const app = setup(t, () => [], recording, {
     'next/navigation': { usePathname: () => '/meeting-details', useRouter() { throw new Error('Start must not use navigation'); } },
-    '@/contexts/ConfigContext': { useConfig: () => config },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => config },
     '@/hooks/useRecordingStart': { useStartRecordingSession: () => (...args) => {
       attempts.push(args);
       return pending.promise;

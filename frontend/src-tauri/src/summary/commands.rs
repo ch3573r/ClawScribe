@@ -81,7 +81,6 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     mut summary: serde_json::Value,
-    _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let _install_guard = crate::updates::admit_work()?;
     let pool = state.db_manager.pool();
@@ -119,7 +118,7 @@ pub async fn api_restore_previous_summary<R: Runtime>(
         .await
         .map_err(|error| error.to_string())?;
     let _ = app.emit(super::automatic::CHANGED_EVENT, &meeting_id);
-    api_get_summary(app, state, meeting_id, None).await
+    api_get_summary(app, state, meeting_id).await
 }
 
 /// Gets the per-meeting summary language override from metadata.json.
@@ -266,7 +265,6 @@ pub async fn api_get_summary<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
-    _auth_token: Option<String>,
 ) -> Result<SummaryResponse, String> {
     let pool = state.db_manager.pool();
 
@@ -448,7 +446,6 @@ pub async fn api_process_transcript<R: Runtime>(
     custom_prompt: Option<String>,
     template_id: Option<String>,
     summary_language: Option<String>,
-    _auth_token: Option<String>,
 ) -> Result<ProcessTranscriptResponse, String> {
     use uuid::Uuid;
 

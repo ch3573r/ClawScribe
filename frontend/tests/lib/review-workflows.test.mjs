@@ -51,7 +51,7 @@ test("successful bulk deletion discards pending editor drafts and resets the act
   assert.equal(draft.dirty(), false);
   assert.equal(calls.at(-1)[0], "api_set_summary_edits_pending");
   assert.equal(calls.at(-1)[1].pending, false);
-  assert.equal(current?.id, "intro-call");
+  assert.equal(current, null);
 });
 
 test("bulk vocabulary errors identify the invalid term within the original line", () => {

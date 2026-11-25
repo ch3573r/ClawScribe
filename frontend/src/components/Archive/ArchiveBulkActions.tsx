@@ -74,7 +74,7 @@ export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onRet
               summary.cleanup ||= outcome.cleanup_pending;
               deleted.push(meeting.id);
               setMeetings(rows => rows.filter(row => row.id !== meeting.id));
-              setCurrentMeeting(current => current?.id === meeting.id ? { id: "intro-call", title: "+ New Call" } : current);
+              setCurrentMeeting(current => current?.id === meeting.id ? null : current);
               try { await indexedDBService.deleteMeeting(meeting.id); }
               catch { summary.cacheFailure = true; }
             }

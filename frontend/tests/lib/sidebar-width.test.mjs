@@ -65,7 +65,7 @@ test('sidebar provider restores width, shares offsets, reclamps on resize and cl
     'next/navigation': { usePathname: () => pathname, useRouter: () => ({}) },
     '@/lib/analytics': { trackBackendConnection() {} },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ isRecording: false }) },
-    '@/contexts/ConfigContext': { useConfig: () => ({
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
       audioDeviceInventory: { data: null, status: 'checking', refresh() {} },
       selectedDevices: {}, transcriptModelConfig: {},
     }) },

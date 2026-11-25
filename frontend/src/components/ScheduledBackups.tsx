@@ -1,13 +1,15 @@
 'use client';
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { formatArchiveBytes } from '@/lib/archive-review';
 
 interface ScheduleStatus {
   enabled: boolean;
+  exclude_audio: boolean;
   running: boolean;
   destination: string | null;
   last_success: number | null;
@@ -17,48 +19,73 @@ interface ScheduleStatus {
   omitted_saved_live_answers: number;
 }
 
+interface ArchiveStorage {
+  saved_audio_bytes: number;
+  database_bytes: number;
+  reference_bytes: number;
+  unavailable_folders: number;
+  partial: boolean;
+}
+
 export function ScheduledBackups({ disabled }: { disabled: boolean }) {
   const [status, setStatus] = useState<ScheduleStatus | null>(null);
+  const [excludeBeforeChoosingFolder, setExcludeBeforeChoosingFolder] = useState(false);
+  const [storage, setStorage] = useState<ArchiveStorage | 'unavailable' | null>(null);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const pending = useRef(false);
+  const statusVersion = useRef(0);
   const switchId = useId();
+  const excludeId = useId();
 
+  const refresh = useCallback(async () => {
+    const request = ++statusVersion.current;
+    try {
+      const next = await invoke<ScheduleStatus>('scheduled_backup_status');
+      if (request === statusVersion.current) {
+        setStatus(next);
+        setError('');
+      }
+    } catch (failure) {
+      if (request === statusVersion.current) setError(String(failure));
+    }
+  }, []);
   useEffect(() => {
     let active = true;
-    let latest = 0;
-    const refresh = async () => {
-      const request = ++latest;
-      try {
-        const next = await invoke<ScheduleStatus>('scheduled_backup_status');
-        if (active && request === latest) {
-          setStatus(next);
-          setError('');
-        }
-      } catch (failure) {
-        if (active && request === latest) setError(String(failure));
-      }
-    };
-    const subscription = listen('backup-schedule-changed', () => void refresh());
-    void subscription.then(refresh, refresh);
+    const refreshIfActive = () => { if (active) void refresh(); };
+    const subscription = listen('backup-schedule-changed', refreshIfActive);
+    void subscription.then(refreshIfActive, refreshIfActive);
     return () => {
       active = false;
+      statusVersion.current += 1;
       void subscription.then(unlisten => unlisten(), () => {});
     };
-  }, []);
+  }, [refresh]);
 
-  const change = async (enabled?: boolean) => {
+  useEffect(() => {
+    if (disabled) return;
+    let active = true;
+    setStorage(null);
+    void invoke<ArchiveStorage>('measure_archive_storage')
+      .then(value => { if (active) setStorage(value); })
+      .catch(() => { if (active) setStorage('unavailable'); });
+    return () => { active = false; };
+  }, [disabled]);
+
+  const change = async (options?: { enabled: boolean } | { excludeAudio: boolean }) => {
     if (pending.current) return;
     pending.current = true;
     setSaving(true);
     setError('');
     try {
-      if (enabled === undefined) {
-        await invoke('choose_scheduled_backup_folder');
+      if (!options) {
+        await invoke('choose_scheduled_backup_folder', {
+          excludeAudio: status?.destination ? undefined : excludeBeforeChoosingFolder,
+        });
       } else {
-        await invoke('set_scheduled_backups', { enabled });
+        await invoke('set_scheduled_backups', options);
       }
-      setStatus(await invoke<ScheduleStatus>('scheduled_backup_status'));
+      await refresh();
     } catch (failure) {
       setError(String(failure));
     } finally {
@@ -68,6 +95,10 @@ export function ScheduledBackups({ disabled }: { disabled: boolean }) {
   };
 
   const unavailable = disabled || saving || !!status?.running;
+  const excludeAudio = status?.destination ? status.exclude_audio : excludeBeforeChoosingFolder;
+  const estimate = storage && storage !== 'unavailable'
+    ? storage.database_bytes + storage.reference_bytes + (excludeAudio ? 0 : storage.saved_audio_bytes)
+    : null;
   return (
     <section aria-label="Scheduled backups" className="space-y-3 border-t border-border pt-4">
       <div>
@@ -75,10 +106,26 @@ export function ScheduledBackups({ disabled }: { disabled: boolean }) {
         <p className="text-sm text-muted-foreground">Save a backup each day while ClawScribe is open. Keep the three newest scheduled copies.</p>
       </div>
       {!status && !error && <p role="status" className="text-sm">Loading scheduled backup settings…</p>}
+      {status && <>
+        <div className="flex items-center gap-2">
+          <Switch id={excludeId} checked={excludeAudio} disabled={unavailable} onCheckedChange={checked => {
+            if (status.destination) void change({ excludeAudio: checked });
+            else setExcludeBeforeChoosingFolder(checked);
+          }} />
+          <label htmlFor={excludeId} className="text-sm">Exclude recording audio</label>
+        </div>
+        <p role="status" className="text-sm text-muted-foreground">
+          {disabled ? 'Size estimate available when the library is idle.'
+            : estimate !== null ? `Estimated size per backup is ${formatArchiveBytes(estimate)}.`
+            : storage === 'unavailable' ? 'Size estimate unavailable.' : 'Estimating backup size…'}
+          {!disabled && storage && storage !== 'unavailable' && (storage.partial || storage.unavailable_folders > 0)
+            ? ' Some library files could not be measured.' : ''}
+        </p>
+      </>}
       {status?.destination && <>
         <p className="break-all text-sm text-muted-foreground">{status.destination}</p>
         <div className="flex items-center gap-2">
-          <Switch id={switchId} checked={status.enabled} disabled={unavailable} onCheckedChange={change} />
+          <Switch id={switchId} checked={status.enabled} disabled={unavailable} onCheckedChange={enabled => void change({ enabled })} />
           <label htmlFor={switchId} className="text-sm">Daily backups</label>
         </div>
         <p role="status" className="text-sm text-muted-foreground">

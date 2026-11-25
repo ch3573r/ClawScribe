@@ -269,7 +269,7 @@ function exportPreview(kind, { groups, summary = false } = {}) {
   const component = loadTsModule(`src/components/MeetingDetails/${filename}.tsx`, {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     'lucide-react': {}, sonner: { toast: { info() {}, success() {}, error(...args) { calls.push(['error', ...args]); } } },
-    '@/contexts/ConfigContext': { useConfig: () => ({ modelConfig: { provider: 'openai', model: 'synthetic' } }) },
+    '@/contexts/ConfigContext': { useSummaryConfig: () => ({ modelConfig: { provider: 'openai', model: 'synthetic' } }) },
     '@/lib/exportDestinations': { getExportDestinations: () => ({ plannerAiPolish: true }) },
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       calls.push([command, JSON.parse(JSON.stringify(args))]);

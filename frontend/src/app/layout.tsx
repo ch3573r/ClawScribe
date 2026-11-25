@@ -21,7 +21,6 @@ import { migrateLegacyMeetingContexts } from '@/lib/meetingContext'
 import { migrateLegacyMeetingCalendars } from '@/lib/meetingCalendarStore'
 import { flushMeetingDrafts, flushSummaryEditsBeforeExit } from '@/lib/meetingDrafts'
 import { AppTitlebar } from '@/components/AppTitlebar'
-import AnalyticsProvider from '@/components/AnalyticsProvider'
 import { toast } from 'sonner'
 import { AppToaster } from '@/components/AppToaster'
 import { useState, useEffect, useCallback } from 'react'
@@ -366,7 +365,6 @@ export default function RootLayout({
         <ThemeInitializer />
         <AppShortcuts />
         <AppTitlebar />
-        <AnalyticsProvider>
           <RecordingStateProvider>
             <TranscriptProvider>
               <ConfigProvider key={setupCompletedHere ? 'completed-setup' : 'startup'}>
@@ -415,7 +413,6 @@ export default function RootLayout({
               </ConfigProvider>
             </TranscriptProvider>
           </RecordingStateProvider>
-        </AnalyticsProvider>
 
         <AppToaster />
       </body>

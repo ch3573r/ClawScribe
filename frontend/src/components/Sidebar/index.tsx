@@ -208,7 +208,7 @@ const Sidebar: React.FC = () => {
 
       // If deleting the active meeting, navigate to home
       if (currentMeeting?.id === itemId) {
-        setCurrentMeeting(previous => previous?.id === itemId ? { id: "intro-call", title: "+ New Call" } : previous);
+        setCurrentMeeting(previous => previous?.id === itemId ? null : previous);
         if (pathname === "/meeting-details") router.push("/");
       }
       try {
@@ -451,8 +451,7 @@ const Sidebar: React.FC = () => {
 
   const renderItem = (item: SidebarItem) => {
     const isActive = item.type === "file" && currentMeeting?.id === item.id;
-    const isMeetingItem =
-      item.id.includes("-") && !item.id.startsWith("intro-call");
+    const isMeetingItem = item.id.includes("-");
     const matchingResult = passageMatches.get(item.id);
     const hasContentMatch = !!matchingResult || savedMatches.has(item.id);
 
@@ -460,10 +459,7 @@ const Sidebar: React.FC = () => {
 
     const open = () => {
       setCurrentMeeting({ id: item.id, title: item.title });
-      const basePath = item.id.startsWith("intro-call")
-        ? "/"
-        : `/meeting-details?id=${encodeURIComponent(item.id)}`;
-      router.push(basePath);
+      router.push(`/meeting-details?id=${encodeURIComponent(item.id)}`);
     };
 
     return (

@@ -326,9 +326,7 @@ pub(crate) fn parse_word_timestamps(value: Option<&str>) -> Option<Vec<Transcrip
 pub async fn api_get_meetings<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
-    auth_token: Option<String>,
 ) -> Result<Vec<Meeting>, String> {
-    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Listing local meetings");
     let pool = state.db_manager.pool();
     match MeetingsRepository::get_meetings(pool).await {
@@ -356,9 +354,7 @@ pub async fn api_search_transcripts<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     query: String,
-    auth_token: Option<String>,
 ) -> Result<Vec<TranscriptSearchResult>, String> {
-    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Searching local transcripts");
 
     let pool = state.db_manager.pool();
@@ -399,7 +395,6 @@ pub(crate) async fn api_search_library(
 pub async fn api_get_model_config<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
-    _auth_token: Option<String>,
 ) -> Result<Option<ModelConfig>, String> {
     log_info!("api_get_model_config called (native)");
     model_config_view(
@@ -460,7 +455,6 @@ pub async fn api_save_model_config<R: Runtime>(
     whisper_model: String,
     api_key: Option<String>,
     ollama_endpoint: Option<String>,
-    _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let pool = state.db_manager.pool();
     use crate::summary::{automatic, llm_client::LLMProvider};
@@ -546,7 +540,6 @@ pub async fn api_get_api_key_status<R: Runtime>(
 pub async fn api_get_transcript_config<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
-    _auth_token: Option<String>,
 ) -> Result<Option<TranscriptConfig>, String> {
     log_info!("api_get_transcript_config called (native)");
     transcript_config_view(state.db_manager.pool()).await
@@ -601,7 +594,6 @@ pub async fn api_save_transcript_config<R: Runtime>(
     base_url: Option<String>,
     endpoint: Option<String>,
     region: Option<String>,
-    _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
         "api_save_transcript_config called (native) for provider '{}'",
@@ -733,7 +725,6 @@ pub async fn api_test_transcript_provider<R: Runtime>(
     _region: Option<String>,
     audio_path: String,
     language: Option<String>,
-    _auth_token: Option<String>,
 ) -> Result<TranscriptProviderTestResult, String> {
     log_info!(
         "api_test_transcript_provider called (native) for provider '{}'",
@@ -1042,12 +1033,10 @@ pub async fn api_delete_meeting<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
-    auth_token: Option<String>,
     delete_files: bool,
 ) -> Result<serde_json::Value, String> {
     let _work = crate::updates::admit_work()?;
     let recording_job = claim_meeting_deletion_job(delete_files)?.map(std::sync::Arc::new);
-    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Deleting local meeting");
 
     let pool = state.db_manager.pool();
@@ -1120,9 +1109,7 @@ pub async fn api_get_meeting<R: Runtime>(
     _app: AppHandle<R>,
     meeting_id: String,
     state: tauri::State<'_, AppState>,
-    auth_token: Option<String>,
 ) -> Result<MeetingDetails, String> {
-    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Loading local meeting");
 
     let pool = state.db_manager.pool();
@@ -1324,9 +1311,7 @@ pub async fn api_save_meeting_title<R: Runtime>(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     title: String,
-    auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     let _install_guard = crate::updates::admit_work()?;
     let pool = state.db_manager.pool();
     match MeetingsRepository::update_meeting_title(pool, &meeting_id, &title).await {
@@ -1550,12 +1535,10 @@ pub async fn api_save_transcript<R: Runtime>(
     meeting_title: String,
     transcripts: Vec<serde_json::Value>,
     folder_path: Option<String>,
-    auth_token: Option<String>,
     recording_outcome: Option<crate::audio::outcome::RecordingOutcome>,
     use_saved_recording: Option<bool>,
     calendar_link: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let _ = auth_token; // Legacy IPC compatibility; local persistence needs no token.
     log_info!("Saving meeting transcript");
 
     // The webview does not decide where a meeting's files are: the folder must

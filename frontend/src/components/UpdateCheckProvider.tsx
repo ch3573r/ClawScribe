@@ -5,7 +5,7 @@ import { updateService, type UpdateChannel, type UpdateSnapshot } from '@/servic
 import { UpdateDialog } from './UpdateDialog';
 import { showUpdateNotification } from './UpdateNotification';
 import { toast } from 'sonner';
-import { AUTO_UPDATE_CHECK_CHANGED_EVENT, getAutoUpdateCheckEnabled } from '@/lib/updatePreferences';
+import { AUTO_UPDATE_CHECK_CHANGED_EVENT, getAutoUpdateCheckEnabled, loadAutoUpdateCheckEnabled } from '@/lib/updatePreferences';
 
 interface UpdateCheckContextType extends UpdateSnapshot {
   checkForUpdates: (force?: boolean) => Promise<void>;
@@ -24,14 +24,22 @@ export function UpdateCheckProvider({ children }: { children: React.ReactNode })
   useEffect(() => { toast.dismiss('clawscribe-update'); }, [snapshot.channel]);
 
   useEffect(() => {
+    let active = true;
+    let preferenceLoaded = false;
     void updateService.initialize().catch(() => {});
     const sync = (event?: Event) => {
-      setAutoCheck(event instanceof CustomEvent && typeof event.detail === 'boolean' ? event.detail : getAutoUpdateCheckEnabled());
+      if (event instanceof CustomEvent && typeof event.detail === 'boolean') setAutoCheck(event.detail);
+      else if (preferenceLoaded) setAutoCheck(getAutoUpdateCheckEnabled());
     };
-    sync();
+    void loadAutoUpdateCheckEnabled().then(() => {
+      if (!active) return;
+      preferenceLoaded = true;
+      sync();
+    });
     window.addEventListener('storage', sync);
     window.addEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, sync);
     return () => {
+      active = false;
       window.removeEventListener('storage', sync);
       window.removeEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, sync);
     };

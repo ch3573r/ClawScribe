@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useSummaryConfig } from "@/contexts/ConfigContext";
 import { getExportDestinations } from "@/lib/exportDestinations";
 import { actionRowKey, type ActionExportGroup } from "@/lib/meeting-follow-through";
 import { editReviewedActions, savePreviewedSummaryActions, type ReviewedActionEdit, type SavedAction } from "@/services/meetingActionsService";
@@ -134,7 +134,7 @@ export function TaskExportPreview({
   onReport,
   onReviewActions,
 }: TaskExportPreviewProps & { destination: TaskDestination }) {
-  const { modelConfig } = useConfig();
+  const { modelConfig } = useSummaryConfig();
   const [groups, setGroups] = useState<TaskGroup[]>([]);
   const [buckets, setBuckets] = useState<BucketInfo[]>([]);
   const [loading, setLoading] = useState(false);

@@ -1193,6 +1193,10 @@ pub fn run() {
             // Language preference commands
             set_language_preference,
             behavior_settings::get_behavior_settings,
+            behavior_settings::load_auto_update_preference,
+            behavior_settings::set_auto_update_preference,
+            behavior_settings::load_player_shortcuts,
+            behavior_settings::set_player_shortcuts,
             behavior_settings::migrate_legacy_behavior_settings,
             behavior_settings::set_recording_notification_preference,
             behavior_settings::set_conversation_metrics_preference,

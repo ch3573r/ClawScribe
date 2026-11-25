@@ -14,8 +14,8 @@ import { PendingRecordingNotes } from "./PendingRecordingNotes";
 import { LibraryBackup } from "./LibraryBackup";
 import { ArchiveStorageButton } from "./Archive/ArchiveStorageButton";
 import Analytics from "@/lib/analytics";
-import { useConfig, type NotificationSettings } from "@/contexts/ConfigContext";
-import { getAutoUpdateCheckEnabled, setAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
+import { usePreferenceConfig, type NotificationSettings } from "@/contexts/ConfigContext";
+import { AUTO_UPDATE_CHECK_CHANGED_EVENT, loadAutoUpdateCheckEnabled, setAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { useInterruptedRecordings } from "@/hooks/useInterruptedRecordings";
 import { RECOVERY_OPEN_ALL, RECOVERY_OPEN_REQUEST } from "@/lib/interruptedRecordings";
@@ -55,7 +55,7 @@ export function PreferenceSettings() {
     isLoadingPreferences,
     loadPreferences,
     updateNotificationSettings,
-  } = useConfig();
+  } = usePreferenceConfig();
 
   const router = useRouter();
   const recordingState = useRecordingState();
@@ -68,7 +68,9 @@ export function PreferenceSettings() {
   };
 
   const [loaded, setLoaded] = useState(false);
-  const [autoUpdateChecksEnabled, setAutoUpdateChecksEnabled] = useState(true);
+  const [autoUpdateChecksEnabled, setAutoUpdateChecksEnabled] = useState<boolean | null>(null);
+  const savingUpdatePreference = useRef(false);
+  const [updatingPreference, setUpdatingPreference] = useState(false);
   const [savingNotifications, setSavingNotifications] = useState(false);
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [saveFolder, setSaveFolder] = useState<string | undefined>(undefined);
@@ -80,13 +82,17 @@ export function PreferenceSettings() {
   // Lazy load preferences on mount (only loads if not already cached).
   useEffect(() => {
     let active = true;
-    setAutoUpdateChecksEnabled(getAutoUpdateCheckEnabled());
+    const syncUpdatePreference = () => {
+      void loadAutoUpdateCheckEnabled().then(enabled => { if (active) setAutoUpdateChecksEnabled(enabled); });
+    };
+    window.addEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, syncUpdatePreference);
+    syncUpdatePreference();
     hasTrackedViewRef.current = false;
     void loadPreferences().finally(() => { if (active) setLoaded(true); });
     invoke<{ save_folder?: string }>("get_recording_preferences")
       .then((preferences) => { if (active && preferences?.save_folder) setSaveFolder(preferences.save_folder); })
       .catch(() => { /* the default folder from the app is shown instead */ });
-    return () => { active = false; };
+    return () => { active = false; window.removeEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, syncUpdatePreference); };
   }, [loadPreferences]);
 
   // Track preferences viewed once per visit, when the settings are known.
@@ -142,14 +148,19 @@ export function PreferenceSettings() {
     }
   };
 
-  const handleAutoUpdateCheckChange = (enabled: boolean) => {
-    setAutoUpdateChecksEnabled(enabled);
-    setAutoUpdateCheckEnabled(enabled);
-    Analytics.track("update_settings_changed", {
-      automatic_launch_check: enabled.toString(),
-    }).catch((error) => {
-      console.error("Failed to track update preference change:", error);
-    });
+  const handleAutoUpdateCheckChange = async (enabled: boolean) => {
+    if (savingUpdatePreference.current) return;
+    savingUpdatePreference.current = true;
+    setUpdatingPreference(true);
+    try {
+      await setAutoUpdateCheckEnabled(enabled);
+      setAutoUpdateChecksEnabled(enabled);
+    } catch {
+      toast.error("Could not save the automatic update setting. Try again.");
+    } finally {
+      savingUpdatePreference.current = false;
+      setUpdatingPreference(false);
+    }
   };
 
   const chooseFolder = async () => {
@@ -181,7 +192,7 @@ export function PreferenceSettings() {
           htmlFor="preferences-auto-update"
           description="Checks at startup and while ClawScribe is running in the tray"
         >
-          <Switch id="preferences-auto-update" checked={autoUpdateChecksEnabled} onCheckedChange={handleAutoUpdateCheckChange} />
+          <Switch id="preferences-auto-update" checked={autoUpdateChecksEnabled ?? true} disabled={autoUpdateChecksEnabled === null || updatingPreference} onCheckedChange={handleAutoUpdateCheckChange} />
         </SettingsRow>
         <UpdateChannelSettings id="preferences-prerelease-updates" />
       </SettingsCard>

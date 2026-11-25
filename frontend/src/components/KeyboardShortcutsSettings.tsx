@@ -22,7 +22,7 @@ import {
   DEFAULT_PLAYER_BINDINGS, fixedShortcutOwner, PLAYER_ACTIONS, playerActionForChord, playerChord,
   playerKeycaps, savePlayerBindings, type PlayerAction, type PlayerBindings,
 } from "@/lib/player-bindings";
-import { usePlayerBindings } from "@/hooks/usePlaybackShortcuts";
+import { usePlayerBindingState } from "@/hooks/usePlaybackShortcuts";
 
 type Action = ShortcutAction | PlayerAction;
 type Group = "global" | "player";
@@ -65,7 +65,7 @@ async function playerChordsForGlobals(globals: ShortcutBindings) {
 export function KeyboardShortcutsSettings() {
   const [bindings, setBindings] = useState<ShortcutBindings | null>(null);
   const [capturing, setCapturing] = useState<Action | null>(null);
-  const player = usePlayerBindings();
+  const { bindings: player, loading: playerLoading } = usePlayerBindingState();
   const [group, setGroup] = useState<Group>("global");
   const [ready, setReady] = useState(false);
   const [conflicts, setConflicts] = useState<string[]>([]);
@@ -115,13 +115,16 @@ export function KeyboardShortcutsSettings() {
     }
   }, []);
 
-  const savePlayer = useCallback((next: PlayerBindings) => {
+  const savePlayer = useCallback(async (next: PlayerBindings) => {
+    setApplying("all");
     try {
-      savePlayerBindings(next);
+      await savePlayerBindings(next);
       setError(null);
       setNotice("Player shortcuts updated");
     } catch {
       setError("Could not save the player shortcuts. Try again.");
+    } finally {
+      setApplying(null);
     }
   }, []);
 
@@ -169,7 +172,7 @@ export function KeyboardShortcutsSettings() {
           return;
         }
       }
-      savePlayer({ ...player, [capturing]: chord });
+      void savePlayer({ ...player, [capturing]: chord });
     };
     const blur = () => setCapturing(null);
     // Keep recording hotkeys registered. While this editor owns capture the native
@@ -201,7 +204,7 @@ export function KeyboardShortcutsSettings() {
     </SettingsFooter></SettingsCard></SettingsStack>;
   }
 
-  const busy = applying !== null;
+  const busy = applying !== null || playerLoading;
   const reset = async (scope: Group) => {
     setGroup(scope);
     setError(null);
@@ -215,7 +218,7 @@ export function KeyboardShortcutsSettings() {
         const other = chord && playerActionForChord(nextPlayer, chord);
         if (other) { setError(taken(scope === "player" ? label : other.label)); return; }
       }
-      if (scope === "player") savePlayer({ ...DEFAULT_PLAYER_BINDINGS });
+      if (scope === "player") await savePlayer({ ...DEFAULT_PLAYER_BINDINGS });
       else await apply({ ...DEFAULT_BINDINGS }, "all");
     } catch {
       setError("Could not check the current keyboard layout. Try again.");

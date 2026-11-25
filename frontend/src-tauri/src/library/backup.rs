@@ -344,7 +344,11 @@ fn allowed_file(name: &str) -> bool {
             | "exports.json"
             | "recording-outcome.json"
             | crate::audio::import::IMPORT_OWNER_FILE
-    ) || Path::new(name)
+    ) || archive_audio_file(name)
+}
+
+fn archive_audio_file(name: &str) -> bool {
+    Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| {
@@ -543,6 +547,7 @@ fn write_archive_impl(
         reference_root,
         records.as_ref(),
         None,
+        false,
     )?
     .publish(path, exclusive)
 }
@@ -578,6 +583,7 @@ fn prepare_archive(
     reference_root: Option<&Path>,
     record_files: Option<&records::SnapshotFiles>,
     scheduled: Option<&ScheduledBackup>,
+    exclude_audio: bool,
 ) -> Result<PreparedBackup, String> {
     let result = write_archive_contents(
         output.as_file_mut(),
@@ -586,6 +592,7 @@ fn prepare_archive(
         reference_root,
         record_files,
         scheduled,
+        exclude_audio,
     );
     backup_checkpoint(scheduled)?;
     let files = result?;
@@ -608,6 +615,7 @@ fn write_archive_contents(
     reference_root: Option<&Path>,
     record_files: Option<&records::SnapshotFiles>,
     scheduled: Option<&ScheduledBackup>,
+    exclude_audio: bool,
 ) -> Result<usize, String> {
     backup_checkpoint(scheduled)?;
     archive_documents::set_file_references(manifest)?;
@@ -654,7 +662,7 @@ fn write_archive_contents(
             .and_then(Value::as_str)
             .is_some_and(|id| pending_audio.contains(id));
         let Some(folder) = folder else {
-            if recovery_pending {
+            if !exclude_audio && recovery_pending {
                 manifest
                     .incomplete_audio
                     .entry(index)
@@ -735,7 +743,7 @@ fn write_archive_contents(
             backup_checkpoint(scheduled)?;
             let entry = entry.map_err(failure)?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if !allowed_file(&name) {
+            if !allowed_file(&name) || (exclude_audio && archive_audio_file(&name)) {
                 continue;
             }
             let metadata = entry.metadata().map_err(failure)?;
@@ -758,10 +766,7 @@ fn write_archive_contents(
             }
             let mut input = File::open(entry.path()).map_err(failure)?;
             let size = input.metadata().map_err(failure)?.len();
-            has_audio |= size > 0
-                && Path::new(&name)
-                    .extension()
-                    .is_some_and(|ext| ext != "json");
+            has_audio |= size > 0 && archive_audio_file(&name);
             total = total.checked_add(size).ok_or("Archive is too large.")?;
             files += 1;
             if files > MAX_FILES || total > MAX_BYTES {
@@ -781,12 +786,15 @@ fn write_archive_contents(
             }
             names.push(name);
         }
-        incomplete.audio_unavailable =
-            !has_audio && (recovery_pending || incomplete.recovery_files_excluded);
+        incomplete.audio_unavailable = !exclude_audio
+            && !has_audio
+            && (recovery_pending || incomplete.recovery_files_excluded);
         if incomplete.audio_unavailable || incomplete.recovery_files_excluded {
             manifest.incomplete_audio.insert(index, incomplete);
         }
-        manifest.files.insert(index, names);
+        if !exclude_audio || !names.is_empty() {
+            manifest.files.insert(index, names);
+        }
     }
     archive_documents::write_originals(
         &mut zip,
@@ -2036,7 +2044,7 @@ pub async fn backup_library(app: AppHandle, path: String) -> Result<BackupReport
 }
 
 async fn backup_library_to(app: AppHandle, path: PathBuf) -> Result<BackupReport, String> {
-    backup_with_permits(app, path, claim_archive()?, None).await
+    backup_with_permits(app, path, claim_archive()?, None, false).await
 }
 
 enum ArchiveAudio {
@@ -2113,11 +2121,19 @@ pub(super) async fn try_scheduled_backup(
     path: PathBuf,
     output: tempfile::NamedTempFile,
     control: Arc<ScheduledBackup>,
+    exclude_audio: bool,
 ) -> Result<Option<BackupReport>, String> {
     let Ok(permits) = claim_scheduled_archive(&control) else {
         return Ok(None);
     };
-    let result = backup_with_permits(app, path, permits, Some((output, control.clone()))).await;
+    let result = backup_with_permits(
+        app,
+        path,
+        permits,
+        Some((output, control.clone())),
+        exclude_audio,
+    )
+    .await;
     match result {
         Err(_) if control.checkpoint().is_err() => Ok(None),
         result => result.map(Some),
@@ -2129,6 +2145,7 @@ async fn backup_with_permits(
     path: PathBuf,
     permits: ArchivePermits,
     scheduled_output: Option<(tempfile::NamedTempFile, Arc<ScheduledBackup>)>,
+    exclude_audio: bool,
 ) -> Result<BackupReport, String> {
     if !path
         .extension()
@@ -2172,6 +2189,7 @@ async fn backup_with_permits(
             Some(&reference_root),
             Some(&records),
             control.as_deref(),
+            exclude_audio,
         )?;
         prepared.report.skipped_template_items = skipped_template_items;
         drop(records);
@@ -2302,6 +2320,7 @@ mod tests {
                 None,
                 None,
                 Some(&control),
+                false,
             )?;
             permits.finish_reading_for_schedule(&control)?;
             prepared.publish(&worker_destination, true)
@@ -3978,6 +3997,75 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn backup_without_audio_restores_meeting_and_recording_metadata() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("audio.WAV"), b"synthetic audio").unwrap();
+        std::fs::write(source.path().join("metadata.json"), b"{}").unwrap();
+        sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = 'review-test'")
+            .bind(source.path().to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let audio_only = tempfile::tempdir().unwrap();
+        std::fs::write(audio_only.path().join("audio.wav"), b"synthetic audio").unwrap();
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES ('audio-only', 'Audio only', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
+            .bind(audio_only.path().to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let records = records::SnapshotFiles::temporary(target.path()).unwrap();
+        let (manifest, folders) = snapshot_for_backup(&pool, &records, None).await.unwrap();
+        let archive = target.path().join("without-audio.zip");
+        let report = prepare_archive(
+            archive_tempfile(&archive).unwrap(),
+            manifest,
+            folders,
+            None,
+            Some(&records),
+            None,
+            true,
+        )
+        .unwrap()
+        .publish(&archive, false)
+        .unwrap();
+        assert_eq!(report.files, 1);
+        assert!(report.incomplete_meetings.is_empty());
+
+        let (manifest, stage) = unpack(&archive, target.path(), &HashSet::new()).unwrap();
+        let restored_pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("DELETE FROM meetings")
+            .execute(&restored_pool)
+            .await
+            .unwrap();
+        let report = import_manifest(&restored_pool, manifest, stage)
+            .await
+            .unwrap();
+        assert_eq!(report.meetings, 2);
+        let transcript: String =
+            sqlx::query_scalar("SELECT transcript FROM transcripts WHERE id = 'b'")
+                .fetch_one(&restored_pool)
+                .await
+                .unwrap();
+        assert_eq!(transcript, "Project confirmed");
+        let folder: Option<String> =
+            sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = 'audio-only'")
+                .fetch_one(&restored_pool)
+                .await
+                .unwrap();
+        assert_eq!(folder, None);
+        let restored: String =
+            sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = 'review-test'")
+                .fetch_one(&restored_pool)
+                .await
+                .unwrap();
+        assert!(Path::new(&restored).join("metadata.json").is_file());
+        assert!(!Path::new(&restored).join("audio.WAV").exists());
+        assert!(source.path().join("audio.WAV").is_file());
     }
 
     #[tokio::test]

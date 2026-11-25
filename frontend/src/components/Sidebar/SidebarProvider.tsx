@@ -8,7 +8,7 @@ import { listen } from '@tauri-apps/api/event';
 import { MeetingTag } from '@/lib/library';
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, MAX, readStoredSidebarWidth } from '@/lib/sidebarWidth';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useTranscriptionConfig } from '@/contexts/ConfigContext';
 import { useLiveTranscriptionReadiness } from '@/hooks/useLiveTranscriptionReadiness';
 import { reportStartFailure, useStartRecordingSession } from '@/hooks/useRecordingStart';
 import { audioSourceReadiness } from '@/lib/audioDevicePreferences';
@@ -63,10 +63,6 @@ interface SidebarContextType extends ReturnType<typeof useSummaryPolling> {
   nextMeetingTitle: string;
   setNextMeetingTitle: React.Dispatch<React.SetStateAction<string>>;
   liveReadiness: ReturnType<typeof useLiveTranscriptionReadiness>;
-  setServerAddress: (address: string) => void;
-  serverAddress: string;
-  transcriptServerAddress: string;
-  setTranscriptServerAddress: (address: string) => void;
   // Refetch meetings from backend
   refetchMeetings: () => Promise<void>;
 
@@ -99,7 +95,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     } catch { if (version === tagsVersion.current) setProjectTagsError('Could not load project tags.'); }
     finally { if (version === tagsVersion.current) setProjectTagsLoading(false); }
   }, []);
-  const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>({ id: 'intro-call', title: '+ New Call' });
+  const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>(null);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [sidebarWidth, updateSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [sidebarMaxWidth, setSidebarMaxWidth] = useState(MAX);
@@ -133,14 +129,12 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [isMeetingActive, setIsMeetingActive] = useState(false);
   const [nextMeetingTitle, setNextMeetingTitle] = useState('');
   const startingFromSidebar = React.useRef(false);
-  const [serverAddress, setServerAddress] = useState('');
-  const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
   const { activeSummaryPolls, startSummaryPolling, stopSummaryPolling, attachSummaryPolling } = useSummaryPolling();
 
   // Use recording state from RecordingStateContext (single source of truth)
   const recording = useRecordingState();
   const { isRecording, recordingMode, isSavingMode } = recording;
-  const { audioDeviceInventory, selectedDevices, devicePreferencesStatus, isSavingDevicePreferences, transcriptModelConfig } = useConfig();
+  const { audioDeviceInventory, selectedDevices, devicePreferencesStatus, isSavingDevicePreferences, transcriptModelConfig } = useTranscriptionConfig();
   const { data: inventory, status: inventoryStatus, refresh } = audioDeviceInventory;
   useEffect(() => { void refresh(); }, [refresh]);
   const liveReadiness = useLiveTranscriptionReadiness(recordingMode === 'live', transcriptModelConfig.provider, transcriptModelConfig.model);
@@ -159,37 +153,35 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 
   // Extract fetchMeetings as a reusable function
   const fetchMeetings = React.useCallback(async () => {
-    if (serverAddress) {
-      const version = ++meetingVersion.current;
-      meetingLoadPending.current = true;
-      setMeetingsLoading(true);
-      try {
-        const meetings = await invoke<CurrentMeeting[]>('api_get_meetings');
-        if (version !== meetingVersion.current) return;
-        const transformedMeetings = meetings.map(meeting => ({
-          id: meeting.id,
-          title: meeting.title,
-          created_at: meeting.created_at,
-          updated_at: meeting.updated_at,
-        }));
-        allowLoadedMeetingDrafts(transformedMeetings);
-        updateMeetings(transformedMeetings);
-        setMeetingsError(null);
-        Analytics.trackBackendConnection(true);
-      } catch (error) {
-        if (version !== meetingVersion.current) return;
-        console.error('Error fetching meetings:', error);
-        // Keep what was loaded before; an empty list would pass for an empty library.
-        setMeetingsError('Could not load your meetings.');
-        Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
-      } finally {
-        if (version === meetingVersion.current) {
-          meetingLoadPending.current = false;
-          setMeetingsLoading(false);
-        }
+    const version = ++meetingVersion.current;
+    meetingLoadPending.current = true;
+    setMeetingsLoading(true);
+    try {
+      const meetings = await invoke<CurrentMeeting[]>('api_get_meetings');
+      if (version !== meetingVersion.current) return;
+      const transformedMeetings = meetings.map(meeting => ({
+        id: meeting.id,
+        title: meeting.title,
+        created_at: meeting.created_at,
+        updated_at: meeting.updated_at,
+      }));
+      allowLoadedMeetingDrafts(transformedMeetings);
+      updateMeetings(transformedMeetings);
+      setMeetingsError(null);
+      Analytics.trackBackendConnection(true);
+    } catch (error) {
+      if (version !== meetingVersion.current) return;
+      console.error('Error fetching meetings:', error);
+      // Keep what was loaded before; an empty list would pass for an empty library.
+      setMeetingsError('Could not load your meetings.');
+      Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
+    } finally {
+      if (version === meetingVersion.current) {
+        meetingLoadPending.current = false;
+        setMeetingsLoading(false);
       }
     }
-  }, [serverAddress]);
+  }, []);
 
   const setMeetings = React.useCallback<SidebarContextType['setMeetings']>(update => {
     updateMeetings(update);
@@ -224,14 +216,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     };
   }, [refreshProjectTags, fetchMeetings, setMeetings]);
 
-  useEffect(() => {
-    const fetchSettings = async () => {
-      setServerAddress('http://localhost:5167');
-      setTranscriptServerAddress('http://127.0.0.1:8178/stream');
-    };
-    fetchSettings();
-  }, []);
-
   const sidebarItems = React.useMemo<SidebarItem[]>(() => [
     {
       id: 'meetings',
@@ -248,7 +232,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   // Update current meeting when on home page
   useEffect(() => {
     if (pathname === '/') {
-      setCurrentMeeting({ id: 'intro-call', title: '+ New Call' });
+      setCurrentMeeting(null);
     }
   }, [pathname]);
 
@@ -294,10 +278,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       nextMeetingTitle,
       setNextMeetingTitle,
       liveReadiness,
-      setServerAddress,
-      serverAddress,
-      transcriptServerAddress,
-      setTranscriptServerAddress,
       activeSummaryPolls,
       startSummaryPolling,
       stopSummaryPolling,
@@ -309,7 +289,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     sidebarMaxWidth, sidebarOffset, isSidebarResizing, toggleCollapse, meetings,
     meetingsError, meetingsLoading, setMeetings, isMeetingActive, handleRecordingToggle, recordingActionReason, nextMeetingTitle,
     liveReadiness.data, liveReadiness.error, liveReadiness.refresh,
-    serverAddress, transcriptServerAddress, activeSummaryPolls, startSummaryPolling,
+    activeSummaryPolls, startSummaryPolling,
     stopSummaryPolling, attachSummaryPolling, fetchMeetings,
   ]);
 

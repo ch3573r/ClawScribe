@@ -258,7 +258,7 @@ const customOpenAI = {
   allow_unencrypted: true, destination_problem: 'Fixture destination warning',
 };
 
-test('ConfigContext hydrates the stored compatible provider fields together', async t => {
+test('Summary config hydrates the stored compatible provider fields together', async t => {
   const hooks = createHookHarness();
   const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null, setItem() {} } });
@@ -271,22 +271,41 @@ test('ConfigContext hydrates the stored compatible provider fields together', as
     api_get_custom_openai_config: customOpenAI,
   })[command] ?? null;
   const core = { invoke };
-  const { ConfigProvider } = loadTsModule('src/contexts/ConfigContext.tsx', {
+  const { SummaryConfigProvider } = loadTsModule('src/contexts/SummaryConfigContext.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@tauri-apps/api/core': core,
     '@tauri-apps/api/event': { listen: async () => () => {} },
-    '@/hooks/useAudioDeviceInventory': { useAudioDeviceInventory: () => ({}) },
-    '@/hooks/useRecordingDevicePreferences': { useRecordingDevicePreferences: () => ({}) },
-    '@/lib/behaviorSettings': { loadBehaviorSettings: async () => ({ language: 'auto' }) },
   });
   t.after(() => hooks.unmount());
-  const render = () => hooks.render(() => ConfigProvider({})).props.value.modelConfig;
+  const render = () => hooks.render(() => SummaryConfigProvider({})).props.value.modelConfig;
   render(); await flush();
   const config = render();
   assert.equal(config.model, customOpenAI.model);
   for (const field of ['timeoutSeconds', 'organization', 'project', 'allow_unencrypted', 'destination_problem']) {
     assert.equal(config[field], customOpenAI[field], field);
   }
+});
+
+test('the compatibility hook exposes all domains and keeps its value stable until one changes', () => {
+  const hooks = createHookHarness();
+  const summary = { modelConfig: { provider: 'ollama' } };
+  let transcription = { selectedLanguage: 'de' };
+  const preferences = { storageLocations: null };
+  const { useConfig } = loadTsModule('src/contexts/ConfigContext.tsx', {
+    react: hooks.react,
+    './SummaryConfigContext': { useSummaryConfig: () => summary },
+    './TranscriptionConfigContext': { useTranscriptionConfig: () => transcription },
+    './PreferenceConfigContext': { usePreferenceConfig: () => preferences },
+  });
+  const before = hooks.render(useConfig);
+  assert.equal(before.modelConfig, summary.modelConfig);
+  assert.equal(before.selectedLanguage, 'de');
+  assert.equal(before.storageLocations, null);
+  assert.equal(hooks.render(useConfig), before);
+  transcription = { selectedLanguage: 'en' };
+  const after = hooks.render(useConfig);
+  assert.equal(after.selectedLanguage, 'en');
+  assert.equal(after.modelConfig, before.modelConfig);
 });
 
 test('fetched compatible provider settings survive a rerender and an unrelated autosave', async () => {

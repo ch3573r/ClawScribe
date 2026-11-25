@@ -17,6 +17,7 @@
 //!   the core has no value yet (`migrate_legacy_behavior_settings`).
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_store::StoreExt;
@@ -31,6 +32,20 @@ const LANGUAGE: &str = "language";
 const LEGACY_MIGRATED: &str = "legacy_migrated";
 const SHOW_CONVERSATION_METRICS: &str = "show_conversation_metrics";
 const SHOW_RECORDING_NOTIFICATION: &str = "show_recording_notification";
+const AUTO_UPDATE_CHECK: &str = "auto_update_check";
+const PLAYER_SHORTCUTS: &str = "player_shortcuts";
+const PLAYER_ACTIONS: &[&str] = &[
+    "toggle",
+    "back",
+    "forward",
+    "backLarge",
+    "forwardLarge",
+    "slower",
+    "faster",
+    "follow",
+    "bookmark",
+    "find",
+];
 
 /// One change at a time, whether it comes from the interface or from the
 /// hand-over of the webview's old values.
@@ -456,6 +471,109 @@ pub async fn set_conversation_metrics_preference<R: Runtime>(
     .map_err(|_| "Could not save the setting".to_string())?
 }
 
+fn load_auto_update(backing: &dyn Backing, legacy_enabled: Option<bool>) -> Result<bool, String> {
+    if let Some(enabled) = backing
+        .read(AUTO_UPDATE_CHECK)
+        .and_then(|value| value.as_bool())
+    {
+        return Ok(enabled);
+    }
+    if let Some(enabled) = legacy_enabled {
+        persist_bool(backing, AUTO_UPDATE_CHECK, enabled)?;
+    }
+    Ok(legacy_enabled.unwrap_or(true))
+}
+
+type PlayerShortcuts = BTreeMap<String, String>;
+
+fn valid_player_binding(action: &str, chord: &str) -> bool {
+    PLAYER_ACTIONS.contains(&action)
+        && !chord.trim().is_empty()
+        && chord.len() <= 128
+        && !chord.chars().any(char::is_control)
+}
+
+fn load_shortcuts(
+    backing: &dyn Backing,
+    legacy_bindings: Option<PlayerShortcuts>,
+) -> Result<PlayerShortcuts, String> {
+    if let Some(bindings) = backing
+        .read(PLAYER_SHORTCUTS)
+        .and_then(|value| serde_json::from_value::<PlayerShortcuts>(value).ok())
+        .filter(|bindings| {
+            bindings
+                .iter()
+                .all(|(action, chord)| valid_player_binding(action, chord))
+        })
+    {
+        return Ok(bindings);
+    }
+    let mut bindings = legacy_bindings.unwrap_or_default();
+    bindings.retain(|action, chord| valid_player_binding(action, chord));
+    if !bindings.is_empty() {
+        persist(backing, PLAYER_SHORTCUTS, json!(bindings))?;
+    }
+    Ok(bindings)
+}
+
+#[tauri::command]
+pub async fn load_auto_update_preference<R: Runtime>(
+    app: AppHandle<R>,
+    legacy_enabled: Option<bool>,
+) -> Result<bool, String> {
+    let _change = CHANGE_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        load_auto_update(open(&app)?.as_ref(), legacy_enabled)
+    })
+    .await
+    .map_err(|_| "Could not read the update preference".to_string())?
+}
+
+#[tauri::command]
+pub async fn set_auto_update_preference<R: Runtime>(
+    app: AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let _change = CHANGE_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        persist_bool(open(&app)?.as_ref(), AUTO_UPDATE_CHECK, enabled)
+    })
+    .await
+    .map_err(|_| "Could not save the update preference".to_string())?
+}
+
+#[tauri::command]
+pub async fn load_player_shortcuts<R: Runtime>(
+    app: AppHandle<R>,
+    legacy_bindings: Option<PlayerShortcuts>,
+) -> Result<PlayerShortcuts, String> {
+    let _change = CHANGE_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        load_shortcuts(open(&app)?.as_ref(), legacy_bindings)
+    })
+    .await
+    .map_err(|_| "Could not read the player shortcuts".to_string())?
+}
+
+#[tauri::command]
+pub async fn set_player_shortcuts<R: Runtime>(
+    app: AppHandle<R>,
+    bindings: PlayerShortcuts,
+) -> Result<(), String> {
+    if !bindings
+        .iter()
+        .all(|(action, chord)| valid_player_binding(action, chord))
+    {
+        return Err("Invalid player shortcut".into());
+    }
+    let _change = CHANGE_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        persist(open(&app)?.as_ref(), PLAYER_SHORTCUTS, json!(bindings))
+    })
+    .await
+    .map_err(|_| "Could not save the player shortcuts".to_string())?
+}
+
 #[cfg(test)]
 pub(crate) mod test_memory {
     use super::*;
@@ -503,6 +621,40 @@ pub(crate) mod test_memory {
             *self.saved.borrow_mut() = self.values.borrow().clone();
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod ui_preference_tests {
+    use super::{test_memory::Memory, *};
+
+    #[test]
+    fn native_ui_preferences_migrate_once() {
+        let backing = Memory::default();
+        assert!(!load_auto_update(&backing, Some(false)).unwrap());
+        assert!(!load_auto_update(&backing, Some(true)).unwrap());
+
+        let legacy = [
+            ("toggle".into(), "P".into()),
+            ("unknown".into(), "Q".into()),
+        ]
+        .into_iter()
+        .collect();
+        let saved = load_shortcuts(&backing, Some(legacy)).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved["toggle"], "P");
+        let stale = [("toggle".into(), "Z".into())].into_iter().collect();
+        assert_eq!(load_shortcuts(&backing, Some(stale)).unwrap(), saved);
+    }
+
+    #[test]
+    fn a_failed_ui_preference_migration_can_retry() {
+        let backing = Memory::default();
+        *backing.fail_saves.borrow_mut() = true;
+        assert!(load_auto_update(&backing, Some(false)).is_err());
+        assert!(backing.read(AUTO_UPDATE_CHECK).is_none());
+        *backing.fail_saves.borrow_mut() = false;
+        assert!(!load_auto_update(&backing, Some(false)).unwrap());
     }
 }
 
