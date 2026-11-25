@@ -12,7 +12,9 @@ rust-version = "1.89"
 
 [lib]
 name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop only: main.rs, examples and tests link the rlib. staticlib and cdylib
+# were Tauri mobile template defaults and cost two extra release links.
+crate-type = ["rlib"]
 
 
 # Hardware acceleration features for whisper-rs

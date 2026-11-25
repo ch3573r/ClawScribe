@@ -181,13 +181,17 @@ if ($LASTEXITCODE -ne 0 -or -not $cargoMetadata.target_directory) {
 }
 $bundleRoot = Join-Path $cargoMetadata.target_directory "release\bundle"
 $releaseConfig = Join-Path $tauriRoot "tauri.windows-release.conf.json"
+# Build-FrontendAssets above already produced and checked frontend/out from a
+# clean folder. This override removes tauri.conf.json's beforeBuildCommand so
+# tauri build does not run the same production build a second time.
+$prebuiltFrontendConfig = Join-Path $tauriRoot "tauri.prebuilt-frontend.conf.json"
 Remove-Item -LiteralPath (Join-Path $bundleRoot "msi") -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $bundleRoot "nsis") -Recurse -Force -ErrorAction SilentlyContinue
 
 if ($Feature -eq "cpu") {
-    pnpm exec tauri build --config $releaseConfig -- --locked
+    pnpm exec tauri build --config $releaseConfig --config $prebuiltFrontendConfig -- --locked
 } else {
-    pnpm exec tauri build --config $releaseConfig -- @featureArgs --locked
+    pnpm exec tauri build --config $releaseConfig --config $prebuiltFrontendConfig -- @featureArgs --locked
 }
 
 if ($LASTEXITCODE -ne 0) { throw "Windows installer build failed." }
