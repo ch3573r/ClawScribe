@@ -11,6 +11,7 @@ use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 
 use super::models;
 
@@ -38,8 +39,9 @@ pub struct SidecarManager {
     /// Health status
     is_healthy: Arc<AtomicBool>,
 
-    /// Shutdown flag
-    should_shutdown: Arc<AtomicBool>,
+    /// Cancels the health and idle tasks that belong to the current spawn.
+    /// Each spawn installs a fresh token so tasks never outlive their process.
+    background: Arc<std::sync::Mutex<CancellationToken>>,
 
     /// A resource whose cleanup has not actually completed cannot be reused.
     quarantined: Arc<AtomicBool>,
@@ -155,7 +157,7 @@ impl SidecarManager {
             request_lock: Arc::new(Mutex::new(())),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
-            should_shutdown: Arc::new(AtomicBool::new(false)),
+            background: Arc::new(std::sync::Mutex::new(cancelled_token())),
             quarantined: Arc::new(AtomicBool::new(false)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path,
@@ -277,14 +279,15 @@ impl SidecarManager {
         }
 
         self.is_healthy.store(true, Ordering::SeqCst);
-        self.should_shutdown.store(false, Ordering::SeqCst);
         self.update_activity().await;
 
         log::info!("Sidecar spawned successfully");
 
-        // Start background tasks
-        self.start_health_check_loop();
-        self.start_idle_check_loop();
+        // Start background tasks bound to this spawn only. The preceding
+        // shutdown() cancelled the previous spawn's tasks.
+        let token = self.replace_background_token();
+        self.start_health_check_loop(token.clone());
+        self.start_idle_check_loop(token);
 
         Ok(())
     }
@@ -462,8 +465,8 @@ impl SidecarManager {
     pub async fn shutdown_gracefully(&self) -> Result<()> {
         log::info!("Initiating graceful shutdown of sidecar");
 
-        // Set shutdown flag to prevent new internal tasks
-        self.should_shutdown.store(true, Ordering::SeqCst);
+        // Stop the internal health and idle tasks.
+        self.cancel_background();
 
         // Wait for active requests to complete
         // We poll every 500ms
@@ -494,30 +497,79 @@ impl SidecarManager {
 
     /// Force shutdown the sidecar
     pub async fn shutdown(&self) -> Result<()> {
-        self.should_shutdown.store(true, Ordering::SeqCst);
+        self.shutdown_within(SHUTDOWN_DEADLINE).await
+    }
+
+    async fn shutdown_within(&self, deadline: Duration) -> Result<()> {
+        self.cancel_background();
         self.quarantined.store(true, Ordering::SeqCst);
         self.is_healthy.store(false, Ordering::SeqCst);
         // Do not write a polite message into a potentially full stdin pipe.
         // Keep the child in its manager slot across every await. If startup's
         // waiter is cancelled, the next cleanup owner still has the actual child.
-        {
+        let confirmed = {
             let mut child_lock = self.child_process.lock().await;
-            if let Some(child) = child_lock.as_mut() {
-                loop {
-                    let _ = child.start_kill();
-                    match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
-                        Ok(Ok(_)) => break,
-                        _ => tokio::time::sleep(Duration::from_millis(50)).await,
-                    }
-                }
-            }
+            let confirmed = match child_lock.as_mut() {
+                Some(child) => kill_and_reap(child, deadline).await,
+                None => true,
+            };
+            // Dropping the handle also issues kill_on_drop's final kill.
             *child_lock = None;
-        }
+            confirmed
+        };
         *self.stdin_writer.lock().await = None;
         *self.stdout_reader.lock().await = None;
         *self.current_model_path.write().await = None;
         self.quarantined.store(false, Ordering::SeqCst);
-        Ok(())
+        if confirmed {
+            Ok(())
+        } else {
+            // App exit must never hang on an unreapable helper. Its pipes are
+            // closed above, so the helper also exits on stdin EOF.
+            log::error!(
+                "Local summary helper did not confirm exit within {:?}",
+                deadline
+            );
+            Err(anyhow!(
+                "Local summary helper did not stop within {} seconds",
+                deadline.as_secs()
+            ))
+        }
+    }
+
+    fn replace_background_token(&self) -> CancellationToken {
+        let token = CancellationToken::new();
+        let previous = {
+            let mut slot = self.background.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::replace(&mut *slot, token.clone())
+        };
+        previous.cancel();
+        token
+    }
+
+    fn cancel_background(&self) {
+        self.background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancel();
+    }
+
+    /// A handle onto the same shared state for a background task.
+    fn shared(&self) -> Self {
+        Self {
+            child_process: self.child_process.clone(),
+            stdin_writer: self.stdin_writer.clone(),
+            stdout_reader: self.stdout_reader.clone(),
+            request_lock: self.request_lock.clone(),
+            last_activity: self.last_activity.clone(),
+            is_healthy: self.is_healthy.clone(),
+            background: self.background.clone(),
+            quarantined: self.quarantined.clone(),
+            active_request_count: self.active_request_count.clone(),
+            helper_binary_path: self.helper_binary_path.clone(),
+            current_model_path: self.current_model_path.clone(),
+            idle_timeout_secs: self.idle_timeout_secs,
+        }
     }
     /// Check if sidecar is healthy
     pub fn is_healthy(&self) -> bool {
@@ -536,33 +588,19 @@ impl SidecarManager {
         last_activity.elapsed().as_secs()
     }
 
-    /// Start health check loop (runs in background)
-    fn start_health_check_loop(&self) {
-        let manager = Self {
-            child_process: self.child_process.clone(),
-            stdin_writer: self.stdin_writer.clone(),
-            stdout_reader: self.stdout_reader.clone(),
-            request_lock: self.request_lock.clone(),
-            last_activity: self.last_activity.clone(),
-            is_healthy: self.is_healthy.clone(),
-            should_shutdown: self.should_shutdown.clone(),
-            quarantined: self.quarantined.clone(),
-            active_request_count: self.active_request_count.clone(),
-            helper_binary_path: self.helper_binary_path.clone(),
-            current_model_path: self.current_model_path.clone(),
-            idle_timeout_secs: self.idle_timeout_secs,
-        };
+    /// Start health check loop (runs in background until `token` is cancelled)
+    fn start_health_check_loop(&self, token: CancellationToken) {
+        let manager = self.shared();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            let mut interval = tokio::time::interval(HEALTH_CHECK_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                interval.tick().await;
-
-                if manager.should_shutdown.load(Ordering::SeqCst) {
-                    log::debug!("Health check loop: shutdown flag set, exiting");
-                    break;
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => break,
+                    _ = interval.tick() => {}
                 }
 
                 if !manager.is_healthy() {
@@ -576,7 +614,12 @@ impl SidecarManager {
                 }
 
                 log::debug!("Health check: sending ping");
-                if let Err(e) = manager.send_ping().await {
+                let ping = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => break,
+                    result = manager.send_ping() => result,
+                };
+                if let Err(e) = ping {
                     log::warn!("Health check failed: {}", e);
                     manager.is_healthy.store(false, Ordering::SeqCst);
                 }
@@ -586,33 +629,19 @@ impl SidecarManager {
         });
     }
 
-    /// Start idle check loop (runs in background)
-    fn start_idle_check_loop(&self) {
-        let manager = Self {
-            child_process: self.child_process.clone(),
-            stdin_writer: self.stdin_writer.clone(),
-            stdout_reader: self.stdout_reader.clone(),
-            request_lock: self.request_lock.clone(),
-            last_activity: self.last_activity.clone(),
-            is_healthy: self.is_healthy.clone(),
-            should_shutdown: self.should_shutdown.clone(),
-            quarantined: self.quarantined.clone(),
-            active_request_count: self.active_request_count.clone(),
-            helper_binary_path: self.helper_binary_path.clone(),
-            current_model_path: self.current_model_path.clone(),
-            idle_timeout_secs: self.idle_timeout_secs,
-        };
+    /// Start idle check loop (runs in background until `token` is cancelled)
+    fn start_idle_check_loop(&self, token: CancellationToken) {
+        let manager = self.shared();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(IDLE_CHECK_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                interval.tick().await;
-
-                if manager.should_shutdown.load(Ordering::SeqCst) {
-                    log::debug!("Idle check loop: shutdown flag set, exiting");
-                    break;
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => break,
+                    _ = interval.tick() => {}
                 }
 
                 // Don't shutdown if we are busy
@@ -645,14 +674,95 @@ impl SidecarManager {
     }
 }
 
-impl Drop for SidecarManager {
-    fn drop(&mut self) {
-        // Set shutdown flag
-        self.should_shutdown.store(true, Ordering::SeqCst);
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
-        // Note: Actual cleanup happens in shutdown() method
-        // We can't do async work in Drop, so this is best-effort
-        log::debug!("SidecarManager dropped");
+fn cancelled_token() -> CancellationToken {
+    let token = CancellationToken::new();
+    token.cancel();
+    token
+}
+
+/// Kills `child` and waits for it, retrying until `deadline` elapses.
+/// Returns whether the exit was confirmed.
+async fn kill_and_reap(child: &mut Child, deadline: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        let _ = child.start_kill();
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return false;
+        }
+        match tokio::time::timeout(remaining.min(Duration::from_secs(1)), child.wait()).await {
+            Ok(Ok(_)) => return true,
+            Ok(Err(error)) => {
+                log::warn!("Waiting for the local summary helper failed: {}", error);
+            }
+            Err(_) => {}
+        }
+        if started.elapsed() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn replacing_the_background_token_cancels_the_previous_spawn() {
+        let background = Arc::new(std::sync::Mutex::new(cancelled_token()));
+        let first = CancellationToken::new();
+        *background.lock().unwrap() = first.clone();
+        let next = CancellationToken::new();
+        let previous = std::mem::replace(&mut *background.lock().unwrap(), next.clone());
+        previous.cancel();
+        assert!(first.is_cancelled());
+        assert!(!next.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn kill_and_reap_confirms_a_killable_child() {
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("cmd.exe");
+        #[cfg(windows)]
+        command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+        #[cfg(not(windows))]
+        let mut command = tokio::process::Command::new("sleep");
+        #[cfg(not(windows))]
+        command.arg("30");
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        assert!(kill_and_reap(&mut child, Duration::from_secs(10)).await);
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn kill_and_reap_gives_up_at_a_zero_deadline() {
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("cmd.exe");
+        #[cfg(windows)]
+        command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+        #[cfg(not(windows))]
+        let mut command = tokio::process::Command::new("sleep");
+        #[cfg(not(windows))]
+        command.arg("30");
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        // Bounded: returns instead of looping forever.
+        assert!(!kill_and_reap(&mut child, Duration::ZERO).await);
     }
 }
 
@@ -695,7 +805,7 @@ mod protocol_tests {
             request_lock: Arc::new(Mutex::new(())),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(true)),
-            should_shutdown: Arc::new(AtomicBool::new(false)),
+            background: Arc::new(std::sync::Mutex::new(cancelled_token())),
             quarantined: Arc::new(AtomicBool::new(false)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path: PathBuf::new(),

@@ -1,6 +1,7 @@
 pub mod acceleration;
 pub mod commands;
 pub mod system_monitor;
+pub mod vulkan_runtime;
 pub mod whisper_engine;
 // pub mod stderr_suppressor;
 

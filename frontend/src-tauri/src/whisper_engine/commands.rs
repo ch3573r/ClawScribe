@@ -30,13 +30,13 @@ pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
 
     log::info!("Models directory set to: {}", models_dir.display());
 
-    let mut guard = MODELS_DIR.lock().unwrap();
+    let mut guard = MODELS_DIR.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(models_dir);
 }
 
 /// Get the configured models directory
 fn get_models_directory() -> Option<PathBuf> {
-    MODELS_DIR.lock().unwrap().clone()
+    MODELS_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// The transcription backend actually compiled into this build, plus the GPU
@@ -58,6 +58,9 @@ pub struct WhisperAccelerationStatus {
     /// True when a GPU was detected but the binary is CPU-only — i.e. installing
     /// the GPU build would unlock acceleration on this machine.
     pub gpu_available_but_unused: bool,
+    /// True when this build needs the Vulkan loader for Whisper and it is
+    /// missing. Whisper is then unavailable; Parakeet is unaffected.
+    pub vulkan_runtime_missing: bool,
     pub cpu_cores: u8,
     pub memory_gb: u8,
     pub performance_tier: String,
@@ -75,15 +78,25 @@ pub async fn whisper_get_acceleration_status() -> Result<WhisperAccelerationStat
     let accel =
         whisper_context_acceleration_for(backend, profile.gpu_type, profile.performance_tier);
 
-    let gpu_available_but_unused = !accel.use_gpu && !matches!(profile.gpu_type, GpuType::None);
+    let vulkan_runtime_missing = matches!(
+        crate::whisper_engine::vulkan_runtime::vulkan_runtime(),
+        crate::whisper_engine::vulkan_runtime::VulkanRuntime::Missing
+    );
+    let gpu_available_but_unused =
+        !vulkan_runtime_missing && !accel.use_gpu && !matches!(profile.gpu_type, GpuType::None);
 
     Ok(WhisperAccelerationStatus {
         compiled_backend: backend.as_str().to_string(),
         runtime_detected_gpu: format!("{:?}", profile.gpu_type),
-        use_gpu: accel.use_gpu,
-        flash_attn: accel.flash_attn,
-        label: accel.status_label().to_string(),
+        use_gpu: accel.use_gpu && !vulkan_runtime_missing,
+        flash_attn: accel.flash_attn && !vulkan_runtime_missing,
+        label: if vulkan_runtime_missing {
+            "Whisper unavailable: Vulkan runtime not installed".to_string()
+        } else {
+            accel.status_label().to_string()
+        },
         gpu_available_but_unused,
+        vulkan_runtime_missing,
         cpu_cores: profile.cpu_cores,
         memory_gb: profile.memory_gb,
         performance_tier: format!("{:?}", profile.performance_tier),
@@ -92,7 +105,7 @@ pub async fn whisper_get_acceleration_status() -> Result<WhisperAccelerationStat
 
 #[command]
 pub async fn whisper_init() -> Result<(), String> {
-    let mut guard = WHISPER_ENGINE.lock().unwrap();
+    let mut guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_some() {
         return Ok(());
     }
@@ -107,7 +120,7 @@ pub async fn whisper_init() -> Result<(), String> {
 #[command]
 pub async fn whisper_get_available_models() -> Result<Vec<ModelInfo>, String> {
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -186,7 +199,7 @@ pub async fn whisper_load_model(
 ) -> Result<(), String> {
     let _job = crate::audio::inference::claim_job()?;
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -237,7 +250,7 @@ pub async fn whisper_load_model(
 #[command]
 pub async fn whisper_get_current_model() -> Result<Option<String>, String> {
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -251,7 +264,7 @@ pub async fn whisper_get_current_model() -> Result<Option<String>, String> {
 #[command]
 pub async fn whisper_is_model_loaded() -> Result<bool, String> {
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -265,7 +278,7 @@ pub async fn whisper_is_model_loaded() -> Result<bool, String> {
 #[command]
 pub async fn whisper_has_available_models() -> Result<bool, String> {
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -290,7 +303,7 @@ pub async fn whisper_has_available_models() -> Result<bool, String> {
 #[command]
 pub async fn whisper_validate_model_ready() -> Result<String, String> {
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -341,7 +354,7 @@ pub(crate) async fn whisper_validate_model_ready_for(
         check_model_files, LiveModelFailure, ModelFileState,
     };
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -400,7 +413,7 @@ pub(crate) async fn whisper_validate_model_ready_for(
 #[command]
 pub async fn whisper_transcribe_audio(audio_data: Vec<f32>) -> Result<String, String> {
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -419,7 +432,7 @@ pub async fn whisper_transcribe_audio(audio_data: Vec<f32>) -> Result<String, St
 #[command]
 pub async fn whisper_get_models_directory() -> Result<String, String> {
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -437,7 +450,7 @@ pub async fn whisper_download_model(
     model_name: String,
 ) -> Result<(), String> {
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -502,7 +515,7 @@ pub async fn whisper_download_model(
 #[command]
 pub async fn whisper_cancel_download(model_name: String) -> Result<(), String> {
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -520,7 +533,7 @@ pub async fn whisper_cancel_download(model_name: String) -> Result<(), String> {
 pub async fn whisper_delete_corrupted_model(model_name: String) -> Result<String, String> {
     let _job = crate::audio::inference::claim_job()?;
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap();
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 

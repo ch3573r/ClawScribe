@@ -30,18 +30,18 @@ pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
 
     log::info!("Parakeet models directory set to: {}", models_dir.display());
 
-    let mut guard = MODELS_DIR.lock().unwrap();
+    let mut guard = MODELS_DIR.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(models_dir);
 }
 
 /// Get the configured models directory
 fn get_models_directory() -> Option<PathBuf> {
-    MODELS_DIR.lock().unwrap().clone()
+    MODELS_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 #[command]
 pub async fn parakeet_init() -> Result<(), String> {
-    let mut guard = PARAKEET_ENGINE.lock().unwrap();
+    let mut guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_some() {
         return Ok(());
     }
@@ -56,7 +56,7 @@ pub async fn parakeet_init() -> Result<(), String> {
 #[command]
 pub async fn parakeet_get_available_models() -> Result<Vec<ModelInfo>, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -77,7 +77,7 @@ pub async fn parakeet_load_model<R: Runtime>(
 ) -> Result<(), String> {
     let _job = crate::audio::inference::claim_job()?;
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -131,7 +131,7 @@ pub async fn parakeet_load_model<R: Runtime>(
 #[command]
 pub async fn parakeet_get_current_model() -> Result<Option<String>, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -145,7 +145,7 @@ pub async fn parakeet_get_current_model() -> Result<Option<String>, String> {
 #[command]
 pub async fn parakeet_is_model_loaded() -> Result<bool, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -159,7 +159,7 @@ pub async fn parakeet_is_model_loaded() -> Result<bool, String> {
 #[command]
 pub async fn parakeet_has_available_models() -> Result<bool, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -184,7 +184,7 @@ pub async fn parakeet_has_available_models() -> Result<bool, String> {
 #[command]
 pub async fn parakeet_validate_model_ready() -> Result<String, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -240,7 +240,7 @@ pub(crate) async fn parakeet_validate_model_ready_for(
         check_model_files, LiveModelFailure, ModelFileState,
     };
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -311,7 +311,7 @@ pub(crate) async fn parakeet_validate_model_ready_for(
 #[command]
 pub async fn parakeet_transcribe_audio(audio_data: Vec<f32>) -> Result<String, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -328,7 +328,7 @@ pub async fn parakeet_transcribe_audio(audio_data: Vec<f32>) -> Result<String, S
 #[command]
 pub async fn parakeet_get_models_directory() -> Result<String, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -346,7 +346,7 @@ pub async fn parakeet_download_model<R: Runtime>(
     model_name: String,
 ) -> Result<(), String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -440,7 +440,7 @@ pub async fn parakeet_cancel_download<R: Runtime>(
     model_name: String,
 ) -> Result<(), String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -475,7 +475,7 @@ pub async fn parakeet_retry_download<R: Runtime>(
     log::info!("Retrying download for: {}", model_name);
 
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -499,7 +499,7 @@ pub async fn parakeet_retry_download<R: Runtime>(
 pub async fn parakeet_delete_corrupted_model(model_name: String) -> Result<String, String> {
     let _job = crate::audio::inference::claim_job()?;
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -585,7 +585,7 @@ pub(crate) async fn apply_parakeet_directml<R: tauri::Runtime>(
         .store(enabled, std::sync::atomic::Ordering::Relaxed);
 
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
     if let Some(engine) = engine {
@@ -636,7 +636,7 @@ pub(crate) async fn apply_parakeet_worker<R: tauri::Runtime>(
         .store(enabled, std::sync::atomic::Ordering::Relaxed);
 
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
     if let Some(engine) = engine {

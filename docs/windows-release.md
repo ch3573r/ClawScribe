@@ -146,12 +146,18 @@ or elevation.
 
 ### Vulkan
 
-The `windows-gpu` and `vulkan` builds have a load-time dependency on
-`vulkan-1.dll`. A machine without the loader can fail before the app opens or
-native tests are discovered, even if no GPU inference is requested. Use a
-supported GPU driver or the official LunarG Vulkan runtime. Do not download
-individual DLLs from third-party sites. The 0.5.42 installer does not install
-a GPU driver or the Vulkan runtime for you.
+The `windows-gpu` and `vulkan` builds delay-load `vulkan-1.dll`
+(`/DELAYLOAD:vulkan-1.dll`, set in `frontend/src-tauri/build.rs`), so the
+loader is not in the executable's normal import table and the app starts on a
+PC without it. Before any Whisper model loads, the app probes for the loader.
+If it is missing, Whisper reports that the Vulkan runtime is not installed and
+does not start; Parakeet and Nemotron are unaffected. Settings and Diagnostics
+show the same state. To confirm a build, `dumpbin /imports clawscribe.exe`
+must list `vulkan-1.dll` only under the delay-load section.
+
+To use Whisper on such a PC, install a supported GPU driver or the official
+LunarG Vulkan runtime. Do not download individual DLLs from third-party sites.
+The installer does not install a GPU driver or the Vulkan runtime for you.
 
 Extracting the Vulkan SDK supplies headers, libraries, and build tools; it does
 not run its bundled `Helpers/VulkanRT.exe`. The release workflow explicitly

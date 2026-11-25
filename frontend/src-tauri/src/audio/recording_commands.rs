@@ -254,14 +254,20 @@ mod stop_tests {
         }
         impl Drop for Restore {
             fn drop(&mut self) {
-                *RECORDING_MANAGER.lock().unwrap() = self.manager.take();
-                *ACTIVE_CAPTURE.lock().unwrap() = self.active.take();
+                *RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner()) = self.manager.take();
+                *ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner()) = self.active.take();
                 IS_RECORDING.store(self.recording, Ordering::SeqCst);
             }
         }
         let restore = Restore {
-            manager: RECORDING_MANAGER.lock().unwrap().take(),
-            active: ACTIVE_CAPTURE.lock().unwrap().take(),
+            manager: RECORDING_MANAGER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
+            active: ACTIVE_CAPTURE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
             recording: IS_RECORDING.swap(true, Ordering::SeqCst),
         };
         let runtime = crate::knowledge::KnowledgeState::default();
@@ -269,7 +275,7 @@ mod stop_tests {
         let (startup, sink) = prepare_live_recording(&runtime, &mut manager, true).unwrap();
         let id = startup.commit();
         let snapshot = serde_json::to_value(runtime.live.snapshot(&id).unwrap()).unwrap();
-        *RECORDING_MANAGER.lock().unwrap() = Some(manager);
+        *RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
         let _ = publish_active_recording(&sink);
         let metadata = get_recording_state().await;
         assert_eq!(
@@ -364,7 +370,7 @@ impl SavingRecording {
 static SAVING_RECORDING: Mutex<Option<SavingRecording>> = Mutex::new(None);
 
 pub(crate) fn set_start_after_save(want_recording: Option<bool>, session_id: Option<&str>) -> bool {
-    let mut saving = SAVING_RECORDING.lock().unwrap();
+    let mut saving = SAVING_RECORDING.lock().unwrap_or_else(|e| e.into_inner());
     saving
         .as_mut()
         .is_some_and(|owner| owner.update(want_recording, session_id, Instant::now()))
@@ -419,7 +425,11 @@ impl StopState {
         progress: u8,
         message: &'static str,
     ) {
-        if let Some(owner) = SAVING_RECORDING.lock().unwrap().as_mut() {
+        if let Some(owner) = SAVING_RECORDING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
             owner.progress = progress;
             owner.message = message;
         }
@@ -432,7 +442,7 @@ impl StopState {
     }
 
     fn close(&self) -> Option<Instant> {
-        let mut saving = SAVING_RECORDING.lock().unwrap();
+        let mut saving = SAVING_RECORDING.lock().unwrap_or_else(|e| e.into_inner());
         IS_STOPPING.store(false, Ordering::Release);
         saving.take().and_then(|owner| owner.start_requested)
     }
@@ -643,7 +653,7 @@ pub(crate) fn stop_live_assistance(
 }
 
 fn store_recording_manager(manager: RecordingManager) {
-    *RECORDING_MANAGER.lock().unwrap() = Some(manager);
+    *RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
 }
 
 /// Publish the active state and worker together so Stop cannot miss the task.
@@ -658,7 +668,7 @@ fn activate_recording<R: Runtime>(
     let folder = publish_active_recording(&sink);
     start_health_watch(sink.session_id.clone(), folder, transcribes);
     LIVE_TRANSCRIPTION.store(transcribes, Ordering::SeqCst);
-    let mut task = TRANSCRIPTION_TASK.lock().unwrap();
+    let mut task = TRANSCRIPTION_TASK.lock().unwrap_or_else(|e| e.into_inner());
     RECORDING_EPOCH.fetch_add(1, Ordering::AcqRel);
     IS_RECORDING.store(true, Ordering::SeqCst);
     if transcribes {
@@ -754,7 +764,7 @@ fn publish_active_recording(
     sink: &super::recording_manager::LiveTranscriptSink,
 ) -> Option<std::path::PathBuf> {
     let active = {
-        let manager = RECORDING_MANAGER.lock().unwrap();
+        let manager = RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner());
         let manager = manager
             .as_ref()
             .expect("recording manager stored before activation");
@@ -766,7 +776,7 @@ fn publish_active_recording(
         }
     };
     let folder = active.folder.clone();
-    *ACTIVE_CAPTURE.lock().unwrap() = Some(active);
+    *ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(active);
     folder
 }
 
@@ -787,7 +797,7 @@ fn start_health_watch(session_id: String, folder: Option<std::path::PathBuf>, li
                 let Some(state) = active_capture(&disk_session) else {
                     break;
                 };
-                let mut health = state.health.lock().unwrap();
+                let mut health = state.health.lock().unwrap_or_else(|e| e.into_inner());
                 health.destination_free_bytes = destination;
                 health.scratch_free_bytes = scratch;
             }
@@ -802,7 +812,7 @@ fn start_health_watch(session_id: String, folder: Option<std::path::PathBuf>, li
                 continue;
             }
             let available = {
-                let mut guard = RECORDING_MANAGER.lock().unwrap();
+                let mut guard = RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(manager) = guard
                     .as_mut()
                     .filter(|m| m.live_session_id() == Some(session_id.as_str()))
@@ -1066,7 +1076,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     );
 
     store_recording_manager(manager);
-    *RECORDING_JOB.lock().unwrap() = Some(job);
+    *RECORDING_JOB.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
     drop(engine_lifecycle_guard);
     activate_recording(
         &app,
@@ -1397,7 +1407,7 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     );
 
     store_recording_manager(manager);
-    *RECORDING_JOB.lock().unwrap() = Some(job);
+    *RECORDING_JOB.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
     drop(engine_lifecycle_guard);
     activate_recording(
         &app,
@@ -1578,7 +1588,7 @@ async fn stop_recording_session<R: Runtime>(
         (active_seconds, session_id)
     };
     let stopped_live_identity = {
-        let mut saving = SAVING_RECORDING.lock().unwrap();
+        let mut saving = SAVING_RECORDING.lock().unwrap_or_else(|e| e.into_inner());
         IS_STOPPING.store(true, Ordering::Release);
         let identity = stop_live_assistance(&app.state::<crate::knowledge::KnowledgeState>());
         *saving = Some(SavingRecording {
@@ -1610,7 +1620,7 @@ async fn stop_recording_session<R: Runtime>(
     let mut recording_files_incomplete = false;
     // Step 1: Stop audio capture immediately (no more new chunks) with proper error handling
     let manager_for_cleanup = {
-        let mut global_manager = RECORDING_MANAGER.lock().unwrap();
+        let mut global_manager = RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner());
         global_manager.take()
     };
     // The manager is ours now; a reconnection can no longer take it.
@@ -1665,7 +1675,7 @@ async fn stop_recording_session<R: Runtime>(
 
     // Drain a bounded amount of recognition work; retained audio supports recovery.
     let transcription_task = {
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
+        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap_or_else(|e| e.into_inner());
         global_task.take()
     };
 
@@ -1768,7 +1778,10 @@ async fn stop_recording_session<R: Runtime>(
         }
     }
 
-    let manager_for_cleanup = RECORDING_MANAGER.lock().unwrap().take();
+    let manager_for_cleanup = RECORDING_MANAGER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
     if let Some(manager) = &manager_for_cleanup {
         // If the dispatcher was aborted, a child worker may still be exiting.
         // Serialize closing with ingestion before taking the final snapshots.
@@ -1782,7 +1795,13 @@ async fn stop_recording_session<R: Runtime>(
         ))
     });
     let capture_details = manager_for_cleanup.as_ref().map(|manager| {
-        let mut details = manager.get_state().health.lock().unwrap().details.clone();
+        let mut details = manager
+            .get_state()
+            .health
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .details
+            .clone();
         details.unfinished_segments = unfinished_segments;
         details.empty_live_transcript = super::outcome::EmptyLiveTranscript::from_live_result(
             transcribes,
@@ -2049,7 +2068,10 @@ async fn stop_recording_session<R: Runtime>(
     floating_outcome.remember_outcome(floating_session);
 
     // Release the recording job only after the outcome is persisted.
-    ACTIVE_CAPTURE.lock().unwrap().take();
+    ACTIVE_CAPTURE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
     IS_RECORDING.store(false, Ordering::SeqCst);
 
     // Step 5: Complete shutdown
@@ -2098,7 +2120,10 @@ async fn stop_recording_session<R: Runtime>(
 
     // Release the old job before admitting another start. Take the request
     // under the admission lock so a request racing the commit cannot vanish.
-    RECORDING_JOB.lock().unwrap().take();
+    RECORDING_JOB
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
     let queued = _stop_state.close();
     floating_outcome.finish(&app, floating_session);
     if let Some(requested) = queued {
@@ -2247,8 +2272,8 @@ async fn set_recording_paused<R: Runtime>(
     {
         // Pause changes capture state only. Serialize with Stop admission,
         // which can run independently of a driver call.
-        let _saving = SAVING_RECORDING.lock().unwrap();
-        let guard = ACTIVE_CAPTURE.lock().unwrap();
+        let _saving = SAVING_RECORDING.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
         let sink = guard
             .as_ref()
             .map(|active| &active.sink)
@@ -2287,7 +2312,7 @@ pub async fn is_recording_paused() -> bool {
 #[tauri::command]
 pub async fn get_recording_state() -> serde_json::Value {
     let is_recording = IS_RECORDING.load(Ordering::SeqCst);
-    let active = ACTIVE_CAPTURE.lock().unwrap();
+    let active = ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(sink) = active.as_ref().map(|active| &active.sink) {
         let state = &sink.capture;
         serde_json::json!({
@@ -2322,12 +2347,16 @@ pub async fn get_recording_state() -> serde_json::Value {
 /// Returns the path if a meeting name was set and folder structure initialized
 #[tauri::command]
 pub async fn get_meeting_folder_path() -> Result<Option<String>, String> {
-    Ok(ACTIVE_CAPTURE.lock().unwrap().as_ref().and_then(|active| {
-        active
-            .folder
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned())
-    }))
+    Ok(ACTIVE_CAPTURE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|active| {
+            active
+                .folder
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+        }))
 }
 
 /// Get accumulated transcript segments from current recording session
@@ -2493,11 +2522,14 @@ async fn with_recording_manager_out<T: Send + 'static>(
     if is_stopping() {
         return Err("The recording is stopping.".to_string());
     }
-    let taken = RECORDING_MANAGER.lock().unwrap().take();
+    let taken = RECORDING_MANAGER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
     let Some(mut manager) = taken else {
         return Err("Recording not active".to_string());
     };
-    *RECONNECT_STARTED.lock().unwrap() = Some(Instant::now());
+    *RECONNECT_STARTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
     let task = tokio::task::spawn_blocking(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&mut manager)));
         if result.is_err() {
@@ -2511,7 +2543,7 @@ async fn with_recording_manager_out<T: Send + 'static>(
             );
         }
         store_recording_manager(manager);
-        *RECONNECT_STARTED.lock().unwrap() = None;
+        *RECONNECT_STARTED.lock().unwrap_or_else(|e| e.into_inner()) = None;
         drop(owner);
         result
     });
@@ -2675,13 +2707,19 @@ mod reconnect_tests {
     struct Restore(Option<RecordingManager>);
     impl Drop for Restore {
         fn drop(&mut self) {
-            *RECORDING_MANAGER.lock().unwrap() = self.0.take();
+            *RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner()) = self.0.take();
         }
     }
 
     fn install_manager() -> Restore {
-        let restore = Restore(RECORDING_MANAGER.lock().unwrap().take());
-        *RECORDING_MANAGER.lock().unwrap() = Some(RecordingManager::new());
+        let restore = Restore(
+            RECORDING_MANAGER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
+        );
+        *RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(RecordingManager::new());
         restore
     }
 
@@ -2709,7 +2747,10 @@ mod reconnect_tests {
         .await
         .unwrap();
         assert_eq!(value, 7);
-        assert!(RECORDING_MANAGER.lock().unwrap().is_some());
+        assert!(RECORDING_MANAGER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some());
         assert!(RECONNECT_OWNER.try_lock().is_ok());
     }
 
@@ -2724,7 +2765,13 @@ mod reconnect_tests {
                 wait.recv().unwrap();
             },
         ));
-        until(|| RECORDING_MANAGER.lock().unwrap().is_none()).await;
+        until(|| {
+            RECORDING_MANAGER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        })
+        .await;
         let second = with_recording_manager_out(Duration::from_secs(5), |_| ()).await;
         assert_eq!(
             second.unwrap_err(),
@@ -2732,13 +2779,21 @@ mod reconnect_tests {
         );
         release.send(()).unwrap();
         first.await.unwrap().unwrap();
-        assert!(RECORDING_MANAGER.lock().unwrap().is_some());
+        assert!(RECORDING_MANAGER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some());
     }
 
     #[tokio::test]
     async fn without_an_active_recording_nothing_runs() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
-        let _restore = Restore(RECORDING_MANAGER.lock().unwrap().take());
+        let _restore = Restore(
+            RECORDING_MANAGER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
+        );
         let result = with_recording_manager_out(Duration::from_secs(5), |_| {
             panic!("work must not run without a manager")
         })
@@ -2757,18 +2812,23 @@ mod reconnect_tests {
             })
             .await;
         assert_eq!(failed.unwrap().unwrap_err(), "device unavailable");
-        assert!(RECORDING_MANAGER.lock().unwrap().is_some());
+        assert!(RECORDING_MANAGER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some());
         // A panic in the work: the capture is marked incomplete and a warning is
         // sent before the manager goes back.
         let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         {
-            let guard = RECORDING_MANAGER.lock().unwrap();
+            let guard = RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner());
             let sink = warnings.clone();
             guard
                 .as_ref()
                 .unwrap()
                 .set_warning_callback(move |message| {
-                    sink.lock().unwrap().push(message.to_string());
+                    sink.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(message.to_string());
                 });
             assert!(!guard.as_ref().unwrap().get_state().capture_incomplete());
         }
@@ -2780,7 +2840,10 @@ mod reconnect_tests {
             panicked.unwrap_err(),
             "The device reconnection failed unexpectedly."
         );
-        assert!(RECORDING_MANAGER.lock().unwrap().is_some());
+        assert!(RECORDING_MANAGER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some());
         assert!(RECORDING_MANAGER
             .lock()
             .unwrap()
@@ -2788,7 +2851,7 @@ mod reconnect_tests {
             .unwrap()
             .get_state()
             .capture_incomplete());
-        let seen = warnings.lock().unwrap().clone();
+        let seen = warnings.lock().unwrap_or_else(|e| e.into_inner()).clone();
         assert_eq!(seen.len(), 1);
         assert!(seen[0].contains("some audio may be missing"));
         assert!(RECONNECT_OWNER.try_lock().is_ok());
@@ -2807,13 +2870,22 @@ mod reconnect_tests {
         assert_eq!(result.unwrap_err(), AUDIO_DEVICE_NOT_RESPONDING);
         assert!(started.elapsed() < Duration::from_secs(2));
         // The hung call still owns the manager and the reconnect slot.
-        assert!(RECORDING_MANAGER.lock().unwrap().is_none());
+        assert!(RECORDING_MANAGER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none());
         assert!(RECONNECT_OWNER.try_lock().is_err());
         // Stop does not wait forever on it.
         assert!(wait_for_reconnect(Duration::from_millis(30)).await.is_err());
         // When the call finally returns, the manager is back and the slot free.
         release.send(()).unwrap();
-        until(|| RECORDING_MANAGER.lock().unwrap().is_some()).await;
+        until(|| {
+            RECORDING_MANAGER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        })
+        .await;
         until(|| RECONNECT_OWNER.try_lock().is_ok()).await;
         assert!(wait_for_reconnect(Duration::from_millis(30)).await.is_ok());
     }
@@ -2829,12 +2901,21 @@ mod reconnect_tests {
                 wait.recv().unwrap();
             },
         ));
-        until(|| RECORDING_MANAGER.lock().unwrap().is_none()).await;
+        until(|| {
+            RECORDING_MANAGER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        })
+        .await;
         let waiter = tokio::spawn(async {
             let _guard = wait_for_reconnect(Duration::from_secs(5)).await.unwrap();
             // Holding the slot, the manager is back: this is where the Stop
             // path checks the detected-call owner and takes the manager.
-            RECORDING_MANAGER.lock().unwrap().is_some()
+            RECORDING_MANAGER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
         });
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(!waiter.is_finished(), "the waiter is held back");
@@ -2853,24 +2934,27 @@ mod reconnect_tests {
         struct RestoreCapture(Option<ActiveRecording>, bool);
         impl Drop for RestoreCapture {
             fn drop(&mut self) {
-                *ACTIVE_CAPTURE.lock().unwrap() = self.0.take();
+                *ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner()) = self.0.take();
                 IS_RECORDING.store(self.1, Ordering::SeqCst);
             }
         }
         let _capture = RestoreCapture(
-            ACTIVE_CAPTURE.lock().unwrap().take(),
+            ACTIVE_CAPTURE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
             IS_RECORDING.swap(true, Ordering::SeqCst),
         );
         let runtime = crate::knowledge::KnowledgeState::default();
         let (id, capture) = {
-            let mut guard = RECORDING_MANAGER.lock().unwrap();
+            let mut guard = RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner());
             let manager = guard.as_mut().unwrap();
             let (startup, sink) = prepare_live_recording(&runtime, manager, true).unwrap();
             let capture = sink.capture.clone();
             capture.start_recording().unwrap();
             capture.pause_recording().unwrap();
             capture.report_warning("Synthetic backend warning");
-            *ACTIVE_CAPTURE.lock().unwrap() = Some(ActiveRecording {
+            *ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(ActiveRecording {
                 sink,
                 recording_id: Some("synthetic-recording".into()),
                 folder: Some("synthetic-folder".into()),
@@ -2885,7 +2969,13 @@ mod reconnect_tests {
                 wait.recv().unwrap();
             },
         ));
-        until(|| RECORDING_MANAGER.lock().unwrap().is_none()).await;
+        until(|| {
+            RECORDING_MANAGER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        })
+        .await;
         let state = get_recording_state().await;
         assert_eq!(state["session_id"], id.as_str());
         assert_eq!(state["is_paused"], true);

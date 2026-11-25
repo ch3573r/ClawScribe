@@ -36,6 +36,7 @@ interface AccelerationDiagnosticStatus {
   flashAttn: boolean;
   label: string;
   gpuAvailableButUnused: boolean;
+  vulkanRuntimeMissing?: boolean;
   cpuCores: number;
   memoryGb: number;
   performanceTier: string;
@@ -510,10 +511,12 @@ export function DiagnosticsSettings() {
     if (snapshot) {
       const acceleration = snapshot.acceleration;
       list.push({
-        id: "backend", name: "Transcription backend",
+        id: "backend", name: "Whisper backend",
         value: acceleration ? acceleration.label : "Unknown",
-        tone: acceleration?.gpuAvailableButUnused ? "warning" : "ok",
-        status: acceleration?.gpuAvailableButUnused ? "GPU not used" : "OK",
+        tone: acceleration?.vulkanRuntimeMissing || acceleration?.gpuAvailableButUnused ? "warning" : "ok",
+        status: acceleration?.vulkanRuntimeMissing
+          ? "Vulkan missing"
+          : acceleration?.gpuAvailableButUnused ? "GPU not used" : "OK",
       });
       if (acceleration?.gpuAvailableButUnused) {
         list[list.length - 1].value = `${acceleration.runtimeDetectedGpu} GPU is visible, but this build uses CPU transcription`;

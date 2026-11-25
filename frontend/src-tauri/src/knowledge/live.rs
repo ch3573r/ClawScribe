@@ -665,18 +665,43 @@ where
             return Err("No finalized live transcript is available yet".into());
         }
         let (saved_scope, saved) = super::live_context::saved(pool, &request).await?;
-        let live_limit = if saved.is_empty() { 12 } else { 6 };
-        let live = super::live_context::lexical(&snapshot, &request.search.query, live_limit);
-        let mut passages: Vec<_> = live.iter().take(live_limit).cloned().collect();
-        passages.extend(saved.into_iter().take(12 - passages.len()));
-        for passage in live {
-            if passages.len() == 12 {
-                break;
+        let intent = super::live_context::intent(&request.search.query);
+        let mut window_coverage = None;
+        let passages = if intent.uses_window() {
+            // Recaps and open-question sweeps need the whole rolling window,
+            // not a dozen keyword hits. Keep the newest speech that fits;
+            // saved references fill any remaining budget.
+            let window = super::live_context::window(&snapshot);
+            let mut passages = super::live_context::fit_newest(
+                &snapshot,
+                &request.search.query,
+                &window,
+                budget.saturating_sub(512),
+            )?;
+            window_coverage = Some(
+                if passages.len() == snapshot.segments.len() && !snapshot.transcription_incomplete {
+                    "complete_window"
+                } else {
+                    "partial_window"
+                },
+            );
+            passages.extend(saved.into_iter().take(12));
+            passages
+        } else {
+            let live_limit = if saved.is_empty() { 12 } else { 6 };
+            let live = super::live_context::lexical(&snapshot, &request.search.query, live_limit);
+            let mut passages: Vec<_> = live.iter().take(live_limit).cloned().collect();
+            passages.extend(saved.into_iter().take(12 - passages.len()));
+            for passage in live {
+                if passages.len() == 12 {
+                    break;
+                }
+                if !passages.iter().any(|p| p.evidence == passage.evidence) {
+                    passages.push(passage);
+                }
             }
-            if !passages.iter().any(|p| p.evidence == passage.evidence) {
-                passages.push(passage);
-            }
-        }
+            passages
+        };
         let (prompt, selected, contexts) = super::live_context::build_prompt(
             &snapshot,
             &request.search.query,
@@ -687,6 +712,7 @@ where
             serde_json::from_str(&prompt).map_err(|_| "Invalid live evidence prompt")?;
         envelope["live_context"] = serde_json::json!({"session_id":snapshot.session_id,"finalized_through_seconds":snapshot.finalized_through_seconds,
             "transcription_incomplete":snapshot.transcription_incomplete,"context_window_seconds":600,
+            "evidence_selection":window_coverage.unwrap_or("relevant_excerpts"),
             "notice":"Evidence is finalized transcript through the stated recording time, not a real-time description of the current moment."});
         let prompt = envelope.to_string();
         if prompt.len() > budget {

@@ -2,9 +2,8 @@ use std::io::{self, BufRead, Write};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::pin::pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use encoding_rs;
@@ -303,7 +302,9 @@ struct ModelState {
     model: Option<LlamaModel>,
     model_path: Option<PathBuf>,
     context_size: u32,
-    last_activity: Arc<AtomicU64>,
+    /// Monotonic time of the last model load or generation. Health pings do
+    /// not count, so they cannot mask real inactivity.
+    last_activity: std::cell::Cell<Instant>,
 }
 
 impl ModelState {
@@ -314,24 +315,12 @@ impl ModelState {
             model: None,
             model_path: None,
             context_size: 2048,
-            last_activity: Arc::new(AtomicU64::new(Self::current_timestamp())),
+            last_activity: std::cell::Cell::new(Instant::now()),
         })
     }
 
-    fn current_timestamp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    }
-
     fn update_activity(&self) {
-        self.last_activity
-            .store(Self::current_timestamp(), Ordering::SeqCst);
-    }
-
-    fn seconds_since_activity(&self) -> u64 {
-        Self::current_timestamp() - self.last_activity.load(Ordering::SeqCst)
+        self.last_activity.set(Instant::now());
     }
 
     fn load_model_if_needed(&mut self, model_path: PathBuf, context_size: u32) -> Result<()> {
@@ -406,7 +395,7 @@ impl ModelState {
         let batch_size = self.context_size as usize;
         let mut batch = LlamaBatch::new(batch_size, 1);
 
-        let last_index: i32 = (tokens_list.len() - 1) as i32;
+        let last_index = prompt_last_index(tokens_list.len(), batch_size)?;
         for (i, token) in (0_i32..).zip(tokens_list.into_iter()) {
             let is_last = i == last_index;
             batch
@@ -545,6 +534,54 @@ impl ModelState {
     }
 }
 
+/// Index of the final prompt token, rejecting prompts that cannot be decoded:
+/// an empty tokenization would underflow, and an oversized one cannot fit the
+/// batch or leave room to generate.
+fn prompt_last_index(token_count: usize, batch_size: usize) -> Result<i32> {
+    if token_count == 0 {
+        anyhow::bail!("The prompt produced no tokens");
+    }
+    if token_count >= batch_size {
+        anyhow::bail!(
+            "The prompt is {} tokens, which does not fit the {}-token context",
+            token_count,
+            batch_size
+        );
+    }
+    Ok((token_count - 1) as i32)
+}
+
+/// Time left before the idle timeout fires, or `None` once it has elapsed.
+fn idle_remaining(last_activity: Instant, now: Instant, timeout: Duration) -> Option<Duration> {
+    let idle = now.saturating_duration_since(last_activity);
+    timeout.checked_sub(idle).filter(|left| !left.is_zero())
+}
+
+/// Reads stdin on its own thread so the main loop can wait with a timeout.
+fn spawn_stdin_reader() -> mpsc::Receiver<io::Result<String>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut lock = stdin.lock();
+        loop {
+            let mut line = String::new();
+            match lock.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if sender.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
+    receiver
+}
+
 // ============================================================================
 // Main Loop with Keep-Alive Protocol
 // ============================================================================
@@ -570,28 +607,26 @@ fn main() -> Result<()> {
 
     let mut state = ModelState::new()?;
 
-    let stdin = io::stdin();
-    let mut stdin_lock = stdin.lock();
-    let mut buffer = String::new();
+    let lines = spawn_stdin_reader();
+    let idle_timeout = Duration::from_secs(idle_timeout_secs);
 
     loop {
-        // Check idle timeout
-        if state.seconds_since_activity() > idle_timeout_secs {
+        // Wait for a request, but never longer than the idle timeout allows.
+        let Some(wait) = idle_remaining(state.last_activity.get(), Instant::now(), idle_timeout)
+        else {
             eprintln!("💤 Idle timeout reached, shutting down");
             send_response(&Response::Goodbye)?;
             break;
-        }
-
-        // Read line from stdin
-        buffer.clear();
-        match stdin_lock.read_line(&mut buffer) {
-            Ok(0) => {
+        };
+        match lines.recv_timeout(wait) {
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
                 // EOF reached
                 eprintln!("📪 EOF received, shutting down");
                 break;
             }
-            Ok(_) => {
-                let line = buffer.trim();
+            Ok(Ok(raw_line)) => {
+                let line = raw_line.trim();
                 if line.is_empty() {
                     continue;
                 }
@@ -652,7 +687,6 @@ fn main() -> Result<()> {
                         }
                     }
                     Ok(Request::Ping) => {
-                        state.update_activity();
                         send_response(&Response::Pong)?;
                     }
                     Ok(Request::Shutdown) => {
@@ -668,7 +702,7 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("❌ Error reading stdin: {}", e);
                 break;
             }
@@ -755,6 +789,39 @@ mod tests {
         assert_eq!(sampling.repeat_penalty, 1.05);
         assert_eq!(sampling.penalty_last_n, 256);
         assert!(sampling.uses_penalties());
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn empty_and_oversized_prompts_are_rejected_without_panicking() {
+        assert!(prompt_last_index(0, 2048).is_err());
+        assert!(prompt_last_index(2048, 2048).is_err());
+        assert!(prompt_last_index(5000, 2048).is_err());
+        assert_eq!(prompt_last_index(1, 2048).unwrap(), 0);
+        assert_eq!(prompt_last_index(100, 2048).unwrap(), 99);
+    }
+
+    #[test]
+    fn idle_remaining_is_monotonic_and_expires() {
+        let start = Instant::now();
+        let timeout = Duration::from_secs(300);
+        assert_eq!(idle_remaining(start, start, timeout), Some(timeout));
+        assert_eq!(
+            idle_remaining(start, start + Duration::from_secs(100), timeout),
+            Some(Duration::from_secs(200))
+        );
+        assert_eq!(idle_remaining(start, start + timeout, timeout), None);
+        assert_eq!(
+            idle_remaining(start, start + Duration::from_secs(900), timeout),
+            None
+        );
+        // A "now" earlier than the last activity saturates instead of underflowing.
+        let later = start + Duration::from_secs(5);
+        assert_eq!(idle_remaining(later, start, timeout), Some(timeout));
     }
 }
 

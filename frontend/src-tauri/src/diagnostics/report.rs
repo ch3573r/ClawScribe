@@ -82,6 +82,7 @@ fn build_report(snapshot: &DiagnosticSnapshot) -> Value {
             "runtimeDetectedGpu": allowlisted(&status.runtime_detected_gpu, &["None", "Vulkan", "Cuda", "Metal", "OpenCL"]),
             "useGpu": status.use_gpu,
             "gpuAvailableButUnused": status.gpu_available_but_unused,
+            "vulkanRuntimeMissing": status.vulkan_runtime_missing,
         })),
         "transcription": {
             "selectedProvider": allowlisted(&transcription.selected_provider, &[

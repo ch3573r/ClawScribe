@@ -15,10 +15,27 @@ fn main() {
         // The swift-rs crate build will be handled in the enhanced_macos crate's build.rs
     }
 
+    configure_vulkan_delay_load();
+
     // Download and bundle FFmpeg binary at build-time
     ffmpeg::ensure_ffmpeg_binary();
 
     tauri_build::build()
+}
+
+/// Whisper's Vulkan backend links `vulkan-1.dll`. Left in the normal import
+/// table, a PC without the Vulkan loader fails with STATUS_DLL_NOT_FOUND before
+/// `main()`, even though the default Parakeet engine never needs Vulkan.
+/// Delay-loading moves that dependency to the first Vulkan call, which the
+/// app guards with an explicit runtime probe (`whisper_engine::vulkan_runtime`).
+fn configure_vulkan_delay_load() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let vulkan = std::env::var_os("CARGO_FEATURE_VULKAN").is_some();
+    if target_os == "windows" && target_env == "msvc" && vulkan {
+        println!("cargo:rustc-link-arg=/DELAYLOAD:vulkan-1.dll");
+        println!("cargo:rustc-link-arg=delayimp.lib");
+    }
 }
 
 /// Detects GPU acceleration capabilities and provides build guidance

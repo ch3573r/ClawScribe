@@ -243,7 +243,7 @@ test('diagnostics lists problems first, keeps healthy rows quiet and shows the c
   const rows=nodes(tree).filter(node=>node.type?.name==='HealthRow').map(node=>node.props.item);
   assert.equal(rows[0].id,'calendars');assert.equal(rows[0].tone,'warning');
   assert.ok(rows.slice(1).every(row=>row.tone==='ok'),'only the calendar problem is coloured');
-  assert.deepEqual(rows.map(row=>row.name).slice(0,2),['Calendars','Transcription backend']);
+  assert.deepEqual(rows.map(row=>row.name).slice(0,2),['Calendars','Whisper backend']);
   assert.ok(rows.some(row=>row.name==='Codex app-server'));
   assert.match(text(tree),/ClawScribe 0\.5\.60 · windows x64 · release/);
   const call=nodes(tree).find(node=>node.type?.name==='CallDetectionCard');
