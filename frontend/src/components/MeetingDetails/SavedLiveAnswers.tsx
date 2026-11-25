@@ -32,10 +32,11 @@ interface Excerpt {
   reference: EvidenceRef | null;
 }
 
-export function SavedLiveAnswers({ meetingId, onReveal, onPlay, onInsert, summaryBusy }: {
+export function SavedLiveAnswers({ meetingId, onReveal, onPlay, onNavigate, onInsert, summaryBusy }: {
   meetingId: string;
-  onReveal?: (source: ResolvedSummarySource) => Promise<void>;
-  onPlay?: (seconds: number) => Promise<void>;
+  onReveal?: (source: ResolvedSummarySource, current: () => boolean) => Promise<void>;
+  onPlay?: (seconds: number, current: () => boolean) => Promise<void>;
+  onNavigate?: () => void;
   onInsert?: (markdown: string) => Promise<void>;
   summaryBusy: boolean;
 }) {
@@ -50,6 +51,8 @@ export function SavedLiveAnswers({ meetingId, onReveal, onPlay, onInsert, summar
   const pending = useRef(false);
   const [source, setSource] = useState<{ noteId: string; tag: number; text: string; excerpt?: Excerpt | null } | null>(null);
   const sourceRequest = useRef(0);
+  const navigateRequest = useRef<number | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -74,13 +77,14 @@ export function SavedLiveAnswers({ meetingId, onReveal, onPlay, onInsert, summar
   async function jump(play: boolean) {
     if (!source?.excerpt || pending.current) return;
     const { noteId, tag } = source;
-    const current = ++sourceRequest.current;
+    const request = ++sourceRequest.current;
+    const current = () => sourceRequest.current === request;
     pending.current = true;
     setBusy(true);
     setError("");
     try {
       const excerpt = await invoke<Excerpt | null>("resolve_saved_live_answer_citation", { meetingId, answerId: noteId, tag });
-      if (sourceRequest.current !== current) return;
+      if (!current()) return;
       if (!excerpt) throw new Error("This reference is no longer available.");
       const target = excerpt.navigation;
       if (target && target.meeting_id !== meetingId && excerpt.reference) {
@@ -88,18 +92,19 @@ export function SavedLiveAnswers({ meetingId, onReveal, onPlay, onInsert, summar
         if (!route) throw new Error("This reference cannot open a transcript.");
         router.push(route);
       } else if (play && excerpt.start_seconds != null && onPlay) {
-        await onPlay(excerpt.start_seconds);
+        await onPlay(excerpt.start_seconds, current);
       } else if (!play && target?.meeting_id === meetingId && onReveal) {
         await onReveal({
           transcript_id: target.transcript_id, transcript_index: target.transcript_index,
           text: excerpt.text, timestamp: excerpt.start_seconds, stale: false,
-        });
+        }, current);
+        if (current()) navigateRequest.current = request;
       } else {
         throw new Error(play ? "Audio for this citation is unavailable." : "A matching transcript passage is unavailable.");
       }
-      if (sourceRequest.current === current) { setSource(null); setOpen(false); }
+      if (current()) { setSource(null); setOpen(false); }
     } catch (failure) {
-      if (sourceRequest.current === current) setError(failure instanceof Error ? failure.message : "Could not open this citation. Try again.");
+      if (current()) setError(failure instanceof Error ? failure.message : "Could not open this citation. Try again.");
     } finally {
       pending.current = false;
       setBusy(false);
@@ -148,11 +153,17 @@ export function SavedLiveAnswers({ meetingId, onReveal, onPlay, onInsert, summar
     {!loaded && error ? <div className="flex items-center gap-2">
       <p role="alert" className="text-sm text-destructive">{error}</p>
       <Button variant="outline" size="sm" onClick={() => setAttempt(value => value + 1)}>Retry</Button>
-    </div> : <Button variant="outline" size="sm" onClick={() => setOpen(true)}>Saved live answers ({notes.length})</Button>}
+    </div> : <Button ref={triggerRef} variant="outline" size="sm" onClick={() => setOpen(true)}>Saved live answers ({notes.length})</Button>}
     <Dialog open={open} onOpenChange={value => {
       if (!pending.current) { setOpen(value); setRemoving(null); setSource(null); setError(""); sourceRequest.current++; }
     }}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl" onCloseAutoFocus={event => {
+        event.preventDefault();
+        const request = navigateRequest.current;
+        navigateRequest.current = null;
+        if (request === sourceRequest.current && onNavigate) onNavigate();
+        else triggerRef.current?.focus();
+      }}>
         <DialogHeader>
           <DialogTitle>{removing ? "Remove saved answer?" : "Saved live answers"}</DialogTitle>
           <DialogDescription>{removing ? "This removes the selected note and its saved evidence from this meeting." : "Answers you saved during recording and the evidence available when they were generated."}</DialogDescription>

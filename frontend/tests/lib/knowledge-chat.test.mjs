@@ -129,6 +129,7 @@ test('the current library conversation can be renamed and explicitly deleted', a
   app.state.clear = async remove => { updates.push(remove); };
   const action = label => nodes(app.render()).find(node => node.props?.onSelect && text(node) === label);
   try {
+    assert.equal(action('Clear conversation'), undefined);
     action('Rename conversation…').props.onSelect();
     const field = nodes(app.render()).find(node => node.props?.id === 'knowledge-conversation-name');
     assert.equal(field.props.value, 'Old name');
@@ -146,6 +147,8 @@ test('the current library conversation can be renamed and explicitly deleted', a
 
 test('clearing history requires confirmation for the same conversation', () => {
   const app = chatSurface();
+  app.state.owner = { kind: 'meeting', id: 'meeting' };
+  app.state.scope = { kind: 'meeting', meeting_id: 'meeting' };
   app.state.messages = [{role:'user', id:'q', content:'Launch checklist', created_at:'2026-09-01'}];
   const cleared = [];
   app.state.clear = async () => { cleared.push(app.state.owner.id); };
@@ -154,7 +157,7 @@ test('clearing history requires confirmation for the same conversation', () => {
   try {
     requestClear();
     assert.deepEqual(cleared, []);
-    assert.match(dialog().props.text, /Launch checklist/);
+    assert.match(dialog().props.text, /this meeting’s chat/);
     dialog().props.onCancel();
     assert.equal(dialog(), undefined);
     assert.deepEqual(cleared, []);
@@ -169,6 +172,8 @@ test('clearing history requires confirmation for the same conversation', () => {
 
 test('clearing names the opening trigger and cannot close silently while the conversation is busy', () => {
   const app = chatSurface();
+  app.state.owner = { kind: 'meeting', id: 'meeting' };
+  app.state.scope = { kind: 'meeting', meeting_id: 'meeting' };
   app.state.messages = [{role:'user', id:'q', content:'Launch checklist', created_at:'2026-09-01'}];
   const cleared = [];
   app.state.clear = async () => { cleared.push(app.state.owner.id); };
@@ -189,7 +194,7 @@ test('clearing names the opening trigger and cannot close silently while the con
     assert.deepEqual(cleared, []);
     app.state.sending = false;
     dialog().props.onConfirm();
-    assert.deepEqual(cleared, ['saved']);
+    assert.deepEqual(cleared, ['meeting']);
     assert.equal(dialog(), undefined);
   } finally { app.unmount(); }
 });

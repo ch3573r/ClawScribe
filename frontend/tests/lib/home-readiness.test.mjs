@@ -241,7 +241,7 @@ test('Home can change a disconnected device without leaving the signal path', as
   assert.match(text(home), /Only your microphone will be recorded/);
   assert.equal(nodes(home).find(node => node.type === 'RecordingControls').props.isRecordingDisabled, false);
   const titleInput = () => nodes(render()).find(node => node.props.id === 'next-meeting-title');
-  titleInput().props.onChange({ target: { value: 'Synthetic planning meeting' } });
+  titleInput().props.onChange({ target: { value: 'Synthetic\tplanning\u0085meeting' } });
   assert.equal(titleInput().props.value, 'Synthetic planning meeting');
 
   preferred.micDevice = 'Unplugged mic (input)';

@@ -820,6 +820,7 @@ mod tests {
         state.resume_recording().unwrap();
         let mut readings = state.latest_levels.lock().unwrap();
         readings.observe(quiet, now + Duration::from_secs(40));
+        assert!(!readings.mic_no_signal(now + Duration::from_millis(49_999)));
         assert!(readings.mic_no_signal(now + Duration::from_secs(50)));
     }
 

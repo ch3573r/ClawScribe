@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
-import { createHookHarness, flush } from './hook-harness.mjs';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
 const jsx = (type, props) => ({ type, props });
 const nodes = node => Array.isArray(node) ? node.flatMap(nodes)
@@ -19,6 +19,9 @@ test('saved answers render cited Markdown, append with provenance, and recheck e
   const target = { meeting_id: 'meeting', transcript_id: 'row', transcript_index: 3, start_seconds: 42 };
   const citation = { text: 'A decision', start_seconds: 42, historical: true, navigation: target };
   const revealed = [], played = [], appended = [];
+  let navigations = 0;
+  let revealGuard;
+  let revealPending;
   let reads = 0;
   let citationAvailable = true;
   const { SavedLiveAnswers } = loadTsModule('src/components/MeetingDetails/SavedLiveAnswers.tsx', {
@@ -42,7 +45,12 @@ test('saved answers render cited Markdown, append with provenance, and recheck e
   const render = () => hooks.render(() => SavedLiveAnswers({
     meetingId: 'meeting', summaryBusy: false,
     onPlay: async seconds => { played.push(seconds); },
-    onReveal: async row => { revealed.push(row.transcript_id); },
+    onReveal: async (row, current) => {
+      revealed.push(row.transcript_id);
+      revealGuard = current;
+      await revealPending?.promise;
+    },
+    onNavigate: () => { navigations++; },
     onInsert: async markdown => { appended.push(markdown); },
   }));
   const button = title => nodes(render()).find(node => node.type === 'button' && text(node) === title);
@@ -61,6 +69,11 @@ test('saved answers render cited Markdown, append with provenance, and recheck e
     button('Show in transcript').props.onClick();
     await flush();
     assert.deepEqual(revealed, ['row']);
+    assert.equal(revealGuard(), true);
+    assert.equal(navigations, 0);
+    assert.equal(nodes(render()).find(node => node.type === 'dialog').props.open, false);
+    nodes(render()).find(node => node.type === 'content').props.onCloseAutoFocus({ preventDefault() {} });
+    assert.equal(navigations, 1);
     assert.equal(reads, 2);
     button('Saved live answers (1)').props.onClick();
     await inspect();
@@ -79,5 +92,16 @@ test('saved answers render cited Markdown, append with provenance, and recheck e
     await flush();
     assert.match(appended[0], /\*\*Decision\*\* \[K1\]/);
     assert.match(appended[0], /Source numbers refer to this entry in Saved live answers/);
+    button('Saved live answers (1)').props.onClick();
+    await inspect();
+    revealPending = deferred();
+    button('Show in transcript').props.onClick();
+    await flush();
+    assert.equal(revealGuard(), true);
+    hooks.unmount();
+    assert.equal(revealGuard(), false);
+    revealPending.resolve();
+    await flush();
+    assert.equal(navigations, 1);
   } finally { hooks.unmount(); }
 });

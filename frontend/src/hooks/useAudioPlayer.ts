@@ -4,6 +4,45 @@ import { DEFAULT_PLAYBACK_RATE, PLAYBACK_RATE_STORAGE_KEY, normalizePlaybackRate
 import { resumablePlaybackPosition } from './transcript-playback';
 
 const POSITION_WRITE_INTERVAL_MS = 5_000;
+const POSITION_STORAGE_KEY = 'clawscribe.playbackPositions';
+const MAX_SAVED_POSITIONS = 200;
+type SavedPosition = [meetingId: string, seconds: number];
+
+function readPositions(storage: Storage): SavedPosition[] {
+  try {
+    const saved: unknown = JSON.parse(storage.getItem(POSITION_STORAGE_KEY) ?? '[]');
+    if (!Array.isArray(saved)) return [];
+    return saved.filter((entry): entry is SavedPosition =>
+      Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' &&
+      typeof entry[1] === 'number' && Number.isFinite(entry[1]) && entry[1] >= 0
+    ).slice(0, MAX_SAVED_POSITIONS);
+  } catch {
+    return [];
+  }
+}
+
+function writePosition(storage: Storage, meetingId: string, seconds: number, positions = readPositions(storage)) {
+  const remaining = positions.filter(([id]) => id !== meetingId).slice(0, MAX_SAVED_POSITIONS - 1);
+  storage.setItem(POSITION_STORAGE_KEY, JSON.stringify([[meetingId, seconds], ...remaining]));
+  storage.removeItem(`clawscribe.playbackPosition.${meetingId}`);
+}
+
+function readPosition(meetingId: string): number {
+  try {
+    const storage = window.localStorage;
+    const positions = readPositions(storage);
+    const saved = positions.find(([id]) => id === meetingId);
+    if (saved) return saved[1];
+    const legacy = storage.getItem(`clawscribe.playbackPosition.${meetingId}`);
+    if (legacy === null) return 0;
+    const seconds = Number(legacy);
+    if (!Number.isFinite(seconds) || seconds < 0) return 0;
+    try { writePosition(storage, meetingId, seconds, positions); } catch { /* Keep the legacy entry if migration fails. */ }
+    return seconds;
+  } catch {
+    return 0;
+  }
+}
 
 // The chosen speed is a per-viewer convenience; the player works without storage.
 function storedRate(): number {
@@ -69,26 +108,25 @@ export const useAudioPlayer = (audioPath: string | null, meetingId?: string) => 
     audio.preservesPitch = true;
     audio.volume = volumeRef.current;
     audio.muted = mutedRef.current;
-    const positionKey = meetingId ? `clawscribe.playbackPosition.${meetingId}` : null;
     let positionReady = false;
     let savedSeconds = 0;
     let lastWriteAt = Date.now();
     const savePosition = () => {
-      if (!positionKey || !positionReady || !Number.isFinite(audio.currentTime)) return;
+      if (!meetingId || !positionReady || !Number.isFinite(audio.currentTime)) return;
       const seconds = audio.currentTime;
       if (savedSeconds === seconds) return;
-      try { window.localStorage.setItem(positionKey, String(seconds)); } catch { /* Playback works without storage. */ }
-      savedSeconds = seconds;
       lastWriteAt = Date.now();
+      try {
+        writePosition(window.localStorage, meetingId, seconds);
+        savedSeconds = seconds;
+      } catch { /* Playback works without storage. */ }
     };
     const metadata = () => {
       if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
       setDuration(audio.duration);
       if (positionReady) return;
       positionReady = true;
-      if (positionKey) {
-        try { savedSeconds = Number(window.localStorage.getItem(positionKey)); } catch { /* Start at the beginning. */ }
-      }
+      if (meetingId) savedSeconds = readPosition(meetingId);
       const position = pendingSeek.current === null
         ? resumablePlaybackPosition(savedSeconds, audio.duration)
         : Math.min(pendingSeek.current, audio.duration);
@@ -98,7 +136,7 @@ export const useAudioPlayer = (audioPath: string | null, meetingId?: string) => 
     };
     const time = () => {
       setTime(audio.currentTime);
-      if (positionKey && Date.now() - lastWriteAt >= POSITION_WRITE_INTERVAL_MS) savePosition();
+      if (meetingId && Date.now() - lastWriteAt >= POSITION_WRITE_INTERVAL_MS) savePosition();
     };
     const playing = () => { setIsPlaying(true); setError(null); };
     const paused = () => { setIsPlaying(false); savePosition(); };
@@ -106,11 +144,11 @@ export const useAudioPlayer = (audioPath: string | null, meetingId?: string) => 
     const failed = () => { setIsPlaying(false); setError('Failed to load audio file'); };
     const handlers = { loadedmetadata: metadata, durationchange: metadata, timeupdate: time, playing, pause: paused, ended, error: failed };
     for (const [event, handler] of Object.entries(handlers)) audio.addEventListener(event, handler);
-    if (positionKey) window.addEventListener('pagehide', savePosition);
+    if (meetingId) window.addEventListener('pagehide', savePosition);
     audio.src = convertFileSrc(audioPath);
     audio.load();
     return () => {
-      if (positionKey) window.removeEventListener('pagehide', savePosition);
+      if (meetingId) window.removeEventListener('pagehide', savePosition);
       savePosition();
       for (const [event, handler] of Object.entries(handlers)) audio.removeEventListener(event, handler);
       audioRef.current = null;

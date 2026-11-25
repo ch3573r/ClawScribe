@@ -211,8 +211,8 @@ export function KnowledgeChat({ state, mode, provider, model, title = "Ask about
           {compact && headerMenuExtra}
           <DropdownMenuLabel>Conversations</DropdownMenuLabel>
           {state.scope.kind === "library" && <DropdownMenuItem onSelect={() => void state.newConversation()}>New conversation</DropdownMenuItem>}
-            <DropdownMenuItem disabled={(!library && !state.messages.length) || !state.owner || busy}
-              onSelect={() => { if (state.owner) setClearTarget({ owner: state.owner, remove: false }); }}>Clear conversation</DropdownMenuItem>
+            {state.owner?.kind === "meeting" && <DropdownMenuItem disabled={!state.messages.length || busy}
+              onSelect={() => { if (state.owner) setClearTarget({ owner: state.owner, remove: false }); }}>Clear conversation</DropdownMenuItem>}
             {library && <>
               <DropdownMenuItem onSelect={() => {
                 setRenameTarget(state.owner);

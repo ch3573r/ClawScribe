@@ -225,7 +225,7 @@ export function HomeDashboard({
                   <div className="space-y-1.5 text-left">
                     <label htmlFor="next-meeting-title" className="text-sm text-muted-foreground">Meeting title (optional)</label>
                     <Input id="next-meeting-title" value={nextMeetingTitle} maxLength={160}
-                      onChange={event => setNextMeetingTitle(event.target.value)} />
+                      onChange={event => setNextMeetingTitle(event.target.value.replace(/\p{Cc}/gu, " "))} />
                   </div>
                   {micOnly && <p role="status" className="max-w-sm text-sm text-warning-foreground">No default output is available. Only your microphone will be recorded.</p>}
                   {deviceCheckFailed && <p role="alert" className="max-w-sm text-sm text-destructive">Could not verify the audio devices or load their preferences. Recheck devices to try again.</p>}

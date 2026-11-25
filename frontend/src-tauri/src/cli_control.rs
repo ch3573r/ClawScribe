@@ -3,6 +3,7 @@
 //! A second launch such as `ClawScribe.exe --toggle-recording` is forwarded to
 //! the running instance by the single-instance plugin. This module parses the
 //! flags and drives the same recording path the tray and global shortcut use.
+//! `--pause-recording` toggles between paused and recording.
 
 use tauri::{AppHandle, Runtime};
 
@@ -53,7 +54,20 @@ pub fn run_cli_action<R: Runtime>(app: &AppHandle<R>, action: CliAction) {
         CliAction::ToggleRecording => None,
         CliAction::StartRecording => Some(true),
         CliAction::StopRecording => Some(false),
-        CliAction::PauseRecording => return crate::tray::pause_recording_handler(app),
+        CliAction::PauseRecording => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                use crate::audio::recording_commands::{is_recording, is_recording_paused};
+                if is_recording().await {
+                    dispatch_pause_toggle(
+                        is_recording_paused().await,
+                        || crate::tray::pause_recording_handler(&app),
+                        || crate::tray::resume_recording_handler(&app),
+                    );
+                }
+            });
+            return;
+        }
         CliAction::Bookmark => return crate::library::bookmark_active_recording(app),
     };
     crate::tray::recording_intent_handler(
@@ -63,9 +77,31 @@ pub fn run_cli_action<R: Runtime>(app: &AppHandle<R>, action: CliAction) {
     );
 }
 
+fn dispatch_pause_toggle(paused: bool, pause: impl FnOnce(), resume: impl FnOnce()) {
+    if paused {
+        resume();
+    } else {
+        pause();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_flag_dispatches_both_directions() {
+        use std::cell::Cell;
+        let action = Cell::new(None);
+        for (paused, expected) in [(false, "pause"), (true, "resume")] {
+            dispatch_pause_toggle(
+                paused,
+                || action.set(Some("pause")),
+                || action.set(Some("resume")),
+            );
+            assert_eq!(action.take(), Some(expected));
+        }
+    }
 
     #[test]
     fn parses_each_flag() {

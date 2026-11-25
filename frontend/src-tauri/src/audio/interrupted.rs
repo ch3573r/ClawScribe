@@ -110,6 +110,8 @@ impl ActiveFolder {
 pub struct InterruptedRecording {
     pub folder: String,
     pub title: Option<String>,
+    #[serde(skip)]
+    recording_id: Option<String>,
     /// When the recording started (the marker's `created_at`).
     pub started_at: Option<String>,
     /// Approximate: the marker's duration, legacy checkpoints at ten seconds
@@ -489,6 +491,7 @@ fn classify_folder_with_deletions(
     .to_string();
     Some(InterruptedRecording {
         folder: folder.to_string_lossy().into_owned(),
+        recording_id: recording_id.map(str::to_owned),
         title: marker
             .get("meeting_name")
             .and_then(Value::as_str)
@@ -954,7 +957,7 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
     let (active, active_cache_id) = super::recording_commands::active_recording_recovery();
     let active_cache_unknown = active != ActiveFolder::None && active_cache_id.is_none();
     let kept = kept_folders(&app);
-    tokio::task::spawn_blocking(move || {
+    let mut result = tokio::task::spawn_blocking(move || {
         // The whole scan stays inside its time limit: the registered-folder
         // lookup comes out of it.
         let started = Instant::now();
@@ -998,7 +1001,44 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
         result
     })
     .await
-    .map_err(|_| "Could not look for interrupted recordings".to_string())
+    .map_err(|_| "Could not look for interrupted recordings".to_string())?;
+    apply_recovery_titles(pool, &mut result.recordings).await;
+    Ok(result)
+}
+
+async fn apply_recovery_titles(pool: &sqlx::SqlitePool, recordings: &mut [InterruptedRecording]) {
+    let ids: HashSet<_> = recordings
+        .iter()
+        .filter_map(|recording| recording.recording_id.as_deref())
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT recording_id, title FROM recording_title_drafts WHERE recording_id IN (",
+    );
+    let mut bindings = query.separated(", ");
+    for id in ids {
+        bindings.push_bind(id);
+    }
+    bindings.push_unseparated(")");
+    let Ok(drafts) = query
+        .build_query_as::<(String, String)>()
+        .fetch_all(pool)
+        .await
+    else {
+        return; // Keep the folder titles if this optional lookup fails.
+    };
+    let drafts: HashMap<_, _> = drafts.into_iter().collect();
+    for recording in recordings {
+        if let Some(title) = recording
+            .recording_id
+            .as_ref()
+            .and_then(|id| drafts.get(id))
+        {
+            recording.title = Some(title.clone());
+        }
+    }
 }
 
 async fn recovery_owners(pool: &sqlx::SqlitePool) -> Result<Vec<RecoveryOwner>, String> {
@@ -1746,6 +1786,36 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[tokio::test]
+    async fn recovery_list_prefers_the_draft_for_the_recording_id() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "meeting-95e21332-fe98-42f9-bd33-4d1771139765";
+        let folder = make(root.path(), "with-draft");
+        let metadata = serde_json::json!({
+            "version": "1.0", "transcript_file": "transcripts.json",
+            "recording_id": id, "status": "recording", "meeting_name": "Folder title"
+        });
+        std::fs::write(folder.join("metadata.json"), metadata.to_string()).unwrap();
+        marker(&make(root.path(), "without-draft"), "recording", None);
+        let mut scan = run(
+            &[root.path().to_owned()],
+            &HashMap::new(),
+            ActiveFolder::None,
+            Limits::default(),
+        );
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("INSERT INTO recording_title_drafts (recording_id, title) VALUES (?, ?)")
+            .bind(id)
+            .bind("Typed title")
+            .execute(&pool)
+            .await
+            .unwrap();
+        apply_recovery_titles(&pool, &mut scan.recordings).await;
+        assert_eq!(scan.recordings.len(), 2);
+        assert_eq!(scan.recordings[0].title.as_deref(), Some("Weekly sync"));
+        assert_eq!(scan.recordings[1].title.as_deref(), Some("Typed title"));
     }
 
     #[test]

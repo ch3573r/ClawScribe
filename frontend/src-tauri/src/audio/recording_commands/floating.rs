@@ -483,6 +483,21 @@ fn position_visible(point: (i32, i32), origin: (i32, i32), size: (u32, u32)) -> 
     x >= 0 && y >= 0 && x + 96 <= i64::from(size.0) && y + 48 <= i64::from(size.1)
 }
 
+fn resize_position(
+    point: PhysicalPosition<i32>,
+    origin: PhysicalPosition<i32>,
+    work: PhysicalSize<u32>,
+    previous: PhysicalSize<u32>,
+    next: PhysicalSize<u32>,
+    margin: u32,
+) -> PhysicalPosition<i32> {
+    if point == bottom_right(origin, work, previous, margin) {
+        bottom_right(origin, work, next, margin)
+    } else {
+        point
+    }
+}
+
 fn fit_position<R: Runtime>(
     window: &WebviewWindow<R>,
     monitor: &tauri::Monitor,
@@ -528,9 +543,22 @@ pub(crate) fn floating_resize<R: Runtime>(
     let height = if let (Ok(Some(monitor)), Ok(point)) =
         (window.current_monitor(), window.outer_position())
     {
-        let work_height =
-            (f64::from(monitor.work_area().size.height) / monitor.scale_factor()).floor() as u32;
+        let work = monitor.work_area();
+        let scale = monitor.scale_factor();
+        let work_height = (f64::from(work.size.height) / scale).floor() as u32;
         let height = height.min(work_height.max(BAR_HEIGHT));
+        let point = if let Ok(previous) = window.inner_size() {
+            resize_position(
+                point,
+                work.position,
+                work.size,
+                previous,
+                LogicalSize::new(WIDTH, height).to_physical::<u32>(scale),
+                (f64::from(CORNER_MARGIN) * scale).round() as u32,
+            )
+        } else {
+            point
+        };
         fit_position(&window, &monitor, point, height);
         height
     } else {
@@ -611,6 +639,27 @@ mod tests {
                 18,
             ),
             PhysicalPosition::new(40, 50)
+        );
+    }
+
+    #[test]
+    fn resize_keeps_a_default_corner_anchored_and_preserves_custom_positions() {
+        let origin = PhysicalPosition::new(-1920, 0);
+        let work = PhysicalSize::new(1920, 1000);
+        let bar = PhysicalSize::new(549, 90);
+        let expanded = PhysicalSize::new(549, 300);
+        let margin = 18;
+        let default = bottom_right(origin, work, bar, margin);
+        let raised = resize_position(default, origin, work, bar, expanded, margin);
+        assert_eq!(raised, PhysicalPosition::new(-567, 682));
+        assert_eq!(
+            resize_position(raised, origin, work, expanded, bar, margin),
+            default
+        );
+        let custom = PhysicalPosition::new(-1100, 700);
+        assert_eq!(
+            resize_position(custom, origin, work, expanded, bar, margin),
+            custom
         );
     }
 

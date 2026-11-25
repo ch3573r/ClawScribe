@@ -168,6 +168,44 @@ test('Find retains input focus after summary overflow closes and resets the supp
   }
 });
 
+test('summary Find refreshes highlights during edits without moving the viewport', t => {
+  const hooks = createHookHarness();
+  const previousWindow = globalThis.window;
+  const highlights = new Map();
+  let refresh;
+  globalThis.window = {
+    CSS: { highlights },
+    Highlight: class { constructor(...ranges) { this.ranges = ranges; } },
+    MutationObserver: class { constructor(callback) { refresh = callback; } observe() {} disconnect() {} },
+  };
+  t.after(() => { hooks.unmount(); globalThis.window = previousWindow; });
+  const scroll = { scrollTop: 0, getBoundingClientRect: () => ({ top: 0, bottom: 100, height: 100 }) };
+  let ranges;
+  const makeRange = top => ({ getBoundingClientRect: () => ({ top, bottom: top + 10, height: 10 }) });
+  ranges = [makeRange(250), makeRange(400)];
+  const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', {
+    ...primitives, react: hooks.react, '@/lib/summary-find': { collectSummaryRanges: () => ranges },
+  });
+  const render = () => nodes(hooks.render(() => SummaryPanel({ ...summaryProps, findOpenRequest: 1 })));
+  const input = () => render().find(node => node.props?.placeholder === 'Find in summary');
+  const tree = render();
+  tree.find(node => node.props?.className?.includes('::highlight')).props.ref.current = {};
+  tree.find(node => node.props?.className === 'min-h-0 min-w-0 flex-1 overflow-y-auto').props.ref.current = scroll;
+  input().props.onChange({ target: { value: 'notes' } });
+  render();
+  render();
+  assert.equal(scroll.scrollTop, 205);
+  scroll.scrollTop = 12;
+  ranges = [makeRange(300), makeRange(400)];
+  refresh();
+  render();
+  assert.equal(highlights.get('clawscribe-summary-find-current').ranges[0], ranges[0]);
+  assert.equal(scroll.scrollTop, 12);
+  input().props.onKeyDown({ key: 'Enter', nativeEvent: {}, preventDefault() {} });
+  render();
+  assert.equal(scroll.scrollTop, 367);
+});
+
 test('summary save status appears only when a summary exists', () => {
   const hooks = createHookHarness();
   const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', { ...primitives, react: hooks.react });

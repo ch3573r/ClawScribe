@@ -152,18 +152,14 @@ async fn list(
         return Err("Choose an end date on or after the start date.".into());
     }
     let owner = filters.owner.as_deref().unwrap_or("").trim().to_lowercase();
-    let search = filters
-        .search
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
+    let search = filters.search.as_deref().unwrap_or("").trim();
     if owner.chars().count() > 160
         || search.chars().count() > 255
         || filters.series.as_ref().is_some_and(|id| id.len() > 512)
     {
         return Err("Invalid action filter.".into());
     }
+    let search = search.to_lowercase();
     let mut meetings = sqlx::query_as::<_, MeetingRow>(
         "SELECT id, title, created_at, calendar_link, reviewed_actions FROM meetings
          WHERE reviewed_actions IS NOT NULL AND reviewed_actions != '[]'
@@ -802,6 +798,21 @@ async fn save_series_review(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn action_search_limits_input_characters_before_case_expansion() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let today = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+        let filters = |length| ActionFilters {
+            search: Some("İ".repeat(length)),
+            ..Default::default()
+        };
+        assert!(list(&pool, filters(255), 1, today).await.is_ok());
+        assert_eq!(
+            list(&pool, filters(256), 1, today).await.err().as_deref(),
+            Some("Invalid action filter.")
+        );
+    }
 
     fn action(id: u128, title: &str, done: bool) -> serde_json::Value {
         json!({

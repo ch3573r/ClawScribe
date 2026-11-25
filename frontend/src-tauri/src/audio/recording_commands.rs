@@ -1207,11 +1207,8 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     let start_timer = Instant::now();
     start_allowed()?;
     let _starting = StartingState::claim()?;
-    let custom_title = options
-        .custom_title
-        .as_deref()
-        .map(validate_recording_title)
-        .transpose()?;
+    let (custom_title, invalid_custom_title) =
+        prepare_recording_title(options.custom_title.as_deref());
     info!("Starting recording with selected devices");
     if let Some(request) = options.request {
         request.check_call()?;
@@ -1495,6 +1492,12 @@ pub(crate) async fn start_selected_session<R: Runtime>(
     )
     .unwrap_or_else(|_| warn!("Could not announce the started recording to the window"));
 
+    if invalid_custom_title {
+        let _ = app.emit(
+            "recording-warning",
+            "The meeting title was skipped. Enter a title of 1 to 160 characters while recording.",
+        );
+    }
     if mode != requested_mode {
         if let Some(state) = active_capture(&live_session_id) {
             state.report_warning("Speech recognition could not start. Audio is still recording. Choose Transcribe after saving the meeting.");
@@ -2451,6 +2454,40 @@ pub async fn get_recording_meeting_name() -> Result<Option<String>, String> {
         .unwrap()
         .as_ref()
         .and_then(|active| active.meeting_name.clone()))
+}
+
+#[test]
+fn initial_title_normalizes_controls_and_drops_invalid_values() {
+    assert_eq!(
+        prepare_recording_title(Some(" \tPlan\u{0085}review\n")),
+        (Some("Plan review".to_owned()), false)
+    );
+    assert_eq!(prepare_recording_title(None), (None, false));
+    assert_eq!(prepare_recording_title(Some("\t\r")), (None, true));
+    assert_eq!(
+        prepare_recording_title(Some(&"ä".repeat(161))),
+        (None, true)
+    );
+}
+
+fn prepare_recording_title(value: Option<&str>) -> (Option<String>, bool) {
+    let Some(value) = value else {
+        return (None, false);
+    };
+    let normalized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    match validate_recording_title(&normalized) {
+        Ok(title) => (Some(title), false),
+        Err(_) => (None, true),
+    }
 }
 
 fn validate_recording_title(value: &str) -> Result<String, String> {

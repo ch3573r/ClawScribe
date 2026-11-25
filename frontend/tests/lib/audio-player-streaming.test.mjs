@@ -80,6 +80,8 @@ test('player resumes each meeting once metadata is ready, remembers seeks, and k
   const previousWindow = globalThis.window;
   const elements = [];
   const positions = new Map([['clawscribe.playbackPosition.first', '40'], ['clawscribe.playbackPosition.second', '99']]);
+  const mapKey = 'clawscribe.playbackPositions';
+  positions.set(mapKey, JSON.stringify(Array.from({ length: 200 }, (_, i) => [`old-${i}`, 10])));
   const windowEvents = new Map();
   class Audio {
     duration = NaN;
@@ -93,6 +95,7 @@ test('player resumes each meeting once metadata is ready, remembers seeks, and k
   }
   globalThis.window = { Audio, localStorage: {
     getItem: key => positions.get(key) ?? null, setItem: (key, value) => positions.set(key, value),
+    removeItem: key => positions.delete(key),
   }, addEventListener: (event, handler) => windowEvents.set(event, handler), removeEventListener: event => windowEvents.delete(event) };
   const hooks = createHookHarness();
   try {
@@ -112,7 +115,11 @@ test('player resumes each meeting once metadata is ready, remembers seeks, and k
     assert.equal(elements[0].muted, true);
     assert.equal(render().muted, true);
     id = 'second'; render();
-    assert.equal(positions.get('clawscribe.playbackPosition.first'), '50');
+    const saved = JSON.parse(positions.get(mapKey));
+    assert.equal(saved.length, 200);
+    assert.deepEqual(saved[0], ['first', 50]);
+    assert.equal(saved.some(([key]) => key === 'old-199'), false);
+    assert.equal(positions.has('clawscribe.playbackPosition.first'), false);
     assert.equal(elements[1].volume, 0.4);
     assert.equal(elements[1].muted, true);
     render().toggleMute();
@@ -122,9 +129,9 @@ test('player resumes each meeting once metadata is ready, remembers seeks, and k
     assert.equal(elements[1].muted, false);
     await render().seek(15);
     windowEvents.get('pagehide')?.();
-    assert.equal(positions.get('clawscribe.playbackPosition.second'), '15');
+    assert.deepEqual(JSON.parse(positions.get(mapKey))[0], ['second', 15]);
     elements[1].emit('ended');
-    assert.equal(positions.get('clawscribe.playbackPosition.second'), '0');
+    assert.deepEqual(JSON.parse(positions.get(mapKey))[0], ['second', 0]);
     id = 'first'; render();
     await render().seek(4);
     elements[2].duration = 100;

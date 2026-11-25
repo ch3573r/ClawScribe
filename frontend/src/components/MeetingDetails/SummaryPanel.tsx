@@ -95,6 +95,15 @@ interface SummaryPanelProps {
 const SUMMARY_FIND_HIGHLIGHT = 'clawscribe-summary-find';
 const SUMMARY_CURRENT_FIND_HIGHLIGHT = 'clawscribe-summary-find-current';
 
+function scrollToSummaryMatch(scroll: HTMLDivElement | null, range: Range | undefined) {
+  if (!range || !scroll) return;
+  const match = range.getBoundingClientRect();
+  const viewport = scroll.getBoundingClientRect();
+  if (match.top < viewport.top || match.bottom > viewport.bottom) {
+    scroll.scrollTop += match.top - viewport.top - (viewport.height - match.height) / 2;
+  }
+}
+
 export function SummaryPanel({
   bindings = DEFAULT_PLAYER_BINDINGS,
   findOpenRequest = 0,
@@ -157,6 +166,7 @@ export function SummaryPanel({
   const [findQuery, setFindQuery] = useState('');
   const [findMatches, setFindMatches] = useState<Range[]>([]);
   const [activeFindIndex, setActiveFindIndex] = useState(0);
+  const scrollForQueryRef = useRef<string | null>(null);
   const [recoveryCandidate, setRecoveryCandidate] = useState<string | null>(null);
   const [appliedRecovery, setAppliedRecovery] = useState<string | null>(null);
   const [savingRecovery, setSavingRecovery] = useState(false);
@@ -353,6 +363,10 @@ export function SummaryPanel({
       const matches = collectSummaryRanges(root, findQuery);
       setFindMatches(matches);
       setActiveFindIndex(index => index < matches.length ? index : 0);
+      if (scrollForQueryRef.current === findQuery) {
+        scrollForQueryRef.current = null;
+        scrollToSummaryMatch(summaryScrollRef.current, matches[0]);
+      }
     };
     refresh();
     // The editor loads asynchronously and can change under an open search.
@@ -371,13 +385,7 @@ export function SummaryPanel({
 
   const activeFindMatch = isFindOpen ? findMatches[activeFindIndex] : undefined;
   useEffect(() => {
-    const scroll = summaryScrollRef.current;
-    if (!activeFindMatch || !scroll) return;
-    const match = activeFindMatch.getBoundingClientRect();
-    const viewport = scroll.getBoundingClientRect();
-    if (match.top < viewport.top || match.bottom > viewport.bottom) {
-      scroll.scrollTop += match.top - viewport.top - (viewport.height - match.height) / 2;
-    }
+    if (!activeFindMatch) return;
     const highlights = window.CSS?.highlights;
     if (!window.Highlight || !highlights) return;
     const highlight = new window.Highlight(activeFindMatch);
@@ -387,11 +395,15 @@ export function SummaryPanel({
   }, [activeFindMatch]);
 
   const runSummaryFind = (direction: 1 | -1) => {
-    if (findMatches.length > 0) setActiveFindIndex(index => stepMatch(index, findMatches.length, direction));
+    if (findMatches.length === 0) return;
+    const index = stepMatch(activeFindIndex, findMatches.length, direction);
+    setActiveFindIndex(index);
+    scrollToSummaryMatch(summaryScrollRef.current, findMatches[index]);
   };
 
   const closeSummaryFind = () => {
     setIsFindOpen(false);
+    scrollForQueryRef.current = null;
     setFindQuery('');
     setFindMatches([]);
     setActiveFindIndex(0);
@@ -524,6 +536,7 @@ export function SummaryPanel({
             ref={findInputRef}
             value={findQuery}
             onChange={(event) => {
+              scrollForQueryRef.current = event.target.value;
               setFindQuery(event.target.value);
               setActiveFindIndex(0);
             }}
@@ -562,7 +575,7 @@ export function SummaryPanel({
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div ref={summaryScrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto">
-          <SavedLiveAnswers key={meeting.id} meetingId={meeting.id} onReveal={onRevealSource && (source => onRevealSource(source, () => true))} onPlay={onPlaySource && (seconds => onPlaySource(seconds, () => true))}
+          <SavedLiveAnswers key={meeting.id} meetingId={meeting.id} onReveal={onRevealSource} onPlay={onPlaySource} onNavigate={onNavigateSource}
             summaryBusy={isSummaryLoading || isSaving}
             onInsert={aiSummary ? async markdown => {
               if (isEditorSummary(aiSummary)) {
