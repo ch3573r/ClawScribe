@@ -36,8 +36,6 @@ interface RecordingState {
   isRecording: boolean;           // Is a recording session active
   isPaused: boolean;              // Is the recording paused
   isActive: boolean;              // Is actively recording (recording && !paused)
-  recordingDuration: number | null;  // Total duration including pauses
-  activeDuration: number | null;     // Active recording time (excluding pauses)
 
   // NEW: Lifecycle status
   status: RecordingStatus;
@@ -73,6 +71,11 @@ const shutdownStages = {
 } as const;
 
 const RecordingStateContext = createContext<RecordingStateContextType | null>(null);
+const RecordingElapsedContext = createContext(0);
+
+export function useRecordingElapsedSeconds() {
+  return useContext(RecordingElapsedContext);
+}
 
 export const useRecordingState = () => {
   const context = useContext(RecordingStateContext);
@@ -114,12 +117,11 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     isRecording: false,
     isPaused: false,
     isActive: false,
-    recordingDuration: null,
-    activeDuration: null,
     status: RecordingStatus.IDLE,  // NEW: Initialize with IDLE status
     statusMessage: undefined,       // NEW: No message initially
     verificationError: null,
   });
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const lifecycleListeners = useRef(new Set<(status: RecordingStatus) => void>());
   const stoppedListeners = useRef(new Set<RecordingStoppedListener>());
@@ -202,9 +204,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
             prev.sessionMode === (backend.recording_mode ?? 'live') &&
             prev.isRecording === backend.is_recording &&
             prev.isPaused === backend.is_paused &&
-            prev.isActive === backend.is_active &&
-            prev.recordingDuration === backend.recording_duration &&
-            prev.activeDuration === backend.active_duration
+              prev.isActive === backend.is_active
           ) return prev;
           return {
             ...prev, status, sessionId,
@@ -212,10 +212,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
             isRecording: backend.is_recording,
             isPaused: backend.is_paused,
             isActive: backend.is_active,
-            recordingDuration: backend.recording_duration,
-            activeDuration: backend.active_duration,
           };
         });
+        setElapsedSeconds(Math.floor(backend.active_duration ?? 0));
       } catch {
         if (active) console.error('Could not synchronize recording state.');
       } finally {
@@ -342,12 +341,12 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
           : payload.library_save_failed ? RecordingStatus.ERROR : RecordingStatus.IDLE;
         lifecycleStatus.current = status;
         stopPolling();
+        setElapsedSeconds(0);
         listeners.forEach(callback => callback(RecordingStatus.STOPPING));
         setState(prev => ({
             ...prev, status,
             statusMessage: payload?.library_save_failed ? payload.message : undefined,
             sessionId: null, isRecording: false, isPaused: false, isActive: false,
-            recordingDuration: null, activeDuration: null,
             verificationError: null,
         }));
         if (payload) stoppedListeners.current.forEach(callback => callback(payload,
@@ -401,7 +400,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
 
   return (
     <RecordingStateContext.Provider value={contextValue}>
-      {children}
+      <RecordingElapsedContext.Provider value={elapsedSeconds}>
+        {children}
+      </RecordingElapsedContext.Provider>
     </RecordingStateContext.Provider>
   );
 }

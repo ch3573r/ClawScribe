@@ -52,12 +52,33 @@ function createView(delaySubscriptions = false, snapshotOverride) {
     ...harness, callbacks, requests, intervals, subscriptions,
     get unsubscribed() { return unsubscribed; },
     setBackendSession(id) { backendSessionId = id; },
+    renderProviders: () => harness.render(() => RecordingStateProvider({ children: null })),
     render: () => harness.render(() => RecordingStateProvider({ children: null })).value,
     tick() { for (const callback of intervals.values()) callback(); },
   };
 }
 
 const recording = { session_id: 'session-current', recording_generation: '2', is_recording: true, is_paused: false, is_active: true, recording_duration: 10, active_duration: 10, recording_mode: 'live' };
+
+test('elapsed ticks update the clock without changing the lifecycle context value', async () => {
+  const view = createView();
+  view.render();
+  await flush();
+  try {
+    view.requests[0].resolve(recording);
+    await flush();
+    const initial = view.renderProviders();
+    assert.equal(initial.children.value, 10);
+    view.tick();
+    view.requests[1].resolve({ ...recording, active_duration: 11.4, recording_duration: 13 });
+    await flush();
+    const tick = view.renderProviders();
+    assert.equal(tick.value, initial.value);
+    assert.equal(tick.children.value, 11);
+    view.callbacks.Stopped({ session_id: 'session-current', library_save_failed: false });
+    assert.equal(view.renderProviders().children.value, 0);
+  } finally { view.unmount(); }
+});
 
 test('a native stop shows progress until the matching library commit and ignores late progress', async () => {
   const view = createView();

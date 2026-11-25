@@ -10,12 +10,14 @@ import { TranscriptSegmentData } from "@/types";
 import { PlaybackOptions } from "./PlaybackOptions";
 import type { PlayerBindings } from "@/lib/player-bindings";
 import { bookmarkTime, type MeetingBookmark } from "@/lib/library";
+import { usePlaybackTime, type PlaybackClock } from "@/hooks/useAudioPlayer";
 
 interface SpeakerLaneTimelineProps {
   bindings?: PlayerBindings;
   onApplySpeakerToMatching?: RenameSpeaker;
   segments: TranscriptSegmentData[]; totalCount?: number; showSpeakerAttribution?: boolean;
   currentTime?: number; durationSeconds?: number; isPlaying?: boolean; isAudioReady?: boolean;
+  playbackClock?: PlaybackClock;
   onPlayPause?: () => void; onSeek?: (seconds: number) => void;
   rate?: number; onRateChange?: (rate: number) => void;
   followPlayback?: boolean; onFollowChange?: (follow: boolean) => void;
@@ -83,7 +85,8 @@ const LaneBars = memo(function LaneBars({ lane, duration }: { lane: TimelineLane
   })}</>;
 });
 
-export function SpeakerLaneTimeline({ bindings, segments, onApplySpeakerToMatching, showSpeakerAttribution = true, currentTime = 0, durationSeconds = 0, isPlaying = false, isAudioReady = false, onPlayPause, onSeek, rate, onRateChange, followPlayback, onFollowChange, bookmarks = [] }: SpeakerLaneTimelineProps) {
+export function SpeakerLaneTimeline({ bindings, segments, onApplySpeakerToMatching, showSpeakerAttribution = true, currentTime: initialTime = 0, playbackClock, durationSeconds = 0, isPlaying = false, isAudioReady = false, onPlayPause, onSeek, rate, onRateChange, followPlayback, onFollowChange, bookmarks = [] }: SpeakerLaneTimelineProps) {
+  const currentTime = usePlaybackTime(playbackClock) ?? initialTime;
   // Keep the rename anchor and draft mounted through optimistic label updates.
   const [renameSnapshot, setRenameSnapshot] = useState<TranscriptSegmentData[] | null>(null);
   const laneSegments = renameSnapshot ?? segments;

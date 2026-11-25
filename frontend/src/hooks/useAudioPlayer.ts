@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, useSyncExternalStore } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { DEFAULT_PLAYBACK_RATE, PLAYBACK_RATE_STORAGE_KEY, normalizePlaybackRate } from '@/lib/playback-controls';
 
@@ -8,9 +8,39 @@ function storedRate(): number {
   catch { return DEFAULT_PLAYBACK_RATE; }
 }
 
+export type PlaybackClock = {
+  getSnapshot: () => number;
+  subscribe: (listener: () => void) => () => void;
+};
+
+const noPlaybackTime = () => undefined;
+const noSubscription = () => () => {};
+
+export function usePlaybackTime(clock?: PlaybackClock) {
+  return useSyncExternalStore(clock?.subscribe ?? noSubscription, clock?.getSnapshot ?? noPlaybackTime, noPlaybackTime);
+}
+
+function createPlaybackClock() {
+  let seconds = 0;
+  const listeners = new Set<() => void>();
+  const clock: PlaybackClock = {
+    getSnapshot: () => seconds,
+    subscribe: listener => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
+  const setTime = (next: number) => {
+    if (Object.is(next, seconds)) return;
+    seconds = next;
+    listeners.forEach(listener => listener());
+  };
+  return { clock, setTime };
+}
+
 export const useAudioPlayer = (audioPath: string | null) => {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
+  const [{ clock, setTime }] = useState(createPlaybackClock);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -19,7 +49,7 @@ export const useAudioPlayer = (audioPath: string | null) => {
   const rateRef = useRef(rate);
 
   useEffect(() => {
-    setIsPlaying(false); setCurrentTime(0); setDuration(0); setError(null);
+    setIsPlaying(false); setTime(0); setDuration(0); setError(null);
     pendingSeek.current = null;
     if (!audioPath) return;
 
@@ -36,14 +66,14 @@ export const useAudioPlayer = (audioPath: string | null) => {
         if (pendingSeek.current !== null) {
           audio.currentTime = Math.min(pendingSeek.current, audio.duration);
           pendingSeek.current = null;
-          setCurrentTime(audio.currentTime);
+          setTime(audio.currentTime);
         }
       }
     };
-    const time = () => setCurrentTime(audio.currentTime);
+    const time = () => setTime(audio.currentTime);
     const playing = () => { setIsPlaying(true); setError(null); };
     const paused = () => setIsPlaying(false);
-    const ended = () => { setIsPlaying(false); audio.currentTime = 0; setCurrentTime(0); };
+    const ended = () => { setIsPlaying(false); audio.currentTime = 0; setTime(0); };
     const failed = () => { setIsPlaying(false); setError('Failed to load audio file'); };
     const handlers = { loadedmetadata: metadata, durationchange: metadata, timeupdate: time, playing, pause: paused, ended, error: failed };
     for (const [event, handler] of Object.entries(handlers)) audio.addEventListener(event, handler);
@@ -56,7 +86,7 @@ export const useAudioPlayer = (audioPath: string | null) => {
       audio.removeAttribute('src');
       audio.load();
     };
-  }, [audioPath]);
+  }, [audioPath, setTime]);
 
   const play = useCallback(async () => {
     const audio = audioRef.current;
@@ -79,8 +109,8 @@ export const useAudioPlayer = (audioPath: string | null) => {
     const time = Math.max(0, seconds);
     if (!Number.isFinite(audio.duration)) { pendingSeek.current = time; return; }
     audio.currentTime = Math.min(time, audio.duration);
-    setCurrentTime(audio.currentTime);
-  }, []);
+    setTime(audio.currentTime);
+  }, [setTime]);
 
   // Relative to the element's own clock, so repeated key presses never use a stale time.
   const seekBy = useCallback(async (delta: number) => {
@@ -97,6 +127,6 @@ export const useAudioPlayer = (audioPath: string | null) => {
     try { window.localStorage?.setItem(PLAYBACK_RATE_STORAGE_KEY, String(next)); } catch { /* not remembered */ }
   }, []);
 
-  return useMemo(() => ({ isPlaying, currentTime, duration, error, rate, play, pause, seek, seekBy, setRate }),
-    [isPlaying, currentTime, duration, error, rate, play, pause, seek, seekBy, setRate]);
+  return useMemo(() => ({ isPlaying, clock, duration, error, rate, play, pause, seek, seekBy, setRate }),
+    [isPlaying, clock, duration, error, rate, play, pause, seek, seekBy, setRate]);
 };

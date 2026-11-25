@@ -315,7 +315,7 @@ export default function PageContent({
       return;
     }
 
-    invoke<string | null>('resolve_meeting_audio_file', { meetingFolder: folderPath })
+    invoke<string | null>('resolve_meeting_audio_file', { meetingId: meeting.id })
       .then((path) => {
         if (!cancelled) {
           setAudioPath(path);
@@ -333,11 +333,8 @@ export default function PageContent({
     return () => {
       cancelled = true;
     };
-  }, [meeting.folder_path, audioCheck]);
+  }, [meeting.id, meeting.folder_path, audioCheck]);
 
-  // Depend on the individual player functions (stable identities from
-  // useAudioPlayer), not the whole player object, which changes identity on
-  // every clock tick during playback.
   const handleTimelineSeek = useCallback((seconds: number) => {
     void seek(seconds);
   }, [seek]);
@@ -416,7 +413,7 @@ export default function PageContent({
           showSpeakerAttribution={showSpeakerAttribution}
           totalCount={totalCount}
           onApplySpeakerToMatching={onApplySpeakerToMatching}
-          currentTime={audioPlayer.currentTime}
+          playbackClock={audioPlayer.clock}
           durationSeconds={audioPlayer.duration || undefined}
           isPlaying={isPlaying}
           isAudioReady={isAudioReady}
@@ -460,7 +457,7 @@ export default function PageContent({
           onRetryAudio={hasRecordingFolder ? () => setAudioCheck(check => check + 1) : undefined}
           isLoadingTranscript={isLoadingTranscript}
           showSpeakerAttribution={showSpeakerAttribution}
-          activeTime={isAudioReady ? audioPlayer.currentTime : undefined}
+          playbackClock={isAudioReady ? audioPlayer.clock : undefined}
           onSeekToTime={isAudioReady ? playPassage : undefined}
           onRefetchTranscripts={onRefetchTranscripts}
           onPatchTranscriptText={onPatchTranscriptText}

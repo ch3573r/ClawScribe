@@ -15,12 +15,13 @@ import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import { splitForHighlight } from "@/lib/transcript-find";
+import { activePlaybackSegment, indexPlaybackRanges } from "@/hooks/transcript-playback";
 
 export interface VirtualizedTranscriptViewProps {
     speakerSegments?: TranscriptSegmentData[];
     sourceAttributionEnabled?: boolean;
     focusedSource?: { id: string; request: number };
-    onEditSegment?: (segment: TranscriptSegmentData) => void;
+    onEditSegment?: (id: string) => void;
     /** Transcript segments to display */
     segments: TranscriptSegmentData[];
     /** Saved-meeting empty state; recording keeps its live status. */
@@ -107,7 +108,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
 }: {
     highlight?: string;
     isFindCurrent?: boolean;
-    onEdit?: () => void;
+    onEdit?: (id: string) => void;
     originalText?: string | null;
     id: string;
     timestamp: number;
@@ -179,7 +180,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                     {onEdit && <div className="absolute right-1 top-1 flex items-center gap-1">
                         {originalText != null && originalText !== text && <span className="text-xs text-primary">Edited</span>}
                         <Tooltip><TooltipTrigger asChild>
-                          <Button variant="ghost" size="icon" type="button" onClick={onEdit} className="h-7 w-7 bg-card opacity-0 group-hover/segment:opacity-100 group-focus-within/segment:opacity-100 focus-visible:opacity-100" aria-label="Edit segment"><Pencil className="h-3.5 w-3.5" /></Button>
+                          <Button variant="ghost" size="icon" type="button" onClick={() => onEdit(id)} className="h-7 w-7 bg-card opacity-0 group-hover/segment:opacity-100 group-focus-within/segment:opacity-100 focus-visible:opacity-100" aria-label="Edit segment"><Pencil className="h-3.5 w-3.5" /></Button>
                         </TooltipTrigger><TooltipContent>Edit segment</TooltipContent></Tooltip>
                     </div>}
                     {isStreaming ? (
@@ -396,16 +397,9 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     // Resolve the playback position to a single active segment id, so clock
     // ticks re-render at most the two rows whose highlight state changes
     // instead of every visible (memo-broken) row.
-    const activeSegmentId = useMemo(() => {
-        if (activeTime === undefined) return null;
-        for (const segment of segments) {
-            const end = segment.endTime ?? segment.timestamp + 0.75;
-            if (activeTime >= segment.timestamp && activeTime < end) {
-                return segment.id;
-            }
-        }
-        return null;
-    }, [segments, activeTime]);
+    const hasPlayback = activeTime !== undefined;
+    const playbackRanges = useMemo(() => hasPlayback ? indexPlaybackRanges(segments) : [], [hasPlayback, segments]);
+    const activeSegmentId = activePlaybackSegment(playbackRanges, activeTime);
 
     // Follow playback: scroll when the spoken segment changes, never on every clock tick.
     const followedSegment = useRef<string | null>(null);
@@ -498,7 +492,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         originalText={segment.original_text}
-                                        onEdit={onEditSegment ? () => onEditSegment(segment) : undefined}
+                                        onEdit={onEditSegment}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
                                         showSpeakerLabels={showSpeakerLabels}
@@ -568,7 +562,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         originalText={segment.original_text}
-                                        onEdit={onEditSegment ? () => onEditSegment(segment) : undefined}
+                                        onEdit={onEditSegment}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
                                         showSpeakerLabels={showSpeakerLabels}

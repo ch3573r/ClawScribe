@@ -219,9 +219,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     },
   ], [meetings]);
 
-  const toggleCollapse = () => {
-    setIsCollapsed(!isCollapsed);
-  };
+  const toggleCollapse = React.useCallback(() => setIsCollapsed(collapsed => !collapsed), []);
 
   // Update current meeting when on home page
   useEffect(() => {
@@ -231,7 +229,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   }, [pathname]);
 
   // Function to handle recording toggle from sidebar
-  const handleRecordingToggle = () => {
+  const handleRecordingToggle = React.useCallback(() => {
     if (!isRecording) {
       // Check if already on home page
       if (pathname === '/') {
@@ -256,10 +254,9 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       Analytics.trackButtonClick('stop_recording', 'sidebar');
     }
     // Starting is handled by the Home component; stopping by the provider.
-  };
+  }, [isRecording, pathname, router]);
 
-  return (
-    <SidebarContext.Provider value={{
+  const value = React.useMemo<SidebarContextType>(() => ({
       deleteTarget, setDeleteTarget,
       projectTags,
       projectTagsError,
@@ -292,8 +289,17 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       stopSummaryPolling,
       attachSummaryPolling,
       refetchMeetings: fetchMeetings,
+  }), [
+    deleteTarget, projectTags, projectTagsError, projectTagsLoading, refreshProjectTags,
+    currentMeeting, sidebarItems, isCollapsed, sidebarWidth, setSidebarWidth,
+    sidebarMaxWidth, sidebarOffset, isSidebarResizing, toggleCollapse, meetings,
+    meetingsError, meetingsLoading, setMeetings, isMeetingActive, handleRecordingToggle,
+    serverAddress, transcriptServerAddress, activeSummaryPolls, startSummaryPolling,
+    stopSummaryPolling, attachSummaryPolling, fetchMeetings,
+  ]);
 
-    }}>
+  return (
+    <SidebarContext.Provider value={value}>
       {children}
     </SidebarContext.Provider>
   );

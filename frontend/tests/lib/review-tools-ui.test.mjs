@@ -18,12 +18,20 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // ---------------------------------------------------------------------------
 // Transcript view: find highlighting, scrolling to matches, follow playback
 // ---------------------------------------------------------------------------
-function transcriptView(initial) {
+function transcriptView(initial, captureSegment = () => {}) {
   const hooks = createHookHarness();
   const scrolls = [];
   const rows = Array.from({ length: 12 }, (_, index) => ({ id: `row-${index}`, timestamp: index * 10, endTime: index * 10 + 9, text: index === 3 ? 'The Budget is tight.' : `Synthetic line ${index}.` }));
   const { VirtualizedTranscriptView } = loadTsModule('src/components/VirtualizedTranscriptView.tsx', {
-    react: { ...hooks.react, memo: component => component, startTransition: action => action(), useReducer: () => [0, () => {}] },
+    react: {
+      ...hooks.react,
+      memo: component => props => {
+        if (component.name === 'TranscriptSegment') captureSegment(props);
+        return component(props);
+      },
+      startTransition: action => action(),
+      useReducer: () => [0, () => {}],
+    },
     'react/jsx-runtime': { jsx, jsxs: jsx },
     '@tanstack/react-virtual': { useVirtualizer: options => ({
       getTotalSize: () => 720, getVirtualItems: () => Array.from({ length: options.count }, (_, index) => ({ index, start: index * 60 })),
@@ -94,6 +102,27 @@ test('follow playback scrolls when the spoken passage changes, never on every cl
   view.set({ followPlayback: false, activeTime: 81 }); view.render();
   assert.equal(view.scrolls.length, 2, 'following off leaves the reader in control');
   view.unmount();
+});
+
+test('playback keeps the edit prop stable and the edit button submits the row id', () => {
+  const edited = [];
+  const captured = new Map();
+  const onEditSegment = id => edited.push(id);
+  const view = transcriptView({ onEditSegment, activeTime: 1 }, props => captured.set(props.id, props));
+  try {
+    for (const segments of [view.rows, view.rows.slice(0, 2)]) {
+      view.set({ segments });
+      view.render();
+      const previousEdit = captured.get('row-1').onEdit;
+      view.set({ activeTime: 11 });
+      const nodes = view.render();
+      assert.equal(captured.get('row-1').onEdit, previousEdit);
+      assert.equal(previousEdit, onEditSegment);
+      const button = nodes.filter(node => node.props?.['aria-label'] === 'Edit segment')[1];
+      button.props.onClick();
+    }
+    assert.deepEqual(edited, ['row-1', 'row-1']);
+  } finally { view.unmount(); }
 });
 
 // ---------------------------------------------------------------------------

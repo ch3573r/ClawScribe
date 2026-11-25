@@ -13,7 +13,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import Analytics from '@/lib/analytics';
-import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateContext';
+import { RecordingStatus, useRecordingElapsedSeconds, useRecordingState } from '@/contexts/RecordingStateContext';
 import { LiveBookmarkButton } from '@/components/MeetingDetails/MeetingBookmarks';
 import { LiveRecordingNotes } from '@/components/LiveRecordingNotes';
 import { Button } from '@/components/ui/button';
@@ -35,6 +35,19 @@ interface RecordingControlsProps {
   };
   meetingName?: string;
   variant?: 'floating' | 'dashboard';
+}
+
+function RecordingElapsedTime() {
+  const elapsed = useRecordingElapsedSeconds();
+  const hours = Math.floor(elapsed / 3600);
+  const minutes = Math.floor(elapsed / 60) % 60;
+  const seconds = String(elapsed % 60).padStart(2, '0');
+  const time = hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`;
+  return (
+    <span className="font-mono text-sm tabular-nums text-foreground min-w-[3.25rem] text-center">
+      {time}
+    </span>
+  );
 }
 
 export const RecordingControls: React.FC<RecordingControlsProps> = ({
@@ -63,19 +76,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const isStartPending =
     isStarting ||
     recordingState.status === RecordingStatus.STARTING;
-
-  // The only elapsed clock on screen. It shows the backend's active recording
-  // time (pauses excluded), so it stays correct after leaving and reopening Home.
-  const elapsed = Math.floor(recordingState.activeDuration ?? 0);
-
-  const formatTime = (time: number) => {
-    const h = Math.floor(time / 3600);
-    const m = Math.floor((time % 3600) / 60);
-    const s = Math.floor(time % 60);
-    const mm = m.toString().padStart(2, '0');
-    const ss = s.toString().padStart(2, '0');
-    return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
-  };
 
   useEffect(() => {
     const checkTauri = async () => {
@@ -444,11 +444,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                 </>
               )}
 
-              {isRecording && (
-                <span className="font-mono text-sm tabular-nums text-foreground min-w-[3.25rem] text-center">
-                  {formatTime(elapsed)}
-                </span>
-              )}
+              {isRecording && <RecordingElapsedTime />}
 
               {/* Real levels while recording. Idle, three flat bars. */}
               {isRecording ? (

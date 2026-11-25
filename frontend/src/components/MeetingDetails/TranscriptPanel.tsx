@@ -13,6 +13,7 @@ import { MeetingBookmarks } from './MeetingBookmarks';
 import { Button } from '@/components/ui/button';
 import type { PlayerBindings } from '@/lib/player-bindings';
 import type { TranscriptTextPatch } from '@/lib/meetingTranscripts';
+import { usePlaybackTime, type PlaybackClock } from '@/hooks/useAudioPlayer';
 
 interface TranscriptPanelProps {
   bindings?: PlayerBindings;
@@ -47,6 +48,7 @@ interface TranscriptPanelProps {
   onRetryAudio?: () => void;
   showSpeakerAttribution?: boolean;
   activeTime?: number;
+  playbackClock?: PlaybackClock;
   onSeekToTime?: (seconds: number) => void;
   onRefetchTranscripts?: () => Promise<void>;
   onPatchTranscriptText?: (patches: TranscriptTextPatch[]) => void;
@@ -91,7 +93,8 @@ export function TranscriptPanel({
   audioError,
   onRetryAudio,
   showSpeakerAttribution = true,
-  activeTime,
+  activeTime: initialTime,
+  playbackClock,
   onSeekToTime,
   onRefetchTranscripts,
   onPatchTranscriptText,
@@ -104,6 +107,7 @@ export function TranscriptPanel({
   bookmarkRequest = 0,
   onBookmarksChange,
 }: TranscriptPanelProps) {
+  const activeTime = usePlaybackTime(playbackClock) ?? initialTime;
   const [bookmarkOpen, setBookmarkOpen] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
@@ -148,6 +152,10 @@ export function TranscriptPanel({
     const hydrated = new Map(convertedSegments.map(row => [row.id, row]));
     return completeTimeline.map(row => hydrated.get(row.id) ?? row);
   }, [completeTimeline, convertedSegments]);
+  const editSegment = useCallback((id: string) => {
+    const segment = displayedSegments.find(row => row.id === id);
+    if (segment) setEditing(segment);
+  }, [displayedSegments]);
   const searchable = completeTimeline ?? (speakerSegments?.length ? speakerSegments : convertedSegments);
   const searchComplete = !usePagination || timelineComplete === true ||
     (totalCount !== undefined && searchable.length === totalCount);
@@ -245,7 +253,7 @@ export function TranscriptPanel({
           focusedSource={focusedSource}
           speakerSegments={speakerSegments}
           sourceAttributionEnabled={sourceAttributionEnabled}
-          onEditSegment={meetingId && !isRecording ? setEditing : undefined}
+          onEditSegment={meetingId && !isRecording ? editSegment : undefined}
           segments={displayedSegments}
           emptyState={emptyState}
           isRecording={isRecording}

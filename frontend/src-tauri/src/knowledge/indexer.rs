@@ -12,7 +12,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tauri::{Manager, State};
+use std::time::Duration;
+use tauri::{Listener, Manager, State};
+
+// SQL triggers queue work even on paths that have no application event.
+const DURABLE_QUEUE_RECHECK: Duration = Duration::from_secs(30);
+const FAILED_JOB_RECHECK: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub struct IndexWorker {
@@ -31,48 +36,72 @@ impl IndexWorker {
         let scheduler = Arc::downgrade(&scheduler);
         tauri::async_runtime::spawn(async move {
             loop {
-                tokio::select! {
-                    _=wake.notified()=>{},
-                    _=tokio::time::sleep(std::time::Duration::from_secs(1))=>{},
-                }
+                // Register before reading the durable queue or its admission
+                // gates. A concurrent commit can then wake this idle pass.
+                let notified = wake.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let Some(runtime) = scheduler.upgrade() else {
                     break;
                 };
                 if pool.is_closed() {
                     break;
                 }
-                if !runtime.accepts_work()
-                    || crate::audio::recording_commands::capture_active()
-                    || super::scheduler::foreground_waiting()
-                {
-                    continue;
-                }
-                while runtime.notifications.lock().unwrap().next().is_some() {}
-                if store::invalidate_other_spaces(&pool, &model::PINS.space().id)
-                    .await
-                    .is_err()
-                {
-                    continue;
-                }
-                match store::next_job(&pool).await {
-                    Ok(Some(job)) => {
-                        if let Err(error) = index_source(&pool, &runtime, &job).await {
-                            // A failed model check blocks the worker globally.
-                            // Leave this source queued for when the files are repaired.
-                            if error != KnowledgeError::ModelUnavailable || runtime.accepts_work() {
-                                let _ = store::record_failure(&pool, &job, &error).await;
-                            }
-                        } else {
-                            wake.notify_one();
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => {}
+                let delay = match run_queued_job(&pool, &runtime).await {
+                    QueuePass::More => continue,
+                    QueuePass::Idle => DURABLE_QUEUE_RECHECK,
+                    QueuePass::Retry => FAILED_JOB_RECHECK,
+                };
+                drop(runtime);
+                tokio::select! {
+                    _ = notified => {},
+                    _ = tokio::time::sleep(delay) => {},
+                    _ = pool.close_event() => break,
                 }
             }
         });
         true
     }
+}
+
+enum QueuePass {
+    More,
+    Idle,
+    Retry,
+}
+
+async fn run_queued_job(pool: &SqlitePool, runtime: &Arc<Scheduler>) -> QueuePass {
+    if !runtime.accepts_work() {
+        return QueuePass::Idle;
+    }
+    // The recording-stopped event precedes release of the save guard. If the
+    // wake sees that guard, recheck while the Stop transition is settling.
+    if crate::audio::recording_commands::is_stopping() {
+        return QueuePass::Retry;
+    }
+    if crate::audio::recording_commands::capture_active() || super::scheduler::foreground_waiting()
+    {
+        return QueuePass::Idle;
+    }
+    while runtime.notifications.lock().unwrap().next().is_some() {}
+    if store::invalidate_other_spaces(pool, &model::PINS.space().id)
+        .await
+        .is_err()
+    {
+        return QueuePass::Idle;
+    }
+    let Ok(Some(job)) = store::next_job(pool).await else {
+        return QueuePass::Idle;
+    };
+    if let Err(error) = index_source(pool, runtime, &job).await {
+        // A failed model check blocks the worker globally. Leave this source
+        // queued for when the files are repaired.
+        if error != KnowledgeError::ModelUnavailable || runtime.accepts_work() {
+            let _ = store::record_failure(pool, &job, &error).await;
+        }
+        return QueuePass::Retry;
+    }
+    QueuePass::More
 }
 
 pub async fn index_source(
@@ -211,6 +240,14 @@ pub fn start_installed_pool(app: &tauri::AppHandle) {
         .start(state.db_manager.pool().clone(), knowledge.scheduler.clone())
     {
         return;
+    }
+    for event in [
+        "library-changed",
+        "recording-stopped",
+        "retranscription-complete",
+    ] {
+        let wake = knowledge.index_worker.wake.clone();
+        app.listen(event, move |_| wake.notify_one());
     }
     let pool = state.db_manager.pool().clone();
     let scheduler = knowledge.scheduler.clone();
@@ -515,6 +552,44 @@ mod tests {
         assert!(peak <= 16384, "index input must remain bounded");
     }
     use super::*;
+
+    #[tokio::test]
+    async fn installed_worker_drains_startup_work_then_waits_for_notifications() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let enqueue = |id: &'static str| {
+            sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES(?,'Synthetic','2026-01-01','2026-01-01')")
+                .bind(id)
+                .execute(&pool)
+        };
+        let wait_for_drain = || async {
+            tokio::time::timeout(Duration::from_millis(750), async {
+                while store::next_job(&pool).await.unwrap().is_some() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        };
+
+        enqueue("first").await.unwrap();
+        enqueue("second").await.unwrap();
+        let scheduler = super::super::scheduler::synthetic_query_scheduler();
+        let worker = IndexWorker::default();
+        assert!(worker.start(pool.clone(), scheduler.clone()));
+        wait_for_drain().await;
+
+        enqueue("third").await.unwrap();
+        worker.wake();
+        wait_for_drain().await;
+        pool.close().await;
+    }
+
     #[tokio::test]
     async fn installed_pool_has_one_worker_and_disabled_jobs_remain_durable() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()

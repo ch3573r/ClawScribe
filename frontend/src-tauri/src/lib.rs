@@ -223,41 +223,44 @@ async fn get_transcription_status() -> audio::recording_commands::TranscriptionS
 async fn resolve_meeting_audio_file(
     app: tauri::AppHandle,
     state: tauri::State<'_, state::AppState>,
-    meeting_folder: String,
+    meeting_id: String,
 ) -> Result<Option<String>, String> {
-    // The trusted roots (a network recordings folder included) decide what may be looked at.
-    let _ = audio::recording_preferences::recording_roots(&app).await;
-    let Some(folder) = canonicalize_existing_dir(&meeting_folder)? else {
+    let roots = audio::recording_preferences::recording_roots(&app).await;
+    let Some(folder) = saved_audio_folder(state.db_manager.pool(), &meeting_id, &roots).await?
+    else {
         return Ok(None);
     };
-
-    let saved_meeting_folders = sqlx::query_scalar::<_, String>(
-        "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
-    )
-    .fetch_all(state.db_manager.pool())
-    .await
-    .map_err(|e| format!("Failed to verify meeting folder: {}", e))?;
-
-    if !canonical_folder_is_registered(&folder, saved_meeting_folders.iter().map(String::as_str)) {
-        log::warn!("Refusing to resolve audio from an unregistered meeting folder");
+    let Some(path) = audio::incremental_saver::resolve_audio_file_or_recover(&folder).await? else {
         return Ok(None);
+    };
+    let resolved = path
+        .canonicalize()
+        .map_err(|_| "Meeting audio could not be resolved")?;
+    if resolved.parent() != Some(folder.as_path()) {
+        return Err("Meeting audio links outside the recording folder are not supported".into());
     }
+    app.asset_protocol_scope()
+        .allow_file(&resolved)
+        .map_err(|_| "Meeting audio access could not be granted")?;
+    Ok(Some(resolved.to_string_lossy().into_owned()))
+}
 
-    let path = audio::incremental_saver::resolve_audio_file_or_recover(&folder).await?;
-    if let Some(path) = &path {
-        let resolved = path
-            .canonicalize()
-            .map_err(|_| "Meeting audio could not be resolved")?;
-        if resolved.parent() != Some(folder.as_path()) {
-            return Err(
-                "Meeting audio links outside the recording folder are not supported".into(),
-            );
-        }
-        app.asset_protocol_scope()
-            .allow_file(&resolved)
-            .map_err(|_| "Meeting audio access could not be granted")?;
-    }
-    Ok(path.map(|path| path.to_string_lossy().to_string()))
+const SAVED_AUDIO_FOLDER_QUERY: &str =
+    "SELECT folder_path FROM meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''";
+
+async fn saved_audio_folder(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    roots: &[PathBuf],
+) -> Result<Option<PathBuf>, String> {
+    let saved = sqlx::query_scalar::<_, String>(SAVED_AUDIO_FOLDER_QUERY)
+        .bind(meeting_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| "Failed to look up the saved meeting folder")?;
+    Ok(saved.and_then(|folder| {
+        database::meeting_files::resolve_recording_folder(Path::new(&folder), roots).ok()
+    }))
 }
 
 fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, String> {
@@ -338,6 +341,53 @@ mod tests {
             &requested,
             [temp_dir.path().join("Missing").to_string_lossy().as_ref()]
         ));
+    }
+
+    #[tokio::test]
+    async fn saved_audio_uses_the_meeting_id_index_and_requires_an_authorized_folder() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Recordings");
+        let saved = root.join("Saved meeting");
+        let outside = temp.path().join("Elsewhere");
+        std::fs::create_dir_all(&saved).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        for (id, path) in [
+            ("saved", saved.as_path()),
+            ("outside", outside.as_path()),
+            ("root", root.as_path()),
+            ("blank", Path::new(" ")),
+        ] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 'Synthetic', '2026-01-01', '2026-01-01', ?)")
+                .bind(id)
+                .bind(path.to_str().unwrap())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let plan = format!("EXPLAIN QUERY PLAN {SAVED_AUDIO_FOLDER_QUERY}");
+        let (_, _, _, operation): (i64, i64, i64, String) = sqlx::query_as(&plan)
+            .bind("saved")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(operation.contains("SEARCH meetings") && operation.contains("(id=?)"));
+        let roots = [root];
+        assert_eq!(
+            saved_audio_folder(&pool, "saved", &roots).await.unwrap(),
+            Some(saved.canonicalize().unwrap())
+        );
+        for id in ["outside", "root", "blank", "missing"] {
+            assert!(saved_audio_folder(&pool, id, &roots)
+                .await
+                .unwrap()
+                .is_none());
+        }
     }
 
     #[test]

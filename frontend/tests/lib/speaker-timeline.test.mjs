@@ -191,7 +191,12 @@ async function page(attribution, segments, updatedSegments, { playback, toastErr
     sonner: { toast: { error: toastError } },
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
     '@/lib/analytics': { trackPageView() {} },
-    '@tauri-apps/api/core': { invoke: async command => { assert.equal(command, 'resolve_meeting_audio_file'); return 'synthetic/audio.wav'; } },
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      assert.equal(command, 'resolve_meeting_audio_file');
+      assert.equal(args.meetingId, 'synthetic-meeting');
+      assert.deepEqual(Object.keys(args), ['meetingId']);
+      return 'synthetic/audio.wav';
+    } },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({}) },
     '@/contexts/ConfigContext': { useConfig: () => ({ modelConfig: {} }) },
     '@/hooks/useSourceAttribution': { useSourceAttribution: () => attribution },
