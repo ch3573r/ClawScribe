@@ -147,23 +147,33 @@ impl RunningChild {
         Ok(running)
     }
 
-    /// Kill and wait before releasing inference admission. Closing the job also
-    /// terminates any Windows descendants that inherited a pipe handle.
+    /// Kill the worker and give it a bounded time to exit. A driver can delay
+    /// Windows process termination. Closing the job also terminates descendants.
     fn stop(&mut self) -> bool {
         self.requests.take();
+        let Some(job) = self.job.take() else {
+            return false;
+        };
         let _ = self.process.kill();
-        self.job.take();
-        let reaped = self.process.wait().is_ok();
+        drop(job);
+        let until = Instant::now() + SHUTDOWN_GRACE;
+        let reaped = loop {
+            match self.process.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) if Instant::now() < until => thread::sleep(Duration::from_millis(2)),
+                _ => break false,
+            }
+        };
         if let Some(thread) = self.io_thread.take() {
-            // Usually the killed child's pipes wake immediately. Do not turn an
-            // inherited pipe on another platform into an unbounded join.
-            let until = Instant::now() + SHUTDOWN_GRACE;
             while !thread.is_finished() && Instant::now() < until {
                 thread::sleep(Duration::from_millis(2));
             }
             if thread.is_finished() {
                 let _ = thread.join();
             }
+        }
+        if !reaped {
+            log::warn!("Parakeet worker did not exit within the cleanup deadline");
         }
         reaped
     }
@@ -224,6 +234,16 @@ impl TranscriptionWorker {
             spawned: 0,
             #[cfg(test)]
             reaped: 0,
+        }
+    }
+
+    #[cfg(any(test, all(windows, feature = "directml")))]
+    pub(super) fn probe_directml(&mut self, timeout: Duration) -> Result<bool, WorkerError> {
+        let response = self.exchange(Request::ProbeDirectml, Arc::new(vec![]), timeout, &|| false);
+        self.stop_child();
+        match response? {
+            Response::DirectmlProbe { available } => Ok(available),
+            _ => Err(WorkerError::Protocol),
         }
     }
 
@@ -320,8 +340,8 @@ impl TranscriptionWorker {
                 if is_cancelled() {
                     return Err(WorkerError::Cancelled);
                 }
-                // The failed exchange already killed/reaped the process. An
-                // absent child is reloaded by transcribe_once, with CPU forced
+                // The failed exchange already stopped the child. A new
+                // child is loaded by transcribe_once, with CPU forced
                 // for this and all later loads after a DirectML worker failure.
                 self.transcribe_once(samples, timeout, is_cancelled)
             }
@@ -725,7 +745,9 @@ while ($true) {{
     $pcmLength = $reader.ReadUInt32()
     $pcm = $reader.ReadBytes($pcmLength)
     if ($request -eq 'Shutdown') {{ exit 0 }}
-    if ($null -ne $request.Load) {{
+    if ($request -eq 'ProbeDirectml') {{
+        $response = ConvertTo-Json -Compress -InputObject @{{ DirectmlProbe = @{{ available = ($mode -eq 'probe-available') }} }}
+    }} elseif ($null -ne $request.Load) {{
         Add-Content -LiteralPath ($state + '.loads') -Value ([string]$request.Load.use_directml)
         if ($request.Load.use_directml) {{
             if ($mode -eq 'load-timeout') {{ Start-Sleep -Seconds 60 }}
@@ -757,6 +779,31 @@ while ($true) {{
 }}
 "#
         ))
+    }
+
+    #[test]
+    #[cfg(any(windows, unix))]
+    fn directml_probe_has_a_hard_timeout_and_stops_the_child() {
+        let mut worker = stalled();
+        let started = Instant::now();
+        assert_eq!(
+            worker.probe_directml(Duration::from_millis(250)),
+            Err(WorkerError::TimedOut)
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(worker.reaped, 1);
+        assert!(worker.child.is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn directml_probe_reads_the_child_result_and_stops_the_child() {
+        let directory = tempfile::tempdir().unwrap();
+        for (mode, available) in [("probe-available", true), ("probe-unavailable", false)] {
+            let mut worker = fake(mode, &directory.path().join("state"));
+            assert_eq!(worker.probe_directml(Duration::from_secs(5)), Ok(available));
+            assert_eq!(worker.reaped, 1);
+        }
     }
 
     #[test]

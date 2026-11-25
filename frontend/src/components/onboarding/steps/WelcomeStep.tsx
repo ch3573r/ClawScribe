@@ -62,9 +62,11 @@ export function WelcomeStep({ onRecordAudio, finishing, error }: {
         </div>
 
         {windows && <div className="w-full max-w-md">
-          <SignalCheck feed={feed} unavailableReason={devicePreferencesStatus === 'ready'
-            ? finishing ? 'Finishing setup' : null
-            : 'Audio devices are unavailable'} />
+          <SignalCheck feed={feed} unavailableReason={devicePreferencesStatus === 'loading'
+            ? 'Checking audio devices…'
+            : devicePreferencesStatus === 'ready'
+              ? finishing ? 'Finishing setup' : null
+              : 'Audio devices are unavailable'} />
         </div>}
 
         {/* CTA Section */}

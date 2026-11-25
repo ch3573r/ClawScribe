@@ -1,7 +1,5 @@
 use crate::parakeet_engine::model::{ParakeetModel, TimestampedResult};
-use crate::parakeet_engine::worker::{
-    directml_session_disabled, transcription_timeout, LoadSpec, TranscriptionWorker,
-};
+use crate::parakeet_engine::worker::{transcription_timeout, LoadSpec, TranscriptionWorker};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,12 +9,25 @@ use std::time::Instant;
 use tokio::fs;
 use tokio::sync::RwLock;
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 const DIRECTML_AUTOMATIC: u8 = 0;
 const DIRECTML_OFF: u8 = 1;
 const DIRECTML_ON: u8 = 2;
 static DIRECTML_PREFERENCE: AtomicU8 = AtomicU8::new(DIRECTML_AUTOMATIC);
+static LAST_DIRECTML_LOAD_FELL_BACK: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn last_directml_load_fell_back() -> bool {
+    LAST_DIRECTML_LOAD_FELL_BACK.load(Ordering::Acquire)
+}
+
+#[cfg(all(windows, feature = "directml"))]
+static DIRECTML_PROBE_DIRECTORY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(all(windows, feature = "directml"))]
+pub(crate) fn set_directml_probe_directory(directory: PathBuf) {
+    let _ = DIRECTML_PROBE_DIRECTORY.set(directory);
+}
 
 pub(crate) fn set_directml_preference(preference: Option<bool>) {
     let value = match preference {
@@ -34,21 +45,43 @@ pub(crate) fn resolve_directml_preference(
     preference.unwrap_or_else(probe)
 }
 
-/// Reads the preference on a blocking thread. The first automatic check uses
-/// the same ONNX Runtime provider registration as the model loader.
-pub(crate) fn directml_requested() -> bool {
-    let preference = match DIRECTML_PREFERENCE.load(Ordering::Acquire) {
+fn directml_preference() -> Option<bool> {
+    match DIRECTML_PREFERENCE.load(Ordering::Acquire) {
         DIRECTML_OFF => Some(false),
         DIRECTML_ON => Some(true),
         _ => None,
-    };
-    resolve_directml_preference(preference, super::model::directml_available)
+    }
+}
+
+fn automatic_directml_available() -> bool {
+    #[cfg(all(windows, feature = "directml"))]
+    {
+        DIRECTML_PROBE_DIRECTORY
+            .get()
+            .is_some_and(|directory| super::worker::automatic_directml_available(directory))
+    }
+    #[cfg(not(all(windows, feature = "directml")))]
+    false
+}
+
+/// Resolve on a blocking thread. Only the supervised child touches DirectML.
+pub(crate) fn directml_requested() -> bool {
+    resolved_directml().0
+}
+
+pub(crate) fn resolved_directml() -> (bool, bool) {
+    let preference = directml_preference();
+    let requested = resolve_directml_preference(preference, automatic_directml_available);
+    // A setting changed while the probe was running takes precedence.
+    let preference = directml_preference();
+    (preference.unwrap_or(requested), preference.is_none())
 }
 
 pub(crate) fn directml_default_unavailable() -> bool {
     cfg!(all(windows, feature = "directml"))
-        && DIRECTML_PREFERENCE.load(Ordering::Acquire) == DIRECTML_AUTOMATIC
-        && !super::model::directml_available()
+        && directml_preference().is_none()
+        && !automatic_directml_available()
+        && directml_preference().is_none()
 }
 
 #[cfg(test)]
@@ -64,7 +97,7 @@ fn parakeet_automatic_directml_requires_probe_success_and_preserves_explicit_cho
     )));
 }
 
-/// Opt-in process isolation, sampled when a model is loaded.
+/// Opt-in process isolation for CPU. DirectML always uses the worker.
 pub static USE_PARAKEET_WORKER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -238,6 +271,15 @@ fn parakeet_base_url(model_name: &str) -> &'static str {
 enum LoadedModel {
     InProcess(ParakeetModel),
     Worker(TranscriptionWorker),
+}
+
+impl LoadedModel {
+    fn session_status(&self) -> (bool, u64) {
+        match self {
+            Self::InProcess(model) => (model.directml_registered, 0),
+            Self::Worker(worker) => worker.session_status(),
+        }
+    }
 }
 
 pub struct ParakeetEngine {
@@ -564,7 +606,7 @@ impl ParakeetEngine {
                 let path = model_info.path.clone();
                 let model = crate::audio::inference::run(move |cancelled| {
                     let use_directml = directml_requested();
-                    if use_worker {
+                    let model = if use_worker || (use_directml && cfg!(feature = "directml")) {
                         let mut worker = TranscriptionWorker::new()?;
                         worker.load(
                             LoadSpec {
@@ -574,16 +616,15 @@ impl ParakeetEngine {
                             },
                             &|| cancelled.load(std::sync::atomic::Ordering::Acquire),
                         )?;
-                        Ok(LoadedModel::Worker(worker))
+                        LoadedModel::Worker(worker)
                     } else {
-                        ParakeetModel::new(
-                            &path,
-                            precision_suffix,
-                            use_directml && !directml_session_disabled(),
-                        )
-                        .map(LoadedModel::InProcess)
-                        .map_err(anyhow::Error::from)
+                        LoadedModel::InProcess(ParakeetModel::new(&path, precision_suffix, false)?)
+                    };
+                    if use_directml {
+                        LAST_DIRECTML_LOAD_FELL_BACK
+                            .store(!model.session_status().0, Ordering::Release);
                     }
+                    Ok(model)
                 })
                 .await
                 .map_err(|e| anyhow!("Failed to load Parakeet model {}: {}", model_name, e))?;
@@ -672,10 +713,7 @@ impl ParakeetEngine {
             .read()
             .await
             .as_ref()
-            .map(|model| match model {
-                LoadedModel::InProcess(model) => (model.directml_registered, 0),
-                LoadedModel::Worker(worker) => worker.session_status(),
-            })
+            .map(LoadedModel::session_status)
     }
 
     /// Transcribe audio samples using the loaded Parakeet model

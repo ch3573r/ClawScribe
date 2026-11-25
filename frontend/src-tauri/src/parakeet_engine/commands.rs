@@ -605,6 +605,36 @@ pub async fn get_parakeet_use_directml() -> Result<bool, String> {
         .map_err(|_| "Could not check the DirectML setting".into())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedDirectml {
+    requested: bool,
+    automatic: bool,
+    last_load_fell_back: bool,
+    default_unavailable: bool,
+    session_disabled: bool,
+}
+
+/// Resolved preference, including the result of any automatic DirectML probe.
+#[command]
+pub async fn get_parakeet_directml_status() -> Result<ResolvedDirectml, String> {
+    tokio::task::spawn_blocking(|| {
+        let (requested, automatic) = super::parakeet_engine::resolved_directml();
+        ResolvedDirectml {
+            requested,
+            automatic,
+            last_load_fell_back: requested
+                && super::parakeet_engine::last_directml_load_fell_back(),
+            default_unavailable: cfg!(all(windows, feature = "directml"))
+                && automatic
+                && !requested,
+            session_disabled: super::worker::directml_session_disabled(),
+        }
+    })
+    .await
+    .map_err(|_| "Could not check the DirectML setting".into())
+}
+
 #[command]
 pub async fn get_parakeet_directml_default_unavailable() -> Result<bool, String> {
     tokio::task::spawn_blocking(super::parakeet_engine::directml_default_unavailable)
@@ -617,7 +647,7 @@ pub async fn get_parakeet_directml_session_disabled() -> Result<bool, String> {
     Ok(crate::parakeet_engine::worker::directml_session_disabled())
 }
 
-/// Beta opt-in: isolate Parakeet in a supervised process on the next load.
+/// Beta opt-in: isolate Parakeet CPU inference on the next load.
 #[command]
 pub async fn set_parakeet_use_worker<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,

@@ -11,6 +11,8 @@ import { getSummaryModelSizeLabel } from '@/lib/onboarding-summary-model';
 import type { RecordingMode } from '@/contexts/RecordingStateContext';
 
 type SetupState = 'idle' | 'preparing' | 'stopping' | 'ready' | 'failed';
+const FINISH_CANCEL_TIMEOUT_MS = 10_000;
+
 function createPreparation() {
   let settle!: () => void;
   const done = new Promise<void>(resolve => { settle = resolve; });
@@ -210,9 +212,17 @@ export function SetupOverviewStep({ onChoose, finishing, error }: SetupOverviewS
     setFinishingAfterCancel(true);
     cancelSpeech();
     cancelNotes();
-    await Promise.all(waiting);
-    complete();
-    setFinishingAfterCancel(false);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<void>(resolve => {
+        timer = setTimeout(resolve, FINISH_CANCEL_TIMEOUT_MS);
+      });
+      await Promise.race([Promise.all(waiting), timeout]);
+      complete();
+    } finally {
+      clearTimeout(timer);
+      setFinishingAfterCancel(false);
+    }
   };
 
   const busyFinishing = finishing || finishingAfterCancel;
@@ -289,7 +299,7 @@ export function SetupOverviewStep({ onChoose, finishing, error }: SetupOverviewS
           <DialogHeader>
             <DialogTitle>Cancel model setup?</DialogTitle>
             <DialogDescription>{cancelIntent === 'finish'
-              ? 'Any models still downloading will be canceled before setup finishes.'
+              ? 'Setup will cancel active downloads and use any models that are already ready.'
               : 'The model download will stop. You can start it again later.'}</DialogDescription>
           </DialogHeader>
           <DialogFooter>

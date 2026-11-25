@@ -982,6 +982,7 @@ pub fn run() {
             parakeet_engine::commands::open_parakeet_models_folder,
             parakeet_engine::commands::set_parakeet_use_directml,
             parakeet_engine::commands::get_parakeet_use_directml,
+            parakeet_engine::commands::get_parakeet_directml_status,
             parakeet_engine::commands::get_parakeet_directml_session_disabled,
             parakeet_engine::commands::get_parakeet_directml_default_unavailable,
             parakeet_engine::commands::set_parakeet_use_worker,

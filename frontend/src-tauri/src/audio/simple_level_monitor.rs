@@ -14,6 +14,26 @@ use super::audio_processing::audio_to_mono;
 
 #[cfg(windows)]
 const SIGNAL_CHECK_DURATION: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const SIGNAL_CHECK_GRACE: Duration = Duration::from_secs(1);
+
+#[cfg(windows)]
+fn begin_signal_check(
+    check: &Mutex<std::sync::Weak<Instant>>,
+    now: Instant,
+) -> Result<Arc<Instant>, &'static str> {
+    let mut active = check.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(deadline) = active.upgrade() {
+        return Err(if now >= *deadline + SIGNAL_CHECK_GRACE {
+            "The audio device is not responding. Try again later."
+        } else {
+            "A signal check is already running."
+        });
+    }
+    let deadline = Arc::new(now + SIGNAL_CHECK_DURATION);
+    *active = Arc::downgrade(&deadline);
+    Ok(deadline)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,16 +99,12 @@ pub async fn check_audio_signal(
     #[cfg(windows)]
     {
         use super::devices::{default_input_device, default_output_device, DeviceType};
-        static CHECK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-        let permit = Arc::new(
-            CHECK
-                .try_lock()
-                .map_err(|_| "A signal check is already running.")?,
-        );
+        static CHECK: Mutex<std::sync::Weak<Instant>> = Mutex::new(std::sync::Weak::new());
+        let permit = begin_signal_check(&CHECK, Instant::now())?;
         if super::recording_commands::audio_signal_check_blocked() {
             return Err("The signal check is unavailable while recording or saving.".into());
         }
-        let deadline = Instant::now() + SIGNAL_CHECK_DURATION;
+        let deadline = *permit;
         let epoch = super::recording_commands::recording_epoch();
         let start = |name, kind, default, source, updates| {
             let permit = permit.clone();
@@ -116,7 +132,7 @@ pub async fn check_audio_signal(
         );
         let finish = |task| async move {
             // A stalled driver must not strand the UI or admit more check workers.
-            match tokio::time::timeout_at((deadline + Duration::from_secs(1)).into(), task).await {
+            match tokio::time::timeout_at((deadline + SIGNAL_CHECK_GRACE).into(), task).await {
                 Ok(Ok(result)) => result,
                 _ => SignalResult::Unavailable,
             }
@@ -685,6 +701,28 @@ mod tests {
             ]),
             vec!["Microphone (2- USB Headset)".to_string()]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn signal_check_reports_a_stalled_driver_until_its_workers_exit() {
+        use super::{begin_signal_check, Duration, Instant, Mutex};
+        let check = Mutex::default();
+        let start = Instant::now();
+        let permit = begin_signal_check(&check, start).unwrap();
+        let worker = permit.clone();
+        assert_eq!(
+            begin_signal_check(&check, start + Duration::from_secs(1)).unwrap_err(),
+            "A signal check is already running."
+        );
+        drop(permit);
+        let after_timeout = start + Duration::from_secs(6);
+        assert_eq!(
+            begin_signal_check(&check, after_timeout).unwrap_err(),
+            "The audio device is not responding. Try again later."
+        );
+        drop(worker);
+        assert!(begin_signal_check(&check, after_timeout).is_ok());
     }
 
     #[cfg(windows)]

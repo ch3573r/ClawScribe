@@ -3,7 +3,9 @@ use super::{sync_prompt, tracker, Mode, Tracker, JOIN_STATE_CHANGED};
 use crate::audio::recording_commands::{capture_active, is_starting, recording_epoch};
 use crate::exports::ms_auth_state::MicrosoftAuthState;
 use crate::library::calendar::{CalendarLink, CalendarSource};
-use crate::teams_detection::calls::{meet_room, scan, teams_room, CallScan, CallWindow, Provider};
+use crate::teams_detection::calls::{
+    meet_room, scan_join_baseline, teams_room, CallScan, CallWindow, Provider,
+};
 use chrono::Utc;
 use serde::Serialize;
 use std::time::{Duration, Instant};
@@ -80,8 +82,8 @@ impl Invitation {
         match call.room_identity {
             Some(room) if room != self.room => Mode::Off,
             None if self.provider != Provider::Teams => Mode::Off,
-            // An already-open window may have been showing a call that Windows
-            // UI Automation could not inspect before the invitation opened.
+            // For Meet, the baseline only includes windows that already showed
+            // this room. Teams retains the check against every open window.
             Some(_) if self.near_start && !self.open_before.contains(&call.window) => Mode::Auto,
             _ => Mode::Prompt,
         }
@@ -103,8 +105,24 @@ impl Invitation {
         let scan = scan.filter(|s| s.supported && s.complete).ok_or(
             "The meeting link opened. ClawScribe could not check existing calls. Start recording manually.",
         )?;
-        self.active_before = Some(scan.active.iter().map(|call| call.window.clone()).collect());
-        self.open_before = scan.open_windows.clone();
+        self.active_before = Some(
+            scan.active
+                .iter()
+                .filter(|call| {
+                    self.provider != Provider::GoogleMeet || call.room_identity == Some(self.room)
+                })
+                .map(|call| call.window.clone())
+                .collect(),
+        );
+        self.open_before = if self.provider == Provider::GoogleMeet {
+            scan.open_meet_rooms
+                .iter()
+                .filter(|(_, room)| *room == self.room)
+                .map(|(window, _)| window.clone())
+                .collect()
+        } else {
+            scan.open_windows.clone()
+        };
         Ok(())
     }
 }
@@ -323,7 +341,7 @@ pub async fn join_and_record<R: Runtime>(
         cancel(&app, &id);
         return Err("Complete recording setup before using Join and record.".into());
     }
-    let baseline = scan(vec![provider], vec![]).await.ok();
+    let baseline = scan_join_baseline(provider).await.ok();
     let launched = {
         let mut tracker = tracker();
         // Cancellation and sign-out serialize with the actual OS launch.
@@ -485,6 +503,36 @@ mod tests {
             Mode::Prompt
         ));
         assert!(matches!(join.mode(&call("new", Some([1; 32]))), Mode::Auto));
+    }
+
+    #[test]
+    fn meet_distinguishes_the_invited_room_from_other_tabs_in_an_existing_window() {
+        let mut exact = call("existing browser", Some([1; 32]));
+        exact.provider = Provider::GoogleMeet;
+        for (previous_room, expected) in [
+            (None, Mode::Auto),
+            (Some([2; 32]), Mode::Auto),
+            (Some([1; 32]), Mode::Prompt),
+        ] {
+            let mut join = invitation();
+            join.provider = Provider::GoogleMeet;
+            let baseline = CallScan {
+                open_windows: vec![exact.window.clone()],
+                open_meet_rooms: previous_room
+                    .map(|room| (exact.window.clone(), room))
+                    .into_iter()
+                    .collect(),
+                ..snapshot(vec![])
+            };
+            join.launch(Some(&baseline), || Ok(())).unwrap();
+            assert_eq!(join.mode(&exact), expected);
+        }
+
+        let mut join = invitation();
+        join.provider = Provider::GoogleMeet;
+        let baseline = snapshot(vec![exact.clone()]);
+        join.launch(Some(&baseline), || Ok(())).unwrap();
+        assert_eq!(join.mode(&exact), Mode::Off);
     }
 
     #[test]

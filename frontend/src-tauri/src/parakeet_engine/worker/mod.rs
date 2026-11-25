@@ -1,5 +1,7 @@
 //! Opt-in supervised Parakeet inference, independent of Tauri.
 mod child;
+#[cfg(any(test, all(windows, feature = "directml")))]
+mod directml_probe;
 pub mod protocol;
 mod supervisor;
 
@@ -8,6 +10,14 @@ pub use supervisor::{
 };
 
 pub const WORKER_FLAG: &str = "--clawscribe-transcription-worker";
+
+#[cfg(all(windows, feature = "directml"))]
+pub(super) fn automatic_directml_available(app_data: &std::path::Path) -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    directml_probe::resolve(&AVAILABLE, app_data, || {
+        TranscriptionWorker::new()?.probe_directml(std::time::Duration::from_secs(5))
+    })
+}
 
 /// Dispatch before initializing logging or the desktop runtime.
 pub fn dispatch() -> Option<i32> {

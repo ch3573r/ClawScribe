@@ -51,6 +51,8 @@ pub struct CallScan {
     pub(crate) active: Vec<CallWindow>,
     pub(crate) ended: Vec<CallWindow>,
     pub(crate) open_windows: Vec<String>,
+    #[serde(skip)]
+    pub(crate) open_meet_rooms: Vec<(String, [u8; 32])>,
 }
 
 #[tauri::command]
@@ -67,15 +69,29 @@ pub(crate) async fn scan(
     providers: Vec<Provider>,
     watched: Vec<String>,
 ) -> Result<CallScan, String> {
+    scan_windows(providers, watched, false).await
+}
+
+pub(crate) async fn scan_join_baseline(provider: Provider) -> Result<CallScan, String> {
+    scan_windows(vec![provider], vec![], provider == Provider::GoogleMeet).await
+}
+
+async fn scan_windows(
+    providers: Vec<Provider>,
+    watched: Vec<String>,
+    inspect_meet_tabs: bool,
+) -> Result<CallScan, String> {
     #[cfg(windows)]
     {
-        tauri::async_runtime::spawn_blocking(move || native::scan(&providers, &watched))
-            .await
-            .map_err(|_| "Could not check meeting windows.".to_string())
+        tauri::async_runtime::spawn_blocking(move || {
+            native::scan(&providers, &watched, inspect_meet_tabs)
+        })
+        .await
+        .map_err(|_| "Could not check meeting windows.".to_string())
     }
     #[cfg(not(windows))]
     {
-        let _ = (providers, watched);
+        let _ = (providers, watched, inspect_meet_tabs);
         Ok(CallScan::default())
     }
 }
@@ -343,7 +359,11 @@ mod native {
         find().is_some()
     }
 
-    pub(super) fn scan(providers: &[Provider], watched: &[String]) -> CallScan {
+    pub(super) fn scan(
+        providers: &[Provider],
+        watched: &[String],
+        inspect_meet_tabs: bool,
+    ) -> CallScan {
         let mut scan = CallScan {
             supported: true,
             ..Default::default()
@@ -433,7 +453,11 @@ mod native {
             }
             let title = String::from_utf16_lossy(&title[..count as usize]).to_lowercase();
             let desktop = desktop_provider(exe);
-            if desktop.is_none() && !title.contains("meet") && !title.contains("teams") {
+            if desktop.is_none()
+                && !inspect_meet_tabs
+                && !title.contains("meet")
+                && !title.contains("teams")
+            {
                 continue;
             }
             if Instant::now() >= deadline {
@@ -455,6 +479,11 @@ mod native {
             };
             if !providers.contains(&provider) {
                 continue;
+            }
+            if inspect_meet_tabs && provider == Provider::GoogleMeet {
+                if let Some(room) = room_identity {
+                    scan.open_meet_rooms.push((window.clone(), room));
+                }
             }
             let mut hash = DefaultHasher::new();
             room.hash(&mut hash);

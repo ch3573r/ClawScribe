@@ -118,7 +118,8 @@ export function TranscriptionOptions() {
     parakeetSettings && parakeetSettings.worker !== getParakeetWorker() ? UNAPPLIED_MESSAGE : workerError
   );
   const dmlStatus = parakeetReadError ?? (
-    parakeetSettings && parakeetSettings.directml !== getParakeetDirectml() ? UNAPPLIED_MESSAGE : dmlError
+    parakeetSettings && !parakeetSettings.directmlAutomatic &&
+    parakeetSettings.directml !== getParakeetDirectml() ? UNAPPLIED_MESSAGE : dmlError
   );
 
   // Source attribution (Me / Participants), default off. It depends on saved audio.
@@ -202,6 +203,9 @@ export function TranscriptionOptions() {
           {parakeetSettings?.directmlSessionDisabled && (
             <Note>GPU acceleration was turned off for this session after the speech model stopped responding.</Note>
           )}
+          {parakeetSettings?.directmlLastLoadFellBack && !parakeetSettings.directmlSessionDisabled && (
+            <Note>The last speech model could not load with DirectML and used the CPU.</Note>
+          )}
         </>}
       >
         <Switch
@@ -217,7 +221,7 @@ export function TranscriptionOptions() {
         htmlFor="parakeet-worker"
         title={<BetaTitle>Run transcription in a separate process</BetaTitle>}
         description={<>
-          Keeps recording if the speech model crashes or stops responding. Applies from the next recording
+          Also isolates CPU transcription so recording can continue after a crash or timeout. Applies from the next recording.
           {workerStatus && <Note>{workerStatus}</Note>}
         </>}
       >

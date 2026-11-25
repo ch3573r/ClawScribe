@@ -116,6 +116,21 @@ test('an unavailable automatic DirectML default explains CPU use', async t => {
   assert.match(text(ui.row('parakeet-directml')), /DirectML could not initialize.*Parakeet will use the CPU/);
 });
 
+test('a successful automatic DirectML default is active without a stored choice', async t => {
+  const ui = setup(t, { backend: { directml: true, directmlAutomatic: true, worker: false } });
+  ui.render();
+  await flush();
+  assert.equal(ui.control('parakeet-directml').props.checked, true);
+  assert.doesNotMatch(text(ui.row('parakeet-directml')), /Not active yet/);
+});
+
+test('a model that fell back to the CPU explains its backend on the GPU option', async t => {
+  const ui = setup(t, { backend: { directml: true, worker: false, directmlLastLoadFellBack: true } });
+  ui.render();
+  await flush();
+  assert.match(text(ui.row('parakeet-directml')), /could not load with DirectML and used the CPU/);
+});
+
 test('source attribution needs saved audio and says so', async t => {
   const ui = setup(t, { audioSaving: false, attribution: true });
   ui.render();

@@ -1028,6 +1028,7 @@ mod tests {
             active: active.to_vec(),
             ended: ended.to_vec(),
             open_windows: open.iter().map(|window| window.to_string()).collect(),
+            ..Default::default()
         }
     }
 

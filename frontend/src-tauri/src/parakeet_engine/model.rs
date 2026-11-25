@@ -23,21 +23,49 @@ const SAMPLE_RATE: usize = 16_000;
 pub(super) fn directml_available() -> bool {
     #[cfg(all(windows, feature = "directml"))]
     {
-        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *AVAILABLE.get_or_init(|| {
-            let available = Session::builder().is_ok_and(|mut builder| {
-                DirectMLExecutionProvider::default()
-                    .register(&mut builder)
-                    .is_ok()
-            });
-            if !available {
-                log::warn!("Parakeet: DirectML provider could not be initialized; using CPU");
-            }
-            available
+        Session::builder().is_ok_and(|mut builder| {
+            DirectMLExecutionProvider::default()
+                .register(&mut builder)
+                .is_ok()
         })
     }
     #[cfg(not(all(windows, feature = "directml")))]
     false
+}
+
+fn load_transcription_sessions<S, E>(
+    use_directml: bool,
+    decoder_use_directml: bool,
+    mut load: impl FnMut(&str, bool) -> Result<(S, bool), E>,
+) -> Result<(S, S, bool), E> {
+    let (encoder, encoder_directml) = load("encoder-model", use_directml)?;
+    let decoder_requested = encoder_directml && decoder_use_directml;
+    let (decoder, decoder_directml) = load("decoder_joint-model", decoder_requested)?;
+    if decoder_requested && !decoder_directml {
+        drop(encoder);
+        let (cpu_encoder, _) = load("encoder-model", false)?;
+        return Ok((cpu_encoder, decoder, false));
+    }
+    Ok((encoder, decoder, encoder_directml))
+}
+
+#[cfg(test)]
+#[test]
+fn an_encoder_cpu_fallback_keeps_the_decoder_on_cpu_and_reports_cpu() {
+    let mut loads = Vec::new();
+    let (_, _, directml) = load_transcription_sessions(true, true, |name, use_directml| {
+        loads.push((name.to_owned(), use_directml));
+        Ok::<_, ()>(((), name == "decoder_joint-model" && use_directml))
+    })
+    .unwrap();
+    assert_eq!(
+        loads,
+        [
+            ("encoder-model".into(), true),
+            ("decoder_joint-model".into(), false)
+        ]
+    );
+    assert!(!directml);
 }
 
 static DECODE_SPACE_RE: Lazy<Result<Regex, regex::Error>> =
@@ -217,20 +245,10 @@ impl ParakeetModel {
     ) -> Result<Self, ParakeetError> {
         let decoder_use_directml = Self::decoder_directml_enabled(precision_suffix, use_directml);
 
-        let (encoder, encoder_directml) = Self::init_session(
-            &model_dir,
-            "encoder-model",
-            None,
-            precision_suffix,
-            use_directml,
-        )?;
-        let (decoder_joint, decoder_directml) = Self::init_session(
-            &model_dir,
-            "decoder_joint-model",
-            None,
-            precision_suffix,
-            decoder_use_directml,
-        )?;
+        let (encoder, decoder_joint, directml_registered) =
+            load_transcription_sessions(use_directml, decoder_use_directml, |name, directml| {
+                Self::init_session(&model_dir, name, None, precision_suffix, directml)
+            })?;
         // Preprocessor is tiny — keep it on CPU to avoid DirectML transfer overhead.
         let (preprocessor, _) = Self::init_session(&model_dir, "nemo128", None, None, false)?;
 
@@ -250,7 +268,7 @@ impl ParakeetModel {
             vocab,
             blank_idx,
             vocab_size,
-            directml_registered: encoder_directml || decoder_directml,
+            directml_registered,
         })
     }
 

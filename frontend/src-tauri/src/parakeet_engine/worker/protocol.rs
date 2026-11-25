@@ -8,6 +8,7 @@ pub const MAX_SECTION_BYTES: usize = 256 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Request {
+    ProbeDirectml,
     Load {
         model_dir: PathBuf,
         precision_suffix: Option<String>,
@@ -20,6 +21,9 @@ pub enum Request {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Response {
+    DirectmlProbe {
+        available: bool,
+    },
     Loaded {
         directml_registered: bool,
     },

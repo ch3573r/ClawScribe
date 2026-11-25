@@ -75,11 +75,12 @@ pub(crate) struct Stored {
     pub legacy_migrated: bool,
 }
 
-/// The settings as the webview reads them: every value is concrete.
+/// The settings as the webview reads them. An unset DirectML preference is
+/// resolved separately, when needed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BehaviorSettings {
-    pub parakeet_directml: bool,
+    pub parakeet_directml: Option<bool>,
     pub parakeet_worker: bool,
     pub cloud_transcription: bool,
     pub source_attribution: bool,
@@ -147,7 +148,7 @@ impl Stored {
     /// at the command boundary, away from startup and the capture thread.
     pub(crate) fn effective(&self) -> BehaviorSettings {
         BehaviorSettings {
-            parakeet_directml: self.parakeet_directml.unwrap_or(false),
+            parakeet_directml: self.parakeet_directml,
             parakeet_worker: self.parakeet_worker.unwrap_or(false),
             cloud_transcription: self.cloud_transcription == Some(true),
             source_attribution: self.source_attribution.unwrap_or(false),
@@ -279,6 +280,13 @@ fn open<R: Runtime>(
 /// defaults (the cloud opt-in stays off).
 pub fn load_and_apply<R: Runtime>(app: &AppHandle<R>) {
     use crate::parakeet_engine::parakeet_engine::set_directml_preference;
+    #[cfg(all(windows, feature = "directml"))]
+    {
+        use tauri::Manager;
+        if let Ok(app_data) = app.path().app_data_dir() {
+            crate::parakeet_engine::parakeet_engine::set_directml_probe_directory(app_data);
+        }
+    }
     let settings = match open(app) {
         Ok(store) => {
             let stored = Stored::read(store.as_ref());
@@ -356,13 +364,13 @@ pub(crate) fn save_language<R: Runtime>(app: &AppHandle<R>, language: &str) -> R
 pub async fn get_behavior_settings<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<BehaviorSettings, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut settings = Stored::read(open(&app)?.as_ref()).effective();
-        settings.parakeet_directml = crate::parakeet_engine::parakeet_engine::directml_requested();
-        Ok(settings)
-    })
-    .await
-    .map_err(|_| "Could not read the settings".to_string())?
+    tauri::async_runtime::spawn_blocking(move || Ok(read_settings(open(&app)?.as_ref())))
+        .await
+        .map_err(|_| "Could not read the settings".to_string())?
+}
+
+fn read_settings(backing: &dyn Backing) -> BehaviorSettings {
+    Stored::read(backing).effective()
 }
 
 /// Hands the webview's old values to the core, once and only where the core
@@ -407,10 +415,10 @@ pub async fn migrate_legacy_behavior_settings(
         .then(crate::audio::inference::claim_job)
         .transpose()?;
     let finisher = app.clone();
-    let mut settings = tauri::async_runtime::spawn_blocking(move || {
+    let settings = tauri::async_runtime::spawn_blocking(move || {
         let store = open(&finisher)?;
         finish_migration(store.as_ref())?;
-        Ok::<_, String>(Stored::read(store.as_ref()).effective())
+        Ok::<_, String>(read_settings(store.as_ref()))
     })
     .await
     .map_err(|_| "Could not migrate the settings".to_string())??;
@@ -418,9 +426,6 @@ pub async fn migrate_legacy_behavior_settings(
         crate::parakeet_engine::commands::apply_running_directml_preference(None).await;
     }
     drop(job);
-    drop(_change);
-    settings.parakeet_directml =
-        crate::parakeet_engine::commands::get_parakeet_use_directml().await?;
     Ok(settings)
 }
 
@@ -510,7 +515,8 @@ mod tests {
     fn an_empty_store_gives_the_defaults_with_everything_off() {
         let settings = Stored::read(&Memory::default()).effective();
         assert_eq!(settings, defaults());
-        assert!(!settings.parakeet_directml && !settings.parakeet_worker);
+        assert_eq!(settings.parakeet_directml, None);
+        assert!(!settings.parakeet_worker);
         assert!(!settings.cloud_transcription && !settings.source_attribution);
         assert_eq!(settings.language, "auto");
         assert!(!settings.legacy_migrated);
@@ -557,7 +563,7 @@ mod tests {
         assert_eq!(stored.parakeet_directml, None);
         assert_eq!(stored.language, None);
         let settings = stored.effective();
-        assert!(!settings.parakeet_directml);
+        assert_eq!(settings.parakeet_directml, None);
         assert!(settings.parakeet_worker && settings.source_attribution);
         assert_eq!(settings.language, "auto");
     }
@@ -753,6 +759,17 @@ mod tests {
         }
     }
 }
+#[test]
+fn settings_read_returns_only_the_stored_directml_choice() {
+    let memory = test_memory::Memory::default();
+    let read = || serde_json::to_value(read_settings(&memory)).unwrap()["parakeetDirectml"].clone();
+    assert_eq!(read(), Value::Null);
+    for explicit in [true, false] {
+        persist_bool(&memory, PARAKEET_DIRECTML, explicit).unwrap();
+        assert_eq!(read(), json!(explicit));
+    }
+}
+
 #[test]
 fn parakeet_defers_the_automatic_default_until_the_legacy_choice_is_read() {
     let mut stored = Stored::default();

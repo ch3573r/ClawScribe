@@ -7,14 +7,16 @@ import {
   refreshBehaviorSettings,
 } from "@/lib/behaviorSettings";
 
-// Route Parakeet inference through DirectML (Windows GPU) and optionally run
-// it in a separate supervised process. The core owns both settings: it
+// DirectML (Windows GPU) always runs in a separate supervised process,
+// which can also be enabled for CPU transcription. The core owns both settings: it
 // stores them, applies them at start-up before a recording can start, and
 // applies a change on the next model load. DirectML has no effect unless the
 // build includes the `directml` feature.
 
 export interface ParakeetBackendSettings {
   directml: boolean;
+  directmlAutomatic: boolean;
+  directmlLastLoadFellBack: boolean;
   worker: boolean;
   directmlSessionDisabled: boolean;
   directmlDefaultUnavailable: boolean;
@@ -22,13 +24,24 @@ export interface ParakeetBackendSettings {
 
 /** What the core runs right now; the switches show this. */
 export async function getParakeetBackendSettings(): Promise<ParakeetBackendSettings> {
-  const [directml, worker, directmlSessionDisabled, directmlDefaultUnavailable] = await Promise.all([
-    invoke<boolean>("get_parakeet_use_directml"),
+  const [directml, worker] = await Promise.all([
+    invoke<{
+      requested: boolean;
+      automatic: boolean;
+      lastLoadFellBack: boolean;
+      defaultUnavailable: boolean;
+      sessionDisabled: boolean;
+    }>("get_parakeet_directml_status"),
     invoke<boolean>("get_parakeet_use_worker"),
-    invoke<boolean>("get_parakeet_directml_session_disabled"),
-    invoke<boolean>("get_parakeet_directml_default_unavailable"),
   ]);
-  return { directml, worker, directmlSessionDisabled, directmlDefaultUnavailable };
+  return {
+    directml: directml.requested,
+    directmlAutomatic: directml.automatic,
+    directmlLastLoadFellBack: directml.lastLoadFellBack,
+    worker,
+    directmlSessionDisabled: directml.sessionDisabled,
+    directmlDefaultUnavailable: directml.defaultUnavailable,
+  };
 }
 
 /** The stored preference as the core holds it; off until it has been read. */

@@ -98,7 +98,10 @@ test('the setup screen allows audio before downloads, and speech setup never sta
   assert.deepEqual(choices[1], ['live', null]);
 });
 
-test('concurrent setup downloads show only their own measured progress and clean up on exit', async t => {
+const testConcurrentSetup = settles => test(settles
+  ? 'concurrent setup downloads show only their own progress and settle before exit'
+  : 'Cancel and finish completes with audio only when a download never resolves', async t => {
+  if (!settles) t.mock.timers.enable({ apis: ['setTimeout'] });
   const hooks = createHookHarness(), listeners = new Map(), completed = [];
   const cancelled = [];
   const choices = [];
@@ -160,12 +163,50 @@ test('concurrent setup downloads show only their own measured progress and clean
   action('Cancel and finish').props.onClick();
   assert.deepEqual(cancelled, ['notes-model']);
   assert.equal(action('Download local notes model').props.disabled, true);
-  assert.deepEqual(choices, [], 'the download must settle before leaving setup');
-  notes.resolve();
+  assert.deepEqual(choices, [], 'setup gives the download time to settle');
+  if (settles) {
+    notes.resolve();
+  } else {
+    t.mock.timers.tick(9_999);
+    assert.deepEqual(choices, []);
+    t.mock.timers.tick(1);
+  }
   await flush();
   assert.deepEqual(choices, [['audio_only', null]]);
-  assert.equal(action('Download local notes model').props.disabled, false);
+  assert.equal(action('Finish setup').props.disabled, false);
+  assert.equal(action('Download local notes model').props.disabled, !settles);
   hooks.unmount();
   assert.equal(listeners.size, 0);
   assert.deepEqual(completed.sort(), [notesEvent, speechEvent].sort());
+});
+testConcurrentSetup(true);
+testConcurrentSetup(false);
+
+test('welcome distinguishes loading audio preferences from unavailable devices', () => {
+  const jsx = (type, props) => ({ type, props });
+  let status = 'loading';
+  const enabled = [];
+  const { WelcomeStep } = loadTsModule('src/components/onboarding/steps/WelcomeStep', {
+    'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@/components/ui/button': { Button: 'Button' },
+    '../OnboardingContainer': { OnboardingContainer: 'OnboardingContainer' },
+    '@/contexts/OnboardingContext': { useOnboarding: () => ({ goNext() {} }) },
+    '@/hooks/usePlatform': { usePlatform: () => 'windows' },
+    '@/contexts/ConfigContext': { useConfig: () => ({
+      selectedDevices: { micDevice: null, systemDevice: null },
+      devicePreferencesStatus: status,
+    }) },
+    '@/components/settings/SignalCheck': { SignalCheck: 'SignalCheck' },
+    '@/components/settings/useSignalCheck': { useSignalCheck: active => enabled.push(active) },
+  });
+  const nodes = root => Array.isArray(root) ? root.flatMap(nodes) :
+    root?.props ? [root, ...nodes(root.props.children)] : [];
+  const reason = () => nodes(WelcomeStep({ finishing: false, error: null, onRecordAudio() {} }))
+    .find(node => node.type === 'SignalCheck').props.unavailableReason;
+  assert.equal(reason(), 'Checking audio devices…');
+  status = 'error';
+  assert.equal(reason(), 'Audio devices are unavailable');
+  status = 'ready';
+  assert.equal(reason(), null);
+  assert.deepEqual(enabled, [false, false, true]);
 });

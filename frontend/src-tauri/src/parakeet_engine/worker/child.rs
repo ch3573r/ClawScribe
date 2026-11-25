@@ -29,6 +29,9 @@ pub(super) fn run() -> i32 {
             return 2;
         }
         let response = match request {
+            Request::ProbeDirectml => Response::DirectmlProbe {
+                available: super::super::model::directml_available(),
+            },
             Request::Load {
                 model_dir,
                 precision_suffix,
