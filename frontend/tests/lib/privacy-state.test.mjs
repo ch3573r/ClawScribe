@@ -12,7 +12,7 @@ const base = () => ({
   cloudTranscription: false,
   summary: ready({ provider: 'builtin-ai', ollamaEndpoint: null, customEndpoint: null }),
   autoSummary: false,
-  automaticSummaryApproved: false,
+  summaryDestination: ready({ provider: 'builtin-ai', approved: false }),
   liveSharing: ready(false),
   microsoft: ready({ connected: false, calendar: false }),
   confluenceRest: false,
@@ -96,11 +96,11 @@ test('built-in and local Ollama summaries never leave; remote providers leave on
 
 test('external automatic notes require approval of the current destination', () => {
   const summary = ready({ provider: 'openai', ollamaEndpoint: null, customEndpoint: null });
-  const unapproved = derive({ autoSummary: true, summary });
+  const unapproved = derive({ autoSummary: true, summary, summaryDestination: ready({ provider: 'openai', approved: false }) });
   assert.equal(rowOf(unapproved, 'summary').when, 'When you generate');
   assert.equal(factOf(unapproved, 'text').value, 'Leaves when you ask');
   assert.equal(factOf(unapproved, 'automatic').value, 'None');
-  const model = derive({ autoSummary: true, automaticSummaryApproved: true, summary });
+  const model = derive({ autoSummary: true, summaryDestination: ready({ provider: 'openai', approved: true }), summary });
   assert.equal(rowOf(model, 'summary').tone, 'warning');
   assert.equal(rowOf(model, 'summary').when, 'When a recording ends');
   assert.equal(factOf(model, 'automatic').value, 'Transcript text');
@@ -220,4 +220,16 @@ test('loading and unreadable state is shown as such, never guessed', () => {
 
 test('built-in provider aliases count as local', () => {
   for (const alias of ['local-llama', 'localllama']) assert.equal(classifySummaryProvider(alias).kind, 'local');
+});
+
+test('automatic notes report an unresolved summary destination', () => {
+  const summary = ready({ provider: 'openai', ollamaEndpoint: null, customEndpoint: null });
+  for (const [status, expected] of [['loading', 'Checking…'], ['error', 'Could not check']]) {
+    const settings = { summary, summaryDestination: { status } };
+    const model = derive({ ...settings, autoSummary: true });
+    assert.equal(factOf(model, 'automatic').value, expected);
+    assert.equal(factOf(model, 'text').value, expected);
+    assert.equal(rowOf(model, 'summary').state, status === 'error' ? 'unavailable' : status);
+    assert.equal(factOf(derive(settings), 'automatic').value, 'None');
+  }
 });

@@ -258,9 +258,14 @@ async fn saved_audio_folder(
         .fetch_optional(pool)
         .await
         .map_err(|_| "Failed to look up the saved meeting folder")?;
-    Ok(saved.and_then(|folder| {
-        database::meeting_files::resolve_recording_folder(Path::new(&folder), roots).ok()
-    }))
+    saved
+        // A deleted folder is missing audio, not an untrusted folder.
+        .filter(|folder| Path::new(folder).exists())
+        .map(|folder| {
+            database::meeting_files::resolve_recording_folder(Path::new(&folder), roots)
+                .map_err(|_| "This meeting's folder is not one of your recordings folders. Choose that folder again in Settings to play its audio.".into())
+        })
+        .transpose()
 }
 
 fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, String> {
@@ -382,7 +387,18 @@ mod tests {
             saved_audio_folder(&pool, "saved", &roots).await.unwrap(),
             Some(saved.canonicalize().unwrap())
         );
-        for id in ["outside", "root", "blank", "missing"] {
+        for id in ["outside", "root"] {
+            assert_eq!(
+                saved_audio_folder(&pool, id, &roots).await.unwrap_err(),
+                "This meeting's folder is not one of your recordings folders. Choose that folder again in Settings to play its audio."
+            );
+        }
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES ('deleted', 'Synthetic', '2026-01-01', '2026-01-01', ?)")
+            .bind(roots[0].join("Deleted meeting").to_str().unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for id in ["blank", "missing", "deleted"] {
             assert!(saved_audio_folder(&pool, id, &roots)
                 .await
                 .unwrap()

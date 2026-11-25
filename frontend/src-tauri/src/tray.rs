@@ -589,6 +589,15 @@ pub fn start_lifecycle<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
+pub(crate) fn wake_lifecycle() {
+    LIFECYCLE_WAKE.notify_one();
+}
+
+#[cfg(test)]
+pub(crate) fn lifecycle_notify_for_test() -> &'static Notify {
+    &LIFECYCLE_WAKE
+}
+
 async fn lifecycle_loop<R: Runtime>(app: AppHandle<R>) {
     let mut shown: Option<TrayView> = None;
     loop {

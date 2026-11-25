@@ -160,6 +160,12 @@ test('an ad-hoc meeting opens the AI draft without recipients and accepts valida
   await submit();
   assert.equal(opens().length, 1, 'an invalid address never reaches the native handoff');
   assert.equal(review.find('Input', 'follow-up-manual-recipients').props['aria-invalid'], true);
+  for (const invalid of ['one%two@example.com', 'a'.repeat(65) + '@example.com']) {
+    enter(invalid);
+    await submit();
+    assert.equal(opens().length, 1);
+    assert.equal(review.find('Input', 'follow-up-manual-recipients').props['aria-invalid'], true);
+  }
   enter('Dana+meeting@example.com; pat@example.com, PAT@example.com');
   await submit();
   assert.equal(JSON.stringify(opens()[1].manualRecipients), JSON.stringify(['Dana+meeting@example.com', 'pat@example.com']));

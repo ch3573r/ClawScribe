@@ -17,6 +17,7 @@ use tauri::{Listener, Manager, State};
 
 // SQL triggers queue work even on paths that have no application event.
 const DURABLE_QUEUE_RECHECK: Duration = Duration::from_secs(30);
+const PENDING_QUEUE_RECHECK: Duration = Duration::from_millis(1500);
 const FAILED_JOB_RECHECK: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
@@ -41,26 +42,55 @@ impl IndexWorker {
                 let notified = wake.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
+                let released = super::scheduler::FOREGROUND_RELEASED.notified();
+                tokio::pin!(released);
+                released.as_mut().enable();
                 let Some(runtime) = scheduler.upgrade() else {
                     break;
                 };
                 if pool.is_closed() {
                     break;
                 }
-                let delay = match run_queued_job(&pool, &runtime).await {
-                    QueuePass::More => continue,
-                    QueuePass::Idle => DURABLE_QUEUE_RECHECK,
-                    QueuePass::Retry => FAILED_JOB_RECHECK,
-                };
+                let pass = run_queued_job(&pool, &runtime).await;
+                let accepts_work = runtime.accepts_work();
                 drop(runtime);
                 tokio::select! {
                     _ = notified => {},
-                    _ = tokio::time::sleep(delay) => {},
+                    _ = released => {},
+                    _ = async {
+                        match pass {
+                            QueuePass::More => {}
+                            QueuePass::Idle => wait_for_idle_queue(&pool, accepts_work).await,
+                            QueuePass::Retry => tokio::time::sleep(FAILED_JOB_RECHECK).await,
+                        }
+                    } => {},
                     _ = pool.close_event() => break,
                 }
             }
         });
         true
+    }
+}
+
+async fn wait_for_idle_queue(pool: &SqlitePool, accepts_work: bool) {
+    if !accepts_work {
+        tokio::time::sleep(DURABLE_QUEUE_RECHECK).await;
+        return;
+    }
+    // The queue can gain rows without an app event. Poll the small queue rather
+    // than repeating the full worker pass while it is empty.
+    let deadline = tokio::time::Instant::now() + DURABLE_QUEUE_RECHECK;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(PENDING_QUEUE_RECHECK).await;
+        let pending = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_index_jobs WHERE attempts<3 AND paused=0)",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+        if pending {
+            break;
+        }
     }
 }
 
@@ -420,6 +450,29 @@ pub async fn knowledge_model_cancel_download(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_idle_worker_detects_new_durable_jobs_within_the_short_recheck() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let wait = tokio::spawn({
+            let pool = pool.clone();
+            async move { wait_for_idle_queue(&pool, true).await }
+        });
+        sqlx::raw_sql(
+            "INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('queued','Fixture','2026-01-01','2026-01-01');
+             INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES ('new','queued','Fixture','00:01');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("the durable queue must be checked before the idle wait ends")
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn repeated_short_rows_share_vectors_and_keep_citations_after_reindexing() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
@@ -551,7 +604,6 @@ mod tests {
         );
         assert!(peak <= 16384, "index input must remain bounded");
     }
-    use super::*;
 
     #[tokio::test]
     async fn installed_worker_drains_startup_work_then_waits_for_notifications() {

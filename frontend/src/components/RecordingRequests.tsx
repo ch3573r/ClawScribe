@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
@@ -66,6 +67,14 @@ export function RecordingRequests({ ready }: { ready: boolean }) {
         description: call.eventTitle ? `Is this the call for “${call.eventTitle}”?` : call.retry ? "Try again?" : "Start recording this call?",
         duration: PROMPT_DURATION_MS,
         action: { label: call.retry ? "Try again" : "Record", onClick: answer },
+        cancel: {
+          label: "Not now",
+          onClick: () => {
+            if (prompt?.key !== call.key) return;
+            void invoke("dismiss_call_detection_prompt", { key: call.key })
+              .catch(() => toast.error("Could not dismiss the recording request."));
+          },
+        },
       });
       prompt = { id, key: call.key };
     };

@@ -23,7 +23,7 @@ export interface PrivacyInput {
   summary: Loadable<{ provider: string | null; ollamaEndpoint: string | null; customEndpoint: string | null }>;
   /** "Automatic summaries" on the Summary page. */
   autoSummary: boolean;
-  automaticSummaryApproved: boolean;
+  summaryDestination: Loadable<{ provider: string; approved: boolean }>;
   liveSharing: Loadable<boolean>;
   microsoft: Loadable<{ connected: boolean; calendar: boolean }>;
   /** Confluence is set to publish through its REST API with a base URL. */
@@ -193,7 +193,12 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       })
     : null;
   const textLeavesKind = summaryClass && (summaryClass.kind === "remote" || summaryClass.kind === "unknown");
-  const sendsAutomaticNotes = input.autoSummary && input.automaticSummaryApproved;
+  const summaryChecks = input.autoSummary ? [input.summary, input.summaryDestination] : [input.summary];
+  const sendsAutomaticNotes = input.autoSummary
+    && input.summaryDestination.status === "ready"
+    && input.summaryDestination.value.approved
+    && input.summary.status === "ready"
+    && input.summaryDestination.value.provider === input.summary.value.provider;
   const outcome = transcriptionOutcome(input);
 
   // Recordings and audio
@@ -346,7 +351,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       destination: "This PC", when: "Never leaves", tone: "neutral", detail: "Calculated during live transcription and cleared when the recording ends",
     }),
     memoryRow,
-    withheld(summaryBase, blocked(input.summary)),
+    withheld(summaryBase, blocked(...summaryChecks)),
     withheld(liveBase, liveState),
     withheld(exportsBase, exportsState),
     withheld(webhookBase, blocked(input.webhook)),
@@ -363,7 +368,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       ? { id: "audio", label: "Audio", value: "Leaves this PC", detail: `Imports and Enhance use ${outcome.engine}`, tone: "warning", state: "ready" }
       : { id: "audio", label: "Audio", value: "Stays on this PC", detail: null, tone: "neutral", state: "ready" };
 
-  const textState = blocked(input.summary, input.webhook);
+  const textState = blocked(...summaryChecks, input.webhook);
   let textFact: PrivacyFact;
   if (textState !== "ready" || !summaryClass) {
     textFact = { id: "text", label: "Transcript text", value: textState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: textState === "ready" ? "unavailable" : textState };
@@ -375,7 +380,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
       ? { id: "text", label: "Transcript text", value: "Leaves automatically", detail: where, tone: "warning", state: "ready" }
       : { id: "text", label: "Transcript text", value: "Leaves when you ask", detail: where, tone: "active", state: "ready" };
   }
-  if (webhookText) {
+  if (webhookText && textState === "ready") {
     const automatic = webhookAuto || textFact.tone === "warning";
     textFact = {
       ...textFact,
@@ -386,7 +391,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
     };
   }
 
-  const automaticState = input.autoSummary ? blocked(input.summary, input.webhook) : blocked(input.webhook);
+  const automaticState = input.autoSummary ? blocked(...summaryChecks, input.webhook) : blocked(input.webhook);
   let automaticFact: PrivacyFact;
   if (automaticState !== "ready") {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: automaticState === "loading" ? "Checking…" : "Could not check", detail: null, tone: "off", state: automaticState };
@@ -395,7 +400,7 @@ export function derivePrivacy(input: PrivacyInput): PrivacyModel {
   } else {
     automaticFact = { id: "automatic", label: "Meeting data sent automatically", value: "None", detail: null, tone: "neutral", state: "ready" };
   }
-  if (webhookAuto) {
+  if (webhookAuto && automaticState === "ready") {
     automaticFact = {
       ...automaticFact,
       value: automaticFact.tone === "warning" || webhookText ? "Meeting details and transcript text" : "Meeting details",

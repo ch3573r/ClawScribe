@@ -290,6 +290,32 @@ mod stop_tests {
 static IS_STARTING: AtomicBool = AtomicBool::new(false);
 static IS_STOPPING: AtomicBool = AtomicBool::new(false);
 
+#[cfg(test)]
+#[tokio::test]
+async fn claiming_and_releasing_starting_state_wakes_the_tray() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    let wake = crate::tray::lifecycle_notify_for_test();
+    // Drain a notification stored by an earlier test.
+    let _ = tokio::time::timeout(std::time::Duration::ZERO, wake.notified()).await;
+    let changed = wake.notified();
+    tokio::pin!(changed);
+    assert!(!changed.as_mut().enable());
+    let starting = StartingState::claim().unwrap();
+    assert!(is_starting());
+    tokio::time::timeout(std::time::Duration::from_millis(250), changed)
+        .await
+        .unwrap();
+
+    let changed = wake.notified();
+    tokio::pin!(changed);
+    assert!(!changed.as_mut().enable());
+    drop(starting);
+    assert!(!is_starting());
+    tokio::time::timeout(std::time::Duration::from_millis(250), changed)
+        .await
+        .unwrap();
+}
+
 struct StartingState;
 impl StartingState {
     fn claim() -> Result<Self, String> {
@@ -299,6 +325,7 @@ impl StartingState {
         let guard = Self;
         #[cfg(windows)]
         crate::windows_lifecycle::begin_start()?;
+        crate::tray::wake_lifecycle();
         Ok(guard)
     }
 }
@@ -307,6 +334,7 @@ impl Drop for StartingState {
         IS_STARTING.store(false, Ordering::Release);
         #[cfg(windows)]
         crate::windows_lifecycle::start_settled();
+        crate::tray::wake_lifecycle();
     }
 }
 

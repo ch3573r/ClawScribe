@@ -321,23 +321,27 @@ export function ModelSettingsModal({
   const [isEndpointSectionCollapsed, setIsEndpointSectionCollapsed] = useState<boolean>(true); // Collapsed by default
   const [ollamaNotInstalled, setOllamaNotInstalled] = useState<boolean>(false); // Track if Ollama is not installed
 
+  // Only a successful read, including a confirmed empty configuration, enables saves.
+  const [customLoad, setCustomLoad] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [customReadAttempt, setCustomReadAttempt] = useState(0);
+  const customLoaded = customLoad === 'ready';
   // Custom OpenAI state
-  const [customDestinationProblem, setCustomDestinationProblem] = useState<string | null>(modelConfig.destination_problem ?? null);
-  const [customAllowUnencrypted, setCustomAllowUnencrypted] = useState(modelConfig.allow_unencrypted ?? false);
-  const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
-  const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
+  const [customDestinationProblem, setCustomDestinationProblem] = useState<string | null>(null);
+  const [customAllowUnencrypted, setCustomAllowUnencrypted] = useState(false);
+  const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>('');
+  const [customOpenAIModel, setCustomOpenAIModel] = useState<string>('');
   // A key typed for the custom provider; the stored one is only reported as a status.
-  const [customOpenAIApiKey, setCustomOpenAIApiKey] = useState<string>(modelConfig.customOpenAIApiKey || '');
-  const [customKeyStatus, setCustomKeyStatus] = useState<SecretStatus>(modelConfig.customOpenAIKeyStatus ?? NO_SECRET);
+  const [customOpenAIApiKey, setCustomOpenAIApiKey] = useState<string>('');
+  const [customKeyStatus, setCustomKeyStatus] = useState<SecretStatus>(NO_SECRET);
   // The address the stored custom key was saved for. Changing the address needs the key again.
-  const [savedCustomEndpoint, setSavedCustomEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || '');
-  const [customContextWindow, setCustomContextWindow] = useState<string>(modelConfig.contextWindow?.toString() || '8192');
-  const [customMaxTokens, setCustomMaxTokens] = useState<string>(modelConfig.maxTokens?.toString() || '');
-  const [customTemperature, setCustomTemperature] = useState<string>(modelConfig.temperature?.toString() || '');
-  const [customTopP, setCustomTopP] = useState<string>(modelConfig.topP?.toString() || '');
-  const [customTimeoutSeconds, setCustomTimeoutSeconds] = useState<string>(modelConfig.timeoutSeconds?.toString() ?? '');
-  const [customOrganization, setCustomOrganization] = useState<string>(modelConfig.organization || '');
-  const [customProject, setCustomProject] = useState<string>(modelConfig.project || '');
+  const [savedCustomEndpoint, setSavedCustomEndpoint] = useState<string>('');
+  const [customContextWindow, setCustomContextWindow] = useState<string>('');
+  const [customMaxTokens, setCustomMaxTokens] = useState<string>('');
+  const [customTemperature, setCustomTemperature] = useState<string>('');
+  const [customTopP, setCustomTopP] = useState<string>('');
+  const [customTimeoutSeconds, setCustomTimeoutSeconds] = useState<string>('');
+  const [customOrganization, setCustomOrganization] = useState<string>('');
+  const [customProject, setCustomProject] = useState<string>('');
   const [isCustomOpenAIAdvancedOpen, setIsCustomOpenAIAdvancedOpen] = useState<boolean>(false);
   const [isTestingConnection, setIsTestingConnection] = useState<boolean>(false);
 
@@ -358,8 +362,7 @@ export function ModelSettingsModal({
     timeoutSeconds: 600,
   });
   const [codexStatus, setCodexStatus] = useState<CodexInstallationStatus | null>(null);
-  const codexSignedIn = Boolean(codexStatus?.accountEmail)
-    || ['authenticated', 'chatgpt', 'apikey', 'chatgptauthtokens'].includes(codexStatus?.authStatus?.toLowerCase() ?? '');
+  const codexSignedIn = !['', 'unauthenticated', 'not-required'].includes(codexStatus?.authStatus?.trim().toLowerCase() ?? '');
   const [codexLastResult, setCodexLastResult] = useState<string>('');
   const [isCodexBusy, setIsCodexBusy] = useState<boolean>(false);
   // Only the live app-server catalog is offered; a stale built-in list would hide new models.
@@ -451,7 +454,7 @@ export function ModelSettingsModal({
 
   // Custom OpenAI validation
   const isCustomOpenAIInvalid = modelConfig.provider === 'custom-openai' && (
-    modelConfig.customOpenAIEndpoint === undefined ||
+    !customLoaded ||
     !customOpenAIEndpoint.trim() ||
     !customOpenAIModel.trim()
   );
@@ -477,11 +480,6 @@ export function ModelSettingsModal({
         const data = await invoke<ModelConfig | null>('api_get_model_config');
         if (!active || !data?.provider) return;
         const next = { ...withoutSecrets(data), apiKeyStatus: readSecretStatus(data.apiKeyStatus) };
-        if (data.provider === 'custom-openai') {
-          const custom = await invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config');
-          Object.assign(next, customOpenAIModelFields(custom));
-          next.model = custom?.model || next.model;
-        }
         if (active) setSharedModelConfig(next);
       } catch (error) {
         console.error('Failed to fetch model config:', error);
@@ -497,38 +495,41 @@ export function ModelSettingsModal({
     setOllamaEndpoint(modelConfig.ollamaEndpoint || '');
   }, [modelConfig.ollamaEndpoint, modelConfig.provider]);
 
-  // Sync custom OpenAI state from modelConfig (context or props)
+  const applyCustomFields = (config: ReturnType<typeof customOpenAIModelFields>) => {
+    setCustomOpenAIEndpoint(config.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
+    setSavedCustomEndpoint(config.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
+    setCustomOpenAIModel(config.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
+    setCustomKeyStatus(config.customOpenAIKeyStatus ?? NO_SECRET);
+    setCustomAllowUnencrypted(config.allow_unencrypted ?? false);
+    setCustomDestinationProblem(config.destination_problem ?? null);
+    setCustomMaxTokens(config.maxTokens?.toString() || '');
+    setCustomContextWindow(config.contextWindow?.toString() || '8192');
+    setCustomTemperature(config.temperature?.toString() || '');
+    setCustomTopP(config.topP?.toString() || '');
+    setCustomTimeoutSeconds(config.timeoutSeconds?.toString() ?? '');
+    setCustomOrganization(config.organization || '');
+    setCustomProject(config.project || '');
+  };
+
   useEffect(() => {
-    if (modelConfig.provider === 'custom-openai' && modelConfig.customOpenAIEndpoint !== undefined) {
-      setCustomOpenAIEndpoint(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
-      setSavedCustomEndpoint(modelConfig.customOpenAIEndpoint || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT);
-      setCustomOpenAIModel(modelConfig.customOpenAIModel || DEFAULT_OPENAI_COMPATIBLE_MODEL);
-      setCustomKeyStatus(modelConfig.customOpenAIKeyStatus ?? NO_SECRET);
-      setCustomAllowUnencrypted(modelConfig.allow_unencrypted ?? false);
-      setCustomDestinationProblem(modelConfig.destination_problem ?? null);
-      setCustomMaxTokens(modelConfig.maxTokens?.toString() || '');
-      setCustomContextWindow(modelConfig.contextWindow?.toString() || '8192');
-      setCustomTemperature(modelConfig.temperature?.toString() || '');
-      setCustomTopP(modelConfig.topP?.toString() || '');
-      setCustomTimeoutSeconds(modelConfig.timeoutSeconds?.toString() ?? '');
-      setCustomOrganization(modelConfig.organization || '');
-      setCustomProject(modelConfig.project || '');
-    }
-  }, [
-    modelConfig.provider,
-    modelConfig.customOpenAIEndpoint,
-    modelConfig.customOpenAIModel,
-    modelConfig.customOpenAIKeyStatus,
-    modelConfig.allow_unencrypted,
-    modelConfig.destination_problem,
-    modelConfig.maxTokens,
-    modelConfig.contextWindow,
-    modelConfig.temperature,
-    modelConfig.topP,
-    modelConfig.timeoutSeconds,
-    modelConfig.organization,
-    modelConfig.project
-  ]);
+    setCustomLoad('loading');
+    if (modelConfig.provider !== 'custom-openai') return;
+
+    let active = true;
+    void invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config').then((config) => {
+      if (!active) return;
+      const fields = customOpenAIModelFields(config);
+      setModelConfig(prev => prev.provider === 'custom-openai'
+        ? { ...prev, ...fields, model: config?.model || DEFAULT_OPENAI_COMPATIBLE_MODEL }
+        : prev);
+      applyCustomFields(fields);
+      setCustomOpenAIApiKey('');
+      setCustomLoad('ready');
+    }).catch(() => {
+      if (active) setCustomLoad('error');
+    });
+    return () => { active = false; };
+  }, [modelConfig.provider, customReadAttempt, setModelConfig]);
 
   // Clear provider-specific state when leaving Ollama
   useEffect(() => {
@@ -878,9 +879,10 @@ export function ModelSettingsModal({
     }
     // For custom-openai provider, save the custom config first
     if (modelConfig.provider === 'custom-openai') {
+      if (!customLoaded) return;
       try {
         await invoke('api_save_custom_openai_config', {
-        allowUnencrypted: customAllowUnencrypted,
+          allowUnencrypted: customAllowUnencrypted,
           endpoint: customOpenAIEndpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT,
           apiKey: newKeyPayload(customOpenAIApiKey),
           model: customOpenAIModel.trim() || DEFAULT_OPENAI_COMPATIBLE_MODEL,
@@ -1202,18 +1204,13 @@ export function ModelSettingsModal({
       setPreview(next);
       if (provider === 'openrouter') void loadOpenRouterModels();
       if (provider === 'builtin-ai') void loadBuiltinAiModels();
-      if (provider === 'custom-openai') {
-        invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config').then((config) => {
-          if (previewRef.current !== next) return;
-          setPreview({ ...next, ...customOpenAIModelFields(config), model: config?.model || next.model });
-        }).catch(() => { /* the fields keep their last values */ });
-      }
     }
   };
 
   /** What still has to be chosen before the provider being looked at can be used. */
   const draftProviderMissing = (): string | null => {
-    if (modelConfig.provider === 'custom-openai' && modelConfig.customOpenAIEndpoint === undefined) return 'Compatible provider settings must finish loading';
+    if (modelConfig.provider === 'custom-openai' && !customLoaded) return customLoad === 'error'
+      ? 'Could not load the compatible provider settings' : 'Checking compatible provider settings…';
     if (needsKey(modelConfig.provider) && !hasUsableKey(modelConfig.apiKey, keyStatus)) return 'Enter an API key first';
     if (MODEL_LIST_PROVIDERS.includes(modelConfig.provider) && !modelConfig.model?.trim()) return 'Choose a model first';
     if (modelConfig.provider === 'claude-code' && claudeCode.status && claudeCode.status.state !== 'ready') return 'Claude Code is not ready yet';
@@ -1292,6 +1289,16 @@ export function ModelSettingsModal({
     }
   };
 
+  const customLoadFeedback = () => customLoad === 'error' ? (
+    <div className="flex items-center gap-2">
+      <span role="status">Could not load the compatible provider settings.</span>
+      <Button type="button" variant="outline" onClick={() => {
+        setCustomLoad('loading');
+        setCustomReadAttempt(attempt => attempt + 1);
+      }}>Retry</Button>
+    </div>
+  ) : <p role="status" className="text-sm text-muted-foreground">Checking compatible provider settings…</p>;
+
   const customValues = () => ({
     endpoint: customOpenAIEndpoint, model: customOpenAIModel, apiKey: customOpenAIApiKey, contextWindow: customContextWindow,
     maxTokens: customMaxTokens, temperature: customTemperature, topP: customTopP, timeoutSeconds: customTimeoutSeconds,
@@ -1299,7 +1306,7 @@ export function ModelSettingsModal({
   });
 
   const commitCustom = async (over: Partial<ReturnType<typeof customValues>>): Promise<CommitResult> => {
-    if (modelConfig.customOpenAIEndpoint === undefined) throw new SaveError('Could not load the compatible provider settings');
+    if (!customLoaded) throw new SaveError('Could not load the compatible provider settings');
     const v = { ...customValues(), ...over };
     if (keyRequiredForAddress(savedCustomEndpoint, v.endpoint.trim() || DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, customKeyStatus, v.apiKey)) {
       // Keep the new address; it is saved together with the key.
@@ -1333,10 +1340,10 @@ export function ModelSettingsModal({
     const held = await saveConfig(next, 'Could not save the model settings');
     rememberModel('custom-openai', payload.model);
     setModelConfig(next);
-    setCustomAllowUnencrypted(v.allowUnencrypted);
-    setCustomDestinationProblem(null);
+    applyCustomFields(customOpenAIModelFields({
+      ...payload, apiKeyStatus: customKeyStatus, allow_unencrypted: v.allowUnencrypted,
+    }));
     setCustomCheck({ state: 'idle', message: '' });
-    setSavedCustomEndpoint(payload.endpoint);
     if (payload.apiKey) { setCustomOpenAIApiKey(''); await refreshCustomKeyStatus(); await refreshProviderKeyStatus?.('custom-openai'); }
     return held;
   };
@@ -1584,7 +1591,10 @@ export function ModelSettingsModal({
       );
     }
 
-    if (provider === 'custom-openai') {
+    if (provider === 'custom-openai' && !customLoaded) {
+      rows.push(<div key="custom-load">{customLoadFeedback()}</div>);
+    }
+    if (provider === 'custom-openai' && customLoaded) {
       rows.push(
         <CommitInputRow
           key="custom-endpoint" id="custom-endpoint" title="API base URL" type="url" placeholder={DEFAULT_OPENAI_COMPATIBLE_ENDPOINT}
@@ -1859,17 +1869,6 @@ export function ModelSettingsModal({
                 if (provider === 'builtin-ai') {
                   loadBuiltinAiModels();
                 }
-
-                // Load custom OpenAI config when selected
-                if (provider === 'custom-openai') {
-                  invoke<CustomOpenAIConfig | null>('api_get_custom_openai_config').then((config) => {
-                    setModelConfig(prev => prev.provider === 'custom-openai'
-                      ? { ...prev, ...customOpenAIModelFields(config), model: config?.model || prev.model }
-                      : prev);
-                  }).catch((err) => {
-                    console.error('Failed to load custom OpenAI config:', err);
-                  });
-                }
               }}
             >
               <SelectTrigger>
@@ -1955,7 +1954,8 @@ export function ModelSettingsModal({
         </div>
 
         {/* Custom OpenAI Configuration Section */}
-        {modelConfig.provider === 'custom-openai' && (
+        {modelConfig.provider === 'custom-openai' && !customLoaded && customLoadFeedback()}
+        {modelConfig.provider === 'custom-openai' && customLoaded && (
           <div className="space-y-4 border-t pt-4">
             <div>
               <Label htmlFor="custom-endpoint">API base URL *</Label>

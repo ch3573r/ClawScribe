@@ -18,7 +18,7 @@ interface Draft {
 export type FollowUpEmailDraft = { subject?: string | null; body?: string | null };
 
 const MAX_RECIPIENTS = 25;
-const EMAIL_ADDRESS = /^[a-z0-9_+%'-]+(?:\.[a-z0-9_+%'-]+)*@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+const EMAIL_ADDRESS = /^[a-z0-9_+'-]+(?:\.[a-z0-9_+'-]+)*@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
 
 
 export function FollowUpEmail({ meetingId, close, initialDraft }: {
@@ -57,7 +57,7 @@ export function FollowUpEmail({ meetingId, close, initialDraft }: {
     if (!unique.has(address)) unique.set(address, email);
   }
   const recipients = [...unique.values()];
-  const recipientError = manual.some(email => email.length > 254 || !EMAIL_ADDRESS.test(email))
+  const recipientError = manual.some(email => email.length > 254 || email.indexOf("@") > 64 || !EMAIL_ADDRESS.test(email))
     ? 'Enter valid email addresses separated by commas or semicolons.'
     : recipients.length > MAX_RECIPIENTS ? `Use up to ${MAX_RECIPIENTS} recipients.` : '';
 

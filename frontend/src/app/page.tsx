@@ -21,7 +21,6 @@ import { RECOVERY_OPEN_ALL, RECOVERY_OPEN_REQUEST } from '@/lib/interruptedRecor
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
-import { errorText } from '@/lib/errorText';
 import { useLiveTranscriptionReadiness } from '@/hooks/useLiveTranscriptionReadiness';
 import { LIVE_MODEL_FAILURE_MESSAGE, transcriptionSettingsPath } from '@/lib/start-error';
 import { Button } from '@/components/ui/button';
@@ -127,48 +126,41 @@ export default function Home() {
 
   // Handle recovery with toast notifications and navigation
   const handleRecovery = async (meetingId: string) => {
-    try {
-      const result = await recoverMeeting(meetingId);
+    const result = await recoverMeeting(meetingId);
 
-      if (result.success) {
-        toast.success('Meeting recovered', {
-          description: result.audioRecoveryStatus?.status === 'partial'
-            ? 'Available audio recovered with gaps. You can transcribe it from the saved meeting.'
-            : result.audioRecoveryStatus?.status === 'success'
-              ? result.transcriptCount === 0
-                ? 'Audio recovered. You can transcribe it from the saved meeting.'
-                : 'Transcripts and audio recovered'
-              : result.audioRecoveryStatus?.status === 'failed'
-                ? 'Transcripts saved. Audio recovery needs a retry; original recording files were kept.'
-                : 'Transcripts recovered (no audio available)',
-          action: result.meetingId ? {
-            label: 'View meeting',
-            onClick: () => {
-              router.push(`/meeting-details?id=${result.meetingId}`);
-            }
-          } : undefined,
-          duration: 10000,
-        });
-
-        // Refresh sidebar to show the newly recovered meeting
-        await refetchMeetings();
-
-        if (result.remainingCount === 0) {
-          setShowRecoveryDialog(false);
-          sessionStorage.removeItem('recovery_dialog_shown');
-
-          if (result.meetingId) {
-            setTimeout(() => {
-              router.push(`/meeting-details?id=${result.meetingId}`);
-            }, 2000);
+    if (result.success) {
+      toast.success('Meeting recovered', {
+        description: result.audioRecoveryStatus?.status === 'partial'
+          ? 'Available audio recovered with gaps. You can transcribe it from the saved meeting.'
+          : result.audioRecoveryStatus?.status === 'success'
+            ? result.transcriptCount === 0
+              ? 'Audio recovered. You can transcribe it from the saved meeting.'
+              : 'Transcripts and audio recovered'
+            : result.audioRecoveryStatus?.status === 'failed'
+              ? 'Transcripts saved. Audio recovery needs a retry; original recording files were kept.'
+              : 'Transcripts recovered (no audio available)',
+        action: result.meetingId ? {
+          label: 'View meeting',
+          onClick: () => {
+            router.push(`/meeting-details?id=${result.meetingId}`);
           }
+        } : undefined,
+        duration: 10000,
+      });
+
+      // Refresh sidebar to show the newly recovered meeting
+      await refetchMeetings();
+
+      if (result.remainingCount === 0) {
+        setShowRecoveryDialog(false);
+        sessionStorage.removeItem('recovery_dialog_shown');
+
+        if (result.meetingId) {
+          setTimeout(() => {
+            router.push(`/meeting-details?id=${result.meetingId}`);
+          }, 2000);
         }
       }
-    } catch (error) {
-      toast.error('Failed to recover meeting', {
-        description: errorText(error),
-      });
-      throw error;
     }
   };
 

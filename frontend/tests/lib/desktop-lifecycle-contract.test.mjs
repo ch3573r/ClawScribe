@@ -88,8 +88,12 @@ test('a registered hotkey checks the foreground HWND before deciding whether set
 
 test('hidden capture alerts use generic desktop messages and the existing notification preferences', () => {
   assert.match(rust('tray.rs'), /listen_for_background_alerts\(app\)/);
-  const alerts = functionBody(rust('notifications/commands.rs'), 'pub(crate) fn listen_for_background_alerts');
-  for (const name of ['call-detection-prompt', 'recording-warning', 'recording-error', 'transcription-warning', 'recording-disk-space-low']) {
+  const commands = rust('notifications/commands.rs');
+  const alerts = functionBody(commands, 'pub(crate) fn listen_for_background_alerts');
+  assert.match(commands, /CALL_FALLBACK_ALERT: &str = "call-detection-toast-fallback"/);
+  assert.match(alerts, /CALL_FALLBACK_ALERT/);
+  assert.doesNotMatch(alerts, /"call-detection-prompt"/);
+  for (const name of ['recording-warning', 'recording-error', 'transcription-warning', 'recording-disk-space-low']) {
     assert.ok(alerts.includes('"' + name + '"'), name);
   }
   assert.match(alerts, /window\.is_visible\(\)[\s\S]*window\.is_minimized\(\)/);

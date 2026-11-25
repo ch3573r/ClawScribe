@@ -25,10 +25,17 @@ fn pending_key() -> Option<String> {
     prompt.surface.is_none().then(|| prompt.key.clone())
 }
 
+fn background_alert_event(surface: PromptSurface) -> Option<&'static str> {
+    (surface == PromptSurface::Toast).then_some(crate::notifications::commands::CALL_FALLBACK_ALERT)
+}
+
 fn publish<R: Runtime>(app: &AppHandle<R>, key: &str, surface: PromptSurface) -> bool {
     let view = tracker().select_prompt_surface(key, surface);
     if let Some(view) = view {
         let _ = app.emit("call-detection-prompt", view);
+        if let Some(event) = background_alert_event(surface) {
+            let _ = app.emit(event, ());
+        }
         true
     } else {
         false
@@ -120,4 +127,18 @@ fn build_window<R: Runtime>(app: &AppHandle<R>, key: &str) -> Result<tauri::Webv
         _ => {}
     });
     Ok(window)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_toast_fallback_has_a_background_alert_event() {
+        assert_eq!(background_alert_event(PromptSurface::Native), None);
+        assert_eq!(
+            background_alert_event(PromptSurface::Toast),
+            Some(crate::notifications::commands::CALL_FALLBACK_ALERT)
+        );
+    }
 }

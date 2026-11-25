@@ -100,10 +100,11 @@ test('Home keeps recovery open for the next interrupted recording and clears its
   t.mock.method(globalThis, 'setTimeout', callback => { timeouts.push(callback); });
   let recoverableMeetings = [{ meetingId: 'first' }, { meetingId: 'second' }];
   const check = async () => {};
-  const routes = [];
+  const routes = [], recoveryErrors = [];
   const { default: Home } = loadTsModule('src/app/page.tsx', {
     ...primitives, react: hooks.react, 'framer-motion': { motion: { div: 'div' } },
     'next/navigation': { useRouter: () => ({ push: route => routes.push(route) }) },
+    sonner: { toast: { error: (...args) => recoveryErrors.push(args), success() {} } },
     './_components/SettingsModal': components('SettingsModals'),
     './_components/TranscriptPanel': components('TranscriptPanel'),
     '@/app/_components/StatusOverlays': components('StatusOverlays'),
@@ -122,6 +123,7 @@ test('Home keeps recovery open for the next interrupted recording and clears its
     '@/hooks/useLiveTranscriptionReadiness': { useLiveTranscriptionReadiness: () => ({}) },
     '@/hooks/useTranscriptRecovery': { useTranscriptRecovery: () => ({
       recoverableMeetings, checkForRecoverableTranscripts: check, recoverMeeting: async id => {
+        if (id === 'failed') throw new Error('Fixture recovery failed');
         recoverableMeetings = recoverableMeetings.filter(meeting => meeting.meetingId !== id);
         return { success: true, meetingId: id, remainingCount: recoverableMeetings.length };
       },
@@ -130,6 +132,8 @@ test('Home keeps recovery open for the next interrupted recording and clears its
   const recovery = () => nodes(hooks.render(Home)).find(node => node.type === 'TranscriptRecovery').props;
   recovery();
   assert.equal(recovery().isOpen, true);
+  await assert.rejects(recovery().onRecover('failed'), /Fixture recovery failed/);
+  assert.deepEqual(recoveryErrors, [], 'the recovery dialog owns error feedback');
   await recovery().onRecover('first');
   assert.equal(recovery().isOpen, true);
   assert.equal(timeouts.length, 0);

@@ -35,7 +35,7 @@ function app(options = {}) {
   const handlers = new Map();
   const unlistened = [];
   const state = { isRecording: false, isStarting: false, isStopping: false, isProcessing: false, isSaving: false, setStatus: (...args) => statuses.push(args), ...options.state };
-  const statuses = [], starts = [], answers = [], toasts = [], dismissed = [], confirmed = [], failures = [], corePushed = [];
+  const statuses = [], starts = [], answers = [], toasts = [], dismissed = [], confirmed = [], declined = [], failures = [], corePushed = [];
   const navigation = [];
   // Navigation or a reload would go through these; the component must not touch them.
   window.sessionStorage = { setItem: (...args) => navigation.push(['sessionStorage', ...args]) };
@@ -47,6 +47,10 @@ function app(options = {}) {
   const { RecordingRequests } = loadTsModule(path('components/RecordingRequests.tsx'), {
     react: hooks.react,
     sonner: { toast },
+    '@tauri-apps/api/core': { invoke: async (command, { key }) => {
+      assert.equal(command, 'dismiss_call_detection_prompt');
+      declined.push(key);
+    } },
     '@tauri-apps/api/event': { listen: async (name, handler) => { handlers.set(name, handler); return () => unlistened.push(name); } },
     '@/lib/autoRecord': prefs,
     '@/contexts/RecordingStateContext': { useRecordingState: () => state, RecordingStatus: { ERROR: 'error' } },
@@ -72,7 +76,7 @@ function app(options = {}) {
   const render = () => hooks.render(() => RecordingRequests({ ready: options.ready ?? true }));
   render();
   return {
-    render, hooks, prefs, state, statuses, starts, answers, toasts, dismissed, confirmed, failures, corePushed, navigation,
+    render, hooks, prefs, state, statuses, starts, answers, toasts, dismissed, confirmed, declined, failures, corePushed, navigation,
     emit: async (name, payload, fallback = payload) => {
       if (name === 'call-detection-prompt') options.pendingPrompt = fallback ?? null;
       if (name === 'call-detection-prompt-cleared') options.pendingPrompt = null;
@@ -287,4 +291,20 @@ test('unmount removes the listeners while the claimed start remains native-owned
   pending.resolve('synthetic-session');
   await flush();
   assert.deepEqual(window_.answers, []);
+});
+
+test('a toast prompt can be declined explicitly and timing out leaves it pending', async t => {
+  const view = app();
+  t.after(() => view.hooks.unmount());
+  await flush();
+  const call = { key: 'decline-fixture', provider: 'teams' };
+  await view.emit('call-detection-prompt', call);
+  const prompt = view.toasts.at(-1);
+  prompt.onAutoClose?.();
+  assert.deepEqual(view.declined, []);
+  assert.equal(prompt.cancel.label, 'Not now');
+  prompt.cancel.onClick();
+  await flush();
+  assert.deepEqual(view.declined, [call.key]);
+  assert.deepEqual(view.confirmed, []);
 });

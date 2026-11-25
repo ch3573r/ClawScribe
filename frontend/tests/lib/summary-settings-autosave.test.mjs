@@ -480,3 +480,41 @@ test('a fresh summary setup shows the local draft without claiming a selected mo
   assert.equal(app.saves.length, 0);
   app.hooks.unmount();
 });
+
+test('compatible provider stays read-only after a failed load, then hydrates on retry', async t => {
+  let reject;
+  const pending = new Promise((_resolve, fail) => { reject = fail; });
+  void pending.catch(() => {});
+  const responses = { api_get_custom_openai_config: pending };
+  const app = modalHarness({ responses });
+  t.after(() => app.hooks.unmount());
+  app.context.modelConfig.customOpenAIEndpoint = null;
+  const find = predicate => nodes(app.render()).find(predicate);
+  const button = label => find(node => node.type === 'button' && text(node) === label);
+  find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('custom-openai');
+  app.render();
+  const field = () => find(node => node.type === 'commit-input-row' && node.props.id === 'custom-endpoint');
+  assert.equal(field(), undefined);
+  reject(new Error('Fixture load failed'));
+  await flush();
+  assert.equal(field(), undefined);
+  assert.equal(find(node => node.type === 'button' && /^Use /.test(text(node))).props.disabled, true);
+  responses.api_get_custom_openai_config = customOpenAI;
+  button('Retry').props.onClick();
+  app.render();
+  await flush();
+  assert.equal(field().props.value, customOpenAI.endpoint);
+  assert.equal(app.calls.filter(([command]) => command === 'api_save_custom_openai_config').length, 0);
+});
+
+test('Codex sign-out remains available for an unknown authentication status', async t => {
+  const app = modalHarness({ provider: 'codex', responses: {
+    codex_check_installation: { found: true, authStatus: 'future-account-type' },
+    codex_list_models: [],
+  } });
+  t.after(() => app.hooks.unmount());
+  app.render();
+  await flush();
+  const signOut = nodes(app.render()).find(node => node.type === 'button' && text(node) === 'Sign out');
+  assert.equal(signOut.props.disabled, false);
+});

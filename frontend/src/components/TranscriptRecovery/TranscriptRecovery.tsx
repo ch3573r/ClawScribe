@@ -102,7 +102,9 @@ export function TranscriptRecovery({
       await onRecover(selectedMeetingId);
     } catch (error) {
       console.error('Meeting recovery failed:', error);
-      toast.error('Could not recover the meeting. Your recovery data is still available. Try again.');
+      toast.error('Could not recover the meeting. Your recovery data is still available. Try again.', {
+        description: errorText(error),
+      });
     } finally {
       setIsRecovering(false);
     }

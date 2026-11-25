@@ -199,6 +199,28 @@ pub(crate) fn cancel_microsoft_pending<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+fn invitation_matches_ical_source(invitation: &Invitation, source: uuid::Uuid) -> bool {
+    if invitation.link.source() != CalendarSource::Ical {
+        return false;
+    }
+    // The serialized link exposes the source for both single and recurring events.
+    serde_json::to_value(&invitation.link)
+        .ok()
+        .and_then(|link| uuid::Uuid::parse_str(link.get("sourceId")?.as_str()?).ok())
+        == Some(source)
+}
+
+pub(crate) fn cancel_ical_pending<R: Runtime>(app: &AppHandle<R>, source: uuid::Uuid) {
+    let id = tracker()
+        .join
+        .as_ref()
+        .filter(|join| invitation_matches_ical_source(join, source))
+        .map(|join| join.id.clone());
+    if let Some(id) = id {
+        cancel(app, &id);
+    }
+}
+
 fn prepare_invitation(
     url: &str,
     link: CalendarLink,
@@ -288,6 +310,25 @@ pub async fn join_and_record<R: Runtime>(
 mod tests {
     use super::super::{CallSettings, Context, Decision};
     use super::*;
+
+    #[test]
+    fn removing_an_ical_feed_matches_only_its_own_pending_invitation() {
+        let feed = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        let end = (now + chrono::Duration::hours(1)).to_rfc3339();
+        for (source, expected) in [("ical", true), ("microsoft", false)] {
+            let link: CalendarLink = serde_json::from_value(serde_json::json!({
+                "source": source, "sourceId": feed, "eventId": "single-event",
+                "start": now.to_rfc3339(),
+            }))
+            .unwrap();
+            let (_, invitation) =
+                prepare_invitation("https://teams.microsoft.com/meet/123456", link, &end).unwrap();
+            assert_eq!(invitation_matches_ical_source(&invitation, feed), expected);
+            assert!(!invitation_matches_ical_source(&invitation, other));
+        }
+    }
 
     const IDLE: Context = Context {
         idle: true,

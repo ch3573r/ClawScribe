@@ -35,7 +35,7 @@ function useLoadable<T>(load: () => Promise<T>, tick: number): Loadable<T> {
 export function usePrivacyInput(): PrivacyInput {
   const { isAutoSummary, modelConfig } = useConfig();
   const { recordingMode } = useRecordingState();
-  const { destination } = useSummaryDestination(isAutoSummary, modelConfig, isAutoSummary);
+  const { destination, error: destinationError } = useSummaryDestination(isAutoSummary, modelConfig, isAutoSummary);
   const cloud = useCloudTranscription();
   const webhook = useWebhookSettings();
   const [tick, setTick] = useState(0);
@@ -118,7 +118,9 @@ export function usePrivacyInput(): PrivacyInput {
     cloudTranscription: cloud.enabled,
     summary,
     autoSummary: isAutoSummary,
-    automaticSummaryApproved: destination?.approved === true && summary.status === "ready" && destination.provider === summary.value.provider,
+    summaryDestination: destinationError !== null && destinationError !== undefined
+      ? { status: "error" }
+      : destination ? { status: "ready", value: destination } : { status: "loading" },
     liveSharing,
     microsoft,
     confluenceRest,
