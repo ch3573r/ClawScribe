@@ -195,7 +195,7 @@ test('settings reject player, global and built-in command collisions in either d
     ['Play or pause', event('h', 'KeyH', { metaKey: true }), /replace/i],
     ['Play or pause', event('F4', 'F4', { altKey: true }), /reserved|Windows/i],
     ['Play or pause', event('S', 'KeyS', { metaKey: true, shiftKey: true }), /reserved|Windows/i],
-    ['Start or stop recording', event('f', 'KeyF', { ctrlKey: true }), /find in transcript/i],
+    ['Start or stop recording', event('f', 'KeyF', { ctrlKey: true }), /find in the focused pane/i],
   ]) {
     await ui.assign(entry, chord); assert.match(error(), owner);
   }
