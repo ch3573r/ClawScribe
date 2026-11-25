@@ -21,7 +21,9 @@ pub mod exporter;
 pub mod files;
 pub mod interactive_auth;
 pub mod ledger;
+pub(crate) mod local_open;
 pub mod markdown_notes;
+pub(crate) mod metadata;
 pub mod model;
 pub mod ms_auth_state;
 pub mod onenote;
@@ -91,6 +93,7 @@ pub fn meeting_export_from_notes(
         action_items,
         transcript_excerpt,
         summary_html: None,
+        metadata: Default::default(),
     }
 }
 

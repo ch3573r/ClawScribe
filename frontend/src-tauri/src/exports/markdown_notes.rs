@@ -452,6 +452,7 @@ pub fn meeting_export_for_onenote(
         action_items: Vec::new(),
         transcript_excerpt: None,
         summary_html: Some(html),
+        metadata: Default::default(),
     }
 }
 
@@ -474,6 +475,7 @@ pub fn meeting_export_for_planner(
         action_items: actions,
         transcript_excerpt: None,
         summary_html: None,
+        metadata: Default::default(),
     }
 }
 

@@ -377,9 +377,12 @@ export const microsoftExportService = {
 
   async exportMeetingToOneDriveFiles(
     request: OneDriveExportRequest,
+    options?: Pick<MeetingExportOptions, "bookmarks" | "timestamps">,
   ): Promise<OneDriveExportResponse> {
     return invoke<OneDriveExportResponse>("export_meeting_to_onedrive_files", {
       request,
+      includeBookmarks: options?.bookmarks,
+      timestamps: options?.timestamps,
     });
   },
 

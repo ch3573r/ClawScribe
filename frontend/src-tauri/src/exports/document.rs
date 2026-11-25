@@ -1,11 +1,13 @@
-//! Minimal DOCX generation for OneDrive/SharePoint file export.
+//! Minimal DOCX generation for local and OneDrive/SharePoint exports.
 //!
 //! The writer intentionally supports only the structure ClawScribe summaries
-//! need: headings, bullet list items, tables, and plain paragraphs. It avoids adding a
-//! document-generation dependency by creating the small Open XML ZIP package
-//! directly.
+//! need: headings, styled text, lists, tables, and plain transcript paragraphs.
+//! It writes the small Open XML ZIP package directly.
 
-use std::io::{Cursor, Write};
+use std::{
+    fmt::Write as _,
+    io::{Cursor, Write},
+};
 
 use zip::write::SimpleFileOptions;
 
@@ -14,12 +16,44 @@ enum DocBlock {
         level: u8,
         text: String,
     },
-    Bullet(String),
+    ListItem {
+        id: usize,
+        level: usize,
+        kind: ListKind,
+        start: u32,
+        text: String,
+    },
     Paragraph(String),
+    TranscriptLine(String),
     Table {
         header: Vec<String>,
         rows: Vec<Vec<String>>,
     },
+}
+
+const WORD_LIST_LEVELS: usize = 9;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListKind {
+    Bullet,
+    DecimalDot,
+    DecimalParen,
+}
+
+impl ListKind {
+    fn abstract_id(self) -> u8 {
+        match self {
+            Self::Bullet => 0,
+            Self::DecimalDot => 1,
+            Self::DecimalParen => 2,
+        }
+    }
+}
+
+struct ActiveList {
+    indent: usize,
+    kind: ListKind,
+    id: usize,
 }
 
 const CONTENT_TYPES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -40,40 +74,76 @@ const DOCUMENT_RELS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalo
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
 </Relationships>"#;
 
-const NUMBERING_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:abstractNum w:abstractNumId="0">
-    <w:lvl w:ilvl="0">
-      <w:start w:val="1"/>
-      <w:numFmt w:val="bullet"/>
-      <w:lvlText w:val="&#8226;"/>
-      <w:lvlJc w:val="left"/>
-      <w:pPr>
-        <w:ind w:left="720" w:hanging="360"/>
-      </w:pPr>
-    </w:lvl>
-  </w:abstractNum>
-  <w:num w:numId="1">
-    <w:abstractNumId w:val="0"/>
-  </w:num>
-</w:numbering>"#;
+fn build_numbering_xml(blocks: &[DocBlock]) -> String {
+    let mut xml = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    );
+    for kind in [
+        ListKind::Bullet,
+        ListKind::DecimalDot,
+        ListKind::DecimalParen,
+    ] {
+        let abstract_id = kind.abstract_id();
+        let _ = write!(
+            xml,
+            r#"<w:abstractNum w:abstractNumId="{abstract_id}"><w:multiLevelType w:val="multilevel"/>"#
+        );
+        for level in 0..WORD_LIST_LEVELS {
+            let number = level + 1;
+            let left = 360 * (level + 2);
+            let (format, label) = match kind {
+                ListKind::Bullet => ("bullet", "&#8226;".to_owned()),
+                ListKind::DecimalDot => ("decimal", format!("%{number}.")),
+                ListKind::DecimalParen => ("decimal", format!("%{number})")),
+            };
+            let _ = write!(
+                xml,
+                r#"<w:lvl w:ilvl="{level}"><w:start w:val="1"/><w:numFmt w:val="{format}"/><w:lvlText w:val="{label}"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="{left}" w:hanging="360"/></w:pPr></w:lvl>"#
+            );
+        }
+        xml.push_str("</w:abstractNum>");
+    }
+    xml.push_str(r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#);
+    let mut last_id = 1;
+    for block in blocks {
+        if let DocBlock::ListItem {
+            id,
+            level,
+            kind,
+            start,
+            ..
+        } = block
+        {
+            if *id > last_id {
+                last_id = *id;
+                let abstract_id = kind.abstract_id();
+                let _ = write!(
+                    xml,
+                    r#"<w:num w:numId="{id}"><w:abstractNumId w:val="{abstract_id}"/><w:lvlOverride w:ilvl="{level}"><w:startOverride w:val="{start}"/></w:lvlOverride></w:num>"#
+                );
+            }
+        }
+    }
+    xml.push_str("</w:numbering>");
+    xml
+}
 
 pub fn build_meeting_docx(
     meeting_title: &str,
     summary_markdown: &str,
     transcript: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    let title = clean_inline_markdown(meeting_title);
-    let title = if title.is_empty() {
-        "Meeting notes".to_string()
+    let title = if meeting_title.trim().is_empty() {
+        "Meeting notes"
     } else {
-        title
+        meeting_title.trim()
     };
 
     let mut blocks = Vec::new();
     blocks.push(DocBlock::Heading {
         level: 1,
-        text: title,
+        text: super::metadata::escape_inline(title),
     });
     blocks.extend(parse_markdown_blocks(
         &crate::summary::sources::strip_source_links(summary_markdown),
@@ -104,7 +174,11 @@ pub fn build_meeting_docx(
         "word/_rels/document.xml.rels",
         DOCUMENT_RELS_XML.as_bytes(),
     )?;
-    add_zip_file(&mut zip, "word/numbering.xml", NUMBERING_XML.as_bytes())?;
+    add_zip_file(
+        &mut zip,
+        "word/numbering.xml",
+        build_numbering_xml(&blocks).as_bytes(),
+    )?;
 
     let cursor = zip
         .finish()
@@ -129,7 +203,9 @@ fn add_zip_file(
 
 fn parse_markdown_blocks(markdown: &str) -> Vec<DocBlock> {
     let mut blocks = Vec::new();
-    let mut paragraph_lines: Vec<String> = Vec::new();
+    let mut paragraph_lines = Vec::new();
+    let mut next_list_id = 2;
+    let mut lists: Vec<ActiveList> = Vec::new();
 
     let mut lines = markdown.lines().peekable();
     while let Some(raw_line) = lines.next() {
@@ -154,35 +230,58 @@ fn parse_markdown_blocks(markdown: &str) -> Vec<DocBlock> {
                 {
                     let mut row = split_table_row(lines.next().unwrap());
                     row.resize(header.len(), String::new());
-                    rows.push(row.iter().map(|cell| clean_inline_markdown(cell)).collect());
+                    rows.push(row);
                 }
-                blocks.push(DocBlock::Table {
-                    header: header
-                        .iter()
-                        .map(|cell| clean_inline_markdown(cell))
-                        .collect(),
-                    rows,
-                });
+                lists.clear();
+                blocks.push(DocBlock::Table { header, rows });
                 continue;
             }
         }
 
         if let Some((level, text)) = parse_heading(trimmed) {
             flush_paragraph(&mut blocks, &mut paragraph_lines);
+            lists.clear();
             blocks.push(DocBlock::Heading {
                 level,
-                text: clean_inline_markdown(text),
+                text: text.to_owned(),
             });
             continue;
         }
 
-        if let Some(text) = strip_bullet_marker(trimmed) {
+        if let Some((kind, start, text)) = list_marker(trimmed) {
             flush_paragraph(&mut blocks, &mut paragraph_lines);
-            blocks.push(DocBlock::Bullet(clean_inline_markdown(text)));
+            let indent = raw_line
+                .bytes()
+                .take_while(u8::is_ascii_whitespace)
+                .map(|byte| if byte == b'\t' { 4 } else { 1 })
+                .sum();
+            while lists.last().is_some_and(|list| {
+                list.indent > indent || (list.indent == indent && list.kind != kind)
+            }) {
+                lists.pop();
+            }
+            if lists.last().is_none_or(|list| list.indent < indent) {
+                let id = if kind == ListKind::Bullet {
+                    1
+                } else {
+                    let id = next_list_id;
+                    next_list_id += 1;
+                    id
+                };
+                lists.push(ActiveList { indent, kind, id });
+            }
+            blocks.push(DocBlock::ListItem {
+                id: lists.last().unwrap().id,
+                level: (lists.len() - 1).min(WORD_LIST_LEVELS - 1),
+                start,
+                kind,
+                text: text.to_owned(),
+            });
             continue;
         }
 
-        paragraph_lines.push(clean_inline_markdown(trimmed));
+        lists.clear();
+        paragraph_lines.push(trimmed);
     }
 
     flush_paragraph(&mut blocks, &mut paragraph_lines);
@@ -231,11 +330,11 @@ fn transcript_blocks(transcript: &str) -> Vec<DocBlock> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(|line| DocBlock::Paragraph(line.to_string()))
+        .map(|line| DocBlock::TranscriptLine(line.to_string()))
         .collect()
 }
 
-fn flush_paragraph(blocks: &mut Vec<DocBlock>, paragraph_lines: &mut Vec<String>) {
+fn flush_paragraph(blocks: &mut Vec<DocBlock>, paragraph_lines: &mut Vec<&str>) {
     if paragraph_lines.is_empty() {
         return;
     }
@@ -268,30 +367,28 @@ fn parse_heading(line: &str) -> Option<(u8, &str)> {
     }
 }
 
-fn strip_bullet_marker(line: &str) -> Option<&str> {
+fn list_marker(line: &str) -> Option<(ListKind, u32, &str)> {
     for marker in ["- ", "* ", "+ "] {
-        if let Some(rest) = line.strip_prefix(marker) {
-            return Some(rest.trim());
+        if let Some(text) = line.strip_prefix(marker) {
+            return Some((ListKind::Bullet, 1, text.trim()));
         }
     }
 
     let bytes = line.as_bytes();
     let digit_count = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-    if digit_count == 0 || digit_count + 1 >= bytes.len() {
+    if !(1..=9).contains(&digit_count) || digit_count + 1 >= bytes.len() {
         return None;
     }
-    let marker = bytes[digit_count];
-    if (marker == b'.' || marker == b')') && bytes[digit_count + 1].is_ascii_whitespace() {
-        return Some(line[digit_count + 2..].trim());
+    let kind = match bytes[digit_count] {
+        b'.' => ListKind::DecimalDot,
+        b')' => ListKind::DecimalParen,
+        _ => return None,
+    };
+    if !bytes[digit_count + 1].is_ascii_whitespace() {
+        return None;
     }
-    None
-}
-
-fn clean_inline_markdown(text: &str) -> String {
-    text.trim()
-        .replace("**", "")
-        .replace("__", "")
-        .replace('`', "")
+    let start = line[..digit_count].parse().ok()?;
+    Some((kind, start, line[digit_count + 2..].trim()))
 }
 
 fn build_document_xml(blocks: &[DocBlock]) -> String {
@@ -304,8 +401,15 @@ fn build_document_xml(blocks: &[DocBlock]) -> String {
     for block in blocks {
         match block {
             DocBlock::Heading { level, text } => xml.push_str(&heading_xml(*level, text)),
-            DocBlock::Bullet(text) => xml.push_str(&bullet_xml(text)),
-            DocBlock::Paragraph(text) => xml.push_str(&paragraph_xml(text)),
+            DocBlock::ListItem {
+                id, level, text, ..
+            } => xml.push_str(&list_xml(*id, *level, text)),
+            DocBlock::Paragraph(text) => {
+                xml.push_str(&paragraph_xml(&inline_xml(text, RunStyle::default())))
+            }
+            DocBlock::TranscriptLine(text) => {
+                xml.push_str(&paragraph_xml(&run_xml(text, RunStyle::default())))
+            }
             DocBlock::Table { header, rows } => xml.push_str(&table_xml(header, rows)),
         }
     }
@@ -329,42 +433,28 @@ fn heading_xml(level: u8, text: &str) -> String {
         _ => 22,
     };
     let outline_level = level.saturating_sub(1);
+    let runs = inline_xml(
+        text,
+        RunStyle {
+            bold: true,
+            size: Some(size),
+            ..RunStyle::default()
+        },
+    );
     format!(
-        r#"<w:p>
-      <w:pPr>
-        <w:outlineLvl w:val="{outline_level}"/>
-        <w:spacing w:before="240" w:after="120"/>
-      </w:pPr>
-      <w:r>
-        <w:rPr><w:b/><w:sz w:val="{size}"/></w:rPr>
-        <w:t xml:space="preserve">{}</w:t>
-      </w:r>
-    </w:p>"#,
-        escape_xml(text)
+        r#"<w:p><w:pPr><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="{outline_level}"/></w:pPr>{runs}</w:p>"#,
     )
 }
 
-fn bullet_xml(text: &str) -> String {
+fn list_xml(id: usize, level: usize, text: &str) -> String {
+    let runs = inline_xml(text, RunStyle::default());
     format!(
-        r#"<w:p>
-      <w:pPr>
-        <w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>
-        <w:spacing w:after="80"/>
-      </w:pPr>
-      <w:r><w:t xml:space="preserve">{}</w:t></w:r>
-    </w:p>"#,
-        escape_xml(text)
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="{id}"/></w:numPr><w:spacing w:after="80"/></w:pPr>{runs}</w:p>"#,
     )
 }
 
-fn paragraph_xml(text: &str) -> String {
-    format!(
-        r#"<w:p>
-      <w:pPr><w:spacing w:after="120"/></w:pPr>
-      <w:r><w:t xml:space="preserve">{}</w:t></w:r>
-    </w:p>"#,
-        escape_xml(text)
-    )
+fn paragraph_xml(runs: &str) -> String {
+    format!(r#"<w:p><w:pPr><w:spacing w:after="120"/></w:pPr>{runs}</w:p>"#)
 }
 
 fn table_xml(header: &[String], rows: &[Vec<String>]) -> String {
@@ -392,20 +482,189 @@ fn table_xml(header: &[String], rows: &[Vec<String>]) -> String {
             xml.push_str("<w:trPr><w:tblHeader/></w:trPr>");
         }
         for (cell, width) in row.iter().zip(&widths) {
-            let bold = if index == 0 {
-                "<w:rPr><w:b/></w:rPr>"
-            } else {
-                ""
-            };
+            let runs = inline_xml(
+                cell,
+                RunStyle {
+                    bold: index == 0,
+                    ..RunStyle::default()
+                },
+            );
             xml.push_str(&format!(
-                r#"<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/></w:tcPr><w:p><w:r>{bold}<w:t xml:space="preserve">{}</w:t></w:r></w:p></w:tc>"#,
-                escape_xml(cell)
+                r#"<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/></w:tcPr><w:p>{runs}</w:p></w:tc>"#,
             ));
         }
         xml.push_str("</w:tr>");
     }
     xml.push_str(r#"</w:tbl><w:p><w:pPr><w:spacing w:after="120"/></w:pPr></w:p>"#);
     xml
+}
+
+#[derive(Clone, Copy, Default)]
+struct RunStyle {
+    bold: bool,
+    italic: bool,
+    code: bool,
+    size: Option<u8>,
+}
+
+fn run_xml(text: &str, style: RunStyle) -> String {
+    let mut xml = String::from("<w:r>");
+    if style.bold || style.italic || style.code || style.size.is_some() {
+        xml.push_str("<w:rPr>");
+        if style.code {
+            xml.push_str(r#"<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>"#);
+        }
+        if style.bold {
+            xml.push_str("<w:b/>");
+        }
+        if style.italic {
+            xml.push_str("<w:i/>");
+        }
+        if let Some(size) = style.size {
+            xml.push_str(&format!(r#"<w:sz w:val="{size}"/>"#));
+        }
+        xml.push_str("</w:rPr>");
+    }
+    xml.push_str(r#"<w:t xml:space="preserve">"#);
+    xml.push_str(&escape_xml(text));
+    xml.push_str("</w:t></w:r>");
+    xml
+}
+
+fn inline_xml(text: &str, style: RunStyle) -> String {
+    let mut xml = String::new();
+    write_inline_runs(&mut xml, text, style, 0);
+    if xml.is_empty() {
+        xml = run_xml("", style);
+    }
+    xml
+}
+
+fn write_inline_runs(xml: &mut String, text: &str, style: RunStyle, depth: u8) {
+    let mut plain = String::new();
+    let mut index = 0;
+    while index < text.len() {
+        let rest = &text[index..];
+        if let Some(escaped) = escaped_punctuation(rest) {
+            plain.push(escaped);
+            index += 2;
+            continue;
+        }
+        let marker = rest.chars().next().unwrap();
+        if matches!(marker, '*' | '_' | CODE_MARKER) {
+            let width = rest
+                .bytes()
+                .take_while(|byte| *byte == marker as u8)
+                .count();
+            let after = &rest[width..];
+            let intraword = marker == '_'
+                && text[..index].ends_with(char::is_alphanumeric)
+                && after.starts_with(char::is_alphanumeric);
+            let code = marker == CODE_MARKER;
+            if depth < 12
+                && (code || (width <= 3 && !intraword && !after.starts_with(char::is_whitespace)))
+            {
+                if let Some((content, remaining)) = closing_delimiter(after, marker, width) {
+                    if !plain.is_empty() {
+                        xml.push_str(&run_xml(&plain, style));
+                        plain.clear();
+                    }
+                    if code {
+                        let content = content
+                            .strip_prefix(' ')
+                            .and_then(|value| value.strip_suffix(' '))
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or(content);
+                        xml.push_str(&run_xml(
+                            content,
+                            RunStyle {
+                                code: true,
+                                ..style
+                            },
+                        ));
+                    } else {
+                        let style = RunStyle {
+                            bold: style.bold || width >= 2,
+                            italic: style.italic || width % 2 == 1,
+                            ..style
+                        };
+                        write_inline_runs(xml, content, style, depth + 1);
+                    }
+                    index = text.len() - remaining.len();
+                    continue;
+                }
+            }
+            plain.push_str(&rest[..width]);
+            index += width;
+        } else {
+            plain.push(marker);
+            index += marker.len_utf8();
+        }
+    }
+    if !plain.is_empty() {
+        xml.push_str(&run_xml(&plain, style));
+    }
+}
+
+const CODE_MARKER: char = '\u{60}';
+
+fn escaped_punctuation(text: &str) -> Option<char> {
+    text.strip_prefix('\\')?
+        .chars()
+        .next()
+        .filter(char::is_ascii_punctuation)
+}
+
+fn closing_delimiter(text: &str, marker: char, width: usize) -> Option<(&str, &str)> {
+    let mut index = 0;
+    while index < text.len() {
+        let rest = &text[index..];
+        if marker != CODE_MARKER {
+            if escaped_punctuation(rest).is_some() {
+                index += 2;
+                continue;
+            }
+            if rest.starts_with(CODE_MARKER) {
+                let code_width = rest
+                    .bytes()
+                    .take_while(|byte| *byte == CODE_MARKER as u8)
+                    .count();
+                if let Some((_, remaining)) =
+                    closing_delimiter(&rest[code_width..], CODE_MARKER, code_width)
+                {
+                    index = text.len() - remaining.len();
+                    continue;
+                }
+                index += code_width;
+                continue;
+            }
+        }
+        let Some(ch) = rest.chars().next() else { break };
+        if ch != marker {
+            index += ch.len_utf8();
+            continue;
+        }
+        let count = rest
+            .bytes()
+            .take_while(|byte| *byte == marker as u8)
+            .count();
+        let before = &text[..index];
+        let remaining = &rest[count..];
+        let closes = if marker == CODE_MARKER {
+            count == width
+        } else {
+            (count == width || (count == 3 && width < count))
+                && !before.ends_with(char::is_whitespace)
+                && !(marker == '_'
+                    && before.ends_with(char::is_alphanumeric)
+                    && remaining.starts_with(char::is_alphanumeric))
+        };
+        if index > 0 && closes {
+            return Some((&text[..index + count - width], remaining));
+        }
+        index += count;
+    }
+    None
 }
 
 fn escape_xml(text: &str) -> String {
@@ -417,7 +676,13 @@ fn escape_xml(text: &str) -> String {
             '>' => escaped.push_str("&gt;"),
             '"' => escaped.push_str("&quot;"),
             '\'' => escaped.push_str("&apos;"),
-            _ => escaped.push(ch),
+            '\u{9}'
+            | '\u{a}'
+            | '\u{d}'
+            | '\u{20}'..='\u{d7ff}'
+            | '\u{e000}'..='\u{fffd}'
+            | '\u{10000}'..='\u{10ffff}' => escaped.push(ch),
+            _ => {}
         }
     }
     escaped
@@ -427,6 +692,75 @@ fn escape_xml(text: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn docx_uses_formatted_runs_and_restarts_numbering() {
+        let bytes = build_meeting_docx(
+            "Notes",
+            "## Heading\n\nNormal **bold &** *italic* `<code>` \\*literal\\*.\n\n3. **First**\n4. Second\n\n- Bullet\n\n1. Restart\n\n| Value |\n| --- |\n| *cell* |",
+            Some("[00:01] **Literal** \u{1}"),
+        )
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut part = |name: &str| {
+            let mut xml = String::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_string(&mut xml)
+                .unwrap();
+            xml
+        };
+        let document = part("word/document.xml");
+        let numbering = part("word/numbering.xml");
+        assert!(document.contains(r#"<w:b/></w:rPr><w:t xml:space="preserve">bold &amp;"#));
+        assert!(document.contains(r#"<w:i/></w:rPr><w:t xml:space="preserve">italic"#));
+        assert!(document.contains(r#"<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>"#));
+        assert!(document.contains("&lt;code&gt;"));
+        assert!(document.contains("*literal*"));
+        assert!(document.contains("**Literal**"));
+        assert!(!document.contains('\u{1}'));
+        assert_eq!(document.matches(r#"<w:numId w:val="1"/>"#).count(), 1);
+        assert_eq!(document.matches(r#"<w:numId w:val="2"/>"#).count(), 2);
+        assert_eq!(document.matches(r#"<w:numId w:val="3"/>"#).count(), 1);
+        assert!(numbering.contains(r#"<w:numFmt w:val="decimal"/>"#));
+        assert!(numbering.contains(r#"<w:startOverride w:val="3"/>"#));
+        assert!(numbering.contains(r#"<w:startOverride w:val="1"/>"#));
+        assert!(document.contains(r#"<w:i/></w:rPr><w:t xml:space="preserve">cell"#));
+        for xml in [document, numbering] {
+            let mut reader = quick_xml::Reader::from_str(&xml);
+            while reader.read_event().unwrap() != quick_xml::events::Event::Eof {}
+        }
+    }
+
+    #[test]
+    fn nested_lists_keep_ordered_starts_levels_and_parent_continuation() {
+        let blocks = parse_markdown_blocks(
+            "3. Parent\n   - Bullet detail\n   7) Ordered detail\n   8) More detail\n4. Next parent",
+        );
+        let document = build_document_xml(&blocks);
+        let numbering = build_numbering_xml(&blocks);
+        assert_eq!(
+            document
+                .matches(r#"<w:ilvl w:val="0"/><w:numId w:val="2"/>"#)
+                .count(),
+            2
+        );
+        assert_eq!(
+            document
+                .matches(r#"<w:ilvl w:val="1"/><w:numId w:val="1"/>"#)
+                .count(),
+            1
+        );
+        assert_eq!(
+            document
+                .matches(r#"<w:ilvl w:val="1"/><w:numId w:val="3"/>"#)
+                .count(),
+            2
+        );
+        assert!(numbering.contains(r#"<w:num w:numId="3"><w:abstractNumId w:val="2"/><w:lvlOverride w:ilvl="1"><w:startOverride w:val="7"/>"#));
+        assert!(numbering.contains(r#"<w:lvlText w:val="%2)"/>"#));
+    }
 
     #[test]
     fn adjacent_docx_tables_are_separated_by_an_empty_paragraph() {
@@ -510,8 +844,8 @@ mod tests {
         for xml in [
             xml,
             heading_xml(1, " heading "),
-            bullet_xml(" bullet "),
-            paragraph_xml(" paragraph "),
+            list_xml(1, 0, " bullet "),
+            paragraph_xml(&run_xml(" paragraph ", RunStyle::default())),
         ] {
             assert!(xml.contains("xml:space=\"preserve\"> "));
             assert!(!xml.contains("<w:t>"));
@@ -575,7 +909,8 @@ mod tests {
         assert!(document_xml.contains("Weekly Sync"));
         assert!(document_xml.contains("Decisions"));
         assert!(document_xml.contains("Ship &amp; learn"));
-        assert!(document_xml.contains("Plain summary text."));
+        assert!(document_xml.contains(r#"preserve">Plain </w:t>"#));
+        assert!(document_xml.contains(r#"<w:b/></w:rPr><w:t xml:space="preserve">summary</w:t>"#));
         assert!(document_xml.contains("Transcript"));
         assert!(document_xml.contains("&lt;approved&gt;"));
     }
@@ -586,8 +921,20 @@ mod tests {
             parse_markdown_blocks("## Next steps\n1. First\n- Second\nA paragraph\ncontinues");
         assert_eq!(blocks.len(), 4);
         assert!(matches!(blocks[0], DocBlock::Heading { level: 2, .. }));
-        assert!(matches!(blocks[1], DocBlock::Bullet(_)));
-        assert!(matches!(blocks[2], DocBlock::Bullet(_)));
+        assert!(matches!(
+            blocks[1],
+            DocBlock::ListItem {
+                kind: ListKind::DecimalDot,
+                ..
+            }
+        ));
+        assert!(matches!(
+            blocks[2],
+            DocBlock::ListItem {
+                kind: ListKind::Bullet,
+                ..
+            }
+        ));
         assert!(matches!(blocks[3], DocBlock::Paragraph(_)));
     }
 }

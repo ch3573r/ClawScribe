@@ -1,0 +1,27 @@
+{
+  "name": "Customer / discovery call",
+  "description": "Capture customer goals, current workflows, constraints, and agreed follow-ups.",
+  "sections": [
+    {
+      "title": "Customer context",
+      "instruction": "Summarize who described the current workflow and why they are exploring a change. Cite the supplied source tags",
+      "format": "paragraph"
+    },
+    {
+      "title": "Goals and pain points",
+      "instruction": "List each stated goal or pain point with the customer's example, impact, or measure of success when given. Cite the supplied source tag for each point",
+      "format": "list"
+    },
+    {
+      "title": "Requirements and open questions",
+      "instruction": "Separate confirmed requirements, preferences, and unanswered questions. Preserve the customer's wording when it matters and cite the supplied source tags",
+      "format": "list"
+    },
+    {
+      "title": "Next steps",
+      "instruction": "List only agreed follow-ups with owners and dates when stated. Copy the supplied source tag next to each step",
+      "format": "list",
+      "item_format": "- Task in one sentence. Owner: name or Unassigned; Due: date or Not specified"
+    }
+  ]
+}

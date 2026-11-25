@@ -38,6 +38,11 @@ export function SummaryTemplateSettings() {
   const loadVersion = useRef(0);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; loadVersion.current += 1; }; }, []);
+  useEffect(() => {
+    if (typeof window !== 'undefined' && new URLSearchParams(window.location?.search).get('manageTemplates') === '1') {
+      setDialogOpen(true);
+    }
+  }, []);
 
   const open = async (id: string) => {
     const request = ++loadVersion.current;

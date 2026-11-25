@@ -115,6 +115,9 @@ pub struct MeetingExport {
     /// its headings, lists, and emphasis on the exported page.
     #[serde(default)]
     pub summary_html: Option<String>,
+    /// Canonical metadata rendered by the local export builder.
+    #[serde(skip)]
+    pub(crate) metadata: super::metadata::OneNoteHeader,
 }
 
 impl MeetingExport {
@@ -167,6 +170,7 @@ mod tests {
             }],
             transcript_excerpt: None,
             summary_html: None,
+            metadata: Default::default(),
         };
 
         let h1 = base.artifact_hash();

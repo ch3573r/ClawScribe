@@ -26,13 +26,19 @@ test('Confluence table pipe escaping respects even and odd backslash counts', ()
 });
 
 test('Confluence draft removes app citation targets and retains readable times', () => {
-  const { buildConfluenceDraftMarkdown, markdownToConfluenceHtml } = loadTsModule('src/lib/confluenceDraft.ts');
+  const { buildConfluenceDraft } = loadTsModule('src/lib/confluenceDraft.ts');
   const summaryMarkdown = '- Send draft [00:12:34](#clawscribe-source-abc123)';
-  const draft = buildConfluenceDraftMarkdown({ meetingId: 'internal-meeting-id', meetingTitle: 'Notes', summaryMarkdown });
-  assert.ok(!draft.includes('internal-meeting-id'));
-  assert.ok(draft.includes('(00:12:34)'));
-  assert.ok(!draft.includes('clawscribe-source'));
-  assert.ok(!markdownToConfluenceHtml(draft).includes('clawscribe-source'));
+  const header = {
+    markdown: '# Notes\n\n- Date: 2026-01-01\n- Project tags: \\*draft\\*',
+    html: '<h1>Notes</h1><ul><li>Date: 2026-01-01</li><li>Project tags: *draft*</li></ul>',
+  };
+  const draft = buildConfluenceDraft(header, summaryMarkdown);
+  assert.ok(draft.markdown.startsWith(header.markdown));
+  assert.ok(draft.html.includes(header.html));
+  for (const content of [draft.markdown, draft.html]) {
+    assert.ok(content.includes('(00:12:34)'));
+    assert.ok(!content.includes('clawscribe-source'));
+  }
   assert.ok(summaryMarkdown.includes('clawscribe-source'));
 });
 

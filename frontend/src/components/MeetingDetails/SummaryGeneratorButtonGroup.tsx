@@ -1,6 +1,7 @@
 "use client";
 
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
+import Link from 'next/link';
 import {
   Dialog,
   DialogContent,
@@ -66,12 +67,25 @@ export function SummaryGeneratorButtonGroup({
 
   const isGenerating = summaryStatus === 'processing' || summaryStatus === 'summarizing' || summaryStatus === 'regenerating';
 
-  const templateItems = availableTemplates.map(template => <DropdownMenuItem key={template.id} onSelect={() => onTemplateSelect(template.id, template.name)} title={template.description} className="flex items-center justify-between gap-2">
-    {template.name}{selectedTemplate === template.id && <Check className="h-4 w-4 text-primary" />}
-  </DropdownMenuItem>);
+  const activeTemplate = availableTemplates.find(template => template.id === selectedTemplate)?.name;
+  const templateItems = <>
+    {availableTemplates.map(template => <DropdownMenuItem key={template.id} onSelect={() => onTemplateSelect(template.id, template.name)} title={template.description} className="flex items-center justify-between gap-2">
+      {template.name}{selectedTemplate === template.id && <Check className="h-4 w-4 text-primary" aria-hidden="true" />}
+    </DropdownMenuItem>)}
+    {availableTemplates.length > 0 && <DropdownMenuSeparator />}
+    <DropdownMenuItem asChild><Link href="/settings?tab=summary&manageTemplates=1">Manage templates…</Link></DropdownMenuItem>
+  </>;
   return <div className="flex shrink-0 items-center gap-1">
     {languageSlot}
-    {!compact && availableTemplates.length > 0 && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="sm" className="px-2">Template</Button></DropdownMenuTrigger><DropdownMenuContent align="end">{templateItems}</DropdownMenuContent></DropdownMenu>}
+    {!compact && <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" className="max-w-36 px-2" title={activeTemplate}
+          aria-label={activeTemplate ? `Template: ${activeTemplate}` : "Template"}>
+          <span className="truncate">{activeTemplate ?? "Template"}</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">{templateItems}</DropdownMenuContent>
+    </DropdownMenu>}
     {!compact && <Button variant="ghost" size="sm" className="px-2" onClick={() => setSettingsDialogOpen(true)}>AI model</Button>}
     {isGenerating ? <Button variant="outline" size="sm" onClick={() => { Analytics.trackButtonClick('stop_summary_generation', 'meeting_details'); onStopGeneration(); }}><Square className="h-4 w-4" />Stop</Button>
       : showRegenerate && <Button size="sm" className="px-2 text-xs" disabled={generationDisabled || isCheckingModels} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details'); void onGenerateSummary(customPrompt); }}>
@@ -80,7 +94,13 @@ export function SummaryGeneratorButtonGroup({
       </Button>}
     <DropdownMenu><DropdownMenuTrigger asChild><ActionIcon label="More summary actions" className="h-8 w-8"><MoreHorizontal /></ActionIcon></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-60" onCloseAutoFocus={onActionsCloseAutoFocus}>
-        {compact && availableTemplates.length > 0 && <DropdownMenuSub><DropdownMenuSubTrigger ><FileText className="mr-2 h-4 w-4" />Template</DropdownMenuSubTrigger><DropdownMenuSubContent>{templateItems}</DropdownMenuSubContent></DropdownMenuSub>}
+        {compact && <DropdownMenuSub>
+          <DropdownMenuSubTrigger title={activeTemplate} aria-label={activeTemplate ? `Template: ${activeTemplate}` : "Template"}>
+            <FileText className="mr-2 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="truncate">{activeTemplate ?? "Template"}</span>
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>{templateItems}</DropdownMenuSubContent>
+        </DropdownMenuSub>}
         {compact && <DropdownMenuItem onSelect={() => setSettingsDialogOpen(true)}><Settings className="mr-2 h-4 w-4" />AI model</DropdownMenuItem>}
         {compact && <DropdownMenuSeparator />}
         {actionsSlot}

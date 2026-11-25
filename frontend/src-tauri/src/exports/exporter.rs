@@ -858,6 +858,7 @@ mod tests {
             ],
             transcript_excerpt: None,
             summary_html: None,
+            metadata: Default::default(),
         }
     }
 
@@ -1737,6 +1738,7 @@ mod tests {
                 }],
                 transcript_excerpt: None,
                 summary_html: None,
+                metadata: Default::default(),
             };
 
             // Full set: both action-1 and action-2 are known siblings.
@@ -1831,6 +1833,7 @@ mod tests {
                 }],
                 transcript_excerpt: None,
                 summary_html: None,
+                metadata: Default::default(),
             };
 
             // Full set has only action-2 — no cross-positional sibling to block.

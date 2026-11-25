@@ -116,6 +116,78 @@ fn oversized_serialized_transcript_is_removed_as_a_whole() {
 }
 
 #[tokio::test]
+async fn reviewed_actions_replace_suggestions_and_follow_summary_consent() {
+    let pool = crate::database::transcript_edits::tests::fixture().await;
+    let reviewed = json!([
+        {"id":"00000000-0000-4000-8000-000000000001","title":"Revised task","owner":"Dana",
+         "dueDate":"2026-12-01","done":false,"details":"Use the reviewed draft"},
+        {"id":"00000000-0000-4000-8000-000000000002","title":"Completed task","done":true}
+    ]);
+    let summary = "## Action items\n- Summary suggestion".to_owned();
+    for (stored, expected) in [
+        (Some(reviewed.to_string()), Some("Revised task")),
+        (Some("[]".to_owned()), None),
+        (None, Some("Summary suggestion")),
+    ] {
+        sqlx::query("UPDATE meetings SET reviewed_actions = ? WHERE id = 'review-test'")
+            .bind(&stored)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let content = meetings::load(
+            &pool,
+            "review-test".into(),
+            Some(summary.clone()),
+            Switches::default(),
+        )
+        .await
+        .unwrap();
+        let output = body(content, true, false);
+        assert_eq!(output["action_items"][0]["text"].as_str(), expected);
+        if expected == Some("Revised task") {
+            assert_eq!(output["action_items"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                output["reviewed_actions"][0],
+                json!({
+                    "text":"Revised task","owner":"Dana","due":"2026-12-01","done":false,
+                    "details":"Use the reviewed draft"
+                })
+            );
+            assert_eq!(output["reviewed_actions"][1]["done"], true);
+        }
+        let off = Switches {
+            include_summary: false,
+            ..Switches::default()
+        };
+        let content = meetings::load(&pool, "review-test".into(), Some(summary.clone()), off)
+            .await
+            .unwrap();
+        let output = body(content, false, false);
+        assert!(output.get("reviewed_actions").is_none());
+        assert!(output.get("action_items").is_none());
+    }
+}
+
+#[tokio::test]
+async fn meeting_history_is_scoped_newest_first_and_omits_delivery_destinations() {
+    let pool = crate::database::transcript_edits::tests::fixture().await;
+    sqlx::query(
+        "INSERT INTO webhook_deliveries (id,event,meeting_id,completion_key,started_at,outcome,http_status)
+         VALUES ('older','recording.saved','review-test','saved','2026-11-20','failed',503),
+                ('newer','summary.ready','review-test','generation','2026-11-21','succeeded',204),
+                ('other','test',NULL,NULL,'2026-11-22','succeeded',200)",
+    ).execute(&pool).await.unwrap();
+    let history =
+        serde_json::to_value(history::for_meeting(&pool, "review-test").await.unwrap()).unwrap();
+    assert_eq!(history.as_array().unwrap().len(), 2);
+    assert_eq!(history[0]["event"], "summary.ready");
+    assert_eq!(history[0]["httpStatus"], 204);
+    assert_eq!(history[1]["outcome"], "failed");
+    assert!(history[0].get("completionKey").is_none());
+    assert!(history[0].get("destination").is_none());
+}
+
+#[tokio::test]
 async fn reads_only_current_passages_and_reviewed_meeting_metadata() {
     let pool = SqlitePool::connect(":memory:").await.unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();

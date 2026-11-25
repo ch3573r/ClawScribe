@@ -19,6 +19,7 @@ pub(super) struct SectionRequest {
     pub section_name: String,
     pub page_title: String,
     pub markdown: String,
+    pub metadata: super::metadata::OneNoteHeader,
     pub options: Option<OneNoteOptions>,
     pub resume_id: Option<String>,
     pub replace_existing: bool,
@@ -37,7 +38,10 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
     {
         return Err("Enter a page title and choose the content you want to export.".into());
     }
-    let content_hash = format!("{:x}", Sha256::digest(request.markdown.as_bytes()));
+    let content_hash = match request.metadata.bookmark_revision.as_deref() {
+        Some(bookmarks) => super::ledger::artifact_key_hash(&[&request.markdown, bookmarks]),
+        None => format!("{:x}", Sha256::digest(request.markdown.as_bytes())),
+    };
     let (attempt_id, section_id, title) = if let Some(resume_id) = &request.resume_id {
         let section = ledger
             .onenote_sections
@@ -72,12 +76,13 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
             }
         }
         if request.replace_existing {
-            let meeting = super::markdown_notes::meeting_export_for_onenote(
+            let mut meeting = super::markdown_notes::meeting_export_for_onenote(
                 &ledger.meeting_id,
                 request.page_title.clone(),
                 None,
                 &request.markdown,
             );
+            meeting.metadata = request.metadata;
             let report = if changed {
                 replace_notes_page(
                     client,
@@ -172,12 +177,13 @@ pub(super) async fn export_section<T: GraphTransport, S: Sleeper>(
     if !valid_remote_id(&section_id) {
         return Err("Invalid saved OneNote section reference.".into());
     }
-    let meeting = super::markdown_notes::meeting_export_for_onenote(
+    let mut meeting = super::markdown_notes::meeting_export_for_onenote(
         &ledger.meeting_id,
         title,
         None,
         &request.markdown,
     );
+    meeting.metadata = request.metadata;
     let report = export_saved_section_notes(client, ledger, &meeting, &section_id, account).await;
     if let Some(page_id) = page_id_from_report(&report) {
         ledger
@@ -206,9 +212,10 @@ async fn export_saved_section_notes<T: GraphTransport, S: Sleeper>(
         account.tenant_id, account.user_id
     );
     let legacy = meeting.artifact_hash();
-    let revision = if ledger
-        .entry(&format!("{prefix}{revision}:notes:0"))
-        .is_none()
+    let revision = if meeting.metadata.bookmark_revision.is_none()
+        && ledger
+            .entry(&format!("{prefix}{revision}:notes:0"))
+            .is_none()
         && ledger.entry(&format!("{prefix}{legacy}:notes:0")).is_some()
     {
         &legacy
@@ -704,6 +711,7 @@ mod tests {
             section_name: "Weekly sync".into(),
             page_title: "Release follow-ups".into(),
             markdown: "## Decisions\n- Send the draft".into(),
+            metadata: Default::default(),
             options: None,
             resume_id,
             replace_existing: false,

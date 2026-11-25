@@ -96,6 +96,7 @@ fn build_notes_xhtml(meeting: &MeetingExport) -> String {
     let mut body = String::new();
 
     body.push_str(&format!("<h1>{title}</h1>"));
+    body.push_str(&meeting.metadata.html);
     body.push_str("<p><b>Recorded by:</b> ClawScribe</p>");
 
     body.push_str("<h2>Summary</h2>");
@@ -160,10 +161,13 @@ pub(super) fn notes_marker_prefix(meeting_id: &str) -> String {
 }
 
 pub(super) fn notes_revision(meeting: &MeetingExport) -> String {
-    super::ledger::artifact_key_hash(&[
-        &meeting.artifact_hash(),
+    let artifact = meeting.artifact_hash();
+    let mut parts = vec![
+        artifact.as_str(),
         meeting.summary_html.as_deref().unwrap_or(""),
-    ])
+    ];
+    parts.extend(meeting.metadata.bookmark_revision.as_deref());
+    super::ledger::artifact_key_hash(&parts)
 }
 
 /// Split the transcript into page bodies that each stay under the byte budget.
@@ -263,6 +267,7 @@ mod tests {
             }],
             transcript_excerpt: transcript,
             summary_html: None,
+            metadata: Default::default(),
         }
     }
 
@@ -280,6 +285,33 @@ mod tests {
         assert!(xhtml.contains("Unassigned"));
         assert!(xhtml.contains("due 2026-06-20"));
         assert!(!contains_active_content(xhtml));
+    }
+
+    #[test]
+    fn notes_header_renders_saved_metadata_and_versions_the_bookmark_selection() {
+        let mut meeting = sample(None);
+        let revision = notes_revision(&meeting);
+        let header = super::super::metadata::Header {
+            date: "2026-06-15 10:00".into(),
+            duration: Some("00:30:00".into()),
+            attendees: vec!["Alex & Dana".into()],
+            tags: vec!["Roadmap".into()],
+            bookmarks: vec![(42.0, "<Decision>".into())],
+        };
+        meeting.metadata = header.onenote(true);
+        let pages = build_pages(&meeting, DEFAULT_PAGE_BUDGET_BYTES);
+        let body = &pages[0].xhtml;
+        assert!(body.contains("<li>Date: 2026-06-15 10:00</li><li>Duration: 00:30:00</li>"));
+        assert!(body.contains("<li>Attendees: Alex &amp; Dana</li><li>Project tags: Roadmap</li>"));
+        assert!(body.contains("<li><strong>[00:00:42]</strong> &lt;Decision&gt;</li>"));
+        assert!(body.find("Notes and bookmarks").unwrap() < body.find("<h2>Summary").unwrap());
+        assert_ne!(notes_revision(&meeting), revision);
+        meeting.metadata = super::super::metadata::Header {
+            bookmarks: Vec::new(),
+            ..header
+        }
+        .onenote(true);
+        assert_eq!(notes_revision(&meeting), revision);
     }
 
     #[test]

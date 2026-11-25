@@ -8,6 +8,7 @@ const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof
 const text = node => Array.isArray(node) ? node.map(text).join('') : typeof node === 'string' || typeof node === 'number' ? String(node) : node ? text(node.props?.children) : '';
 const primitives = {
   'react/jsx-runtime': { jsx, jsxs: jsx },
+  'next/link': { __esModule: true, default: 'link' },
   'lucide-react': {},
   '@/components/ui/button': { Button: 'button' },
   '@/components/ui/input': { Input: 'input' },
@@ -141,6 +142,26 @@ const summaryProps = {
   customPrompt: '', contextLoading: false, onPromptChange() {}, onSaveSummary: async () => {}, onSummaryChange() {}, onDirtyChange() {}, summaryError: null,
   getSummaryStatusMessage: () => '', availableTemplates: [], selectedTemplate: '', onTemplateSelect() {},
 };
+
+test('the summary toolbar shows the selected template and links to its settings', () => {
+  const hooks = createHookHarness();
+  const { SummaryGeneratorButtonGroup } = loadTsModule('src/components/MeetingDetails/SummaryGeneratorButtonGroup.tsx', { ...primitives, react: hooks.react });
+  for (const compact of [false, true]) {
+    const toolbar = hooks.render(() => SummaryGeneratorButtonGroup({
+      ...summaryProps, compact,
+      availableTemplates: [{ id: 'executive_brief', name: 'Executive brief', description: 'Example' }],
+      selectedTemplate: 'executive_brief',
+    }));
+    const list = nodes(toolbar);
+    const trigger = list.find(node => node.type === (compact ? 'menu-sub-trigger' : 'button')
+      && node.props['aria-label'] === 'Template: Executive brief');
+    assert.equal(text(trigger), 'Executive brief');
+    const link = list.find(node => node.type === 'link');
+    assert.equal(text(link), 'Manage templates…');
+    assert.equal(link.props.href, '/settings?tab=summary&manageTemplates=1');
+  }
+  hooks.unmount();
+});
 
 test('Find retains input focus after summary overflow closes and resets the suppression', () => {
   const panelHooks = createHookHarness(), generatorHooks = createHookHarness();

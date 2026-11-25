@@ -3,6 +3,8 @@ use std::io::{self, Write};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
+use crate::exports::actions::ReviewedAction;
+
 pub(super) const MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,13 +45,22 @@ pub(super) struct Passage {
     pub text: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Action {
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     due: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Reviewed {
+    #[serde(flatten)]
+    action: Action,
+    done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<String>,
 }
 
 #[derive(Default)]
@@ -63,6 +74,7 @@ pub(super) enum Transcript {
 pub(super) struct Content {
     pub meeting: Meeting,
     pub summary: Option<String>,
+    pub reviewed_actions: Option<Vec<ReviewedAction>>,
     pub transcript: Transcript,
 }
 
@@ -78,6 +90,8 @@ struct Payload<'a> {
     summary_markdown: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     action_items: Vec<Action>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reviewed_actions: Option<Vec<Reviewed>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     transcript: Option<Vec<Passage>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -98,6 +112,7 @@ pub(super) fn sample() -> Content {
             ..Meeting::default()
         },
         summary: None,
+        reviewed_actions: None,
         transcript: Transcript::Absent,
     }
 }
@@ -118,17 +133,41 @@ pub(super) fn build(
             crate::summary::sources::expand_tags(&text, &[])
         })
         .filter(|text| !text.trim().is_empty());
-    let action_items = summary_markdown
-        .as_deref()
-        .map(crate::exports::markdown_notes::parse_action_items)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|item| Action {
-            text: item.task,
-            owner: item.owner,
-            due: item.due_date,
-        })
-        .collect();
+    let reviewed_actions = content
+        .reviewed_actions
+        .filter(|_| include_summary)
+        .map(|actions| {
+            actions
+                .into_iter()
+                .map(|item| Reviewed {
+                    action: Action {
+                        text: export_text(&item.title),
+                        owner: item.owner.as_deref().map(export_text),
+                        due: item.due_date,
+                    },
+                    done: item.done,
+                    details: item.details.as_deref().map(export_text),
+                })
+                .collect::<Vec<_>>()
+        });
+    let action_items = match &reviewed_actions {
+        Some(reviewed) => reviewed
+            .iter()
+            .filter(|item| !item.done)
+            .map(|item| item.action.clone())
+            .collect(),
+        None => summary_markdown
+            .as_deref()
+            .map(crate::exports::markdown_notes::parse_action_items)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| Action {
+                text: item.task,
+                owner: item.owner,
+                due: item.due_date,
+            })
+            .collect(),
+    };
     let (transcript, transcript_truncated) = match (include_transcript, content.transcript) {
         (true, Transcript::Passages(rows)) if !rows.is_empty() => (Some(rows), false),
         (true, Transcript::TooLarge) => (None, true),
@@ -143,6 +182,7 @@ pub(super) fn build(
         meeting: content.meeting,
         summary_markdown,
         action_items,
+        reviewed_actions,
         transcript,
         transcript_truncated,
     };
@@ -153,6 +193,11 @@ pub(super) fn build(
     payload.transcript = None;
     payload.transcript_truncated = true;
     encode(&payload)
+}
+
+fn export_text(text: &str) -> String {
+    let text = crate::summary::sources::strip_source_links(text);
+    crate::summary::sources::expand_tags(&text, &[])
 }
 
 struct BoundedBody(Vec<u8>);

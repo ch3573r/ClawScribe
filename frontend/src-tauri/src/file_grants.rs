@@ -37,6 +37,8 @@ pub(crate) enum Purpose {
     WordSave,
     /// Where to write a Markdown export (`.md`).
     MarkdownSave,
+    /// Open or locate a document successfully written from an export save grant.
+    OpenExport,
     /// The folder recordings are saved in.
     RecordingsFolder,
     /// A reference document to attach to a meeting.

@@ -13,7 +13,7 @@ function nodes(root) {
 const text = root => typeof root === 'string' ? root : Array.isArray(root) ? root.map(text).join('') : text(root?.props?.children ?? '');
 const find = (root, type, label) => nodes(root).find(node => node.type === type && (label === undefined || text(node) === label));
 
-async function setup({ connected = true, planner = true, todo = true, rest = false, restFailure = false, restOutcome = 'published', save = async () => 'export.docx', readFailure = false, resumes = [], history = [], candidates = [], webhook = null } = {}) {
+async function setup({ connected = true, planner = true, todo = true, rest = false, restFailure = false, restOutcome = 'published', save = async () => 'export.docx', canOpen = true, readFailure = false, resumes = [], history = [], candidates = [], webhook = null } = {}) {
   const harness = createHookHarness();
   const calls = [], errors = [], notices = [];
   const draft = loadTsModule('src/lib/confluenceDraft.ts');
@@ -32,6 +32,7 @@ async function setup({ connected = true, planner = true, todo = true, rest = fal
     '@/components/ui/dropdown-menu': names('DropdownMenu DropdownMenuContent DropdownMenuItem DropdownMenuLabel DropdownMenuTrigger'),
     '@/components/ui/dialog': names('Dialog DialogContent DialogDescription DialogFooter DialogHeader DialogTitle'),
     './ExportContentOptions': names('ExportContentOptions'),
+    './WebhookExportHistory': names('WebhookExportHistory'),
     './PlannerExportPreview': names('PlannerExportPreview'),
     './ToDoExportPreview': names('ToDoExportPreview'),
     '@tauri-apps/api/core': { invoke: async (command, args) => {
@@ -42,6 +43,13 @@ async function setup({ connected = true, planner = true, todo = true, rest = fal
       }
       calls.push({ kind: command, args });
       if (command === 'send_meeting_webhook') return { outcome: 'succeeded', httpStatus: 204 };
+      if (command === 'export_local_word' || command === 'export_local_markdown') return canOpen;
+      if (command === 'get_meeting_export_header') {
+        return {
+          markdown: '# Review\n\n- Date: 2026-01-01\n',
+          html: '<h1>Review</h1><ul><li>Date: 2026-01-01</li></ul>',
+        };
+      }
       if (command === 'api_get_meeting') {
         if (readFailure) throw new Error('Synthetic read failure');
         return { transcripts: [{ id: 'saved', timestamp: '09:10:11', speaker: 'Speaker A', text: 'Saved words.' }] };
@@ -63,10 +71,10 @@ async function setup({ connected = true, planner = true, todo = true, rest = fal
         listNotebooks: async () => [],
 
         exportMeetingToOneNoteSection: async (...args) => { calls.push({ kind: 'onenote', args }); return { overall: 'succeeded', items: [] }; },
-        exportMeetingToOneDriveFiles: async args => { calls.push({ kind: 'onedrive', args }); return { files: [], destination: { name: 'Folder' } }; },
+        exportMeetingToOneDriveFiles: async (args, options) => { calls.push({ kind: 'onedrive', args, options }); return { files: [], destination: { name: 'Folder' } }; },
       },
     },
-    '@/lib/confluenceDraft': { ...draft, writeConfluenceDraftToClipboard: async markdown => { calls.push({ kind: 'clipboard', markdown }); return 'rich'; } },
+    '@/lib/confluenceDraft': { ...draft, writeConfluenceDraftToClipboard: async ({ markdown, html }) => { calls.push({ kind: 'clipboard', markdown, html }); return 'rich'; } },
     '@/services/confluenceExportService': { confluenceExportService: { exportPage: async args => {
       calls.push({ kind: 'confluence', args });
       if (restFailure) throw new Error(typeof restFailure === 'string' ? restFailure : 'Synthetic REST failure');
@@ -119,7 +127,8 @@ for (const [menuLabel, buttonLabel, kind] of destinations) {
       let dialog = nodes(view.render()).find(node => node.type === 'Dialog' && node.props.open);
       assert.ok(dialog);
       assert.equal(view.calls.length, 0, 'Opening a menu item must not export or copy anything');
-      find(dialog, 'ExportContentOptions').props.onChange({ content, speakers: false, timestamps: false });
+      assert.equal(find(dialog, 'ExportContentOptions').props.value.bookmarks ?? false, kind === 'export_local_markdown');
+      find(dialog, 'ExportContentOptions').props.onChange({ content, speakers: false, timestamps: false, bookmarks: true });
       dialog = nodes(view.render()).find(node => node.type === 'Dialog' && node.props.open);
       await find(dialog, 'Button', buttonLabel).props.onClick();
       assert.equal(view.errors.length, 0);
@@ -135,6 +144,7 @@ for (const [menuLabel, buttonLabel, kind] of destinations) {
         assert.equal(result.args.markdown, content === 'transcript' ? '' : 'Edited notes');
         assert.equal(result.args.includeSpeakers, false);
         assert.equal(result.args.includeTimestamps, false);
+        assert.equal(result.args.includeBookmarks, true);
       } else {
         const body = kind === 'clipboard' ? result.markdown : kind === 'onenote' ? result.args[2] : `${result.args.markdown}\n${result.args.transcript ?? ''}`;
         assert.equal(body.includes('Edited notes'), content !== 'transcript');
@@ -142,6 +152,16 @@ for (const [menuLabel, buttonLabel, kind] of destinations) {
         assert.ok(!body.includes('Speaker A'));
         assert.ok(!body.includes('09:10:11'));
         assert.equal(view.calls.some(call => call.kind === 'api_get_meeting'), content !== 'summary');
+        if (kind === 'clipboard') {
+          const header = view.calls.find(call => call.kind === 'get_meeting_export_header').args;
+          assert.equal(header.includeBookmarks, true);
+          assert.equal(header.timestamps, false);
+          assert.ok(result.html.includes('<li>Date: 2026-01-01</li>'));
+        } else if (kind === 'onedrive') {
+          assert.equal(result.options.bookmarks, true);
+        } else {
+          assert.equal(result.args[5].bookmarks, true);
+        }
       }
     }
   });
@@ -163,6 +183,28 @@ test('Word remains in the menu while Microsoft is disconnected; cancel and dupli
   assert.equal(view.errors.length, 0);
 });
 
+test('local export toasts open only the successfully saved file or its containing folder', async () => {
+  for (const [menuLabel, buttonLabel] of destinations.slice(0, 2)) {
+    const saved = await setup();
+    find(saved.render(), 'DropdownMenuItem', menuLabel).props.onClick();
+    await find(saved.render(), 'Button', buttonLabel).props.onClick();
+    const [, , toast] = saved.notices[0];
+    assert.equal(toast.action.label, 'Open file');
+    assert.equal(toast.cancel.label, 'Show in folder');
+    assert.ok(!saved.calls.some(call => call.kind === 'open_saved_meeting_export'));
+    toast.action.onClick();
+    toast.cancel.onClick();
+    const opened = saved.calls.filter(call => call.kind === 'open_saved_meeting_export');
+    assert.equal(opened.length, 2);
+    assert.ok(opened.every(call => call.args.path === 'export.docx'));
+    assert.deepEqual(opened.map(call => call.args.showInFolder), [false, true]);
+  }
+  const unavailable = await setup({ canOpen: false });
+  find(unavailable.render(), 'DropdownMenuItem', 'Word document (.docx)').props.onClick();
+  await find(unavailable.render(), 'Button', 'Save as Word document').props.onClick();
+  assert.equal(unavailable.notices[0][2], undefined);
+});
+
 test('Confluence REST and clipboard fallback preserve the same selected transcript', async () => {
   const view = await setup({ rest: true, restFailure: true });
   find(view.render(), 'DropdownMenuItem', 'Confluence').props.onClick();
@@ -182,7 +224,7 @@ test('Confluence does not copy a browser draft when the direct publish may have 
   const view = await setup({ rest: true, restFailure: 'Check Confluence and resolve the outcome in Export history.' });
   find(view.render(), 'DropdownMenuItem', 'Confluence').props.onClick();
   await find(view.render(), 'Button', 'Export to Confluence').props.onClick();
-  assert.deepEqual(view.calls.map(call => call.kind), ['confluence']);
+  assert.deepEqual(view.calls.map(call => call.kind), ['get_meeting_export_header', 'confluence']);
 });
 
 test('One Confluence page can be opened after a repeat or an edited draft without claiming new success', async () => {
@@ -192,7 +234,7 @@ test('One Confluence page can be opened after a repeat or an edited draft withou
     await find(view.render(), 'Button', 'Export to Confluence').props.onClick();
     assert.deepEqual(view.notices.map(([kind, title]) => [kind, title]), [['info', headline]]);
     assert.equal(view.notices[0][2].action.label, 'Open');
-    assert.deepEqual(view.calls.map(call => call.kind), ['confluence']);
+    assert.deepEqual(view.calls.map(call => call.kind), ['get_meeting_export_header', 'confluence']);
   }
 });
 
@@ -246,11 +288,13 @@ test('summary-only controls hide speakers and keep timestamps enabled without cl
   for (const content of ['summary', 'transcript', 'both']) {
     const root = ExportContentOptions({ value: { content, speakers: true, timestamps: false }, onChange() {} });
     const inputs = nodes(root).filter(node => node.type === 'Checkbox');
-    assert.equal(inputs.length, content === 'summary' ? 1 : 2);
+    assert.equal(inputs.length, content === 'summary' ? 2 : 3);
     assert.ok(inputs.every(input => input.props.disabled === false));
     assert.equal(text(root).includes('Speaker labels'), content !== 'summary');
     assert.match(text(root), /Timestamps/);
     assert.match(text(root), /Source times in the summary and line times in the transcript/);
+    assert.match(text(root), /Notes and bookmarks/);
+    assert.equal(inputs.at(-2).props.checked, false);
     assert.equal(inputs.at(-1).props.checked, false);
     if (content !== 'summary') assert.equal(inputs[0].props.checked, true);
   }
@@ -304,6 +348,43 @@ test('offline export history shows results and offers safe available links', asy
   assert.match(text(dialog), /OneNote · Exported/);
   assert.match(text(dialog), /Microsoft To Do · Outcome unknown/);
   assert.equal(find(dialog, 'Button', 'Open').props['aria-label'], 'Open in OneNote');
+  assert.equal(find(dialog, 'WebhookExportHistory').props.meetingId, 'meeting');
+});
+
+test('webhook export history displays a meeting-scoped outcome and refreshes on delivery', async () => {
+  const harness = createHookHarness();
+  let delivery = {
+    id: 'delivery', event: 'summary.ready', startedAt: '2026-01-01T12:00:00Z',
+    outcome: 'pending', attempts: 0, httpStatus: null, errorClass: null,
+  };
+  let refresh, stopped;
+  const { WebhookExportHistory } = loadTsModule('src/components/MeetingDetails/WebhookExportHistory.tsx', {
+    react: harness.react,
+    'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@/components/ui/button': names('Button'),
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      assert.equal(command, 'get_meeting_webhook_history');
+      assert.equal(args.meetingId, 'meeting');
+      return [delivery];
+    } },
+    '@tauri-apps/api/event': { listen: async (event, callback) => {
+      assert.equal(event, 'webhook-updated');
+      refresh = callback;
+      return () => { stopped = true; };
+    } },
+  });
+  const render = () => harness.render(() => WebhookExportHistory({ meetingId: 'meeting' }));
+  assert.match(text(render()), /Loading webhook deliveries/);
+  await flush();
+  assert.match(text(render()), /Summary readyDelivery started/);
+  delivery = { ...delivery, outcome: 'failed', attempts: 3, httpStatus: 503 };
+  await refresh();
+  assert.match(text(render()), /Delivery failed \(HTTP 503\)/);
+  assert.match(text(render()), /3 attempts/);
+  assert.equal(find(render(), 'Button'), undefined);
+  harness.unmount();
+  await flush();
+  assert.equal(stopped, true);
 });
 
 test('export history requires an explicit finding before allowing another submission', async () => {

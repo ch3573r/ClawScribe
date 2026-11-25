@@ -12,6 +12,7 @@ const HISTORY_ERROR: &str = "Could not update webhook delivery history.";
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Delivery {
+    id: String,
     event: String,
     started_at: String,
     finished_at: Option<String>,
@@ -61,7 +62,7 @@ pub(super) async fn finish(
         "UPDATE webhook_deliveries
          SET finished_at = ?, attempts = ?, outcome = ?, http_status = ?, error_class = ?
          WHERE id = ?
-         RETURNING event, started_at, finished_at, attempts, outcome, http_status, error_class",
+         RETURNING id, event, started_at, finished_at, attempts, outcome, http_status, error_class",
     )
     .bind(utc(Utc::now()))
     .bind(i64::from(result.attempts))
@@ -76,10 +77,25 @@ pub(super) async fn finish(
 
 pub(super) async fn latest(pool: &SqlitePool) -> Result<Option<Delivery>, String> {
     sqlx::query_as(
-        "SELECT event, started_at, finished_at, attempts, outcome, http_status, error_class
+        "SELECT id, event, started_at, finished_at, attempts, outcome, http_status, error_class
          FROM webhook_deliveries ORDER BY started_at DESC, rowid DESC LIMIT 1",
     )
     .fetch_optional(pool)
     .await
     .map_err(|_| HISTORY_ERROR.into())
+}
+
+pub(super) async fn for_meeting(
+    pool: &SqlitePool,
+    meeting_id: &str,
+) -> Result<Vec<Delivery>, String> {
+    sqlx::query_as(
+        "SELECT id, event, started_at, finished_at, attempts, outcome, http_status, error_class
+         FROM webhook_deliveries WHERE meeting_id = ?
+         ORDER BY started_at DESC, rowid DESC LIMIT 100",
+    )
+    .bind(meeting_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| "Could not load webhook delivery history.".into())
 }

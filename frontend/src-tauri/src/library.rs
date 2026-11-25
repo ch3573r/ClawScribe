@@ -12,6 +12,7 @@ pub(crate) mod recording_calendar;
 pub(crate) mod saved_text;
 pub mod summary_bookmarks;
 
+use crate::exports::metadata::{export_timestamp, Header};
 use crate::state::AppState;
 use serde::Serialize;
 use sqlx::{Sqlite, SqlitePool, Transaction};
@@ -450,8 +451,9 @@ pub async fn export_local_word(
     include_transcript: bool,
     include_speakers: bool,
     include_timestamps: bool,
+    include_bookmarks: Option<bool>,
     path: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     // Only a path the user chose in the save dialog the core opened
     // (`pick_word_save_path`), once.
     let granted = crate::file_grants::take(crate::file_grants::Purpose::WordSave, &path)?;
@@ -463,13 +465,14 @@ pub async fn export_local_word(
         include_transcript,
         include_speakers,
         include_timestamps,
+        include_bookmarks.unwrap_or(false),
         granted.path.to_string_lossy().into_owned(),
     )
     .await;
     if result.is_err() {
         crate::file_grants::give_back(crate::file_grants::Purpose::WordSave, &granted);
     }
-    result
+    result.map(|()| crate::exports::local_open::allow_saved_file(&granted.path))
 }
 
 async fn export_local_word_to(
@@ -480,6 +483,7 @@ async fn export_local_word_to(
     include_transcript: bool,
     include_speakers: bool,
     include_timestamps: bool,
+    include_bookmarks: bool,
     path: String,
 ) -> Result<(), String> {
     crate::file_grants::save_target_parent_exists(Path::new(&path))?;
@@ -490,7 +494,7 @@ async fn export_local_word_to(
         return Err("Choose a .docx file.".into());
     }
     let state = app.state::<AppState>();
-    let created = read_export_date(state.db_manager.pool(), &meeting_id).await?;
+    let header = Header::load(state.db_manager.pool(), &meeting_id, include_bookmarks).await?;
     // Fetch the full saved transcript, independently of the UI's current page.
     let transcript = if include_transcript {
         Some(
@@ -505,13 +509,16 @@ async fn export_local_word_to(
     } else {
         None
     };
-    if markdown.trim().is_empty() && transcript.as_deref().unwrap_or_default().trim().is_empty() {
+    if markdown.trim().is_empty()
+        && header.bookmarks.is_empty()
+        && transcript.as_deref().unwrap_or_default().trim().is_empty()
+    {
         return Err("There are no notes or transcripts to export.".into());
     }
     tokio::task::spawn_blocking(move || {
         let bytes = crate::exports::document::build_meeting_docx(
             &title,
-            &format!("Date: {}\n\n{markdown}", export_meeting_date(&created)),
+            &format!("{}\n{markdown}", header.markdown(include_timestamps)),
             transcript.as_deref(),
         )?;
         atomic_write(Path::new(&path), &bytes)
@@ -529,8 +536,9 @@ pub async fn export_local_markdown(
     include_transcript: bool,
     include_speakers: bool,
     include_timestamps: bool,
+    include_bookmarks: Option<bool>,
     path: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let purpose = crate::file_grants::Purpose::MarkdownSave;
     let granted = crate::file_grants::take(purpose, &path)?;
     let state = app.state::<AppState>();
@@ -543,6 +551,7 @@ pub async fn export_local_markdown(
             include_transcript,
             include_speakers,
             include_timestamps,
+            include_bookmarks: include_bookmarks.unwrap_or(true),
         },
         granted.path.clone(),
     )
@@ -550,13 +559,14 @@ pub async fn export_local_markdown(
     if result.is_err() {
         crate::file_grants::give_back(purpose, &granted);
     }
-    result
+    result.map(|()| crate::exports::local_open::allow_saved_file(&granted.path))
 }
 
 struct MarkdownOptions {
     include_transcript: bool,
     include_speakers: bool,
     include_timestamps: bool,
+    include_bookmarks: bool,
 }
 
 async fn export_local_markdown_to(
@@ -575,39 +585,7 @@ async fn export_local_markdown_to(
         return Err("Choose a .md file.".into());
     }
 
-    let created = read_export_date(pool, meeting_id).await?;
-    let (duration, calendar_link): (Option<f64>, Option<String>) =
-        sqlx::query_as("SELECT recording_duration_s, calendar_link FROM meetings WHERE id = ?")
-            .bind(meeting_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|_| "Could not read meeting details.")?;
-    let attendees = calendar_link
-        .as_deref()
-        .and_then(|raw| calendar::decode(raw).ok().flatten())
-        .map(|link| {
-            link.confirmed_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    let tags = sqlx::query_scalar("SELECT tag FROM meeting_tags WHERE meeting_id = ? ORDER BY tag")
-        .bind(meeting_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| "Could not read project tags.")?;
-    let bookmarks = read_bookmarks(pool, meeting_id)
-        .await?
-        .into_iter()
-        .map(|bookmark| (bookmark.seconds, bookmark.label))
-        .collect();
-    let metadata = markdown::Metadata {
-        duration,
-        attendees,
-        tags,
-        bookmarks,
-    };
+    let metadata = Header::load(pool, meeting_id, options.include_bookmarks).await?;
     let passages = if options.include_transcript {
         read_export_transcript(pool, meeting_id).await?
     } else {
@@ -624,7 +602,6 @@ async fn export_local_markdown_to(
     tokio::task::spawn_blocking(move || {
         let rendered = markdown::render(
             &title,
-            &export_meeting_date(&created),
             &metadata,
             &summary,
             &passages,
@@ -635,46 +612,6 @@ async fn export_local_markdown_to(
     })
     .await
     .map_err(|_| "Markdown export was interrupted.")?
-}
-
-async fn read_export_date(pool: &SqlitePool, meeting_id: &str) -> Result<String, String> {
-    sqlx::query_scalar("SELECT created_at FROM meetings WHERE id = ?")
-        .bind(meeting_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| "Meeting no longer exists.".into())
-}
-
-fn export_timestamp(timestamp: &str, audio_start_time: Option<f64>) -> String {
-    match audio_start_time.filter(|time| time.is_finite() && *time >= 0.0) {
-        Some(time) => {
-            let seconds = time.floor() as u64;
-            format!(
-                "{:02}:{:02}:{:02}",
-                seconds / 3600,
-                seconds / 60 % 60,
-                seconds % 60
-            )
-        }
-        None => timestamp.trim().to_string(),
-    }
-}
-
-fn export_meeting_date(created: &str) -> String {
-    let date = chrono::DateTime::parse_from_rfc3339(created)
-        .map(|date| date.with_timezone(&chrono::Utc))
-        .ok()
-        .or_else(|| {
-            chrono::NaiveDateTime::parse_from_str(created, "%Y-%m-%d %H:%M:%S%.f")
-                .ok()
-                .map(|date| date.and_utc())
-        });
-    date.map(|date| {
-        date.with_timezone(&chrono::Local)
-            .format("%Y-%m-%d %H:%M")
-            .to_string()
-    })
-    .unwrap_or_else(|| created.to_string())
 }
 
 #[derive(sqlx::FromRow)]
@@ -749,6 +686,7 @@ async fn read_word_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exports::metadata::export_meeting_date;
 
     #[tokio::test]
     async fn archive_tags_are_additive_and_a_full_meeting_rolls_back_the_batch() {
@@ -882,6 +820,7 @@ mod tests {
                 include_transcript: true,
                 include_speakers: true,
                 include_timestamps: true,
+                include_bookmarks: true,
             },
             path.clone(),
         )

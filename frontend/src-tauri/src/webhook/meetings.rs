@@ -17,9 +17,11 @@ pub(super) async fn load(
     let unavailable = |_| Failure::MeetingUnavailable;
     let mut tx = pool.begin().await.map_err(unavailable)?;
     let row = sqlx::query(
-        "SELECT title, created_at, recording_duration_s, calendar_link
+        "SELECT title, created_at, recording_duration_s, calendar_link,
+                CASE WHEN ? THEN reviewed_actions END AS reviewed_actions
          FROM meetings WHERE id = ?",
     )
+    .bind(switches.include_summary)
     .bind(&meeting_id)
     .fetch_one(&mut *tx)
     .await
@@ -43,6 +45,12 @@ pub(super) async fn load(
                 .collect()
         })
         .unwrap_or_default();
+    let reviewed_actions = row
+        .try_get::<Option<&str>, _>("reviewed_actions")
+        .map_err(unavailable)?
+        .map(crate::exports::actions::decode)
+        .transpose()
+        .map_err(|_| Failure::MeetingUnavailable)?;
     let summary = if switches.include_summary {
         match generated_markdown {
             Some(markdown) => Some(markdown),
@@ -71,6 +79,7 @@ pub(super) async fn load(
             attendees,
         },
         summary,
+        reviewed_actions,
         transcript,
     })
 }

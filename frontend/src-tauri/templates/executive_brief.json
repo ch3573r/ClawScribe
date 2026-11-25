@@ -1,0 +1,27 @@
+{
+  "name": "Executive brief",
+  "description": "Summarize outcomes, decisions, and issues that need leadership attention.",
+  "sections": [
+    {
+      "title": "Executive takeaway",
+      "instruction": "Give the main outcome and its stated impact in a short paragraph. Cite the supplied source tags for key claims",
+      "format": "paragraph"
+    },
+    {
+      "title": "Decisions and impact",
+      "instruction": "List decisions, their business impact, and any stated measures. Distinguish confirmed decisions from proposals and cite the supplied source tags",
+      "format": "list"
+    },
+    {
+      "title": "Risks and escalations",
+      "instruction": "List material risks, blockers, and requests for escalation. State who raised them when the source supports it and preserve their uncertainty",
+      "format": "list"
+    },
+    {
+      "title": "Action items",
+      "instruction": "List commitments and leadership follow-ups. Include owners and due dates only when explicitly stated, and copy the supplied source tag beside each task",
+      "format": "list",
+      "item_format": "- Task in one sentence. Owner: name or Unassigned; Due: date or Not specified"
+    }
+  ]
+}

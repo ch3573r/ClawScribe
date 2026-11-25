@@ -16,6 +16,7 @@ export interface WebhookConfig extends WebhookSwitches {
 }
 
 export interface WebhookDelivery {
+  id: string;
   event: "test" | "summary.ready" | "recording.saved";
   startedAt: string;
   finishedAt: string | null;

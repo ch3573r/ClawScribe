@@ -6,6 +6,12 @@ export interface MeetingExportOptions {
   content: 'summary' | 'transcript' | 'both';
   speakers: boolean;
   timestamps: boolean;
+  bookmarks?: boolean;
+}
+
+export interface MeetingExportHeader {
+  markdown: string;
+  html: string;
 }
 
 export function defaultExportOptions(content: MeetingExportOptions['content'] = 'summary'): MeetingExportOptions {

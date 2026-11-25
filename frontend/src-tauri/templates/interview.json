@@ -1,0 +1,26 @@
+{
+  "name": "Interview",
+  "description": "Capture interview questions, responses, concrete examples, and follow-up topics.",
+  "sections": [
+    {
+      "title": "Interview focus",
+      "instruction": "Summarize the stated purpose and topics covered. Cite the supplied source tags",
+      "format": "paragraph"
+    },
+    {
+      "title": "Questions and responses",
+      "instruction": "Pair significant questions with concise, attributed responses. Cite the supplied source tags for both the question and the response when available",
+      "format": "list"
+    },
+    {
+      "title": "Examples and observations",
+      "instruction": "Record concrete examples and stated observations. Separate what the interviewee said from interviewer assessment and cite support for each point",
+      "format": "list"
+    },
+    {
+      "title": "Questions to revisit",
+      "instruction": "List unanswered questions and gaps that participants identified. Cite where each came up and avoid inferring traits or conclusions",
+      "format": "list"
+    }
+  ]
+}

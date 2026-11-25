@@ -492,11 +492,12 @@ pub async fn create_organization_view_link<T: GraphTransport, S: Sleeper>(
         .ok_or_else(|| "Graph did not return a sharing link.".to_string())
 }
 
-pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
+pub(super) async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     ledger: &mut ExportLedger,
     account: &ExportContext<'_>,
     request: OneDriveExportRequest,
+    header: &super::metadata::DocumentHeader,
 ) -> Result<OneDriveExportResponse, String> {
     let token = account.bearer_token;
     let base = match request.destination {
@@ -524,12 +525,14 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
         None => base,
     };
 
-    let revision = artifact_key_hash(&[
-        &request.meeting_id,
-        &request.meeting_title,
-        &request.markdown,
+    let mut revision_parts = vec![
+        request.meeting_id.as_str(),
+        request.meeting_title.as_str(),
+        request.markdown.as_str(),
         request.transcript.as_deref().unwrap_or(""),
-    ]);
+    ];
+    revision_parts.extend(header.bookmark_revision.as_deref());
+    let revision = artifact_key_hash(&revision_parts);
     let title: String = sanitize_drive_item_name(&request.meeting_title, "Meeting notes")
         .chars()
         .take(100)
@@ -553,7 +556,7 @@ pub async fn export_meeting_files<T: GraphTransport, S: Sleeper>(
         Ok(None) => {
             let bytes = build_meeting_docx(
                 &request.meeting_title,
-                &request.markdown,
+                &format!("{}\n{}", header.markdown, request.markdown),
                 request.transcript.as_deref(),
             )?;
             match export_file(
@@ -1139,9 +1142,15 @@ mod tests {
             include_pdf: true,
             create_organization_link: false,
         };
-        let first = export_meeting_files(&client, &mut ledger, &account, request.clone())
-            .await
-            .unwrap();
+        let first = export_meeting_files(
+            &client,
+            &mut ledger,
+            &account,
+            request.clone(),
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(first.files.len(), 1);
         assert_eq!(first.files[0].item_id, "word-id");
         assert_eq!(first.issues.len(), 1);
@@ -1149,9 +1158,15 @@ mod tests {
         let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
         queue_confirmed_file(client.transport(), "word-id", "Notes.docx", 2);
         queue_confirmed_file(client.transport(), "pdf-id", "Notes.pdf", 1);
-        let second = export_meeting_files(&client, &mut ledger, &account, request.clone())
-            .await
-            .unwrap();
+        let second = export_meeting_files(
+            &client,
+            &mut ledger,
+            &account,
+            request.clone(),
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         assert!(second.issues.is_empty());
         assert_eq!(
             second
@@ -1172,13 +1187,90 @@ mod tests {
         );
         let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
         assert!(
-            export_meeting_files(&client, &mut ledger, &account, request)
+            export_meeting_files(&client, &mut ledger, &account, request, &Default::default())
                 .await
                 .unwrap()
                 .issues
                 .is_empty()
         );
         assert_eq!(client.transport().recorded().len(), 7);
+    }
+
+    #[tokio::test]
+    async fn one_drive_separates_bookmarked_content_from_the_original_document() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
+        let transport = MockGraphTransport::new();
+        transport.queue_binary_default([
+            GraphBinaryResponse::success(201, br#"{"id":"original","name":"Notes.docx"}"#.to_vec()),
+            GraphBinaryResponse::success(
+                201,
+                br#"{"id":"with-bookmarks","name":"Notes.docx"}"#.to_vec(),
+            ),
+        ]);
+        let client = client(transport);
+        let account = ExportContext {
+            tenant_id: "tenant",
+            user_id: "user",
+            bearer_token: "<redacted>",
+        };
+        let request = OneDriveExportRequest {
+            meeting_id: "meeting".into(),
+            meeting_title: "Notes".into(),
+            markdown: "Reviewed content".into(),
+            transcript: None,
+            destination: Some(parent_destination()),
+            folder_name: None,
+            include_pdf: false,
+            create_organization_link: false,
+        };
+        let legacy = super::super::metadata::Header::default().document(false);
+        let no_bookmarks = super::super::metadata::Header {
+            date: "2026-11-22".into(),
+            ..Default::default()
+        };
+        let with_bookmarks = super::super::metadata::Header {
+            bookmarks: vec![(12.0, "Decision".into())],
+            date: no_bookmarks.date.clone(),
+            ..Default::default()
+        }
+        .document(true);
+
+        export_meeting_files(&client, &mut ledger, &account, request.clone(), &legacy)
+            .await
+            .unwrap();
+        export_meeting_files(
+            &client,
+            &mut ledger,
+            &account,
+            request.clone(),
+            &with_bookmarks,
+        )
+        .await
+        .unwrap();
+        queue_confirmed_file(client.transport(), "original", "Notes.docx", 1);
+        let repeated = export_meeting_files(
+            &client,
+            &mut ledger,
+            &account,
+            request,
+            &no_bookmarks.document(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated.files[0].item_id, "original");
+        let calls = client.transport().recorded();
+        let uploads: Vec<_> = calls.iter().filter(|call| call.method == "PUT").collect();
+        assert_eq!(uploads.len(), 2);
+        assert_ne!(uploads[0].body_hash, uploads[1].body_hash);
+        assert_eq!(
+            ledger
+                .entries
+                .values()
+                .filter(|entry| entry.status == ExportStatus::Succeeded)
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -1203,9 +1295,15 @@ mod tests {
             include_pdf: false,
             create_organization_link: false,
         };
-        let first = export_meeting_files(&client, &mut ledger, &account, request.clone())
-            .await
-            .unwrap();
+        let first = export_meeting_files(
+            &client,
+            &mut ledger,
+            &account,
+            request.clone(),
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         assert!(first.files.is_empty());
         let mut ledger = ExportLedger::load_or_new(folder.path(), "meeting").unwrap();
         let key = ledger.entries.keys().next().unwrap().clone();
@@ -1213,9 +1311,15 @@ mod tests {
             ledger.entries[&key].status,
             ExportStatus::UnknownAfterSubmit
         );
-        let blocked = export_meeting_files(&client, &mut ledger, &account, request.clone())
-            .await
-            .unwrap();
+        let blocked = export_meeting_files(
+            &client,
+            &mut ledger,
+            &account,
+            request.clone(),
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         assert!(blocked.files.is_empty());
         queue_confirmed_file(client.transport(), "uploaded-word", "Notes.docx", 2);
         super::super::resolution::reconcile(
@@ -1237,6 +1341,7 @@ mod tests {
                 create_organization_link: true,
                 ..request
             },
+            &Default::default(),
         )
         .await
         .unwrap();

@@ -180,6 +180,7 @@ mod tests {
             action_items: vec![],
             transcript_excerpt: None,
             summary_html: None,
+            metadata: Default::default(),
         }
     }
 

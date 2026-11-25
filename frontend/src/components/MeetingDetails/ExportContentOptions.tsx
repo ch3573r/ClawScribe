@@ -29,5 +29,10 @@ export function ExportContentOptions({ value, onChange, disabled = false }: {
         disabled={disabled} onCheckedChange={checked => onChange({ ...value, timestamps: checked === true })} />
       <span>Timestamps<span className="block text-xs text-muted-foreground">Source times in the summary and line times in the transcript</span></span>
     </label>
+    <label className="flex items-center gap-2 text-sm">
+      <Checkbox className="h-[13px] w-[13px]" checked={value.bookmarks ?? false}
+        disabled={disabled} onCheckedChange={checked => onChange({ ...value, bookmarks: checked === true })} />
+      Notes and bookmarks
+    </label>
   </div>;
 }

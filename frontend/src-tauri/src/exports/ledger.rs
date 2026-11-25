@@ -153,6 +153,8 @@ pub struct OneNoteOptions {
     pub content: OneNoteContent,
     pub speakers: bool,
     pub timestamps: bool,
+    #[serde(default)]
+    pub bookmarks: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
