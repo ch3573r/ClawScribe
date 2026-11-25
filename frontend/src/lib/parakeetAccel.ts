@@ -7,8 +7,8 @@ import {
   refreshBehaviorSettings,
 } from "@/lib/behaviorSettings";
 
-// Beta (experimental): route Parakeet inference through DirectML (Windows GPU)
-// and run it in a separate supervised process. The core owns both settings: it
+// Route Parakeet inference through DirectML (Windows GPU) and optionally run
+// it in a separate supervised process. The core owns both settings: it
 // stores them, applies them at start-up before a recording can start, and
 // applies a change on the next model load. DirectML has no effect unless the
 // build includes the `directml` feature.
@@ -17,16 +17,18 @@ export interface ParakeetBackendSettings {
   directml: boolean;
   worker: boolean;
   directmlSessionDisabled: boolean;
+  directmlDefaultUnavailable: boolean;
 }
 
 /** What the core runs right now; the switches show this. */
 export async function getParakeetBackendSettings(): Promise<ParakeetBackendSettings> {
-  const [directml, worker, directmlSessionDisabled] = await Promise.all([
+  const [directml, worker, directmlSessionDisabled, directmlDefaultUnavailable] = await Promise.all([
     invoke<boolean>("get_parakeet_use_directml"),
     invoke<boolean>("get_parakeet_use_worker"),
     invoke<boolean>("get_parakeet_directml_session_disabled"),
+    invoke<boolean>("get_parakeet_directml_default_unavailable"),
   ]);
-  return { directml, worker, directmlSessionDisabled };
+  return { directml, worker, directmlSessionDisabled, directmlDefaultUnavailable };
 }
 
 /** The stored preference as the core holds it; off until it has been read. */

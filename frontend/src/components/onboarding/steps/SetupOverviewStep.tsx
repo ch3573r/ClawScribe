@@ -5,12 +5,19 @@ import { DEFAULT_PARAKEET_MODEL } from '@/constants/modelDefaults';
 import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { getSummaryModelSizeLabel } from '@/lib/onboarding-summary-model';
 import type { RecordingMode } from '@/contexts/RecordingStateContext';
 
 type SetupState = 'idle' | 'preparing' | 'stopping' | 'ready' | 'failed';
-type Preparation = { cancelled: boolean };
+function createPreparation() {
+  let settle!: () => void;
+  const done = new Promise<void>(resolve => { settle = resolve; });
+  return { cancelled: false, done, settle };
+}
+type Preparation = ReturnType<typeof createPreparation>;
+type CancelIntent = 'finish' | 'speech' | 'notes';
 
 type DownloadEvent = {
   modelName?: string;
@@ -98,6 +105,10 @@ export function SetupOverviewStep({ onChoose, finishing, error }: SetupOverviewS
   const [speech, setSpeech] = useState<SetupState>('idle');
   const [notes, setNotes] = useState<SetupState>('idle');
   const [notesModel, setNotesModel] = useState<string | null>(null);
+  const [recommendedNotes, setRecommendedNotes] = useState<string | null>(null);
+  const [useLive, setUseLive] = useState(true);
+  const [cancelIntent, setCancelIntent] = useState<CancelIntent | null>(null);
+  const [finishingAfterCancel, setFinishingAfterCancel] = useState(false);
   const [notesOptIn, setNotesOptIn] = useState(false);
   const [automaticNotes, setAutomaticNotes] = useState(false);
   const speechDownload = useSetupDownload('speech');
@@ -105,9 +116,17 @@ export function SetupOverviewStep({ onChoose, finishing, error }: SetupOverviewS
   const speechPending = useRef<Preparation | null>(null);
   const notesPending = useRef<Preparation | null>(null);
 
+  useEffect(() => {
+    let mounted = true;
+    void invoke<string>('builtin_ai_get_recommended_model')
+      .then(model => { if (mounted) setRecommendedNotes(model); })
+      .catch(() => {});
+    return () => { mounted = false; };
+  }, []);
+
   const prepareSpeech = async () => {
     if (speechPending.current) return;
-    const preparation = { cancelled: false };
+    const preparation = createPreparation();
     speechPending.current = preparation;
     setSpeech('preparing');
     try {
@@ -127,19 +146,20 @@ export function SetupOverviewStep({ onChoose, finishing, error }: SetupOverviewS
     } finally {
       if (preparation.cancelled) setSpeech('idle');
       speechPending.current = null;
+      preparation.settle();
     }
   };
 
   const prepareNotes = async () => {
     if (notesPending.current) return;
-    const preparation = { cancelled: false };
+    const preparation = createPreparation();
     notesPending.current = preparation;
     setAutomaticNotes(false);
     setNotesModel(null);
     setNotes('preparing');
     setNotesOptIn(true);
     try {
-      const model = await invoke<string>('builtin_ai_get_recommended_model');
+      const model = recommendedNotes ?? await invoke<string>('builtin_ai_get_recommended_model');
       if (preparation.cancelled) return;
       setNotesModel(model);
       const args = { modelName: model, refresh: true };
@@ -157,6 +177,7 @@ export function SetupOverviewStep({ onChoose, finishing, error }: SetupOverviewS
         setNotesOptIn(false);
       }
       notesPending.current = null;
+      preparation.settle();
     }
   };
 
@@ -172,40 +193,54 @@ export function SetupOverviewStep({ onChoose, finishing, error }: SetupOverviewS
     setNotes('stopping');
     notesDownload.cancel();
   };
-  const choose = (mode: RecordingMode) => {
-    cancelSpeech();
-    cancelNotes();
+  const complete = () => {
+    const mode = speech === 'ready' && useLive ? 'live' : 'audio_only';
     const model = notesOptIn && notes === 'ready' ? notesModel : null;
     if (model && automaticNotes) onChoose(mode, model, true);
     else onChoose(mode, model);
   };
 
-  return (
-    <OnboardingContainer title="Choose how to record" hideProgress>
-      <div className="mx-auto max-w-lg space-y-3">
-        <section className="space-y-3 rounded-lg border border-border bg-card p-5">
-          <p className="text-sm text-muted-foreground">
-            Save audio on this device and transcribe it from the meeting later. No model download is required.
-          </p>
-          <Button onClick={() => choose('audio_only')} disabled={finishing}>
-            {finishing ? 'Finishing setup…' : 'Record audio now'}
-          </Button>
-          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-        </section>
+  const confirmStop = async () => {
+    const intent = cancelIntent;
+    if (!intent) return;
+    setCancelIntent(null);
+    if (intent === 'speech') return cancelSpeech();
+    if (intent === 'notes') return cancelNotes();
+    const waiting = [speechPending.current?.done, notesPending.current?.done];
+    setFinishingAfterCancel(true);
+    cancelSpeech();
+    cancelNotes();
+    await Promise.all(waiting);
+    complete();
+    setFinishingAfterCancel(false);
+  };
 
+  const busyFinishing = finishing || finishingAfterCancel;
+  const requestFinish = () => {
+    if (speechPending.current || notesPending.current) setCancelIntent('finish');
+    else complete();
+  };
+  const notesSize = recommendedNotes && getSummaryModelSizeLabel(recommendedNotes);
+
+  return (
+    <OnboardingContainer title="Choose how to record" step={2}>
+      <div className="mx-auto max-w-lg space-y-3">
         <section className="space-y-3 rounded-lg border border-border bg-card p-5">
           <h2 className="font-medium">Live transcription</h2>
           <p className="text-sm text-muted-foreground">
-            Show speech as text while recording. Setting up Parakeet can download about 670 MB.
+            Show speech as text while recording. The Parakeet download is about 670 MB.
           </p>
           {speech === 'preparing' && <DownloadStatus percent={speechDownload.percent} label="Preparing the speech model…" />}
           {speech === 'stopping' && <p role="status" className="text-sm text-muted-foreground">Stopping speech model setup…</p>}
-          {speech === 'failed' && <p role="alert" className="text-sm text-destructive">Could not prepare the speech model. Try again or record audio now.</p>}
+          {speech === 'failed' && <p role="alert" className="text-sm text-destructive">Could not prepare the speech model. Try again or finish with audio only.</p>}
           {speech === 'ready'
-            ? <Button variant="outline" onClick={() => choose('live')} disabled={finishing}>Continue with live transcription</Button>
+            ? <div className="flex items-center gap-2 text-sm">
+                <Switch id="onboarding-live-transcription" checked={useLive} disabled={busyFinishing} onCheckedChange={setUseLive} />
+                <label htmlFor="onboarding-live-transcription">Use live transcription</label>
+              </div>
             : speech === 'preparing'
-              ? <Button variant="outline" onClick={cancelSpeech}>Cancel speech setup</Button>
-              : <Button variant="outline" onClick={() => void prepareSpeech()} disabled={finishing || speech === 'stopping'}>
+              ? <Button variant="outline" onClick={() => setCancelIntent('speech')}>Cancel speech setup</Button>
+              : <Button variant="outline" onClick={() => void prepareSpeech()} disabled={busyFinishing || speech === 'stopping'}>
                   {speech === 'failed' ? 'Retry speech model setup' : 'Set up live transcription'}
                 </Button>}
         </section>
@@ -213,7 +248,9 @@ export function SetupOverviewStep({ onChoose, finishing, error }: SetupOverviewS
         <section className="space-y-3 rounded-lg border border-border bg-card p-5">
           <h2 className="font-medium">Local meeting notes</h2>
           <p className="text-sm text-muted-foreground">
-            Prepare a model for notes from saved transcripts. Your meeting text stays on this device. The download may be several gigabytes.
+            Generate notes from saved transcripts on this device. {notesSize
+              ? `Recommended download: ${notesSize}.`
+              : 'The model download can be several gigabytes.'}
           </p>
           {notes === 'preparing' && <DownloadStatus percent={notesDownload.percent}
             label={notesModel ? `Preparing the notes model (${getSummaryModelSizeLabel(notesModel) || 'download size varies'})…` : 'Finding a notes model…'} />}
@@ -223,21 +260,44 @@ export function SetupOverviewStep({ onChoose, finishing, error }: SetupOverviewS
             <>
               <p role="status" className="text-sm text-muted-foreground">The notes model is ready. You can generate notes from a saved meeting.</p>
               <div className="flex items-center gap-2 text-sm">
-                <Switch id="onboarding-automatic-notes" checked={automaticNotes} disabled={finishing} onCheckedChange={setAutomaticNotes} />
+                <Switch id="onboarding-automatic-notes" checked={automaticNotes} disabled={busyFinishing} onCheckedChange={setAutomaticNotes} />
                 <label htmlFor="onboarding-automatic-notes">Generate notes automatically after transcription</label>
               </div>
               <p className="text-xs text-muted-foreground">You can turn automatic notes off in Summary settings.</p>
-              <Button variant="ghost" onClick={() => { setAutomaticNotes(false); setNotesOptIn(false); }} disabled={finishing}>Skip local notes</Button>
+              <Button variant="ghost" onClick={() => { setAutomaticNotes(false); setNotesOptIn(false); }} disabled={busyFinishing}>Skip local notes</Button>
             </>
           ) : notes === 'preparing' ? (
-            <Button variant="outline" onClick={cancelNotes}>Cancel notes setup</Button>
+            <Button variant="outline" onClick={() => setCancelIntent('notes')}>Cancel notes setup</Button>
           ) : (
-            <Button variant="outline" onClick={() => void prepareNotes()} disabled={finishing || notes === 'stopping'}>
+            <Button variant="outline" onClick={() => void prepareNotes()} disabled={busyFinishing || notes === 'stopping'}>
               {notes === 'failed' ? 'Retry local notes setup' : 'Download local notes model'}
             </Button>
           )}
         </section>
+        <div className="space-y-2 pb-2">
+          {!(speech === 'ready' && useLive) && <p className="text-sm text-muted-foreground">
+            Audio-only recording is ready. You can transcribe a saved meeting later.
+          </p>}
+          <Button onClick={requestFinish} disabled={busyFinishing}>
+            {busyFinishing ? 'Finishing setup…' : 'Finish setup'}
+          </Button>
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        </div>
       </div>
+      <Dialog open={cancelIntent !== null} onOpenChange={open => { if (!open) setCancelIntent(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cancel model setup?</DialogTitle>
+            <DialogDescription>{cancelIntent === 'finish'
+              ? 'Any models still downloading will be canceled before setup finishes.'
+              : 'The model download will stop. You can start it again later.'}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCancelIntent(null)}>Keep downloading</Button>
+            <Button onClick={() => void confirmStop()}>{cancelIntent === 'finish' ? 'Cancel and finish' : 'Cancel download'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </OnboardingContainer>
   );
 }

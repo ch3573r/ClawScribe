@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 import { loadTsModule } from './load-ts-module.mjs';
@@ -82,12 +83,17 @@ test('Ollama removes listeners registered before and after disposal without sett
 });
 
 test('the onboarding container starts below the title bar', () => {
-  const { OnboardingContainer } = loadTsModule('src/components/onboarding/OnboardingContainer', {
-    ...primitives,
-    './shared/ProgressIndicator': components('ProgressIndicator'),
-    '@/contexts/OnboardingContext': { useOnboarding: () => ({}) },
-  });
+  const { OnboardingContainer } = loadTsModule('src/components/onboarding/OnboardingContainer', primitives);
   assert.match(OnboardingContainer({ title: 'Setup' }).props.className, /\btop-\[var\(--titlebar-height\)\]/);
+});
+
+test('finishing onboarding switches to the app through React state', () => {
+  const layout = readFileSync(new URL('../../src/app/layout.tsx', import.meta.url), 'utf8');
+  const handler = layout.match(/const handleOnboardingComplete = \(\) => \{([^}]*)\}/)?.[1];
+  assert.match(handler, /setSetupCompletedHere\(true\)/);
+  assert.match(handler, /setShowOnboarding\(false\)/);
+  assert.doesNotMatch(handler, /reload\(/);
+  assert.match(layout, /<ConfigProvider key=\{setupCompletedHere/);
 });
 
 test('Home keeps recovery open for the next interrupted recording and clears its session flag after the last', async t => {

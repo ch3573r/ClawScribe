@@ -3,6 +3,11 @@ import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
 import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
+const dialog = Object.fromEntries(
+  ['Dialog', 'DialogContent', 'DialogDescription', 'DialogFooter', 'DialogHeader', 'DialogTitle']
+    .map(name => [name, name]),
+);
+
 test('audio-only setup completes without a recommendation, model check, or download', async () => {
   const calls = [];
   const { finishRecordingSetup } = loadTsModule('src/lib/onboarding-recording', {
@@ -58,11 +63,13 @@ test('the setup screen allows audio before downloads, and speech setup never sta
     '@/components/ui/button': { Button: 'Button' },
     '@/components/ui/switch': { Switch: 'Switch' },
     '@/components/ui/progress': { Progress: 'Progress' },
+    '@/components/ui/dialog': dialog,
     '@tauri-apps/api/event': { listen: async () => () => {} },
     '../OnboardingContainer': { OnboardingContainer: 'OnboardingContainer' },
     '@tauri-apps/api/core': {
       invoke: async (command, args) => {
         calls.push([command, args]);
+        if (command === 'builtin_ai_get_recommended_model') return 'qwen3.5:2b';
         if (command === 'parakeet_download_model') downloaded = true;
         if (command === 'parakeet_has_available_models') return false;
         if (command === 'parakeet_get_available_models') return downloaded ? [{ name: 'parakeet-tdt-0.6b-v3-int8', status: 'Available' }] : [];
@@ -76,22 +83,25 @@ test('the setup screen allows audio before downloads, and speech setup never sta
     onChoose: (...args) => choices.push(args), finishing: false, error: null,
   }))).find(node => node.type === 'Button' && node.props.children === label);
 
-  button('Record audio now').props.onClick();
+  button('Finish setup').props.onClick();
   assert.deepEqual(choices, [['audio_only', null]]);
-  assert.deepEqual(calls, []);
+  await flush();
+  assert.deepEqual(calls.map(([command]) => command), ['builtin_ai_get_recommended_model']);
 
   button('Set up live transcription').props.onClick();
   await flush();
   assert.deepEqual(calls.map(([command]) => command), [
+    'builtin_ai_get_recommended_model',
     'parakeet_init', 'parakeet_has_available_models', 'parakeet_download_model', 'parakeet_get_available_models',
   ]);
-  button('Continue with live transcription').props.onClick();
+  button('Finish setup').props.onClick();
   assert.deepEqual(choices[1], ['live', null]);
 });
 
 test('concurrent setup downloads show only their own measured progress and clean up on exit', async t => {
   const hooks = createHookHarness(), listeners = new Map(), completed = [];
   const cancelled = [];
+  const choices = [];
   const speech = deferred(), notes = deferred();
   const speechEvent = 'parakeet-model-download-progress', notesEvent = 'builtin-ai-download-progress';
   const jsx = (type, props) => ({ type, props });
@@ -99,6 +109,7 @@ test('concurrent setup downloads show only their own measured progress and clean
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/components/ui/button': { Button: 'Button' }, '@/components/ui/progress': { Progress: 'Progress' },
     '@/components/ui/switch': { Switch: 'Switch' },
+    '@/components/ui/dialog': dialog,
     '../OnboardingContainer': { OnboardingContainer: 'OnboardingContainer' },
     '@tauri-apps/api/event': { listen: async (event, fn) => {
       listeners.set(event, payload => fn({ payload }));
@@ -115,7 +126,9 @@ test('concurrent setup downloads show only their own measured progress and clean
   });
   const tree = root => Array.isArray(root) ? root.flatMap(tree) : !root?.props ? [] :
     [root, ...tree(typeof root.type === 'function' ? root.type(root.props) : root.props.children)];
-  const render = () => tree(hooks.render(() => SetupOverviewStep({ onChoose() {}, finishing: false, error: null })));
+  const render = () => tree(hooks.render(() => SetupOverviewStep({
+    onChoose: (...args) => choices.push(args), finishing: false, error: null,
+  })));
   const action = label => render().find(node => node.type === 'Button' && node.props.children === label);
   const values = () => render().filter(node => node.type === 'Progress').map(node => node.props.value);
   action('Set up live transcription').props.onClick();
@@ -131,17 +144,26 @@ test('concurrent setup downloads show only their own measured progress and clean
   emit(speechEvent, 'parakeet-tdt-0.6b-v3-int8', 29);
   emit(notesEvent, 'notes-model', 34.1);
   assert.deepEqual(values(), [29, 34]);
-  assert.equal(action('Record audio now').props.disabled, false);
+  assert.equal(action('Finish setup').props.disabled, false);
   speech.resolve();
   await flush();
   assert.equal(listeners.has(speechEvent), false);
   assert.ok(action('Retry speech model setup'), 'download completion alone does not establish readiness');
   assert.deepEqual(values(), [34]);
   action('Cancel notes setup').props.onClick();
+  assert.deepEqual(cancelled, [], 'the explicit cancel also requires confirmation');
+  action('Keep downloading').props.onClick();
+  assert.deepEqual(values(), [34]);
+  action('Finish setup').props.onClick();
+  assert.deepEqual(cancelled, []);
+  assert.deepEqual(choices, []);
+  action('Cancel and finish').props.onClick();
   assert.deepEqual(cancelled, ['notes-model']);
   assert.equal(action('Download local notes model').props.disabled, true);
+  assert.deepEqual(choices, [], 'the download must settle before leaving setup');
   notes.resolve();
   await flush();
+  assert.deepEqual(choices, [['audio_only', null]]);
   assert.equal(action('Download local notes model').props.disabled, false);
   hooks.unmount();
   assert.equal(listeners.size, 0);

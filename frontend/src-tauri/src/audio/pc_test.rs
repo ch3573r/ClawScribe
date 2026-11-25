@@ -207,13 +207,14 @@ impl TimedEngine for LocalEngine {
                     .await
                     .map_err(|_| error)?;
                 let (directml, _) = engine.session_status().await.ok_or(error)?;
-                let requested =
-                    parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML.load(Ordering::Relaxed);
+                let requested = parakeet_engine::parakeet_engine::directml_requested();
                 let (backend, reason) = if directml {
                     ("DirectML + CPU", None)
                 } else if requested && parakeet_engine::worker::directml_session_disabled() {
                     ("CPU", Some("Parakeet switched to CPU after its DirectML worker stopped responding."))
-                } else if requested {
+                } else if requested
+                    || parakeet_engine::parakeet_engine::directml_default_unavailable()
+                {
                     (
                         "CPU",
                         Some("DirectML was unavailable for this model session. Parakeet used CPU."),

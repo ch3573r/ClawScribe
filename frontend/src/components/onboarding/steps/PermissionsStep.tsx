@@ -106,10 +106,6 @@ export function PermissionsStep({ onFinish, finishing, error }: {
     <OnboardingContainer
       title="Grant permissions"
       description="ClawScribe needs access to your microphone and system audio to record meetings"
-      step={4}
-      hideProgress={true}
-      showNavigation={allPermissionsGranted}
-      canGoNext={allPermissionsGranted}
     >
       <div className="max-w-lg mx-auto space-y-6">
         {/* Permission Rows */}

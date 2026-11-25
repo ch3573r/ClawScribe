@@ -143,8 +143,8 @@ impl Stored {
         }
     }
 
-    /// Defaults everywhere: GPU and process isolation off, source attribution
-    /// off, cloud transcription off, language `auto`.
+    /// Hardware-independent defaults. The effective DirectML setting is resolved
+    /// at the command boundary, away from startup and the capture thread.
     pub(crate) fn effective(&self) -> BehaviorSettings {
         BehaviorSettings {
             parakeet_directml: self.parakeet_directml.unwrap_or(false),
@@ -159,6 +159,13 @@ impl Stored {
             show_conversation_metrics: self.show_conversation_metrics.unwrap_or(true),
             legacy_migrated: self.legacy_migrated,
         }
+    }
+
+    fn directml_at_startup(&self) -> Option<bool> {
+        // An upgraded webview may still hold an explicit CPU choice. Keep the
+        // old CPU default until that hand-over has had a chance to read it.
+        self.parakeet_directml
+            .or((!self.legacy_migrated).then_some(false))
     }
 }
 
@@ -253,8 +260,6 @@ pub(crate) fn finish_migration(backing: &dyn Backing) -> Result<(), String> {
 /// Puts the stored values into the running core. Called during start-up,
 /// before a recording can start.
 pub(crate) fn apply(settings: &BehaviorSettings) {
-    crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
-        .store(settings.parakeet_directml, Ordering::Relaxed);
     crate::parakeet_engine::parakeet_engine::USE_PARAKEET_WORKER
         .store(settings.parakeet_worker, Ordering::Relaxed);
     crate::audio::recording_commands::set_cloud_transcription_runtime(settings.cloud_transcription);
@@ -273,10 +278,16 @@ fn open<R: Runtime>(
 /// Load and apply during start-up. A store that cannot be read gives the
 /// defaults (the cloud opt-in stays off).
 pub fn load_and_apply<R: Runtime>(app: &AppHandle<R>) {
+    use crate::parakeet_engine::parakeet_engine::set_directml_preference;
     let settings = match open(app) {
-        Ok(store) => Stored::read(store.as_ref()).effective(),
+        Ok(store) => {
+            let stored = Stored::read(store.as_ref());
+            set_directml_preference(stored.directml_at_startup());
+            stored.effective()
+        }
         Err(_) => {
             log::warn!("Behaviour settings could not be read; using the defaults");
+            set_directml_preference(Some(false));
             defaults()
         }
     };
@@ -345,9 +356,13 @@ pub(crate) fn save_language<R: Runtime>(app: &AppHandle<R>, language: &str) -> R
 pub async fn get_behavior_settings<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<BehaviorSettings, String> {
-    tauri::async_runtime::spawn_blocking(move || Ok(Stored::read(open(&app)?.as_ref()).effective()))
-        .await
-        .map_err(|_| "Could not read the settings".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = Stored::read(open(&app)?.as_ref()).effective();
+        settings.parakeet_directml = crate::parakeet_engine::parakeet_engine::directml_requested();
+        Ok(settings)
+    })
+    .await
+    .map_err(|_| "Could not read the settings".to_string())?
 }
 
 /// Hands the webview's old values to the core, once and only where the core
@@ -385,14 +400,28 @@ pub async fn migrate_legacy_behavior_settings(
             Change::Language(language) => crate::apply_language(&app, &language).await?,
         }
     }
+    let activate_default = !stored.legacy_migrated
+        && stored.parakeet_directml.is_none()
+        && legacy.parakeet_directml.is_none();
+    let job = activate_default
+        .then(crate::audio::inference::claim_job)
+        .transpose()?;
     let finisher = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let mut settings = tauri::async_runtime::spawn_blocking(move || {
         let store = open(&finisher)?;
         finish_migration(store.as_ref())?;
         Ok::<_, String>(Stored::read(store.as_ref()).effective())
     })
     .await
-    .map_err(|_| "Could not migrate the settings".to_string())?
+    .map_err(|_| "Could not migrate the settings".to_string())??;
+    if activate_default {
+        crate::parakeet_engine::commands::apply_running_directml_preference(None).await;
+    }
+    drop(job);
+    drop(_change);
+    settings.parakeet_directml =
+        crate::parakeet_engine::commands::get_parakeet_use_directml().await?;
+    Ok(settings)
 }
 
 /// Whether the "recording started" notice is shown.
@@ -722,5 +751,16 @@ mod tests {
         ] {
             assert!(settings.get(key).is_some(), "{key}");
         }
+    }
+}
+#[test]
+fn parakeet_defers_the_automatic_default_until_the_legacy_choice_is_read() {
+    let mut stored = Stored::default();
+    assert_eq!(stored.directml_at_startup(), Some(false));
+    stored.legacy_migrated = true;
+    assert_eq!(stored.directml_at_startup(), None);
+    for explicit in [true, false] {
+        stored.parakeet_directml = Some(explicit);
+        assert_eq!(stored.directml_at_startup(), Some(explicit));
     }
 }

@@ -38,7 +38,7 @@ pub struct CallWindow {
     pub(crate) key: String,
     // Only the core compares room identity. Never expose the address or its digest.
     #[serde(skip)]
-    pub(crate) teams_room: Option<[u8; 32]>,
+    pub(crate) room_identity: Option<[u8; 32]>,
     #[serde(skip)]
     pub(crate) desktop_teams: bool,
 }
@@ -143,25 +143,35 @@ fn browser_surface(address: &str) -> Option<(Provider, String, Option<[u8; 32]>)
         return None;
     }
     match url.host_str()? {
-        "meet.google.com" => {
-            let code = url.path().trim_matches('/');
-            let parts: Vec<_> = code.split('-').collect();
-            if parts.len() == 3
-                && parts.iter().map(|p| p.len()).eq([3, 4, 3])
-                && parts
-                    .iter()
-                    .all(|p| p.bytes().all(|b| b.is_ascii_lowercase()))
-            {
-                Some((Provider::GoogleMeet, code.to_owned(), None))
-            } else {
-                None
-            }
-        }
+        "meet.google.com" => Some((
+            Provider::GoogleMeet,
+            url.path().strip_prefix('/')?.to_owned(),
+            Some(meet_room(&url)?),
+        )),
         "teams.microsoft.com" | "teams.cloud.microsoft" | "teams.live.com" => {
             Some((Provider::Teams, url.path().into(), teams_room(&url)))
         }
         _ => None,
     }
+}
+
+pub(crate) fn meet_room(url: &url::Url) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    if url.scheme() != "https"
+        || url.host_str() != Some("meet.google.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return None;
+    }
+    let code = url.path().strip_prefix('/')?;
+    let parts = code.split('-');
+    (parts.clone().map(str::len).eq([3, 4, 3])
+        && parts
+            .flat_map(str::bytes)
+            .all(|byte| byte.is_ascii_lowercase()))
+    .then(|| Sha256::digest(format!("meet.google.com/{code}")).into())
 }
 
 #[cfg(windows)]
@@ -433,7 +443,7 @@ mod native {
             let Ok(root) = (unsafe { api.ElementFromHandle(hwnd) }) else {
                 continue;
             };
-            let (provider, room, teams_room) = match desktop {
+            let (provider, room, room_identity) = match desktop {
                 Some(p) => (p, String::new(), None),
                 None => {
                     let Some(surface) = address(&api, &root).and_then(|url| browser_surface(&url))
@@ -453,7 +463,7 @@ mod native {
                 provider,
                 window,
                 key,
-                teams_room,
+                room_identity,
                 desktop_teams: desktop == Some(Provider::Teams),
             };
             let names: &[&str] = match provider {

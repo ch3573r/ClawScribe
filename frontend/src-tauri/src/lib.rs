@@ -983,6 +983,7 @@ pub fn run() {
             parakeet_engine::commands::set_parakeet_use_directml,
             parakeet_engine::commands::get_parakeet_use_directml,
             parakeet_engine::commands::get_parakeet_directml_session_disabled,
+            parakeet_engine::commands::get_parakeet_directml_default_unavailable,
             parakeet_engine::commands::set_parakeet_use_worker,
             parakeet_engine::commands::get_parakeet_use_worker,
             // Nemotron (streaming RNN-T, Beta) commands
@@ -999,6 +1000,7 @@ pub fn run() {
             audio::transcription::worker::get_live_source_languages,
             start_recording_with_devices_and_meeting,
             start_audio_level_monitoring,
+            audio::simple_level_monitor::check_audio_signal,
             stop_audio_level_monitoring,
             // Global keyboard shortcuts
             shortcuts::get_shortcuts,

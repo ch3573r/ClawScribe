@@ -11,11 +11,18 @@ function entry(overrides = {}) {
   } };
 }
 
-test('only timed, uncancelled Teams meeting links offer a recording request', () => {
+test('only timed, uncancelled invitations with a detectable Teams or Meet link offer a recording request', () => {
   const { supportsJoinRecording: eligible } = loadTsModule('src/hooks/useJoinRecording.ts');
   const chosen = entry();
   assert.equal(eligible(chosen), true);
   assert.equal(eligible({ ...chosen, sourceId: 'synthetic-calendar' }), true);
+  assert.equal(eligible(entry({ joinUrl: 'https://meet.google.com/abc-defg-hij?authuser=0' })), true);
+  for (const joinUrl of ['https://sub.meet.google.com/abc-defg-hij', 'https://meet.google.com/abc-defg-hij/extra',
+    'http://meet.google.com/abc-defg-hij', 'https://meet.google.com:444/abc-defg-hij',
+    'https://meet.google.com:443/abc-defg-hij', 'https://@meet.google.com/abc-defg-hij',
+    'https://meet.google.com@invalid.example/abc-defg-hij', 'https://zoom.us/j/123456789']) {
+    assert.equal(eligible(entry({ joinUrl })), false, joinUrl);
+  }
   assert.equal(eligible(entry({ joinUrl: 'https://teams.cloud.microsoft/l/meetup-join/19%3ameeting_example%40thread.v2/0?context=example' })), true);
   for (const joinUrl of ['https://teams.microsoft.com/', 'https://teams.live.com/meet/',
     'https://teams.microsoft.com.example.org/meet/123', 'http://teams.microsoft.com/meet/123',

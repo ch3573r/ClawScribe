@@ -33,6 +33,8 @@ use crate::start_request::{self, StartOutcome, StartSource};
 
 /// How often the core looks for calls while detection is on.
 const POLL_INTERVAL: Duration = Duration::from_secs(12);
+const JOIN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+static JOIN_STATE_CHANGED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 /// Consecutive completed scans that must show a call gone before it has ended.
 const MISSES_TO_END: u8 = 3;
 
@@ -98,14 +100,15 @@ fn ended_on_scan(call: &CallWindow, scan: &CallScan) -> bool {
 }
 
 fn same_observed_call(call: &CallWindow, active: &CallWindow) -> bool {
-    active.key == call.key || (call.teams_room.is_some() && active.teams_room == call.teams_room)
+    active.key == call.key
+        || (call.room_identity.is_some() && active.room_identity == call.room_identity)
 }
 
 fn desktop_teams_continuation(call: &CallWindow, active: &CallWindow) -> bool {
     call.desktop_teams
         && active.desktop_teams
-        && call.teams_room.is_none()
-        && active.teams_room.is_none()
+        && call.room_identity.is_none()
+        && active.room_identity.is_none()
 }
 
 struct Observed {
@@ -267,18 +270,26 @@ impl Tracker {
     }
 
     fn providers(&self) -> Vec<Provider> {
-        if self.join.is_none() {
+        let Some(join) = &self.join else {
             return self.settings.providers.clone();
-        }
+        };
         let mut providers = if self.settings.watching() {
             self.settings.providers.clone()
         } else {
             vec![]
         };
-        if !providers.contains(&Provider::Teams) {
-            providers.push(Provider::Teams);
+        if !providers.contains(&join.provider) {
+            providers.push(join.provider);
         }
         providers
+    }
+
+    fn poll_interval(&self) -> Duration {
+        if self.join.as_ref().is_some_and(join::Invitation::armed) {
+            JOIN_POLL_INTERVAL
+        } else {
+            POLL_INTERVAL
+        }
     }
 
     fn mode_for(&self, call: &CallWindow) -> Mode {
@@ -896,7 +907,17 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
                 Ok(false) => {}
                 Err(error) => log::error!("Call monitor: a scan failed unexpectedly: {error}"),
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            loop {
+                let interval = tracker().poll_interval();
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => break,
+                    _ = JOIN_STATE_CHANGED.notified() => {
+                        if tracker().poll_interval() == JOIN_POLL_INTERVAL {
+                            break; // Check immediately after the link opens.
+                        }
+                    }
+                }
+            }
         }
     });
 }
@@ -991,7 +1012,7 @@ mod tests {
             provider,
             window: window.to_string(),
             key: key.to_string(),
-            teams_room: None,
+            room_identity: None,
             desktop_teams: false,
         }
     }
@@ -1063,11 +1084,11 @@ mod tests {
             ..Default::default()
         });
         let first = CallWindow {
-            teams_room: Some([1; 32]),
+            room_identity: Some([1; 32]),
             ..call(Provider::Teams, "window-a", "key-a")
         };
         let moved = CallWindow {
-            teams_room: Some([1; 32]),
+            room_identity: Some([1; 32]),
             ..call(Provider::Teams, "window-b", "key-b")
         };
         let revision = tracker.revision();
@@ -1422,9 +1443,9 @@ mod tests {
     #[test]
     fn a_known_teams_room_survives_moving_to_a_new_call_window() {
         let mut original = call(Provider::Teams, "first-window", "first-call");
-        original.teams_room = Some([3; 32]);
+        original.room_identity = Some([3; 32]);
         let mut moved = call(Provider::Teams, "second-window", "second-call");
-        moved.teams_room = original.teams_room;
+        moved.room_identity = original.room_identity;
         let scan = snapshot(&[moved], &["second-window"], &[]);
         assert!(!ended_on_scan(&original, &scan));
     }
@@ -1485,9 +1506,9 @@ mod tests {
         );
         assert!(ended_on_scan(&original, &transition));
         original.desktop_teams = false;
-        original.teams_room = Some([1; 32]);
+        original.room_identity = Some([1; 32]);
         next.desktop_teams = false;
-        next.teams_room = Some([2; 32]);
+        next.room_identity = Some([2; 32]);
         assert!(ended_on_scan(
             &original,
             &snapshot(&[next], &["new-window"], &[])

@@ -7,8 +7,10 @@ import { FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { AudioDevicesCard } from '@/components/settings/AudioDevicesCard';
 import { CallDetectionSettings } from '@/components/settings/CallDetectionSettings';
-import { SignalCheck } from '@/components/settings/SignalCheck';
+import { MicrophoneCheck, SignalCheck } from '@/components/settings/SignalCheck';
+import { useSignalCheck } from '@/components/settings/useSignalCheck';
 import { useAudioLevelFeed } from '@/components/settings/useAudioLevelFeed';
+import { usePlatform } from '@/hooks/usePlatform';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { setSourceAttribution } from '@/lib/sourceAttribution';
@@ -72,12 +74,19 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     }
   }
 
-  // The signal check runs only while this page is open and nothing is being
-  // recorded. The hook stops the native monitor when the page is left.
-  const levelFeed = useAudioLevelFeed({
-    enabled: !loading && !preferencesFailed && !recordingBusy && devicePreferencesStatus === 'ready',
+  const platform = usePlatform();
+  const windows = platform === 'windows';
+  const checkBlocked = recordingBusy ? 'Unavailable while recording or saving' :
+    loading || devicePreferencesStatus === 'loading' ? 'Checking audio devices…' :
+      preferencesFailed || devicePreferencesStatus !== 'ready' ? 'Audio devices are unavailable' : null;
+  const levelFeed = useSignalCheck(windows && checkBlocked === null, selectedDevices.micDevice, selectedDevices.systemDevice);
+  const microphoneFeed = useAudioLevelFeed({
+    enabled: (platform === 'macos' || platform === 'linux') && checkBlocked === null,
     micDevice: selectedDevices.micDevice,
   });
+  const microphoneLevel = checkBlocked ? null : windows
+    ? levelFeed.running ? levelFeed.levels.microphone : null
+    : microphoneFeed.microphone;
 
   // Load recording preferences on component mount
   useEffect(() => {
@@ -230,7 +239,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const savesAudio = audioOnly || preferences.auto_save;
 
   return (
-    <SettingsColumns aside={<SignalCheck feed={levelFeed} unavailableReason={recordingBusy ? 'Not available while recording' : null} />}>
+    <SettingsColumns aside={windows
+      ? <SignalCheck feed={levelFeed} unavailableReason={checkBlocked} />
+      : <MicrophoneCheck feed={microphoneFeed} unavailableReason={checkBlocked} />}>
       <SettingsCard title="Capture">
         <SettingsRow
           title="Recording mode"
@@ -321,8 +332,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         selectedDevices={selectedDevices}
           onDeviceChange={saveSelectedDevices}
           disabled={saving || isSavingDevicePreferences || recordingBusy}
-        feed={levelFeed}
-        meterPaused={recordingBusy}
+        microphoneLevel={microphoneLevel}
       />
 
       <CallDetectionSettings />

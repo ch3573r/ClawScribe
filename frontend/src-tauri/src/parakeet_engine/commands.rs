@@ -553,7 +553,7 @@ pub async fn open_parakeet_models_folder() -> Result<(), String> {
     Ok(())
 }
 
-/// Beta (opt-in): route Parakeet inference through the DirectML (Windows GPU)
+/// Set an explicit preference for the Parakeet DirectML (Windows GPU)
 /// execution provider. Unloads any loaded model so the change applies on the
 /// next load. No effect unless the build includes the `directml` feature.
 #[command]
@@ -581,9 +581,14 @@ pub(crate) async fn apply_parakeet_directml<R: tauri::Runtime>(
     })
     .await
     .map_err(|_| "Could not save the setting".to_string())??;
-    crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
-        .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    apply_running_directml_preference(Some(enabled)).await;
+    log::info!("Parakeet DirectML set to {enabled}; unloaded model so it reloads with the change");
+    Ok(())
+}
 
+/// The caller owns the inference slot so a loaded model can safely be released.
+pub(crate) async fn apply_running_directml_preference(preference: Option<bool>) {
+    super::parakeet_engine::set_directml_preference(preference);
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
@@ -591,16 +596,20 @@ pub(crate) async fn apply_parakeet_directml<R: tauri::Runtime>(
     if let Some(engine) = engine {
         engine.unload_model().await;
     }
-    log::info!("Parakeet DirectML set to {enabled}; unloaded model so it reloads with the change");
-    Ok(())
 }
 
 #[command]
 pub async fn get_parakeet_use_directml() -> Result<bool, String> {
-    Ok(
-        crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
-            .load(std::sync::atomic::Ordering::Relaxed),
-    )
+    tokio::task::spawn_blocking(super::parakeet_engine::directml_requested)
+        .await
+        .map_err(|_| "Could not check the DirectML setting".into())
+}
+
+#[command]
+pub async fn get_parakeet_directml_default_unavailable() -> Result<bool, String> {
+    tokio::task::spawn_blocking(super::parakeet_engine::directml_default_unavailable)
+        .await
+        .map_err(|_| "Could not check the DirectML provider".into())
 }
 
 #[command]

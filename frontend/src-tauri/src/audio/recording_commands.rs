@@ -349,6 +349,16 @@ pub(crate) fn is_starting() -> bool {
     IS_STARTING.load(Ordering::Acquire)
 }
 
+#[cfg(windows)]
+pub(super) fn audio_signal_check_blocked() -> bool {
+    is_starting()
+        || capture_active()
+        || SAVING_RECORDING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+}
+
 pub(crate) fn calendar_recording_id(session_id: &str) -> Result<String, String> {
     if is_stopping() || !IS_RECORDING.load(Ordering::Acquire) {
         return Err("This recording has stopped.".into());

@@ -11,11 +11,58 @@ use std::time::Instant;
 use tokio::fs;
 use tokio::sync::RwLock;
 
-/// Whether to route Parakeet inference through the DirectML (Windows GPU)
-/// execution provider. Beta, opt-in: set via `set_parakeet_use_directml`, read
-/// when a model is (re)loaded. No effect unless the `directml` feature is built.
-pub static USE_PARAKEET_DIRECTML: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+use std::sync::atomic::{AtomicU8, Ordering};
+
+const DIRECTML_AUTOMATIC: u8 = 0;
+const DIRECTML_OFF: u8 = 1;
+const DIRECTML_ON: u8 = 2;
+static DIRECTML_PREFERENCE: AtomicU8 = AtomicU8::new(DIRECTML_AUTOMATIC);
+
+pub(crate) fn set_directml_preference(preference: Option<bool>) {
+    let value = match preference {
+        None => DIRECTML_AUTOMATIC,
+        Some(false) => DIRECTML_OFF,
+        Some(true) => DIRECTML_ON,
+    };
+    DIRECTML_PREFERENCE.store(value, Ordering::Release);
+}
+
+pub(crate) fn resolve_directml_preference(
+    preference: Option<bool>,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    preference.unwrap_or_else(probe)
+}
+
+/// Reads the preference on a blocking thread. The first automatic check uses
+/// the same ONNX Runtime provider registration as the model loader.
+pub(crate) fn directml_requested() -> bool {
+    let preference = match DIRECTML_PREFERENCE.load(Ordering::Acquire) {
+        DIRECTML_OFF => Some(false),
+        DIRECTML_ON => Some(true),
+        _ => None,
+    };
+    resolve_directml_preference(preference, super::model::directml_available)
+}
+
+pub(crate) fn directml_default_unavailable() -> bool {
+    cfg!(all(windows, feature = "directml"))
+        && DIRECTML_PREFERENCE.load(Ordering::Acquire) == DIRECTML_AUTOMATIC
+        && !super::model::directml_available()
+}
+
+#[cfg(test)]
+#[test]
+fn parakeet_automatic_directml_requires_probe_success_and_preserves_explicit_choices() {
+    assert!(!resolve_directml_preference(None, || false));
+    assert!(resolve_directml_preference(None, || true));
+    assert!(!resolve_directml_preference(Some(false), || panic!(
+        "explicit CPU"
+    )));
+    assert!(resolve_directml_preference(Some(true), || panic!(
+        "explicit DirectML"
+    )));
+}
 
 /// Opt-in process isolation, sampled when a model is loaded.
 pub static USE_PARAKEET_WORKER: std::sync::atomic::AtomicBool =
@@ -513,11 +560,10 @@ impl ParakeetEngine {
 
                 // Load model based on precision/quantization type.
                 let precision_suffix = model_info.quantization.model_suffix();
-                // Beta opt-in: route inference through DirectML (Windows GPU) when enabled.
-                let use_directml = USE_PARAKEET_DIRECTML.load(std::sync::atomic::Ordering::Relaxed);
                 let use_worker = USE_PARAKEET_WORKER.load(std::sync::atomic::Ordering::Relaxed);
                 let path = model_info.path.clone();
                 let model = crate::audio::inference::run(move |cancelled| {
+                    let use_directml = directml_requested();
                     if use_worker {
                         let mut worker = TranscriptionWorker::new()?;
                         worker.load(

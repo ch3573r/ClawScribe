@@ -1,9 +1,9 @@
 //! A single Upcoming invitation, held only in memory from the click to admission.
-use super::{sync_prompt, tracker, Mode, Tracker};
+use super::{sync_prompt, tracker, Mode, Tracker, JOIN_STATE_CHANGED};
 use crate::audio::recording_commands::{capture_active, is_starting, recording_epoch};
 use crate::exports::ms_auth_state::MicrosoftAuthState;
 use crate::library::calendar::{CalendarLink, CalendarSource};
-use crate::teams_detection::calls::{scan, teams_room, CallScan, CallWindow, Provider};
+use crate::teams_detection::calls::{meet_room, scan, teams_room, CallScan, CallWindow, Provider};
 use chrono::Utc;
 use serde::Serialize;
 use std::time::{Duration, Instant};
@@ -15,6 +15,7 @@ const EXPIRED: &str = "The invitation to record is no longer active.";
 pub(super) struct Invitation {
     pub(super) id: String,
     pub(super) link: CalendarLink,
+    pub(super) provider: Provider,
     room: [u8; 32],
     deadline: Instant,
     expires_at: i64,
@@ -30,7 +31,12 @@ pub(super) struct Invitation {
 }
 
 impl Invitation {
-    fn new(link: CalendarLink, room: [u8; 32], end: &str) -> Result<Self, String> {
+    fn new(
+        link: CalendarLink,
+        provider: Provider,
+        room: [u8; 32],
+        end: &str,
+    ) -> Result<Self, String> {
         let now = Utc::now().timestamp_millis();
         let start = link
             .start_time()
@@ -39,12 +45,13 @@ impl Invitation {
             .map_err(|_| "The event end time is unavailable.")?
             .timestamp_millis();
         if end <= now || start >= end || link.is_reviewed() {
-            return Err("Choose a current Teams invitation from Upcoming.".into());
+            return Err("Choose a current meeting invitation from Upcoming.".into());
         }
         let wait = (end - now).min(WAIT_MS);
         Ok(Self {
             id: uuid::Uuid::new_v4().to_string(),
             link,
+            provider,
             room,
             expires_at: now + wait,
             deadline: Instant::now() + Duration::from_millis(wait as u64),
@@ -67,16 +74,21 @@ impl Invitation {
         let Some(before) = &self.active_before else {
             return Mode::Off;
         };
-        if !self.current() || call.provider != Provider::Teams || before.contains(&call.window) {
+        if !self.current() || call.provider != self.provider || before.contains(&call.window) {
             return Mode::Off;
         }
-        match call.teams_room {
+        match call.room_identity {
             Some(room) if room != self.room => Mode::Off,
+            None if self.provider != Provider::Teams => Mode::Off,
             // An already-open window may have been showing a call that Windows
             // UI Automation could not inspect before the invitation opened.
             Some(_) if self.near_start && !self.open_before.contains(&call.window) => Mode::Auto,
             _ => Mode::Prompt,
         }
+    }
+
+    pub(super) fn armed(&self) -> bool {
+        self.active_before.is_some() && self.current()
     }
 
     fn launch(
@@ -89,7 +101,7 @@ impl Invitation {
         }
         open()?;
         let scan = scan.filter(|s| s.supported && s.complete).ok_or(
-            "Teams opened. ClawScribe could not check existing calls. Start recording manually.",
+            "The meeting link opened. ClawScribe could not check existing calls. Start recording manually.",
         )?;
         self.active_before = Some(scan.active.iter().map(|call| call.window.clone()).collect());
         self.open_before = scan.open_windows.clone();
@@ -177,6 +189,7 @@ pub(super) fn cancel<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
         before
     };
     sync_prompt(app, before, None);
+    JOIN_STATE_CHANGED.notify_one();
     let _ = app.emit("join-recording-changed", ());
     true
 }
@@ -226,9 +239,32 @@ fn prepare_invitation(
     link: CalendarLink,
     end: &str,
 ) -> Result<(url::Url, Invitation), String> {
-    let url = url::Url::parse(url).map_err(|_| "Invalid Teams meeting link.")?;
-    let room = teams_room(&url).ok_or("Unsupported Teams meeting link.")?;
-    let invitation = Invitation::new(link.normalized()?, room, end)?;
+    let raw = url;
+    if raw.len() > 4096
+        || raw
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return Err("Invalid meeting link.".into());
+    }
+    let mut url = url::Url::parse(raw).map_err(|_| "Invalid meeting link.")?;
+    let authority_and_path = raw.split_once("://").map(|(_, rest)| rest);
+    let exact_meet_link = authority_and_path
+        .and_then(|rest| rest.split(['?', '#']).next())
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(host, path)| {
+            host.eq_ignore_ascii_case("meet.google.com")
+                && url.path().strip_prefix('/') == Some(path)
+        });
+    let (provider, room) = if let Some(room) = teams_room(&url) {
+        (Provider::Teams, room)
+    } else if let Some(room) = exact_meet_link.then(|| meet_room(&url)).flatten() {
+        (Provider::GoogleMeet, room)
+    } else {
+        return Err("Unsupported meeting link.".into());
+    };
+    url.set_fragment(None);
+    let invitation = Invitation::new(link.normalized()?, provider, room, end)?;
     Ok((url, invitation))
 }
 
@@ -242,6 +278,7 @@ pub async fn join_and_record<R: Runtime>(
     let (url, mut join) = prepare_invitation(&url, link, &end)?;
     let id = join.id.clone();
     let deadline = join.deadline;
+    let provider = join.provider;
     let (timeout, removed) = tokio::sync::oneshot::channel();
     join.timeout = Some(timeout);
     if !cfg!(windows) {
@@ -278,7 +315,7 @@ pub async fn join_and_record<R: Runtime>(
         {
             let _ = timer_app.emit(
                 "recording-start-feedback",
-                "The request to record the Teams meeting expired.",
+                "The request to record the meeting expired.",
             );
         }
     });
@@ -286,7 +323,7 @@ pub async fn join_and_record<R: Runtime>(
         cancel(&app, &id);
         return Err("Complete recording setup before using Join and record.".into());
     }
-    let baseline = scan(vec![Provider::Teams], vec![]).await.ok();
+    let baseline = scan(vec![provider], vec![]).await.ok();
     let launched = {
         let mut tracker = tracker();
         // Cancellation and sign-out serialize with the actual OS launch.
@@ -301,6 +338,7 @@ pub async fn join_and_record<R: Runtime>(
     if launched.is_err() {
         cancel(&app, &id);
     } else {
+        JOIN_STATE_CHANGED.notify_one();
         let _ = app.emit("join-recording-changed", ());
     }
     launched
@@ -358,7 +396,13 @@ mod tests {
             }
             for url in [
                 "not a URL",
-                "https://meet.google.com/abc-defg-hij",
+                "https://meet.google.com/abc-defg-hij/extra",
+                "https://sub.meet.google.com/abc-defg-hij",
+                "https://@meet.google.com/abc-defg-hij",
+                "https://meet.google.com:443/abc-defg-hij",
+                "https://meet.google.com:444/abc-defg-hij",
+                "https://meet.google.com/unrelated/../abc-defg-hij",
+                "https://zoom.us/j/123456789",
                 "https://teams.microsoft.com.example.com/meet/123456",
                 "http://teams.microsoft.com/meet/123456",
                 "https://user@teams.microsoft.com/meet/123456",
@@ -402,6 +446,7 @@ mod tests {
         .unwrap();
         Invitation::new(
             link,
+            Provider::Teams,
             [1; 32],
             &(now + chrono::Duration::hours(1)).to_rfc3339(),
         )
@@ -413,7 +458,7 @@ mod tests {
             provider: Provider::Teams,
             key: window.into(),
             window: window.into(),
-            teams_room: room,
+            room_identity: room,
             desktop_teams: room.is_none(),
         }
     }
@@ -440,6 +485,48 @@ mod tests {
             Mode::Prompt
         ));
         assert!(matches!(join.mode(&call("new", Some([1; 32]))), Mode::Auto));
+    }
+
+    #[test]
+    fn meet_requires_the_invited_room_and_accelerates_only_after_launch() {
+        let mut tracker = Tracker::new(CallSettings::default());
+        let source = invitation();
+        let end = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let (_, meet) = prepare_invitation(
+            "https://meet.google.com/abc-defg-hij?authuser=0",
+            source.link,
+            &end,
+        )
+        .unwrap();
+        let id = meet.id.clone();
+        let mut exact = call("new browser", Some(meet.room));
+        exact.provider = Provider::GoogleMeet;
+        let wrong = CallWindow {
+            room_identity: Some([7; 32]),
+            ..exact.clone()
+        };
+        let unknown = CallWindow {
+            room_identity: None,
+            ..exact.clone()
+        };
+        let other_provider = CallWindow {
+            provider: Provider::Zoom,
+            ..exact.clone()
+        };
+        assert_eq!(tracker.poll_interval(), super::super::POLL_INTERVAL);
+        tracker.reserve_join(meet).unwrap();
+        assert_eq!(tracker.providers(), [Provider::GoogleMeet]);
+        assert_eq!(tracker.poll_interval(), super::super::POLL_INTERVAL);
+        tracker
+            .launch_join(&id, Some(&snapshot(vec![])), || Ok(()))
+            .unwrap();
+        assert_eq!(tracker.poll_interval(), super::super::JOIN_POLL_INTERVAL);
+        for call in [wrong, unknown, other_provider] {
+            assert_eq!(tracker.mode_for(&call), Mode::Off);
+        }
+        assert_eq!(tracker.mode_for(&exact), Mode::Auto);
+        tracker.clear_join(&id);
+        assert_eq!(tracker.poll_interval(), super::super::POLL_INTERVAL);
     }
 
     #[test]

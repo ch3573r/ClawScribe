@@ -9,16 +9,13 @@ import { SettingsCard, SettingsRow } from "@/components/ui/settings-layout";
 import { AudioBackendSelector } from "@/components/AudioBackendSelector";
 import { SegmentedLevelMeter } from "@/components/AudioLevelMeter";
 import type { AudioDevice, SelectedDevices } from "@/lib/audioDevicePreferences";
-import type { AudioLevelFeed } from "@/components/settings/useAudioLevelFeed";
 
 interface AudioDevicesCardProps {
   selectedDevices: SelectedDevices;
   onDeviceChange: (devices: SelectedDevices) => void;
   disabled?: boolean;
   /** Level of the microphone, drawn as a small meter in its row. */
-  feed: AudioLevelFeed;
-  /** Set while the level feed is paused, for example during a recording. */
-  meterPaused?: boolean;
+  microphoneLevel?: { db: number; peakDb: number } | null;
 }
 
 type DeviceRowProps = {
@@ -44,7 +41,7 @@ function DeviceRow({ id, title, defaultLabel, emptyText, value, options, disable
 }
 
 /** Microphone and system audio devices used for new recordings. */
-export function AudioDevicesCard({ selectedDevices, onDeviceChange, disabled = false, feed, meterPaused = false }: AudioDevicesCardProps) {
+export function AudioDevicesCard({ selectedDevices, onDeviceChange, disabled = false, microphoneLevel }: AudioDevicesCardProps) {
   const { audioDeviceInventory, devicePreferencesStatus, refreshDevicePreferences } = useConfig();
   const { data, status, refresh } = audioDeviceInventory;
   useEffect(() => { void refresh(); }, [refresh]);
@@ -54,9 +51,6 @@ export function AudioDevicesCard({ selectedDevices, onDeviceChange, disabled = f
   };
   const devices = data?.devices ?? [];
   const loading = status === "checking" || devicePreferencesStatus === 'loading';
-
-  const meterDb = !meterPaused && feed.status === "live" && feed.microphone ? feed.microphone.db : null;
-  const meterPeak = meterDb === null ? null : feed.microphone?.peakDb ?? null;
 
   return (
     <SettingsCard
@@ -82,7 +76,7 @@ export function AudioDevicesCard({ selectedDevices, onDeviceChange, disabled = f
             emptyText="No microphone devices found"
             value={selectedDevices.micDevice} options={devices.filter(device => device.device_type === "Input")}
             disabled={disabled} onChange={micDevice => onDeviceChange({ ...selectedDevices, micDevice })}
-            meter={<SegmentedLevelMeter size="mini" label="Microphone level" db={meterDb} peakDb={meterPeak} />}
+            meter={<SegmentedLevelMeter size="mini" label="Microphone level" db={microphoneLevel?.db ?? null} peakDb={microphoneLevel?.peakDb ?? null} />}
           />
           <DeviceRow
             id="system-selection" title="System audio" defaultLabel="Default system audio"

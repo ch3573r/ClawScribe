@@ -20,6 +20,26 @@ const MAX_TOKENS_PER_STEP: usize = 3;
 const TDT_DURATIONS: [usize; 5] = [0, 1, 2, 3, 4];
 const SAMPLE_RATE: usize = 16_000;
 
+pub(super) fn directml_available() -> bool {
+    #[cfg(all(windows, feature = "directml"))]
+    {
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *AVAILABLE.get_or_init(|| {
+            let available = Session::builder().is_ok_and(|mut builder| {
+                DirectMLExecutionProvider::default()
+                    .register(&mut builder)
+                    .is_ok()
+            });
+            if !available {
+                log::warn!("Parakeet: DirectML provider could not be initialized; using CPU");
+            }
+            available
+        })
+    }
+    #[cfg(not(all(windows, feature = "directml")))]
+    false
+}
+
 static DECODE_SPACE_RE: Lazy<Result<Regex, regex::Error>> =
     Lazy::new(|| Regex::new(r"\A\s|\s\B|(\s)\b"));
 
@@ -330,7 +350,20 @@ impl ParakeetModel {
                 .with_inter_threads(threads)?;
         }
 
-        let session = builder.commit_from_file(model_dir.as_ref().join(&model_filename))?;
+        let session = match builder.commit_from_file(model_dir.as_ref().join(&model_filename)) {
+            Ok(session) => session,
+            Err(_) if using_directml => {
+                log::warn!("Parakeet: could not load {model_name} with DirectML; retrying on CPU");
+                return Self::init_session(
+                    model_dir,
+                    model_name,
+                    intra_threads,
+                    precision_suffix,
+                    false,
+                );
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         for input in &session.inputs {
             log::info!(

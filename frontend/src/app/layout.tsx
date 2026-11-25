@@ -133,6 +133,7 @@ export default function RootLayout({
 }) {
   const router = useRouter()
   const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null)
+  const [setupCompletedHere, setSetupCompletedHere] = useState(false)
   const [recoveryLibrary, setRecoveryLibrary] = useState(false)
 
   useEffect(() => {
@@ -355,9 +356,8 @@ export default function RootLayout({
   }, []);
 
   const handleOnboardingComplete = () => {
-    console.log('[Layout] Onboarding completed, reloading app')
-    // Optionally reload the window to ensure all state is fresh
-    window.location.reload()
+    setSetupCompletedHere(true)
+    setShowOnboarding(false)
   }
 
   return (
@@ -369,7 +369,7 @@ export default function RootLayout({
         <AnalyticsProvider>
           <RecordingStateProvider>
             <TranscriptProvider>
-              <ConfigProvider>
+              <ConfigProvider key={setupCompletedHere ? 'completed-setup' : 'startup'}>
                 <LiveAssistanceProvider>
                 <OllamaDownloadProvider>
                   <OnboardingProvider>
