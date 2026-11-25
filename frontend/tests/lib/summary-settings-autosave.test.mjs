@@ -165,36 +165,56 @@ test('See everything in Privacy opens the Privacy tab', () => {
 
 // ---- Model settings: immediate-save mode versus the explicit Save button ----------------
 
-function modalHarness({ provider = 'claude', stored = false, onSave, catalogResponse, autosave = true, model = 'claude-sonnet-5', responses = {}, skipInitialFetch = true } = {}) {
+function modalHarness({ provider = 'claude', stored = false, onSave, catalogResponse, autosave = true, model = 'claude-sonnet-5', responses = {}, skipInitialFetch = true, downloads } = {}) {
   const hooks = createHookHarness();
+  const pickerHooks = createHookHarness();
   const calls = [];
   // The core never returns a stored key: the settings only know whether one is stored.
   const config = { provider, model, whisperModel: 'large-v3', apiKey: null, ollamaEndpoint: null };
   const context = {
     modelConfig: config,
     setModelConfig(next) { Object.assign(context, { modelConfig: typeof next === 'function' ? next(context.modelConfig) : next }); },
-    providerKeyStatus: { claude: { stored, hint: stored ? '0001' : null }, groq: { stored: false, hint: null }, openai: { stored: false, hint: null }, openrouter: { stored: false, hint: null } },
+    providerKeyStatus: { claude: { stored: provider === 'claude' && stored, hint: stored ? '0001' : null }, groq: { stored: false, hint: null }, openai: { stored: provider === 'openai' && stored, hint: null }, openrouter: { stored: false, hint: null } },
     refreshProviderKeyStatus: async key => { context.providerKeyStatus = { ...context.providerKeyStatus, [key]: { stored: true, hint: null } }; },
   };
   const stub = name => ({ [name]: name });
+  const panels = new Set([
+    'BuiltInSettings', 'HostedProviderSettings', 'OpenAIKeyLink', 'OllamaSettings', 'OllamaEndpoint',
+    'CompatibleOpenAISettings', 'CompatibleOpenAIAdvanced', 'CodexSettings', 'CodexAdvanced',
+    'ClaudeCodeSettings', 'ClaudeCodeAdvanced', 'ProviderTextField', 'SimpleModelSelect', 'ModelSaveFeedback',
+  ]);
+  let pickerRendering = false;
+  const renderElement = (type, props) => {
+    if (type?.name === 'ModelPicker') {
+      pickerRendering = true;
+      try { return pickerHooks.render(() => type(props)); }
+      finally { pickerRendering = false; }
+    }
+    return panels.has(type?.name) ? type(props) : jsx(type, props);
+  };
+  const invoke = async (command, args) => {
+    calls.push([command, args]);
+    if (Object.hasOwn(responses, command)) return responses[command];
+    if (command === 'get_anthropic_models') return catalogResponse ? catalogResponse() : [{ id: 'claude-sonnet-5' }];
+    if (['get_groq_models', 'get_ollama_models', 'get_openrouter_models'].includes(command)) return [];
+    if (command === 'codex_get_config') return {};
+    return null;
+  };
   const mocks = {
-    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' },
-    '@tauri-apps/api/core': { invoke: async (command, args) => {
-      calls.push([command, args]);
-      if (Object.hasOwn(responses, command)) return responses[command];
-      if (command === 'get_anthropic_models') return catalogResponse ? catalogResponse() : [{ id: 'claude-sonnet-5' }];
-      if (command === 'get_groq_models') return [];
-      if (command === 'codex_get_config') return {};
-      return null;
-    } },
+    react: {
+      ...hooks.react,
+      useState: (...args) => (pickerRendering ? pickerHooks.react.useState : hooks.react.useState)(...args),
+    },
+    'react/jsx-runtime': { jsx: renderElement, jsxs: renderElement, Fragment: 'fragment' },
+    '@tauri-apps/api/core': { invoke },
     '@tauri-apps/plugin-os': { platform: () => 'windows' },
     '@/lib/openExternal': { openExternal() {} },
     '@/components/UnencryptedHttpOptIn': { UnencryptedHttpOptIn: 'http-opt-in' },
     './Sidebar/SidebarProvider': { useSidebar: () => ({ serverAddress: null }) },
-    '@/contexts/OllamaDownloadContext': { useOllamaDownload: () => ({ isDownloading: () => false, getProgress: () => undefined, downloadingModels: new Set() }) },
+    '@/contexts/OllamaDownloadContext': { useOllamaDownload: () => downloads ?? ({ isDownloading: () => false, getProgress: () => undefined, downloadingModels: new Set() }) },
     '@/components/BuiltInModelManager': { BuiltInModelManager: 'built-in-models' },
     '@/contexts/ConfigContext': { useConfig: () => context },
-    './ClaudeCodeProviderCard': {
+    '@/components/ClaudeCodeProviderCard': {
       ClaudeCodeProviderCard: 'claude-code-card', CLAUDE_CODE_MODELS: ['sonnet', 'opus', 'haiku'],
       useClaudeCodeSettings: () => ({ status: null, programPath: '', setProgramPath() {}, busy: false, check: async () => {}, save: async () => {} }),
     },
@@ -205,7 +225,14 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
     '@/components/ui/popover': { Popover: 'popover', PopoverContent: 'popover-content', PopoverTrigger: 'popover-trigger' },
     '@/components/ui/command': { Command: 'command', CommandEmpty: 'command-empty', CommandGroup: 'command-group', CommandInput: 'command-input', CommandItem: 'command-item', CommandList: 'command-list' },
     '@/components/settings/SecretKeyControl': { SecretKeyControl: 'secret-key-control', SecretKeyRow: 'secret-key-row' },
-    '@/services/configService': { configService: { clearApiKey: async () => {}, clearCustomOpenAIApiKey: async () => {}, getCustomOpenAIConfig: async () => null }, customOpenAIModelFields },
+    '@/services/configService': {
+      configService: {
+        clearApiKey: async () => {},
+        clearCustomOpenAIApiKey: async () => {},
+        getCustomOpenAIConfig: () => invoke('api_get_custom_openai_config'),
+      },
+      customOpenAIModelFields,
+    },
     '@/components/settings/settings-parts': { NoteRow: 'note-row', ROW_SELECT: 'w-60' },
     '@/components/settings/summary-provider-parts': {
       CommitInputRow: 'commit-input-row', CopyCommandRow: 'copy-command-row', SaveMark: 'save-mark',
@@ -517,4 +544,134 @@ test('Codex sign-out remains available for an unknown authentication status', as
   await flush();
   const signOut = nodes(app.render()).find(node => node.type === 'button' && text(node) === 'Sign out');
   assert.equal(signOut.props.disabled, false);
+});
+
+test('installed Ollama models are buttons and a second model can be pulled with Enter', async t => {
+  const app = modalHarness({ provider: 'ollama', model: 'gemma3:1b', responses: {
+    get_ollama_models: [{ id: 'one', name: 'gemma3:1b', size: '800 MB' }, { id: 'two', name: 'qwen3:1b', size: '900 MB' }],
+  } });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  app.render(); await flush();
+  const card = name => find(node => node.type === 'button' && node.props['aria-pressed'] !== undefined && text(node).includes(name));
+  assert.equal(card('gemma3:1b')?.props['aria-pressed'], true);
+  assert.equal(card('qwen3:1b')?.props['aria-pressed'], false);
+  card('qwen3:1b').props.onClick();
+  await flush();
+  assert.equal(app.saves.at(-1)?.model, 'qwen3:1b');
+
+  const field = () => find(node => node.type === 'input' && node.props.id === 'summary-ollama-pull');
+  const submit = async value => {
+    field().props.onChange({ target: { value } });
+    const event = { key: 'Enter', preventDefault() {} };
+    field().props.onKeyDown(event);
+    await flush();
+  };
+  await submit('bad model?');
+  assert.equal(app.calls.some(([command]) => command === 'pull_ollama_model'), false);
+  assert.match(text(app.render()), /Enter a valid Ollama model name/);
+  await submit('example/another-model:2b');
+  assert.deepEqual(app.calls.filter(([command]) => command === 'pull_ollama_model').map(([, args]) => ({ ...args })), [
+    { modelName: 'example/another-model:2b', endpoint: null },
+  ]);
+  assert.equal(app.calls.filter(([command]) => command === 'get_ollama_models').length, 2);
+  assert.equal(app.saves.length, 1, 'pulling does not change the selected model');
+});
+
+test('the official compatible endpoint verifies its stored key and offers live model choices', async t => {
+  const endpoint = 'https://api.openai.com/v1';
+  const app = modalHarness({ provider: 'custom-openai', responses: {
+    api_get_custom_openai_config: { ...customOpenAI, endpoint, allow_unencrypted: false, destination_problem: null },
+    get_openai_models: [{ id: 'live-chat-model' }],
+  } });
+  t.after(() => app.hooks.unmount());
+  app.render(); await flush(); app.render(); await flush();
+  const tree = app.render();
+  assert.deepEqual(app.calls.filter(([command]) => command === 'get_openai_models').map(([, args]) => ({ ...args })), [
+    { customEndpoint: endpoint, apiKey: null },
+  ]);
+  assert.match(text(tree), /Model list verified with this key/);
+  assert.ok(nodes(tree).some(node => node.type === 'command-item' && node.props.value === 'live-chat-model'));
+  assert.equal(app.calls.some(([command]) => command === 'api_save_custom_openai_config'), false);
+});
+
+test('the meeting dialog only checks a typed OpenAI key on request and still requires Save', async t => {
+  const endpoint = 'https://api.openai.com/v1';
+  const app = modalHarness({ provider: 'custom-openai', autosave: false, responses: {
+    api_get_custom_openai_config: { ...customOpenAI, endpoint, apiKeyStatus: { stored: false, hint: null }, allow_unencrypted: false, destination_problem: null },
+    get_openai_models: [{ id: 'live-chat-model' }],
+  } });
+  t.after(() => app.hooks.unmount());
+  app.render(); await flush(); app.render();
+  const find = predicate => nodes(app.render()).find(predicate);
+  const requests = () => app.calls.filter(([command]) => command === 'get_openai_models');
+  find(node => node.type === 'secret-key-control' && node.props.id === 'custom-api-key').props.onDraftChange(KEY);
+  app.render(); await flush();
+  assert.equal(requests().length, 0);
+  find(node => node.type === 'button' && text(node) === 'Check connection').props.onClick();
+  await flush();
+  assert.equal(requests().length, 1);
+  assert.equal(requests()[0][1].apiKey, KEY);
+  assert.equal(app.calls.some(([command]) => command === 'api_save_custom_openai_config'), false);
+  find(node => node.type === 'command-item' && node.props.value === 'live-chat-model').props.onSelect();
+  assert.equal(find(node => node.type === 'input' && node.props.id === 'custom-model').props.value, 'live-chat-model');
+  assert.equal(app.saves.length, 0);
+  const submit = find(node => node.type === 'form').props.onSubmit;
+  submit({ preventDefault() {} });
+  submit({ preventDefault() {} });
+  await flush();
+  assert.equal(app.saves.length, 1);
+  assert.equal(app.saves[0].model, 'live-chat-model');
+  assert.equal(app.saves[0].customOpenAIApiKey, null);
+});
+
+test('Ollama pull progress is announced and repeated submission while waiting invokes once', async t => {
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const downloads = {
+    downloadingModels: new Set(),
+    isDownloading: name => downloads.downloadingModels.has(name),
+    getProgress: () => 45,
+  };
+  const app = modalHarness({ provider: 'ollama', model: 'gemma3:1b', downloads, responses: {
+    get_ollama_models: [{ id: 'one', name: 'gemma3:1b', size: '800 MB' }], pull_ollama_model: pending,
+  } });
+  const find = predicate => nodes(app.render()).find(predicate);
+  t.after(() => { finish(); app.hooks.unmount(); });
+  app.render(); await flush();
+  find(node => node.type === 'input' && node.props.id === 'summary-ollama-pull').props.onChange({ target: { value: 'qwen3:1b' } });
+  const start = find(node => node.type === 'button' && text(node) === 'Pull model').props.onClick;
+  start();
+  start();
+  downloads.downloadingModels = new Set(['qwen3:1b']);
+  const progress = find(node => node.type === 'progress');
+  assert.equal(progress.props['aria-label'], 'Download progress for qwen3:1b');
+  assert.equal(progress.props.value, 45);
+  assert.equal(app.calls.filter(([command]) => command === 'pull_ollama_model').length, 1);
+  downloads.downloadingModels = new Set();
+  finish();
+  await flush();
+  assert.equal(app.calls.filter(([command]) => command === 'get_ollama_models').length, 2);
+});
+
+test('a compatible gateway has no automatic credential request and HTTP testing requires opt-in', async t => {
+  const endpoint = 'http://gateway.local/v1';
+  const app = modalHarness({ provider: 'custom-openai', responses: {
+    api_get_custom_openai_config: { ...customOpenAI, endpoint, allow_unencrypted: false, destination_problem: null },
+    api_test_custom_openai_connection: { status: 'success', message: 'Connected' },
+  } });
+  t.after(() => app.hooks.unmount());
+  app.render(); await flush(); app.render(); await flush();
+  const diagnostics = () => app.calls.filter(([command]) => ['get_openai_models', 'api_test_custom_openai_connection'].includes(command));
+  assert.deepEqual(diagnostics(), []);
+  const check = () => nodes(app.render()).find(node => node.type === 'button' && /^Check (connection|again)$/.test(text(node)));
+  check().props.onClick(); await flush();
+  assert.deepEqual(diagnostics(), []);
+  assert.match(text(app.render()), /Allow unencrypted HTTP/);
+  nodes(app.render()).find(node => node.type === 'http-opt-in').props.onChange(true);
+  await flush(); app.render();
+  check().props.onClick(); await flush();
+  assert.deepEqual(diagnostics().map(([command]) => command), ['api_test_custom_openai_connection']);
+  assert.equal(diagnostics()[0][1].allowUnencrypted, true);
+  assert.equal(diagnostics()[0][1].apiKey, null);
 });
