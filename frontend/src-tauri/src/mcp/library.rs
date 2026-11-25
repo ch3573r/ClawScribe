@@ -567,6 +567,9 @@ fn meeting_scope(
         .map(|v| v.as_bool().ok_or(invalid))
         .transpose()?
         .unwrap_or_default();
+    if untagged && !tags.is_empty() {
+        return Err(invalid);
+    }
     Ok(
         (untagged || !tags.is_empty() || from.is_some() || to.is_some()).then_some(
             KnowledgeScope::Library {
@@ -1171,6 +1174,17 @@ mod tests {
 
     async fn run(root: &Path, name: &str, args: Value) -> Value {
         call(root, name, args.as_object().unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn mcp_list_and_search_reject_conflicting_tag_filters() {
+        let (root, _writer) = fixture().await;
+        for tool in ["list_meetings", "search_passages"] {
+            let args = json!({"tags":["Finance"], "untagged":true, "query":"decision"});
+            assert!(call(root.path(), tool, args.as_object().unwrap())
+                .await
+                .is_err());
+        }
     }
 
     #[tokio::test]

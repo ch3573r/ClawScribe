@@ -1,4 +1,4 @@
-//! Runtime probe for the Vulkan loader used by Whisper's Vulkan backend.
+//! Runtime probe for the Vulkan backend used by Whisper.
 //!
 //! Windows MSVC builds with the `vulkan` feature delay-load `vulkan-1.dll`
 //! (see `build.rs`). The app therefore starts on PCs without the Vulkan
@@ -6,42 +6,66 @@
 //! terminate the process. whisper.cpp touches Vulkan from every context load
 //! (its backend registry enumerates Vulkan devices even for CPU-only
 //! contexts), so Whisper must not be initialized at all when the loader is
-//! missing. Every native Whisper entry point calls [`ensure_whisper_runtime`].
+//! missing or ggml cannot enumerate devices. Every native Whisper entry point
+//! calls [`ensure_whisper_runtime`].
 
+#[cfg(all(windows, feature = "vulkan"))]
 use std::sync::OnceLock;
 
 /// User-facing explanation when Whisper cannot run in this build.
 pub const VULKAN_RUNTIME_MISSING_MESSAGE: &str =
-    "Whisper in this GPU build needs the Vulkan runtime, which isn't installed on this PC. \
-Install or update your graphics driver, or install the official Vulkan runtime, then restart \
-ClawScribe. Parakeet transcription works without it.";
+    "Whisper in this GPU build needs a working Vulkan runtime and a compatible device. \
+Install or update your graphics driver, then restart ClawScribe. \
+Parakeet transcription works without Vulkan.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VulkanRuntime {
     /// This build does not link the Vulkan backend.
     NotRequired,
-    /// The Vulkan loader was found and stays loaded for the process lifetime.
+    /// The Vulkan runtime passed its preflight.
     Available,
-    /// The build needs the loader, but it could not be loaded.
+    /// The build needs Vulkan, but the runtime could not be used.
     Missing,
 }
 
-/// Probe result, computed once per process.
-pub fn vulkan_runtime() -> VulkanRuntime {
-    static PROBE: OnceLock<VulkanRuntime> = OnceLock::new();
-    *PROBE.get_or_init(|| {
-        // Match build.rs exactly: every `vulkan` build delay-loads the loader,
-        // whichever backend a combined feature set reports first.
-        classify(cfg!(feature = "vulkan"), || {
-            let available = probe_loader();
-            if !available {
-                log::warn!(
-                    "Vulkan loader (vulkan-1.dll) not found; Whisper is unavailable in this build"
-                );
-            }
-            available
+/// On Windows, the first check can wait for a driver running in a child.
+pub async fn vulkan_runtime() -> VulkanRuntime {
+    #[cfg(all(windows, feature = "vulkan"))]
+    {
+        static PROBE: OnceLock<VulkanRuntime> = OnceLock::new();
+        if let Some(result) = PROBE.get() {
+            return *result;
+        }
+        tokio::task::spawn_blocking(|| {
+            *PROBE.get_or_init(|| {
+                classify(true, || {
+                    if !crate::parakeet_engine::worker::vulkan_device_available() {
+                        log::warn!("Vulkan preflight failed; Whisper is unavailable");
+                        return false;
+                    }
+                    let Some(loader) = load_compatible_loader() else {
+                        log::warn!(
+                            "System Vulkan loader could not be loaded; Whisper is unavailable"
+                        );
+                        return false;
+                    };
+                    // MSVC's delayhlp.cpp calls LoadLibraryEx with flags 0 and the
+                    // bare DLL name. Windows consults loaded modules by base name
+                    // before searching directories, so retain the System32 module
+                    // for the lifetime of this process.
+                    std::mem::forget(loader);
+                    true
+                })
+            })
         })
-    })
+        .await
+        .unwrap_or(VulkanRuntime::Missing)
+    }
+    #[cfg(not(all(windows, feature = "vulkan")))]
+    {
+        // Other Vulkan builds resolve the loader at link time.
+        classify(cfg!(feature = "vulkan"), || true)
+    }
 }
 
 fn classify(requires_vulkan: bool, probe: impl FnOnce() -> bool) -> VulkanRuntime {
@@ -54,9 +78,9 @@ fn classify(requires_vulkan: bool, probe: impl FnOnce() -> bool) -> VulkanRuntim
     }
 }
 
-/// Fails closed before any whisper.cpp call when the Vulkan loader is absent.
-pub fn ensure_whisper_runtime() -> Result<(), String> {
-    runtime_result(vulkan_runtime())
+/// Fails closed before native Whisper initialization if the preflight failed.
+pub async fn ensure_whisper_runtime() -> Result<(), String> {
+    runtime_result(vulkan_runtime().await)
 }
 
 fn runtime_result(runtime: VulkanRuntime) -> Result<(), String> {
@@ -67,48 +91,63 @@ fn runtime_result(runtime: VulkanRuntime) -> Result<(), String> {
 }
 
 /// ggml-vulkan creates its instance with Vulkan API 1.2.
+#[cfg(any(test, all(windows, feature = "vulkan")))]
 const REQUIRED_API_VERSION: u32 = (1 << 22) | (2 << 12);
 
 /// A loader older than 1.1 lacks exports that ggml-vulkan imports; the
 /// delay-load helper would then fail at the first such call.
+#[cfg(any(test, all(windows, feature = "vulkan")))]
 fn loader_supports(api_version: Option<u32>) -> bool {
     api_version.is_some_and(|version| version >= REQUIRED_API_VERSION)
 }
 
 #[cfg(all(windows, feature = "vulkan"))]
-fn probe_loader() -> bool {
+struct VulkanLoader(windows::Win32::Foundation::HMODULE);
+
+#[cfg(all(windows, feature = "vulkan"))]
+impl Drop for VulkanLoader {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns one reference obtained with LoadLibraryExW.
+        let _ = unsafe { windows::Win32::Foundation::FreeLibrary(self.0) };
+    }
+}
+
+#[cfg(all(windows, feature = "vulkan"))]
+fn load_compatible_loader() -> Option<VulkanLoader> {
     use windows::core::{s, w};
     use windows::Win32::System::LibraryLoader::{
-        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_FLAGS,
+        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
     };
 
-    // Same default search order the MSVC delay-load helper uses. The handle is
-    // intentionally never freed so the delay-load helper reuses this module.
     // SAFETY: the argument is a static NUL-terminated wide string.
-    let Ok(module) = (unsafe { LoadLibraryExW(w!("vulkan-1.dll"), None, LOAD_LIBRARY_FLAGS(0)) })
-    else {
-        return false;
-    };
-    // SAFETY: valid module handle and static NUL-terminated export names.
-    let enumerate = unsafe { GetProcAddress(module, s!("vkEnumerateInstanceVersion")) };
-    let features2 = unsafe { GetProcAddress(module, s!("vkGetPhysicalDeviceFeatures2")) };
-    let (Some(enumerate), Some(_)) = (enumerate, features2) else {
-        return false;
-    };
+    let loader = VulkanLoader(
+        unsafe { LoadLibraryExW(w!("vulkan-1.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?,
+    );
+    // SAFETY: the guard owns a live module and the export names are static.
+    let enumerate = unsafe { GetProcAddress(loader.0, s!("vkEnumerateInstanceVersion")) }?;
+    unsafe { GetProcAddress(loader.0, s!("vkGetPhysicalDeviceFeatures2")) }?;
     type EnumerateInstanceVersion = unsafe extern "system" fn(*mut u32) -> i32;
     // SAFETY: the export has the documented vkEnumerateInstanceVersion
     // signature; it writes one u32 and returns a VkResult (0 = VK_SUCCESS).
     let enumerate: EnumerateInstanceVersion = unsafe { std::mem::transmute(enumerate) };
     let mut version = 0u32;
     let result = unsafe { enumerate(&mut version) };
-    loader_supports((result == 0).then_some(version))
+    loader_supports((result == 0).then_some(version)).then_some(loader)
 }
 
-#[cfg(not(all(windows, feature = "vulkan")))]
-fn probe_loader() -> bool {
-    // Non-Windows Vulkan builds keep a normal link-time dependency: the
-    // dynamic loader has already resolved it if the process is running.
-    true
+#[cfg(all(windows, feature = "vulkan"))]
+pub(crate) fn probe_device_in_child() -> bool {
+    extern "C" {
+        // ggml-vulkan.h from the same whisper-rs-sys static library that
+        // Whisper uses. This enters the actual backend's device enumeration.
+        fn ggml_backend_vk_get_device_count() -> std::ffi::c_int;
+    }
+    let Some(_loader) = load_compatible_loader() else {
+        return false;
+    };
+    // SAFETY: the loader is retained through the call, which runs only in the
+    // supervised child. The delay-load table keeps its own reference.
+    unsafe { ggml_backend_vk_get_device_count() > 0 }
 }
 
 #[cfg(test)]

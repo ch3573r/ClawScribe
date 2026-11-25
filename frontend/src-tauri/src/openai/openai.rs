@@ -71,12 +71,19 @@ pub async fn get_openai_models(
         let (stored_key, organization, project) = config
             .map(|config| (config.api_key, config.organization, config.project))
             .unwrap_or_default();
-        return fetch_openai_models(api_key.or(stored_key), organization, project).await;
+        let key = catalog_api_key(api_key, stored_key);
+        return fetch_openai_models(key, organization, project).await;
     }
     let key = SettingsRepository::effective_api_key(pool, "openai", api_key)
         .await
         .map_err(|_| "Failed to read the saved API key".to_string())?;
     fetch_openai_models(key, None, None).await
+}
+
+fn catalog_api_key(override_key: Option<String>, stored_key: Option<String>) -> Option<String> {
+    override_key
+        .filter(|key| !key.trim().is_empty())
+        .or(stored_key)
 }
 
 fn is_official_openai_endpoint(value: &str) -> bool {
@@ -130,7 +137,22 @@ async fn fetch_openai_models(
 
 #[cfg(test)]
 mod tests {
-    use super::is_official_openai_endpoint;
+    use super::{catalog_api_key, is_official_openai_endpoint};
+
+    #[test]
+    fn blank_catalog_key_uses_the_saved_key_for_the_same_endpoint() {
+        for value in [None, Some(""), Some("  "), Some("override")] {
+            let expected = if value == Some("override") {
+                "override"
+            } else {
+                "saved"
+            };
+            assert_eq!(
+                catalog_api_key(value.map(str::to_owned), Some("saved".into())).as_deref(),
+                Some(expected),
+            );
+        }
+    }
 
     #[test]
     fn custom_catalog_accepts_only_official_https_endpoints() {

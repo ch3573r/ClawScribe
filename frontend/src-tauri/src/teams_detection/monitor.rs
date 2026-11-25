@@ -170,6 +170,26 @@ impl ObservedCalls {
     /// Counts the scan against every remembered call and returns the keys of the
     /// calls that have now ended.
     fn update(&mut self, scan: &CallScan) -> Vec<String> {
+        // Desktop Teams can replace its HWND without supplying a room ID.
+        // Follow the dismissed call so positive end evidence for the new HWND
+        // releases its suppression too.
+        if let [call] = scan.active.as_slice() {
+            if !self.calls.contains_key(&call.key) {
+                let mut previous = self.calls.values().filter(|seen| {
+                    seen.dismissed
+                        && desktop_teams_continuation(&seen.call, call)
+                        && !scan.ended.iter().any(|ended| ended.key == seen.call.key)
+                });
+                let previous = previous
+                    .next()
+                    .filter(|_| previous.next().is_none())
+                    .map(|seen| seen.call.key.clone());
+                if let Some(mut seen) = previous.and_then(|key| self.calls.remove(&key)) {
+                    seen.call = call.clone();
+                    self.calls.insert(call.key.clone(), seen);
+                }
+            }
+        }
         let mut ended = Vec::new();
         for (key, observed) in self.calls.iter_mut() {
             observed.misses = if ended_on_scan(&observed.call, scan) {
@@ -1104,6 +1124,44 @@ mod tests {
         assert_eq!(
             tracker.observe(revision, Some(&scan), IDLE),
             Decision::Nothing
+        );
+    }
+
+    #[test]
+    fn dismissed_desktop_teams_call_follows_the_replacement_window() {
+        let mut tracker = Tracker::new(CallSettings {
+            mode: Mode::Prompt,
+            ..Default::default()
+        });
+        let first = CallWindow {
+            desktop_teams: true,
+            ..call(Provider::Teams, "window-a", "key-a")
+        };
+        let moved = CallWindow {
+            desktop_teams: true,
+            ..call(Provider::Teams, "window-b", "key-b")
+        };
+        let revision = tracker.revision();
+        let first_scan = snapshot(&[first], &["window-a"], &[]);
+        assert_eq!(
+            tracker.observe(revision, Some(&first_scan), IDLE),
+            Decision::Prompt
+        );
+        assert!(tracker.dismiss(&tracker.prompt_view().unwrap().key));
+        let moved_scan = snapshot(&[moved.clone()], &["window-a", "window-b"], &[]);
+        assert_eq!(
+            tracker.observe(revision, Some(&moved_scan), IDLE),
+            Decision::Nothing
+        );
+
+        let next = CallWindow {
+            desktop_teams: true,
+            ..call(Provider::Teams, "window-c", "key-c")
+        };
+        let next_scan = snapshot(&[next], &["window-a", "window-b", "window-c"], &[moved]);
+        assert_eq!(
+            tracker.observe(revision, Some(&next_scan), IDLE),
+            Decision::Prompt
         );
     }
 

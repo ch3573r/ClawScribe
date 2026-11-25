@@ -333,17 +333,32 @@ pub(super) fn find_valid_recovered_audio_file(folder: &Path) -> Option<PathBuf> 
     None
 }
 
+async fn inspect_audio_folder<T: Send + 'static>(
+    folder: &Path,
+    inspect: impl FnOnce(&Path) -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    let folder = folder.to_path_buf();
+    tokio::task::spawn_blocking(move || inspect(&folder)).await
+}
+
 /// Find an audio file, recovering it from checkpoints first when the final file is missing.
 pub async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
     // Recovery originals are deliberately retained. Reuse the completed result;
     // an explicit Recover action can rebuild it if originals are later changed.
-    if let Some(path) = find_valid_recovered_audio_file(folder) {
+    let (recovered, has_spool) = inspect_audio_folder(folder, |folder| {
+        (
+            find_valid_recovered_audio_file(folder),
+            folder.join(".audio-spool").is_dir(),
+        )
+    })
+    .await?;
+    if let Some(path) = recovered {
         return Ok(path);
     }
     if super::recording_commands::is_recording().await {
-        return find_existing_audio_file(folder);
+        return inspect_audio_folder(folder, find_existing_audio_file).await?;
     }
-    if folder.join(".audio-spool").is_dir() {
+    if has_spool {
         let status = recover_audio_in_folder(folder.to_string_lossy().to_string())
             .await
             .map_err(anyhow::Error::msg)?;
@@ -351,7 +366,7 @@ pub async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
             return Ok(PathBuf::from(path));
         }
     }
-    match find_existing_audio_file(folder) {
+    match inspect_audio_folder(folder, find_existing_audio_file).await? {
         Ok(path) => Ok(path),
         Err(initial_error) => {
             let recovery = recover_audio_in_folder(folder.to_string_lossy().to_string())
@@ -366,18 +381,20 @@ pub async fn find_or_recover_audio_file(folder: &Path) -> Result<PathBuf> {
 
             if let Some(audio_file_path) = recovery.audio_file_path {
                 let path = PathBuf::from(audio_file_path);
-                if path.is_file() {
+                if inspect_audio_folder(&path, Path::is_file).await? {
                     return Ok(path);
                 }
             }
 
-            find_existing_audio_file(folder).map_err(|after_recovery| {
-                anyhow!(
-                    "{}; audio recovery result: {}",
-                    after_recovery,
-                    recovery.message
-                )
-            })
+            inspect_audio_folder(folder, find_existing_audio_file)
+                .await?
+                .map_err(|after_recovery| {
+                    anyhow!(
+                        "{}; audio recovery result: {}",
+                        after_recovery,
+                        recovery.message
+                    )
+                })
         }
     }
 }
@@ -407,25 +424,43 @@ pub(super) async fn find_or_recover_audio_file_with_status(
 
 /// Resolve a meeting audio file for UI gating. Missing audio/checkpoints are not an error here.
 pub async fn resolve_audio_file_or_recover(folder: &Path) -> Result<Option<PathBuf>, String> {
-    if folder.join(".audio-spool").is_dir() {
+    let inspect_error = |_| "Meeting audio inspection was interrupted".to_string();
+    let (has_spool, existing) = inspect_audio_folder(folder, |folder| {
+        let has_spool = folder.join(".audio-spool").is_dir();
+        (
+            has_spool,
+            (!has_spool)
+                .then(|| find_existing_audio_file(folder).ok())
+                .flatten(),
+        )
+    })
+    .await
+    .map_err(inspect_error)?;
+    if has_spool {
         return find_or_recover_audio_file(folder)
             .await
             .map(Some)
             .map_err(|error| error.to_string());
     }
-    match find_existing_audio_file(folder) {
-        Ok(path) => Ok(Some(path)),
-        Err(_) => {
+    match existing {
+        Some(path) => Ok(Some(path)),
+        None => {
             let recovery = recover_audio_in_folder(folder.to_string_lossy().to_string()).await?;
 
             if let Some(audio_file_path) = recovery.audio_file_path {
                 let path = PathBuf::from(audio_file_path);
-                if path.is_file() {
+                if inspect_audio_folder(&path, Path::is_file)
+                    .await
+                    .map_err(inspect_error)?
+                {
                     return Ok(Some(path));
                 }
             }
 
-            match find_existing_audio_file(folder) {
+            match inspect_audio_folder(folder, find_existing_audio_file)
+                .await
+                .map_err(inspect_error)?
+            {
                 Ok(path) => Ok(Some(path)),
                 Err(_) if recovery.status == "none" => Ok(None),
                 Err(error) => Err(format!(

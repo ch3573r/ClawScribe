@@ -418,15 +418,7 @@ fn build_menu<R: Runtime>(
                     builder = builder.item(
                         &MenuItemBuilder::with_id(
                             format!("confirm_call:{}", prompt.key),
-                            prompt.event_title.as_ref().map_or_else(
-                                || format!("Record this {} call", prompt.provider.label()),
-                                |title| {
-                                    format!(
-                                        "Record this Teams call as {}",
-                                        clean_title(title).unwrap_or_default().replace('&', "&&")
-                                    )
-                                },
-                            ),
+                            prompt_menu_label(&prompt),
                         )
                         .build(app)?,
                     );
@@ -747,6 +739,14 @@ fn truncate_chars(text: &str, limit: usize) -> String {
 }
 
 /// A one-line, bounded title: control characters become spaces.
+fn prompt_menu_label(prompt: &crate::teams_detection::monitor::PromptView) -> String {
+    let label = format!("Record this {} call", prompt.provider.label());
+    match prompt.event_title.as_deref().and_then(clean_title) {
+        Some(title) => format!("{label} as {}", title.replace('&', "&&")),
+        None => label,
+    }
+}
+
 fn clean_title(raw: &str) -> Option<String> {
     let flat: String = raw
         .chars()
@@ -948,6 +948,20 @@ mod tests {
             "ClawScribe"
         );
         assert_eq!(clean_title("  \n\t "), None);
+    }
+
+    #[test]
+    fn a_calendar_prompt_uses_the_call_provider_in_its_menu_label() {
+        let prompt = PromptView {
+            key: "k".into(),
+            provider: Provider::GoogleMeet,
+            retry: false,
+            event_title: Some("Planning & review".into()),
+        };
+        assert_eq!(
+            prompt_menu_label(&prompt),
+            "Record this Google Meet call as Planning && review"
+        );
     }
 
     #[test]

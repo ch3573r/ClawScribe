@@ -5,12 +5,17 @@ use crate::{file_grants, local_path};
 const UNAVAILABLE: &str = "The saved export is no longer available.";
 
 pub(crate) fn allow_saved_file(path: &Path) -> bool {
-    local_path::is_local_path_text(&path.to_string_lossy())
+    validate_saved_file(path).is_ok()
         && file_grants::grant(file_grants::Purpose::OpenExport, path).is_ok()
 }
 
 fn saved_file(text: &str) -> Result<PathBuf, String> {
     let path = file_grants::peek(file_grants::Purpose::OpenExport, text)?;
+    validate_saved_file(&path)?;
+    Ok(path)
+}
+
+fn validate_saved_file(path: &Path) -> Result<(), String> {
     if !local_path::is_local_path_text(&path.to_string_lossy())
         || !path
             .extension()
@@ -20,11 +25,11 @@ fn saved_file(text: &str) -> Result<PathBuf, String> {
     }
     let folder = path.parent().ok_or(UNAVAILABLE)?;
     local_path::require_unlinked_directory(folder).map_err(|_| UNAVAILABLE)?;
-    let metadata = std::fs::symlink_metadata(&path).map_err(|_| UNAVAILABLE)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| UNAVAILABLE)?;
     if !metadata.is_file() || local_path::is_link(&metadata) {
         return Err(UNAVAILABLE.into());
     }
-    Ok(path)
+    Ok(())
 }
 
 #[tauri::command]
@@ -120,9 +125,11 @@ mod tests {
         let text = path.to_string_lossy();
         std::fs::write(path, "notes").unwrap();
         assert!(saved_file(&text).is_err());
+        assert!(!allow_saved_file(dir.path()));
         assert!(allow_saved_file(path));
         assert_eq!(saved_file(&text).unwrap(), path);
         std::fs::remove_file(path).unwrap();
+        assert!(!allow_saved_file(path));
         assert!(saved_file(&text).is_err());
     }
 }

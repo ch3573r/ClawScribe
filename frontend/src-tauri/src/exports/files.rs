@@ -377,12 +377,16 @@ pub async fn create_folder<T: GraphTransport, S: Sleeper>(
     parent: &DriveDestination,
     folder_name: &str,
 ) -> Result<DriveDestination, String> {
+    super::ledger::require_remote_ids(&[&parent.drive_id, &parent.item_id])?;
     let folder_name = sanitize_drive_item_name(folder_name, "Meeting notes");
     let request = post_json_request(
-        format!(
-            "{GRAPH_BASE}/drives/{}/items/{}/children",
-            parent.drive_id, parent.item_id
-        ),
+        super::exporter::graph_url_with_path_segments(&[
+            "drives",
+            &parent.drive_id,
+            "items",
+            &parent.item_id,
+            "children",
+        ]),
         serde_json::json!({
             "name": folder_name,
             "folder": {},

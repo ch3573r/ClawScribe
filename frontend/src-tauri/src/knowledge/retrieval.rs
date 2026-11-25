@@ -53,7 +53,7 @@ pub(crate) async fn freeze_scope_rows(
         KnowledgeScope::Library { filter } => filter.clone(),
         KnowledgeScope::Live { .. } => return Err(KnowledgeError::InvalidInput),
     };
-    if !filter.has_selection() {
+    if !filter.has_selection() || (filter.untagged && !filter.tags.is_empty()) {
         return Err(KnowledgeError::InvalidInput);
     }
     let parse_bound = |value: &str| {
@@ -1724,7 +1724,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn empty_scope_never_broadens_and_untagged_has_precedence() {
+    async fn empty_or_conflicting_scope_is_rejected() {
         let pool = fixture().await;
         assert!(freeze_scope(
             &pool,
@@ -1741,8 +1741,21 @@ mod tests {
                 ..Default::default()
             },
         };
+        assert!(matches!(
+            freeze_scope(&pool, &scope).await,
+            Err(KnowledgeError::InvalidInput)
+        ));
+        let untagged_only = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                untagged: true,
+                ..Default::default()
+            },
+        };
         assert_eq!(
-            freeze_scope(&pool, &scope).await.unwrap().meeting_ids,
+            freeze_scope(&pool, &untagged_only)
+                .await
+                .unwrap()
+                .meeting_ids,
             vec!["three"]
         );
     }

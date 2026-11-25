@@ -397,7 +397,11 @@ async fn nemotron_model_diagnostics<R: Runtime>(
         .ok()
         .map(|dir| path_to_string(dir.join("models").join("nemotron")));
     let (loaded, current_model) = {
-        let engine = NEMOTRON_ENGINE.lock().unwrap().as_ref().cloned();
+        let engine = NEMOTRON_ENGINE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .cloned();
         if let Some(engine) = engine {
             (
                 Some(engine.is_model_loaded().await),

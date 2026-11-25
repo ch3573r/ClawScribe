@@ -21,7 +21,18 @@ pub(crate) fn validate_id(id: &str) -> Result<(), String> {
         stem.strip_prefix(*prefix).is_some_and(|suffix| {
             matches!(
                 suffix,
-                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "Â¹" | "Â²" | "Â³"
+                "0" | "1"
+                    | "2"
+                    | "3"
+                    | "4"
+                    | "5"
+                    | "6"
+                    | "7"
+                    | "8"
+                    | "9"
+                    | "\u{00b9}"
+                    | "\u{00b2}"
+                    | "\u{00b3}"
             )
         })
     });
@@ -150,6 +161,13 @@ mod tests {
         template.sections.clear();
         assert!(save_in(directory.path(), "custom-review", &template).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), saved);
+    }
+
+    #[test]
+    fn rejects_windows_superscript_device_names() {
+        for id in ["COM\u{00b9}", "LPT\u{00b2}.notes", "com\u{00b3}"] {
+            assert!(validate_id(id).is_err(), "{id}");
+        }
     }
 
     #[test]

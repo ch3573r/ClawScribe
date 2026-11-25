@@ -13,10 +13,13 @@ static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Initialize the models directory path using app_data_dir
 /// This should be called during app setup before whisper_init
 pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .expect("Failed to get app data dir");
+    let app_data_dir = match app.path().app_data_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            log::warn!("Could not resolve the model storage directory: {error}");
+            return;
+        }
+    };
 
     let models_dir = app_data_dir.join("models");
 
@@ -79,7 +82,7 @@ pub async fn whisper_get_acceleration_status() -> Result<WhisperAccelerationStat
         whisper_context_acceleration_for(backend, profile.gpu_type, profile.performance_tier);
 
     let vulkan_runtime_missing = matches!(
-        crate::whisper_engine::vulkan_runtime::vulkan_runtime(),
+        crate::whisper_engine::vulkan_runtime::vulkan_runtime().await,
         crate::whisper_engine::vulkan_runtime::VulkanRuntime::Missing
     );
     let gpu_available_but_unused =
@@ -91,7 +94,7 @@ pub async fn whisper_get_acceleration_status() -> Result<WhisperAccelerationStat
         use_gpu: accel.use_gpu && !vulkan_runtime_missing,
         flash_attn: accel.flash_attn && !vulkan_runtime_missing,
         label: if vulkan_runtime_missing {
-            "Whisper unavailable: Vulkan runtime not installed".to_string()
+            "Whisper unavailable: Vulkan runtime or device unavailable".to_string()
         } else {
             accel.status_label().to_string()
         },
@@ -399,7 +402,10 @@ pub(crate) async fn whisper_validate_model_ready_for(
             available_models[0].name.clone()
         };
 
-        if crate::whisper_engine::vulkan_runtime::ensure_whisper_runtime().is_err() {
+        if crate::whisper_engine::vulkan_runtime::ensure_whisper_runtime()
+            .await
+            .is_err()
+        {
             return Err(LiveModelFailure::VulkanRuntimeMissing);
         }
         engine.load_model(&model_name).await.map_err(|error| {

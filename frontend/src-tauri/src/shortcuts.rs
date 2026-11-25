@@ -225,7 +225,9 @@ pub fn on_shortcut<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, state: S
         ShortcutAction::PauseResume => {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                if !crate::audio::recording_commands::is_recording().await {
+                if !crate::audio::recording_commands::is_recording().await
+                    || crate::audio::recording_commands::is_stopping()
+                {
                     return;
                 }
                 if crate::audio::recording_commands::is_recording_paused().await {

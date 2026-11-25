@@ -953,6 +953,14 @@ impl ExportLedger {
     }
 }
 
+pub(super) fn require_remote_ids(ids: &[&str]) -> Result<(), String> {
+    if ids.iter().all(|id| valid_remote_id(id)) {
+        Ok(())
+    } else {
+        Err("Microsoft Graph destination ID is invalid.".into())
+    }
+}
+
 pub(crate) fn valid_remote_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 512

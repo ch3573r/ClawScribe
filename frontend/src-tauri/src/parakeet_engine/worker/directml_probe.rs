@@ -47,14 +47,15 @@ fn run_probe(
         return Ok(false);
     }
     fs::create_dir_all(app_data)?;
-    let pending = app_data.join(PENDING);
-    // Exclusive creation keeps probes from running concurrently. If the parent
-    // exits before the result is known, the pending marker blocks the next run.
-    OpenOptions::new()
+    // Keep a stable file to lock. The OS releases its lock on every exit, and
+    // a pending file left by an older build can also be locked and reused.
+    let pending = OpenOptions::new()
+        .read(true)
         .write(true)
-        .create_new(true)
-        .open(&pending)?
-        .sync_all()?;
+        .create(true)
+        .truncate(false)
+        .open(app_data.join(PENDING))?;
+    pending.try_lock().map_err(io::Error::from)?;
 
     let timeouts = app_data.join(TIMEOUTS);
     let count = match fs::read_to_string(&timeouts) {
@@ -92,7 +93,6 @@ fn run_probe(
             }
         }
     };
-    remove_marker(&pending)?;
     Ok(available && !marker.try_exists()?)
 }
 
@@ -130,7 +130,7 @@ mod tests {
                 }),
                 available
             );
-            assert!(!marker.exists());
+            assert!(resolve(&OnceLock::new(), dir.path(), || Ok(true)));
             assert_eq!(
                 resolve(&cache, dir.path(), || panic!("result should be cached")),
                 available
@@ -190,10 +190,28 @@ mod tests {
             assert!(dir.path().join(PENDING).is_file());
             Err(WorkerError::Spawn)
         }));
-        assert!(!dir.path().join(PENDING).exists());
         assert!(!dir.path().join(MARKER).exists());
         assert!(!probe(Err(WorkerError::TimedOut)));
         assert!(probe(Ok(true)));
+    }
+
+    #[test]
+    fn a_stale_pending_file_does_not_disable_later_probes() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(PENDING), []).unwrap();
+        assert!(resolve(&OnceLock::new(), dir.path(), || Ok(true)));
+    }
+
+    #[test]
+    fn io_failure_does_not_prevent_a_later_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let timeouts = dir.path().join(TIMEOUTS);
+        fs::create_dir(&timeouts).unwrap();
+        assert!(!resolve(&OnceLock::new(), dir.path(), || panic!(
+            "unreadable retry state"
+        )));
+        fs::remove_dir(timeouts).unwrap();
+        assert!(resolve(&OnceLock::new(), dir.path(), || Ok(true)));
     }
 
     #[test]

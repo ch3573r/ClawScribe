@@ -13,10 +13,13 @@ static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Initialize the models directory path using app_data_dir
 /// This should be called during app setup before parakeet_init
 pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .expect("Failed to get app data dir");
+    let app_data_dir = match app.path().app_data_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            log::warn!("Could not resolve the model storage directory: {error}");
+            return;
+        }
+    };
 
     let models_dir = app_data_dir.join("models");
 
@@ -600,7 +603,7 @@ pub(crate) async fn apply_running_directml_preference(preference: Option<bool>) 
 
 #[command]
 pub async fn get_parakeet_use_directml() -> Result<bool, String> {
-    tokio::task::spawn_blocking(super::parakeet_engine::directml_requested)
+    tokio::task::spawn_blocking(|| super::parakeet_engine::resolved_directml().0)
         .await
         .map_err(|_| "Could not check the DirectML setting".into())
 }

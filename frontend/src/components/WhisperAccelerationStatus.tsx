@@ -62,9 +62,9 @@ export function WhisperAccelerationStatus() {
         <div className="mt-2 flex items-start gap-2 rounded-md border border-warning-border/40 bg-warning p-2 text-xs text-warning-foreground">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
-            Whisper needs the Vulkan runtime in this build, and it isn&apos;t
-            installed. Install or update your graphics driver, or the official
-            Vulkan runtime, then restart ClawScribe. Parakeet works without it.
+            Whisper needs a working Vulkan runtime and a compatible device.
+            Install or update your graphics driver, then restart ClawScribe.
+            Parakeet works without Vulkan.
           </span>
         </div>
       )}

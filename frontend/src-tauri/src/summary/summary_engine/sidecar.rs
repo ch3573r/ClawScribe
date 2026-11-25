@@ -43,12 +43,17 @@ pub struct SidecarManager {
     /// Each spawn installs a fresh token so tasks never outlive their process.
     background: Arc<std::sync::Mutex<CancellationToken>>,
 
-    /// A resource whose cleanup has not actually completed cannot be reused.
+    /// Serialize process and pipe replacement with teardown.
+    lifecycle: Arc<Mutex<()>>,
+
+    /// Once detached, this manager can finish existing work but cannot spawn.
+    retired: Arc<AtomicBool>,
+
+    /// Reject queued exchanges while the lifecycle owner is cleaning up.
     quarantined: Arc<AtomicBool>,
 
-    /// A helper whose exit could not be confirmed. No new helper spawns
-    /// until it has exited, so two helpers never hold the model at once.
-    unreaped: Arc<Mutex<Option<Child>>>,
+    #[cfg(windows)]
+    job: Arc<crate::windows_job::Job>,
 
     /// Active request count (for graceful shutdown)
     active_request_count: Arc<AtomicUsize>,
@@ -162,10 +167,15 @@ impl SidecarManager {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             background: Arc::new(std::sync::Mutex::new(cancelled_token())),
+            lifecycle: Arc::new(Mutex::new(())),
+            retired: Arc::new(AtomicBool::new(false)),
             quarantined: Arc::new(AtomicBool::new(false)),
-            unreaped: Arc::new(Mutex::new(None)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path,
+            #[cfg(windows)]
+            job: Arc::new(
+                crate::windows_job::Job::new().context("Could not create local helper job")?,
+            ),
             current_model_path: Arc::new(RwLock::new(None)),
             idle_timeout_secs,
         })
@@ -199,6 +209,8 @@ impl SidecarManager {
 
     /// Ensure sidecar is running, spawn if needed
     pub async fn ensure_running(&self, model_path: PathBuf) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.check_retired()?;
         // Check if already running with correct model
         {
             let current_model = self.current_model_path.read().await;
@@ -219,8 +231,8 @@ impl SidecarManager {
     /// Spawn the sidecar process
     async fn spawn(&self, model_path: PathBuf) -> Result<()> {
         // Shutdown existing process if running
-        self.shutdown().await?;
-        self.ensure_previous_helper_exited().await?;
+        self.shutdown_locked(SHUTDOWN_DEADLINE).await?;
+        self.check_retired()?;
 
         log::info!("Spawning llama-helper sidecar");
         log::info!("Model path: {}", model_path.display());
@@ -254,12 +266,25 @@ impl SidecarManager {
 
         // Retain the manager slot before spawning; no await may lose a new child.
         let mut child_lock = self.child_process.lock().await;
+        self.check_retired()?;
         let mut child = command.spawn().with_context(|| {
             format!(
                 "Failed to spawn llama-helper at {:?}",
                 self.helper_binary_path
             )
         })?;
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::BorrowedHandle;
+            let handle = child
+                .raw_handle()
+                .ok_or_else(|| anyhow!("Local helper exited during startup"))?;
+            // SAFETY: child owns this handle for the duration of assignment.
+            self.job
+                .assign(unsafe { BorrowedHandle::borrow_raw(handle) })
+                .context("Could not contain the local helper process")?;
+        }
 
         let stdin = child
             .stdin
@@ -331,6 +356,7 @@ impl SidecarManager {
             _ = token.cancelled() => return Err(anyhow!("Generation cancelled while queued")),
             lock = self.request_lock.lock() => lock,
         };
+        self.check_retired()?;
         if self.quarantined.load(Ordering::SeqCst) {
             return Err(anyhow!(
                 "Local summary helper is quarantined until cleanup completes"
@@ -341,8 +367,22 @@ impl SidecarManager {
             _ = token.cancelled() => None,
             result = async {
                 // Model switches and process startup belong to the exchange owner too.
-                if let Some(model) = model { self.ensure_running(model).await?; }
-                self.exchange_request(request_json, timeout).await
+                if let Some(path) = &model { self.ensure_running(path.clone()).await?; }
+                let started = Instant::now();
+                let result = self.exchange_request(&request_json, timeout).await;
+                // A sleeping machine can miss the parent's idle timer. The
+                // helper may already have written Goodbye or closed its pipes.
+                // A local generation with no response can safely be retried once.
+                if let (Some(model), Err(error)) = (model, &result) {
+                    if helper_closed(error) {
+                        self.ensure_running_after_disconnect(model).await?;
+                        return self.exchange_request(
+                            &request_json,
+                            timeout.saturating_sub(started.elapsed()),
+                        ).await;
+                    }
+                }
+                result
             } => Some(result),
         };
         match result {
@@ -359,41 +399,46 @@ impl SidecarManager {
         }
     }
 
-    async fn exchange_request(&self, request_json: String, timeout: Duration) -> Result<String> {
-        // Write request to stdin
-        {
-            let mut stdin_lock = self.stdin_writer.lock().await;
-            let stdin = stdin_lock
-                .as_mut()
-                .ok_or_else(|| anyhow!("Sidecar not running"))?;
+    async fn ensure_running_after_disconnect(&self, model: PathBuf) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.check_retired()?;
+        self.spawn(model).await
+    }
 
-            stdin
-                .write_all(request_json.as_bytes())
-                .await
-                .context("Failed to write request to stdin")?;
-            stdin
-                .write_all(b"\n")
-                .await
-                .context("Failed to write newline")?;
-            stdin.flush().await.context("Failed to flush stdin")?;
+    async fn exchange_request(&self, request_json: &str, timeout: Duration) -> Result<String> {
+        if timeout.is_zero() {
+            return Err(anyhow!("Request timed out"));
         }
+        tokio::time::timeout(timeout, async {
+            {
+                let mut stdin_lock = self.stdin_writer.lock().await;
+                let stdin = stdin_lock
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Sidecar not running"))?;
+                stdin
+                    .write_all(request_json.as_bytes())
+                    .await
+                    .context("Failed to write request to stdin")?;
+                stdin
+                    .write_all(b"\n")
+                    .await
+                    .context("Failed to write newline")?;
+                stdin.flush().await.context("Failed to flush stdin")?;
+            }
 
-        // Read response from stdout with timeout
-        match tokio::time::timeout(timeout, self.read_response()).await {
-            Ok(Ok(response)) => {
-                self.update_activity().await;
-                Ok(response)
+            let response = self.read_response().await?;
+            if is_goodbye(&response) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Local summary helper went idle",
+                )
+                .into());
             }
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                // Timeout reached - shutdown sidecar to stop generation
-                log::error!("Request timeout after {:?}, shutting down sidecar", timeout);
-                if let Err(shutdown_err) = self.shutdown().await {
-                    log::error!("Failed to shutdown sidecar after timeout: {}", shutdown_err);
-                }
-                Err(anyhow!("Request timed out after {:?}", timeout))
-            }
-        }
+            self.update_activity().await;
+            Ok(response)
+        })
+        .await
+        .map_err(|_| anyhow!("Request timed out after {timeout:?}"))?
     }
 
     /// Read a single line response from stdout
@@ -415,7 +460,11 @@ impl SidecarManager {
         }
 
         if line.is_empty() {
-            return Err(anyhow!("Sidecar closed stdout (process may have crashed)"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Sidecar closed stdout (process may have crashed)",
+            )
+            .into());
         }
 
         Ok(String::from_utf8(line)
@@ -472,13 +521,24 @@ impl SidecarManager {
         result
     }
 
+    pub(super) fn retire(&self) {
+        self.retired.store(true, Ordering::SeqCst);
+        self.cancel_background();
+    }
+
+    fn check_retired(&self) -> Result<()> {
+        super::client::check_exit_admission()?;
+        if self.retired.load(Ordering::SeqCst) {
+            return Err(anyhow!("Local summary helper is stopping"));
+        }
+        Ok(())
+    }
+
     /// Gracefully shutdown the sidecar
     /// Waits for active requests to complete before killing the process
     pub async fn shutdown_gracefully(&self) -> Result<()> {
         log::info!("Initiating graceful shutdown of sidecar");
-
-        // Stop the internal health and idle tasks.
-        self.cancel_background();
+        self.retire();
 
         // Wait for active requests to complete
         // We poll every 500ms
@@ -513,60 +573,41 @@ impl SidecarManager {
     }
 
     async fn shutdown_within(&self, deadline: Duration) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.shutdown_locked(deadline).await
+    }
+
+    async fn shutdown_locked(&self, deadline: Duration) -> Result<()> {
         self.cancel_background();
         self.quarantined.store(true, Ordering::SeqCst);
         self.is_healthy.store(false, Ordering::SeqCst);
-        // Do not write a polite message into a potentially full stdin pipe.
-        // Keep the child in its manager slot across every await. If startup's
-        // waiter is cancelled, the next cleanup owner still has the actual child.
+        // Kill the process before attempting to acquire pipe locks. Keep its
+        // handle in the manager until exit is confirmed, even on cancellation.
         let confirmed = {
-            let mut child_lock = self.child_process.lock().await;
-            let confirmed = match child_lock.as_mut() {
+            let mut slot = self.child_process.lock().await;
+            let confirmed = match slot.as_mut() {
                 Some(child) => kill_and_reap(child, deadline).await,
                 None => true,
             };
-            let child = child_lock.take();
-            if !confirmed {
-                // Keep the handle so the next spawn waits for this exit.
-                *self.unreaped.lock().await = child;
+            if confirmed {
+                *slot = None;
             }
             confirmed
         };
-        if confirmed {
+        let cleanup = tokio::time::timeout(Duration::from_secs(2), async {
             *self.stdin_writer.lock().await = None;
             *self.stdout_reader.lock().await = None;
             *self.current_model_path.write().await = None;
-        } else {
-            // An in-flight read can hold the pipe locks until its own long
-            // timeout. Never let app exit wait on them.
-            let grace = Duration::from_secs(1);
-            if let Ok(mut stdin) = tokio::time::timeout(grace, self.stdin_writer.lock()).await {
-                *stdin = None;
-            }
-            if let Ok(mut stdout) = tokio::time::timeout(grace, self.stdout_reader.lock()).await {
-                *stdout = None;
-            }
-            if let Ok(mut model) =
-                tokio::time::timeout(grace, self.current_model_path.write()).await
-            {
-                *model = None;
-            }
-        }
+        })
+        .await;
         self.quarantined.store(false, Ordering::SeqCst);
-        if confirmed {
-            Ok(())
-        } else {
-            // App exit must never hang on an unreapable helper. Its pipes are
-            // closed above, so the helper also exits on stdin EOF.
-            log::error!(
-                "Local summary helper did not confirm exit within {:?}",
-                deadline
-            );
-            Err(anyhow!(
+        if !confirmed {
+            return Err(anyhow!(
                 "Local summary helper did not stop within {} seconds",
                 deadline.as_secs()
-            ))
+            ));
         }
+        cleanup.context("Local summary helper pipe cleanup timed out")
     }
 
     async fn child_running(&self) -> bool {
@@ -574,22 +615,6 @@ impl SidecarManager {
             Some(child) => matches!(child.try_wait(), Ok(None)),
             None => false,
         }
-    }
-
-    async fn ensure_previous_helper_exited(&self) -> Result<()> {
-        let mut unreaped = self.unreaped.lock().await;
-        if let Some(child) = unreaped.as_mut() {
-            match child.try_wait() {
-                Ok(Some(_)) => *unreaped = None,
-                _ => {
-                    let _ = child.start_kill();
-                    return Err(anyhow!(
-                        "The previous local summary helper is still stopping. Try again shortly."
-                    ));
-                }
-            }
-        }
-        Ok(())
     }
 
     fn replace_background_token(&self) -> CancellationToken {
@@ -619,8 +644,11 @@ impl SidecarManager {
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             background: self.background.clone(),
+            lifecycle: self.lifecycle.clone(),
+            retired: self.retired.clone(),
             quarantined: self.quarantined.clone(),
-            unreaped: self.unreaped.clone(),
+            #[cfg(windows)]
+            job: self.job.clone(),
             active_request_count: self.active_request_count.clone(),
             helper_binary_path: self.helper_binary_path.clone(),
             current_model_path: self.current_model_path.clone(),
@@ -759,6 +787,22 @@ fn helper_idle_backstop_secs(app_idle_timeout_secs: u64) -> u64 {
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+fn helper_closed(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
+        )
+    })
+}
+
+fn is_goodbye(response: &str) -> bool {
+    // The helper emits a short JSONL control frame. Skip parsing large answers here.
+    response.len() <= 32
+        && serde_json::from_str::<serde_json::Value>(response)
+            .is_ok_and(|value| value == serde_json::json!({"type": "goodbye"}))
+}
+
 fn cancelled_token() -> CancellationToken {
     let token = CancellationToken::new();
     token.cancel();
@@ -856,11 +900,13 @@ mod lifecycle_tests {
 }
 
 #[cfg(all(test, windows))]
-mod protocol_tests {
+pub(super) mod protocol_tests {
     use super::*;
     use tokio::process::{ChildStderr, Command};
 
-    async fn fake_sidecar(script: &str) -> (Arc<SidecarManager>, BufReader<ChildStderr>) {
+    pub(in crate::summary::summary_engine) async fn fake_sidecar(
+        script: &str,
+    ) -> (Arc<SidecarManager>, BufReader<ChildStderr>) {
         // Separate process startup from the protocol deadlines being tested.
         let script = format!("[Console]::Error.WriteLine('started');\n{script}");
         let mut child = Command::new("powershell.exe")
@@ -895,14 +941,48 @@ mod protocol_tests {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(true)),
             background: Arc::new(std::sync::Mutex::new(cancelled_token())),
+            lifecycle: Arc::new(Mutex::new(())),
+            retired: Arc::new(AtomicBool::new(false)),
             quarantined: Arc::new(AtomicBool::new(false)),
-            unreaped: Arc::new(Mutex::new(None)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path: PathBuf::new(),
+            job: Arc::new(crate::windows_job::Job::new().unwrap()),
             current_model_path: Arc::new(RwLock::new(None)),
             idle_timeout_secs: 600,
         });
         (manager, stderr)
+    }
+
+    #[tokio::test]
+    async fn retired_manager_cannot_start_another_helper() {
+        let (manager, _) = fake_sidecar("Start-Sleep -Seconds 60").await;
+        let lifecycle = manager.lifecycle.lock().await;
+        let requester = manager.clone();
+        let queued =
+            tokio::spawn(async move { requester.ensure_running("synthetic".into()).await });
+        manager.retire();
+        drop(lifecycle);
+        assert!(queued
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("stopping"));
+        manager.shutdown().await.unwrap();
+        assert!(manager.child_process.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unsolicited_idle_goodbye_is_handled_as_a_closed_helper() {
+        let (manager, _) = fake_sidecar(
+            "[Console]::In.ReadLine() | Out-Null; [Console]::Out.WriteLine('{\"type\":\"goodbye\"}')",
+        ).await;
+        let error = manager
+            .send_request("{}".into(), Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("went idle"));
+        assert!(manager.child_process.lock().await.is_none());
     }
 
     #[tokio::test]

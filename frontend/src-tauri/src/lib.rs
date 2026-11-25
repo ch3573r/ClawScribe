@@ -65,6 +65,8 @@ pub mod utils;
 mod webhook;
 pub mod whisper_engine;
 #[cfg(windows)]
+mod windows_job;
+#[cfg(windows)]
 mod windows_lifecycle;
 
 use audio::recording_commands::floating;
@@ -233,16 +235,22 @@ async fn resolve_meeting_audio_file(
     let Some(path) = audio::incremental_saver::resolve_audio_file_or_recover(&folder).await? else {
         return Ok(None);
     };
-    let resolved = path
-        .canonicalize()
-        .map_err(|_| "Meeting audio could not be resolved")?;
-    if resolved.parent() != Some(folder.as_path()) {
-        return Err("Meeting audio links outside the recording folder are not supported".into());
-    }
-    app.asset_protocol_scope()
-        .allow_file(&resolved)
-        .map_err(|_| "Meeting audio access could not be granted")?;
-    Ok(Some(resolved.to_string_lossy().into_owned()))
+    tokio::task::spawn_blocking(move || {
+        let resolved = path
+            .canonicalize()
+            .map_err(|_| "Meeting audio could not be resolved")?;
+        if resolved.parent() != Some(folder.as_path()) {
+            return Err(
+                "Meeting audio links outside the recording folder are not supported".into(),
+            );
+        }
+        app.asset_protocol_scope()
+            .allow_file(&resolved)
+            .map_err(|_| "Meeting audio access could not be granted")?;
+        Ok(Some(resolved.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|_| "Meeting audio resolution was interrupted")?
 }
 
 const SAVED_AUDIO_FOLDER_QUERY: &str =
@@ -258,14 +266,16 @@ async fn saved_audio_folder(
         .fetch_optional(pool)
         .await
         .map_err(|_| "Failed to look up the saved meeting folder")?;
-    saved
-        // A deleted folder is missing audio, not an untrusted folder.
-        .filter(|folder| Path::new(folder).exists())
-        .map(|folder| {
-            database::meeting_files::resolve_recording_folder(Path::new(&folder), roots)
-                .map_err(|_| "This meeting's folder is not one of your recordings folders. Choose that folder again in Settings to play its audio.".into())
-        })
-        .transpose()
+    let Some(folder) = saved else {
+        return Ok(None);
+    };
+    let roots = roots.to_vec();
+    tokio::task::spawn_blocking(move || {
+        database::meeting_files::resolve_recording_folder_if_present(Path::new(&folder), &roots)
+            .map_err(|_| "This meeting's folder is not one of your recordings folders. Choose that folder again in Settings to play its audio.".into())
+    })
+    .await
+    .map_err(|_| "Meeting folder resolution was interrupted")?
 }
 
 fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, String> {
@@ -360,11 +370,18 @@ mod tests {
         let root = temp.path().join("Recordings");
         let saved = root.join("Saved meeting");
         let outside = temp.path().join("Elsewhere");
+        let missing_remote = temp.path().join("Untrusted share");
+        local_path::mark_remote_for_tests(&missing_remote);
         std::fs::create_dir_all(&saved).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         for (id, path) in [
             ("saved", saved.as_path()),
             ("outside", outside.as_path()),
+            ("remote", missing_remote.as_path()),
+            (
+                "cleanup",
+                root.join(".clawscribe-cleanup~missing").as_path(),
+            ),
             ("root", root.as_path()),
             ("blank", Path::new(" ")),
         ] {
@@ -387,7 +404,7 @@ mod tests {
             saved_audio_folder(&pool, "saved", &roots).await.unwrap(),
             Some(saved.canonicalize().unwrap())
         );
-        for id in ["outside", "root"] {
+        for id in ["outside", "remote", "cleanup", "root"] {
             assert_eq!(
                 saved_audio_folder(&pool, id, &roots).await.unwrap_err(),
                 "This meeting's folder is not one of your recordings folders. Choose that folder again in Settings to play its audio."
@@ -1361,24 +1378,24 @@ pub fn run() {
                     log::info!("Application exiting, cleaning up resources...");
                     power::release();
                     tauri::async_runtime::block_on(async {
-                        // Clean up database connection and checkpoint WAL
-                        if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
-                            log::info!("Starting database cleanup...");
-                            if let Err(e) = app_state.db_manager.cleanup().await {
-                                log::error!("Failed to cleanup database: {}", e);
-                            } else {
-                                log::info!("Database cleanup completed successfully");
-                            }
-                        } else {
-                            log::warn!(
-                                "AppState not available for database cleanup (likely first launch)"
-                            );
+                        // Close helper admission and cancel local summaries
+                        // before waiting for outstanding database connections.
+                        if let Err(error) =
+                            summary::summary_engine::client::shutdown_sidecars_for_exit().await
+                        {
+                            log::error!("Local summary helper shutdown failed: {error}");
                         }
-
-                        // Clean up sidecar
-                        log::info!("Cleaning up sidecar...");
-                        if let Err(e) = summary::summary_engine::force_shutdown_sidecar().await {
-                            log::error!("Failed to force shutdown sidecar: {}", e);
+                        if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
+                            let cleanup = tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                app_state.db_manager.cleanup(),
+                            )
+                            .await;
+                            match cleanup {
+                                Ok(Ok(())) => log::info!("Database cleanup completed"),
+                                Ok(Err(error)) => log::error!("Database cleanup failed: {error}"),
+                                Err(_) => log::warn!("Database cleanup exceeded the exit limit"),
+                            }
                         }
                     });
                     log::info!("Application cleanup complete");

@@ -164,6 +164,18 @@ async fn save_answer(pool: &SqlitePool, row: (u128, Option<&str>, &str, bool), a
     .unwrap();
 }
 
+#[test]
+fn portable_live_recap_keeps_citations_beyond_the_search_result_limit() {
+    let id = answer_id(1);
+    let mut answer = live_answer(&id);
+    answer["content"] = json!("The example decision stands [K15].");
+    answer["cited_tags"] = json!([15]);
+    answer["citations"][0]["tag"] = json!(15);
+    assert!(crate::knowledge::live_notes::is_portable_live_answer(
+        &id, &answer
+    ));
+}
+
 #[tokio::test]
 async fn v3_ports_only_proven_live_only_answers_and_reports_omissions() {
     let source = empty_conversation_destination().await;

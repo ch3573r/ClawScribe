@@ -74,7 +74,7 @@ struct RunningChild {
 
 impl RunningChild {
     fn spawn(program: &PathBuf, args: &[OsString]) -> Result<Self, WorkerError> {
-        let job = job::Job::new()?;
+        let job = job::Job::new().map_err(|_| WorkerError::Spawn)?;
         let mut command = Command::new(program);
         command
             .args(args)
@@ -94,11 +94,16 @@ impl RunningChild {
             requests: None,
             io_thread: None,
         };
-        let assigned = running
-            .job
-            .as_ref()
-            .ok_or(WorkerError::Spawn)?
-            .assign(running.process.id());
+        #[cfg(windows)]
+        let assigned = {
+            use std::os::windows::io::AsHandle;
+            running
+                .job
+                .as_ref()
+                .ok_or(WorkerError::Spawn)?
+                .assign(running.process.as_handle())
+        };
+        #[cfg(windows)]
         if assigned.is_err() {
             return Err(if matches!(running.process.try_wait(), Ok(Some(_))) {
                 WorkerError::Crashed
@@ -250,6 +255,16 @@ impl TranscriptionWorker {
         self.stop_child();
         match response? {
             Response::DirectmlProbe { available } => Ok(available),
+            _ => Err(WorkerError::Protocol),
+        }
+    }
+
+    #[cfg(all(windows, any(test, feature = "vulkan")))]
+    pub(super) fn probe_vulkan(&mut self, timeout: Duration) -> Result<bool, WorkerError> {
+        let response = self.exchange(Request::ProbeVulkan, Arc::new(vec![]), timeout, &|| false);
+        self.stop_child();
+        match response? {
+            Response::VulkanProbe { available } => Ok(available),
             _ => Err(WorkerError::Protocol),
         }
     }
@@ -537,68 +552,7 @@ impl Drop for TranscriptionWorker {
 
 #[cfg(windows)]
 mod job {
-    use super::WorkerError;
-    use windows::{
-        core::PCWSTR,
-        Win32::{
-            Foundation::{CloseHandle, HANDLE},
-            System::{
-                JobObjects::{
-                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                    SetInformationJobObject, JOBOBJECT_BASIC_LIMIT_INFORMATION,
-                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                },
-                Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
-            },
-        },
-    };
-
-    pub struct Job(HANDLE);
-    // Owned, thread-independent kernel handle. Assignment is thread-safe;
-    // destruction requires exclusive ownership through the engine model lock.
-    unsafe impl Send for Job {}
-    unsafe impl Sync for Job {}
-
-    impl Job {
-        pub fn new() -> Result<Self, WorkerError> {
-            let job = Self(
-                unsafe { CreateJobObjectW(None, PCWSTR::null()) }
-                    .map_err(|_| WorkerError::Spawn)?,
-            );
-            let limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-                BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
-                    LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                    ..Default::default()
-                },
-                // No model memory cap: Parakeet can legitimately exceed 1 GiB.
-                ..Default::default()
-            };
-            unsafe {
-                SetInformationJobObject(
-                    job.0,
-                    JobObjectExtendedLimitInformation,
-                    &limits as *const _ as _,
-                    std::mem::size_of_val(&limits) as u32,
-                )
-            }
-            .map_err(|_| WorkerError::Spawn)?;
-            Ok(job)
-        }
-
-        pub fn assign(&self, pid: u32) -> Result<(), WorkerError> {
-            let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) }
-                .map_err(|_| WorkerError::Spawn)?;
-            let assigned = unsafe { AssignProcessToJobObject(self.0, process) };
-            let _ = unsafe { CloseHandle(process) };
-            assigned.map_err(|_| WorkerError::Spawn)
-        }
-    }
-
-    impl Drop for Job {
-        fn drop(&mut self) {
-            let _ = unsafe { CloseHandle(self.0) };
-        }
-    }
+    pub(super) use crate::windows_job::Job;
 }
 
 #[cfg(not(windows))]
@@ -608,9 +562,6 @@ mod job {
     impl Job {
         pub fn new() -> Result<Self, WorkerError> {
             Ok(Self)
-        }
-        pub fn assign(&self, _: u32) -> Result<(), WorkerError> {
-            Ok(())
         }
     }
 }
@@ -777,7 +728,11 @@ while ($true) {{
     $pcmLength = $reader.ReadUInt32()
     $pcm = $reader.ReadBytes($pcmLength)
     if ($request -eq 'Shutdown') {{ exit 0 }}
-    if ($request -eq 'ProbeDirectml') {{
+    if ($request -eq 'ProbeVulkan') {{
+        if ($mode -eq 'probe-stall') {{ Start-Sleep -Seconds 60 }}
+        if ($mode -eq 'probe-crash') {{ exit 91 }}
+        $response = ConvertTo-Json -Compress -InputObject @{{ VulkanProbe = @{{ available = ($mode -eq 'probe-available') }} }}
+    }} elseif ($request -eq 'ProbeDirectml') {{
         $response = ConvertTo-Json -Compress -InputObject @{{ DirectmlProbe = @{{ available = ($mode -eq 'probe-available') }} }}
     }} elseif ($null -ne $request.Load) {{
         Add-Content -LiteralPath ($state + '.loads') -Value ([string]$request.Load.use_directml)
@@ -811,6 +766,30 @@ while ($true) {{
 }}
 "#
         ))
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn vulkan_probe_fails_closed_and_reaps_unusable_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        for (mode, expected) in [
+            ("probe-available", Ok(true)),
+            ("probe-unavailable", Ok(false)),
+            ("probe-crash", Err(WorkerError::Crashed)),
+        ] {
+            let mut worker = fake(mode, &state);
+            assert_eq!(worker.probe_vulkan(Duration::from_secs(10)), expected);
+            assert!(worker.child.is_none());
+            assert_eq!(worker.reaped, 1);
+        }
+        let mut worker = fake("probe-stall", &state);
+        assert_eq!(
+            worker.probe_vulkan(Duration::from_secs(2)),
+            Err(WorkerError::TimedOut)
+        );
+        assert!(worker.child.is_none());
+        assert_eq!(worker.reaped, 1);
     }
 
     #[test]

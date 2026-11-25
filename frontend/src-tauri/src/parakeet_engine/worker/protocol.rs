@@ -9,6 +9,7 @@ pub const MAX_SECTION_BYTES: usize = 256 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub enum Request {
     ProbeDirectml,
+    ProbeVulkan,
     Load {
         model_dir: PathBuf,
         precision_suffix: Option<String>,
@@ -21,6 +22,9 @@ pub enum Request {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Response {
+    VulkanProbe {
+        available: bool,
+    },
     DirectmlProbe {
         available: bool,
     },

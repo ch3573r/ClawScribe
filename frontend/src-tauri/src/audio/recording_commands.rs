@@ -276,7 +276,11 @@ mod stop_tests {
         let id = startup.commit();
         let snapshot = serde_json::to_value(runtime.live.snapshot(&id).unwrap()).unwrap();
         *RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
-        let _ = publish_active_recording(&sink);
+        let _ = publish_active_recording(&sink, Some("Pre-start title".into()));
+        assert_eq!(
+            get_recording_meeting_name().await.unwrap().as_deref(),
+            Some("Pre-start title")
+        );
         let metadata = get_recording_state().await;
         assert_eq!(
             metadata["session_id"], id,
@@ -715,9 +719,10 @@ fn activate_recording<R: Runtime>(
     auto_open_floating_controls: bool,
     receiver: transcription::queue::TranscriptionQueueReceiver,
     sink: super::recording_manager::LiveTranscriptSink,
+    recording_name: Option<String>,
 ) {
     let controls_session = auto_open_floating_controls.then(|| sink.session_id.clone());
-    let folder = publish_active_recording(&sink);
+    let folder = publish_active_recording(&sink, recording_name);
     start_health_watch(sink.session_id.clone(), folder, transcribes);
     LIVE_TRANSCRIPTION.store(transcribes, Ordering::SeqCst);
     let mut task = TRANSCRIPTION_TASK.lock().unwrap_or_else(|e| e.into_inner());
@@ -814,6 +819,7 @@ pub(crate) fn get_recording_health(session_id: String) -> Option<CaptureSnapshot
 
 fn publish_active_recording(
     sink: &super::recording_manager::LiveTranscriptSink,
+    recording_name: Option<String>,
 ) -> Option<std::path::PathBuf> {
     let active = {
         let manager = RECORDING_MANAGER.lock().unwrap_or_else(|e| e.into_inner());
@@ -823,7 +829,7 @@ fn publish_active_recording(
         ActiveRecording {
             sink: sink.clone(),
             folder: manager.get_meeting_folder(),
-            meeting_name: manager.get_meeting_name(),
+            meeting_name: recording_name,
             recording_id: manager.recording_id().map(str::to_owned),
         }
     };
@@ -1136,6 +1142,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         preferences.auto_open_floating_controls,
         transcription_receiver,
         live_sink,
+        recording_name.clone(),
     );
 
     // Emit success event
@@ -1483,6 +1490,7 @@ pub(crate) async fn start_selected_session<R: Runtime>(
         preferences.auto_open_floating_controls,
         transcription_receiver,
         live_sink,
+        recording_name.clone(),
     );
 
     // Emit success event
@@ -2151,10 +2159,12 @@ async fn stop_recording_session<R: Runtime>(
     floating_outcome.remember_outcome(floating_session);
 
     // Release the recording job only after the outcome is persisted.
-    ACTIVE_CAPTURE
+    let stopped_title = ACTIVE_CAPTURE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .take();
+        .take()
+        .and_then(|active| active.meeting_name)
+        .or(meeting_name_str);
     IS_RECORDING.store(false, Ordering::SeqCst);
 
     // Step 5: Complete shutdown
@@ -2185,7 +2195,7 @@ async fn stop_recording_session<R: Runtime>(
             "folder_path": folder_path_str,
             "session_id": stopped_live_identity.as_ref().map(|identity| &identity.session_id),
             "recording_generation": stopped_live_identity.as_ref().map(|identity| identity.recording_generation),
-            "meeting_name": meeting_name_str,
+            "meeting_name": stopped_title,
             "meeting_id": meeting_id,
             "recording_id": recording_id,
             "transcript_count": transcript_count,

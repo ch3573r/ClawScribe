@@ -36,6 +36,7 @@ pub(crate) fn set_directml_preference(preference: Option<bool>) {
         Some(true) => DIRECTML_ON,
     };
     DIRECTML_PREFERENCE.store(value, Ordering::Release);
+    LAST_DIRECTML_LOAD_FELL_BACK.store(false, Ordering::Release);
 }
 
 pub(crate) fn resolve_directml_preference(
@@ -64,9 +65,9 @@ fn automatic_directml_available() -> bool {
     false
 }
 
-/// Resolve on a blocking thread. Only the supervised child touches DirectML.
-pub(crate) fn directml_requested() -> bool {
-    resolved_directml().0
+/// Whether a loaded CPU session should be labeled as a GPU fallback.
+pub(crate) fn directml_expected() -> bool {
+    directml_preference().unwrap_or(cfg!(all(windows, feature = "directml")))
 }
 
 /// Read the requested setting for diagnostics without initializing DirectML.
@@ -108,6 +109,16 @@ fn parakeet_automatic_directml_requires_probe_success_and_preserves_explicit_cho
     assert!(resolve_directml_preference(Some(true), || panic!(
         "explicit DirectML"
     )));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn reapplying_the_preference_clears_the_previous_fallback() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    let current = directml_preference();
+    LAST_DIRECTML_LOAD_FELL_BACK.store(true, Ordering::Release);
+    set_directml_preference(current);
+    assert!(!last_directml_load_fell_back());
 }
 
 /// Opt-in process isolation for CPU. DirectML always uses the worker.

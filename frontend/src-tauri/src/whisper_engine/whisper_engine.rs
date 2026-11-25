@@ -384,7 +384,9 @@ impl WhisperEngine {
                 log::info!("Loading model: {}", model_name);
                 // whisper.cpp enumerates Vulkan devices on every context load;
                 // without the delay-loaded loader that call would abort the app.
-                super::vulkan_runtime::ensure_whisper_runtime().map_err(|e| anyhow!(e))?;
+                super::vulkan_runtime::ensure_whisper_runtime()
+                    .await
+                    .map_err(|e| anyhow!(e))?;
                 self.validate_model_file(&model_info.path).await?;
 
                 // PERFORMANCE OPTIMIZATION: Use comprehensive hardware profile for optimal GPU configuration

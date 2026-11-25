@@ -57,8 +57,10 @@ pub fn run_cli_action<R: Runtime>(app: &AppHandle<R>, action: CliAction) {
         CliAction::PauseRecording => {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                use crate::audio::recording_commands::{is_recording, is_recording_paused};
-                if is_recording().await {
+                use crate::audio::recording_commands::{
+                    is_recording, is_recording_paused, is_stopping,
+                };
+                if is_recording().await && !is_stopping() {
                     dispatch_pause_toggle(
                         is_recording_paused().await,
                         || crate::tray::pause_recording_handler(&app),

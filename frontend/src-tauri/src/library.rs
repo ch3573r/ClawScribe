@@ -486,7 +486,12 @@ pub async fn export_local_word(
     if result.is_err() {
         crate::file_grants::give_back(crate::file_grants::Purpose::WordSave, &granted);
     }
-    result.map(|()| crate::exports::local_open::allow_saved_file(&granted.path))
+    result?;
+    Ok(tokio::task::spawn_blocking(move || {
+        crate::exports::local_open::allow_saved_file(&granted.path)
+    })
+    .await
+    .unwrap_or(false))
 }
 
 async fn export_local_word_to(
@@ -573,7 +578,12 @@ pub async fn export_local_markdown(
     if result.is_err() {
         crate::file_grants::give_back(purpose, &granted);
     }
-    result.map(|()| crate::exports::local_open::allow_saved_file(&granted.path))
+    result?;
+    Ok(tokio::task::spawn_blocking(move || {
+        crate::exports::local_open::allow_saved_file(&granted.path)
+    })
+    .await
+    .unwrap_or(false))
 }
 
 struct MarkdownOptions {

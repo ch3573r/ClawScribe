@@ -29,6 +29,13 @@ pub(super) fn run() -> i32 {
             return 2;
         }
         let response = match request {
+            Request::ProbeVulkan => {
+                #[cfg(all(windows, feature = "vulkan"))]
+                let available = crate::whisper_engine::vulkan_runtime::probe_device_in_child();
+                #[cfg(not(all(windows, feature = "vulkan")))]
+                let available = false;
+                Response::VulkanProbe { available }
+            }
             Request::ProbeDirectml => Response::DirectmlProbe {
                 available: super::super::model::directml_available(),
             },

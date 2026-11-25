@@ -184,9 +184,14 @@ const CONTEXT_FIELD_RESERVE: usize = 32;
 /// Linear check that `rows` fit `budget` in one prompt, with room for the
 /// per-row context field.
 pub(crate) fn fits(question: &str, rows: &[Passage], budget: usize) -> Result<bool, String> {
-    let reserved = budget.saturating_sub(CONTEXT_FIELD_RESERVE * rows.len());
-    let (prompt, accepted) = super::answers::build_prompt(question, rows, "", reserved)?;
-    Ok(accepted.len() == rows.len() && prompt.len() <= reserved)
+    let Some(reserved) = budget.checked_sub(CONTEXT_FIELD_RESERVE * rows.len()) else {
+        return Ok(false);
+    };
+    match super::answers::build_prompt(question, rows, "", reserved) {
+        Ok((_, accepted)) => Ok(accepted.len() == rows.len()),
+        Err(error) if error == super::answers::PROMPT_BUDGET_EXCEEDED => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// Keep the longest contiguous run of the newest window segments that fits
@@ -498,6 +503,27 @@ mod tests {
         );
         assert!(kept.first().unwrap().text.contains("Punkt 1 "));
         assert!(kept.last().unwrap().text.contains("Punkt 120 "));
+    }
+
+    #[test]
+    fn recap_fits_the_newest_of_eight_hundred_segments_on_small_models() {
+        let snapshot = snapshot_of(
+            (1..=800)
+                .map(|id| segment(id, "Discuss the timeline."))
+                .collect(),
+        );
+        let rows = window(&snapshot);
+        let question = "Summarize the last 10 minutes of finalized speech.";
+        for budget in [2_500, 12_628] {
+            let kept = fit_newest(question, &rows, budget).unwrap();
+            assert!(!kept.is_empty() && kept.len() < rows.len());
+            assert_eq!(
+                kept.last().unwrap().evidence.chunk_id,
+                rows.last().unwrap().evidence.chunk_id
+            );
+            assert!(fits(question, &kept, budget).unwrap());
+            assert!(!fits(question, &rows[rows.len() - kept.len() - 1..], budget).unwrap());
+        }
     }
 
     #[test]

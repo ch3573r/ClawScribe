@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::exports::client::{GraphClient, GraphOutcome, Sleeper};
+use crate::exports::exporter::graph_url_with_path_segments;
+use crate::exports::ledger::require_remote_ids;
 use crate::exports::transport::{GraphRequest, GraphTransport};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
@@ -139,9 +141,13 @@ pub(super) async fn create_section_checked<T: GraphTransport, S: Sleeper>(
     notebook_id: &str,
     display_name: &str,
 ) -> Result<SectionInfo, SectionCreateError> {
+    require_remote_ids(&[notebook_id]).map_err(|message| SectionCreateError {
+        outcome_unknown: false,
+        message,
+    })?;
     let request = GraphRequest {
         method: "POST".into(),
-        url: format!("{GRAPH_BASE}/me/onenote/notebooks/{notebook_id}/sections"),
+        url: graph_url_with_path_segments(&["me", "onenote", "notebooks", notebook_id, "sections"]),
         content_type: "application/json".into(),
         body: serde_json::json!({ "displayName": display_name }).to_string(),
         correlation_id: uuid::Uuid::new_v4().to_string(),
@@ -214,9 +220,10 @@ pub async fn delete_section<T: GraphTransport, S: Sleeper>(
     token: &str,
     section_id: &str,
 ) -> Result<(), String> {
+    require_remote_ids(&[section_id])?;
     let request = GraphRequest {
         method: "DELETE".into(),
-        url: format!("{GRAPH_BASE}/me/onenote/sections/{section_id}"),
+        url: graph_url_with_path_segments(&["me", "onenote", "sections", section_id]),
         content_type: "application/json".into(),
         body: String::new(),
         correlation_id: uuid::Uuid::new_v4().to_string(),
@@ -255,9 +262,10 @@ pub async fn list_sections<T: GraphTransport, S: Sleeper>(
     token: &str,
     notebook_id: &str,
 ) -> Result<Vec<SectionInfo>, String> {
-    let request = get_request(format!(
-        "{GRAPH_BASE}/me/onenote/notebooks/{notebook_id}/sections?$select=id,displayName&$top=100"
-    ));
+    require_remote_ids(&[notebook_id])?;
+    let url =
+        graph_url_with_path_segments(&["me", "onenote", "notebooks", notebook_id, "sections"]);
+    let request = get_request(format!("{url}?$select=id,displayName&$top=100"));
     map_outcome(client.execute(&request, token).await)
 }
 
@@ -276,9 +284,9 @@ pub async fn list_buckets<T: GraphTransport, S: Sleeper>(
     token: &str,
     plan_id: &str,
 ) -> Result<Vec<BucketInfo>, String> {
-    let request = get_request(format!(
-        "{GRAPH_BASE}/planner/plans/{plan_id}/buckets?$select=id,name&$top=100"
-    ));
+    require_remote_ids(&[plan_id])?;
+    let url = graph_url_with_path_segments(&["planner", "plans", plan_id, "buckets"]);
+    let request = get_request(format!("{url}?$select=id,name&$top=100"));
     map_outcome(client.execute(&request, token).await)
 }
 
@@ -339,6 +347,7 @@ pub async fn create_bucket<T: GraphTransport, S: Sleeper>(
     plan_id: &str,
     name: &str,
 ) -> Result<BucketInfo, String> {
+    require_remote_ids(&[plan_id])?;
     let request = GraphRequest {
         method: "POST".into(),
         url: format!("{GRAPH_BASE}/planner/buckets"),
@@ -489,6 +498,17 @@ mod tests {
                 .calls_for(&format!("{GRAPH_BASE}/me/todo/lists")),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_destination_ids_never_reach_graph() {
+        let c = client(MockGraphTransport::new());
+        for id in [".", "..", "bad:separator"] {
+            assert!(list_buckets(&c, "token", id).await.is_err());
+            assert!(list_sections(&c, "token", id).await.is_err());
+            assert!(delete_section(&c, "token", id).await.is_err());
+        }
+        assert!(c.transport().recorded().is_empty());
     }
 
     #[tokio::test]

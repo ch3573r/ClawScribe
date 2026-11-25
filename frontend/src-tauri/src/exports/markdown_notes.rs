@@ -45,16 +45,17 @@ static CLOCK: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\s*[\[(]?\b\d{1,2}:\d{2}(?::\d{2})?\b[\])]?\s*").expect("valid clock regex")
 });
 
-/// Inline `**bold**`.
-static BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("valid bold regex"));
+/// Match spans in the original text. A bold span can contain a whole code span.
+static INLINE_SPAN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"`([^`]+)`|\*\*((?:[^*`]+|`[^`]+`)+)\*\*").expect("valid inline span regex")
+});
 
 /// A whole line that is just a bold label, e.g. `**Action items**` or
 /// `**Decisions:**` — summaries often use these instead of `#` headings.
 static BOLD_HEADING: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\*\*([^*]+?)\*\*:?$").expect("valid bold heading regex"));
 
-/// Inline `` `code` ``.
-static CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`]+)`").expect("valid code regex"));
+static INLINE_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`]+)`").expect("valid code regex"));
 
 fn heading_level(line: &str) -> Option<(u8, &str)> {
     let trimmed = line.trim_start();
@@ -78,10 +79,15 @@ fn bullet_text(line: &str) -> Option<String> {
 
 /// Apply inline emphasis to an already XML-escaped string.
 fn inline_xhtml(escaped: &str) -> String {
-    // `**bold**` and `` `code` `` — markers aren't XML-special, so it's safe to
-    // run these after escaping.
-    let bolded = BOLD.replace_all(escaped, "<b>$1</b>");
-    CODE.replace_all(&bolded, "<code>$1</code>").into_owned()
+    INLINE_SPAN
+        .replace_all(escaped, |span: &regex::Captures<'_>| match span.get(1) {
+            Some(code) => format!("<code>{}</code>", code.as_str()),
+            None => format!(
+                "<b>{}</b>",
+                INLINE_CODE.replace_all(&span[2], "<code>$1</code>")
+            ),
+        })
+        .into_owned()
 }
 
 /// Render a markdown summary into a sanitized XHTML fragment suitable for a
@@ -613,6 +619,14 @@ Some closing thoughts.";
         assert_eq!(items[1].task, "Find out who approves the contract.");
         assert!(items[1].owner.is_none() && items[1].due_date.is_none());
         assert!(parse_action_items("## Action Items\nNone noted.\n").is_empty());
+    }
+
+    #[test]
+    fn code_spans_keep_literal_emphasis_markers() {
+        assert_eq!(
+            inline_xhtml("Check `**kwargs` and `**options` with **care**."),
+            "Check <code>**kwargs</code> and <code>**options</code> with <b>care</b>."
+        );
     }
 
     #[test]

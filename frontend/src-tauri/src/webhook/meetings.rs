@@ -33,9 +33,13 @@ pub(super) async fn load(
     .fetch_all(&mut *tx)
     .await
     .map_err(unavailable)?;
-    let attendees = row
+    let calendar_link = row
         .try_get::<Option<&str>, _>("calendar_link")
-        .map_err(unavailable)?
+        .map_err(unavailable)?;
+    let title = calendar::stored_title_policy(calendar_link)
+        .for_provider(row.try_get("title").map_err(unavailable)?)
+        .unwrap_or_else(|| calendar::WITHHELD_TITLE.to_owned());
+    let attendees = calendar_link
         .and_then(|raw| calendar::decode(raw).ok().flatten())
         .filter(calendar::CalendarLink::is_reviewed)
         .map(|link| {
@@ -72,7 +76,7 @@ pub(super) async fn load(
     Ok(Content {
         meeting: Meeting {
             id: meeting_id,
-            title: row.try_get("title").map_err(unavailable)?,
+            title,
             started_at: meeting_timestamp(&row, "created_at").map_err(unavailable)?,
             duration_seconds: row.try_get("recording_duration_s").map_err(unavailable)?,
             project_tags,
@@ -82,6 +86,45 @@ pub(super) async fn load(
         reviewed_actions,
         transcript,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn webhook_title_follows_calendar_consent() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        for (stored, expected) in [
+            (None, "Synthetic calendar subject"),
+            (Some("null"), calendar::WITHHELD_TITLE),
+        ] {
+            sqlx::query(
+                "UPDATE meetings SET title = ?, calendar_link = ? WHERE id = 'review-test'",
+            )
+            .bind("Synthetic calendar subject")
+            .bind(stored)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let content = load(
+                &pool,
+                "review-test".into(),
+                None,
+                Switches {
+                    enabled: true,
+                    on_summary: false,
+                    on_recording: true,
+                    include_summary: false,
+                    include_transcript: false,
+                    allow_unencrypted: false,
+                },
+            )
+            .await
+            .expect("synthetic meeting loads");
+            assert_eq!(content.meeting.title, expected);
+        }
+    }
 }
 
 async fn saved_markdown(

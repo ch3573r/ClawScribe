@@ -45,7 +45,7 @@ export const LIVE_MODEL_FAILURE_MESSAGE: Record<LiveModelFailure, string> = {
   downloading: 'The speech model is still downloading. Try again when it finishes.',
   load_failed: 'ClawScribe could not load the speech model. Retry or choose another model in Transcription settings.',
   unsupported_provider: 'Choose an on-device speech engine in Transcription settings.',
-  vulkan_runtime_missing: 'Whisper needs the Vulkan runtime, which isn\'t installed. Update your graphics driver or install the official Vulkan runtime, or choose Parakeet in Transcription settings.',
+  vulkan_runtime_missing: 'Whisper needs a working Vulkan runtime and a compatible device. Update your graphics driver and restart ClawScribe, or choose Parakeet in Transcription settings.',
 };
 
 export function transcriptionSettingsPath(provider?: string | null): string {

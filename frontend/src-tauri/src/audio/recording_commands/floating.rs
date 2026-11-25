@@ -35,7 +35,8 @@ pub(crate) struct Appearance {
 
 pub(crate) fn set_appearance(theme: String, accent: Option<String>) {
     let accent = accent.filter(|id| id.len() <= 32 && id.bytes().all(|b| b.is_ascii_lowercase()));
-    *APPEARANCE.lock().unwrap() = Some(Appearance { theme, accent });
+    *APPEARANCE.lock().unwrap_or_else(|error| error.into_inner()) =
+        Some(Appearance { theme, accent });
 }
 
 #[tauri::command]
@@ -303,7 +304,9 @@ impl Status {
     }
 
     pub(super) fn remember_outcome(&self, session_id: Option<&str>) {
-        *LAST_REVIEW.lock().unwrap() = session_id
+        *LAST_REVIEW
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = session_id
             .filter(|_| matches!(self, Self::Review))
             .map(str::to_owned);
     }
@@ -366,7 +369,12 @@ fn recording_status(id: &str) -> Result<Status, String> {
             estimated_seconds_remaining: owner.estimated_seconds_remaining,
         });
     }
-    if LAST_REVIEW.lock().unwrap().as_deref() == Some(id) {
+    if LAST_REVIEW
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_deref()
+        == Some(id)
+    {
         return Ok(Status::Review);
     }
     Ok(match active_capture(id) {
@@ -450,6 +458,11 @@ fn place_window<R: Runtime>(window: &WebviewWindow<R>, default_monitor: Option<&
         let margin = (f64::from(CORNER_MARGIN) * scale).round() as u32;
         let _ = window.set_position(bottom_right(work.position, work.size, size, margin));
     }
+    #[cfg(windows)]
+    if let Some(store) = store {
+        remember_native_drag(window, store);
+    }
+    #[cfg(not(windows))]
     if let Some(store) = store {
         window.on_window_event(move |event| {
             if let tauri::WindowEvent::Moved(position) = event {
@@ -457,6 +470,85 @@ fn place_window<R: Runtime>(window: &WebviewWindow<R>, default_monitor: Option<&
             }
         });
     }
+}
+
+#[cfg(windows)]
+fn remember_native_drag<R: Runtime>(
+    window: &WebviewWindow<R>,
+    store: std::sync::Arc<tauri_plugin_store::Store<R>>,
+) {
+    use windows::Win32::{
+        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
+        UI::{
+            Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+            WindowsAndMessaging::{GetWindowRect, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCDESTROY},
+        },
+    };
+
+    struct Drag<R: Runtime> {
+        store: std::sync::Arc<tauri_plugin_store::Store<R>>,
+        initial: Option<(i32, i32)>,
+    }
+
+    fn position(hwnd: HWND) -> Option<(i32, i32)> {
+        let mut rect = RECT::default();
+        // SAFETY: the window is live during its native move callbacks.
+        unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+        Some((rect.left, rect.top))
+    }
+
+    unsafe extern "system" fn on_move<R: Runtime>(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        id: usize,
+        data: usize,
+    ) -> LRESULT {
+        // SAFETY: SetWindowSubclass received this owned state on the HWND's
+        // thread. WM_NCDESTROY removes the callback before freeing it.
+        let drag = data as *mut Drag<R>;
+        match message {
+            WM_ENTERSIZEMOVE => unsafe { (*drag).initial = position(hwnd) },
+            WM_EXITSIZEMOVE => {
+                let drag = unsafe { &mut *drag };
+                if let (Some(initial), Some(final_position)) = (drag.initial.take(), position(hwnd))
+                {
+                    if final_position != initial {
+                        drag.store
+                            .set("position", serde_json::json!(final_position));
+                    }
+                }
+            }
+            WM_NCDESTROY => unsafe {
+                let _ = RemoveWindowSubclass(hwnd, Some(on_move::<R>), id);
+                drop(Box::from_raw(drag));
+            },
+            _ => {}
+        }
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
+
+    // Programmatic resize/clamp moves never enter the native drag loop.
+    let controls = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        let Ok(hwnd) = controls.hwnd() else {
+            return;
+        };
+        let state = Box::into_raw(Box::new(Drag {
+            store,
+            initial: None,
+        }));
+        // SAFETY: the callback runs on this HWND's owner thread and owns state.
+        if !unsafe {
+            SetWindowSubclass(HWND(hwnd.0 as isize), Some(on_move::<R>), 0, state as usize)
+        }
+        .as_bool()
+        {
+            unsafe { drop(Box::from_raw(state)) };
+            log::warn!("Could not track floating controls drag position");
+        }
+    });
 }
 
 fn bottom_right(

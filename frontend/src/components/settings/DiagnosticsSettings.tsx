@@ -498,7 +498,7 @@ export function DiagnosticsSettings() {
         value: acceleration ? acceleration.label : "Unknown",
         tone: acceleration?.vulkanRuntimeMissing || acceleration?.gpuAvailableButUnused ? "warning" : "ok",
         status: acceleration?.vulkanRuntimeMissing
-          ? "Vulkan missing"
+          ? "Vulkan unavailable"
           : acceleration?.gpuAvailableButUnused ? "GPU not used" : "OK",
       });
       if (acceleration?.gpuAvailableButUnused) {

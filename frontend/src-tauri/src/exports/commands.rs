@@ -423,6 +423,7 @@ pub async fn export_to_onenote<R: Runtime>(
     summary_json: String,
     section_id: String,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&section_id])?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Notes.Create").await?;
 
     let notes: crate::summary::codex_provider::MeetingNotesOutput =
@@ -471,6 +472,7 @@ pub async fn export_to_planner<R: Runtime>(
     plan_id: String,
     bucket_id: String,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&plan_id, &bucket_id])?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
 
     let notes: crate::summary::codex_provider::MeetingNotesOutput =
@@ -532,6 +534,7 @@ pub async fn export_meeting_markdown_to_onenote<R: Runtime>(
     markdown: String,
     section_id: String,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&section_id])?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Notes.Create").await?;
 
     let mut meeting_export = crate::exports::markdown_notes::meeting_export_for_onenote(
@@ -606,6 +609,7 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     resume_id: Option<String>,
     replace_existing: Option<bool>,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&notebook_id])?;
     let replace_existing = replace_existing.unwrap_or(false);
     let scope = if replace_existing {
         "Notes.ReadWrite"
@@ -885,6 +889,7 @@ pub async fn export_meeting_markdown_to_planner<R: Runtime>(
     plan_id: String,
     bucket_id: String,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&plan_id, &bucket_id])?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
 
     let meeting_export = crate::exports::markdown_notes::meeting_export_for_planner(
@@ -1263,6 +1268,10 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         return Err("No tasks selected to export.".to_string());
     }
 
+    super::ledger::require_remote_ids(&[&plan_id])?;
+    for task in &tasks {
+        super::ledger::require_remote_ids(&[&task.bucket_id])?;
+    }
     let reviewed = super::actions::load(
         app.state::<crate::state::AppState>().db_manager.pool(),
         &meeting_id,
@@ -1395,6 +1404,7 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
     tasks: Vec<ToDoTaskInput>,
     preview_candidates: Option<Vec<TaskPreviewCandidate>>,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&list_id])?;
     let tasks: Vec<ToDoTaskInput> = tasks
         .into_iter()
         .filter(|t| !t.title.trim().is_empty())
