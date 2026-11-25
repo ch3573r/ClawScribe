@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.68.1-preview.1
+
+- The GPU build starts on PCs without a Vulkan runtime; Whisper checks Vulkan in a separate process first. Parakeet uses DirectML automatically after a safe startup check and falls back to CPU.
+- Automatic notes pause and resume across exit instead of failing; the built-in AI helper is tied to ClawScribe's lifetime and restarts once after an idle exit.
+- Faster recording and playback, a signal check, simpler onboarding, Google Meet join and record, and command-line pause, resume and bookmark.
+- Meeting review gains citations, bookmarks, focused-pane Find and regeneration; speaker labelling, playback, meeting memory, chat, Live Assistance and follow-up emails are improved.
+- Command palette, Settings search, Archive bulk actions, unified export metadata, Word formatting, five new summary templates, and upgraded recurring series, iCalendar relinking and local MCP server.
+- Windows GPU prerelease for manual evaluation. Stable updates remain on 0.67.0. Runtime/updater version: 0.68.1. Real-hardware capture, no-Vulkan start, mixed-DPI and live Microsoft 365 testing are pending. See the [preview notes](docs/releases/0.68.1-preview.1.md).
+
 ## 0.68.0-preview.1
 
 - Replace MAI-Transcribe with standard Azure Speech for optional import and Enhance transcription. Requests no longer enable enhanced mode or select a MAI model, allowing standard Speech resources such as Germany West Central to work.
