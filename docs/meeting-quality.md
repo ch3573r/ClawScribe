@@ -490,6 +490,12 @@ an incomplete multi-chunk result as successful. It rejects empty transcript inpu
 Extraction/combination/report instructions preserve uncertainty and negation,
 distinguish proposals from decisions, and forbid invented owners and deadlines.
 
+The compatible-API and bundled Codex routes also list every explicit commitment
+as an action, including short first-person ones, and name the speaker as owner
+only when the transcript identifies who is speaking. They do not link facts that
+only share a source tag or sit near each other, and each action keeps the source
+tag of its supporting passage so it links back to the transcript.
+
 The shared, compatible-API, and bundled Codex routes all reduce long inputs
 before their final prompt and reject incomplete reductions. Budgets reserve
 output and prompt overhead, use UTF-8 bytes conservatively, and limit reduction
