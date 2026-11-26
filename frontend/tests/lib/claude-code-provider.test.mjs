@@ -142,7 +142,7 @@ test('summary settings never request an API key, for Claude Code or any other pr
         '@tauri-apps/api/event': { listen: async () => () => {}, emit: async () => {} },
         '@/components/ModelSettingsModal': { ModelSettingsModal: 'model-settings' },
         '@/components/SummaryLanguageSettings': { SummaryLanguageSettings: 'summary-language' },
-        '@/contexts/ConfigContext': { useConfig: () => ({ isAutoSummary: false, toggleIsAutoSummary() {} }) },
+        '@/contexts/ConfigContext': { useSummaryConfig: () => ({ isAutoSummary: false, toggleIsAutoSummary() {} }) },
         './ui/switch': { Switch: 'switch' },
         '@/lib/analytics': { __esModule: true, default: {} },
         sonner: { toast: { error() {}, success() {} } },

@@ -16,6 +16,8 @@ const mocks={
   '@/services/knowledgeService':{knowledgeService:{history:async()=>[]}},
   '@/components/ui/button':{Button:element('button')},
   '@/components/ui/textarea':{Textarea:element('textarea')},
+  '@/components/ui/input':{Input:'input'},
+  '@/components/ui/dialog':Object.fromEntries(['Dialog','DialogContent','DialogDescription','DialogHeader','DialogTitle','DialogFooter'].map(name=>[name,name])),
   '@/components/ui/tooltip':Object.fromEntries(['Tooltip','TooltipTrigger','TooltipContent','TooltipProvider'].map(name=>[name,element('span')])),
   '@/components/ui/dropdown-menu':Object.fromEntries(['DropdownMenu','DropdownMenuContent','DropdownMenuItem','DropdownMenuTrigger','DropdownMenuSeparator','DropdownMenuLabel'].map(name=>[name,element('div')])),
   '@/components/ui/scroll-area':{ScrollArea:element('div')},
@@ -119,8 +121,34 @@ test('saved conversation labels use the list metadata when the menu opens', () =
   } finally { app.unmount(); }
 });
 
+test('the current library conversation can be renamed and explicitly deleted', async () => {
+  const app = chatSurface();
+  const updates = [];
+  app.state.threads = [{ kind:'library', id:'saved', title:'Old name' }];
+  app.state.renameConversation = async title => { updates.push(title); };
+  app.state.clear = async remove => { updates.push(remove); };
+  const action = label => nodes(app.render()).find(node => node.props?.onSelect && text(node) === label);
+  try {
+    assert.equal(action('Clear conversation'), undefined);
+    action('Rename conversation…').props.onSelect();
+    const field = nodes(app.render()).find(node => node.props?.id === 'knowledge-conversation-name');
+    assert.equal(field.props.value, 'Old name');
+    field.props.onChange({ target: { value: 'Planning notes' } });
+    await nodes(app.render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+    assert.deepEqual(updates, ['Planning notes']);
+    action('Delete conversation…').props.onSelect();
+    const confirm = nodes(app.render()).find(node => node.props?.confirmLabel === 'Delete conversation');
+    assert.ok(confirm);
+    assert.deepEqual(updates, ['Planning notes']);
+    confirm.props.onConfirm();
+    assert.deepEqual(updates, ['Planning notes', true]);
+  } finally { app.unmount(); }
+});
+
 test('clearing history requires confirmation for the same conversation', () => {
   const app = chatSurface();
+  app.state.owner = { kind: 'meeting', id: 'meeting' };
+  app.state.scope = { kind: 'meeting', meeting_id: 'meeting' };
   app.state.messages = [{role:'user', id:'q', content:'Launch checklist', created_at:'2026-09-01'}];
   const cleared = [];
   app.state.clear = async () => { cleared.push(app.state.owner.id); };
@@ -129,7 +157,7 @@ test('clearing history requires confirmation for the same conversation', () => {
   try {
     requestClear();
     assert.deepEqual(cleared, []);
-    assert.match(dialog().props.text, /Launch checklist/);
+    assert.match(dialog().props.text, /this meeting’s chat/);
     dialog().props.onCancel();
     assert.equal(dialog(), undefined);
     assert.deepEqual(cleared, []);
@@ -144,6 +172,8 @@ test('clearing history requires confirmation for the same conversation', () => {
 
 test('clearing names the opening trigger and cannot close silently while the conversation is busy', () => {
   const app = chatSurface();
+  app.state.owner = { kind: 'meeting', id: 'meeting' };
+  app.state.scope = { kind: 'meeting', meeting_id: 'meeting' };
   app.state.messages = [{role:'user', id:'q', content:'Launch checklist', created_at:'2026-09-01'}];
   const cleared = [];
   app.state.clear = async () => { cleared.push(app.state.owner.id); };
@@ -164,14 +194,15 @@ test('clearing names the opening trigger and cannot close silently while the con
     assert.deepEqual(cleared, []);
     app.state.sending = false;
     dialog().props.onConfirm();
-    assert.deepEqual(cleared, ['saved']);
+    assert.deepEqual(cleared, ['meeting']);
     assert.equal(dialog(), undefined);
   } finally { app.unmount(); }
 });
 
 test('compact layout isolates configuration from the single conversation scroll area',()=>{
-  const context=jsx('context',{}),secondary=jsx('configuration',{}),start=jsx('paperclip',{}),attachments=jsx('chips',{}),menu=jsx('search-mode',{});
-  const app=chatSurface({compact:true,contextBar:context,secondary,composerStart:start,attachments,headerMenuExtra:menu});
+  const context=jsx('context',{}),secondary=jsx('configuration',{}),start=jsx('paperclip',{}),menu=jsx('search-mode',{});
+  const app=chatSurface({compact:true,contextBar:context,secondary,composerStart:start,headerMenuExtra:menu});
+  app.state.selectedFiles=[{id:'file',display_name:'Plan.md'}];
   try {
     const tree=app.render(),scroll=nodes(tree).filter(node=>node.type==='scroll-area');
     assert.equal(scroll.length,1);
@@ -179,7 +210,7 @@ test('compact layout isolates configuration from the single conversation scroll 
     assert.equal(nodes(scroll[0]).some(node=>['configuration','context'].includes(node.type)),false);
     assert.ok(nodes(tree).includes(context));assert.equal(nodes(tree).includes(secondary),false);
     const form=nodes(tree).find(node=>node.type==='form');
-    assert.ok(nodes(form).includes(start));assert.ok(nodes(form).includes(attachments));
+    assert.ok(nodes(form).includes(start));assert.ok(nodes(form).some(node=>node.props?.['aria-label']==='Selected reference files'));
     assert.ok(nodes(nodes(tree).find(node=>node.type==='header')).includes(menu));
     assert.ok(nodes(tree).some(node=>node.props?.['aria-label']==='More options'));
     assert.match(nodes(form).find(node=>node.type==='label').props.className,/sr-only/);
@@ -227,10 +258,10 @@ test('compact suggestions fill and focus the draft without submitting or grantin
   } finally {app.unmount();}
 });
 
-test('compact external reference notice points to Context and keeps Ask gated',()=>{
-  const app=chatSurface({compact:true});app.state.selectedDocumentIds=['reference'];app.state.sharingEnabled=false;
+test('compact external reference consent is inline and keeps Ask gated',()=>{
+  const app=chatSurface({compact:true});app.state.selectedDocumentIds=['reference'];app.state.selectedFiles=[{id:'reference',display_name:'Plan.md'}];app.state.sharingEnabled=false;
   const input=nodes(app.render()).find(node=>node.type==='textarea');input.props.onChange({target:{value:'Question'}});
-  assert.match(text(app.render()),/reference sharing in Context/);
+  assert.match(text(app.render()),/allow reference sharing/i);
   assert.equal(nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,true);
   app.unmount();
 });

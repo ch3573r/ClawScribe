@@ -17,6 +17,7 @@
 //!   the core has no value yet (`migrate_legacy_behavior_settings`).
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_store::StoreExt;
@@ -31,6 +32,20 @@ const LANGUAGE: &str = "language";
 const LEGACY_MIGRATED: &str = "legacy_migrated";
 const SHOW_CONVERSATION_METRICS: &str = "show_conversation_metrics";
 const SHOW_RECORDING_NOTIFICATION: &str = "show_recording_notification";
+const AUTO_UPDATE_CHECK: &str = "auto_update_check";
+const PLAYER_SHORTCUTS: &str = "player_shortcuts";
+const PLAYER_ACTIONS: &[&str] = &[
+    "toggle",
+    "back",
+    "forward",
+    "backLarge",
+    "forwardLarge",
+    "slower",
+    "faster",
+    "follow",
+    "bookmark",
+    "find",
+];
 
 /// One change at a time, whether it comes from the interface or from the
 /// hand-over of the webview's old values.
@@ -75,11 +90,12 @@ pub(crate) struct Stored {
     pub legacy_migrated: bool,
 }
 
-/// The settings as the webview reads them: every value is concrete.
+/// The settings as the webview reads them. An unset DirectML preference is
+/// resolved separately, when needed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BehaviorSettings {
-    pub parakeet_directml: bool,
+    pub parakeet_directml: Option<bool>,
     pub parakeet_worker: bool,
     pub cloud_transcription: bool,
     pub source_attribution: bool,
@@ -143,11 +159,11 @@ impl Stored {
         }
     }
 
-    /// Defaults everywhere: GPU and process isolation off, source attribution
-    /// off, cloud transcription off, language `auto`.
+    /// Hardware-independent defaults. The effective DirectML setting is resolved
+    /// at the command boundary, away from startup and the capture thread.
     pub(crate) fn effective(&self) -> BehaviorSettings {
         BehaviorSettings {
-            parakeet_directml: self.parakeet_directml.unwrap_or(false),
+            parakeet_directml: self.parakeet_directml,
             parakeet_worker: self.parakeet_worker.unwrap_or(false),
             cloud_transcription: self.cloud_transcription == Some(true),
             source_attribution: self.source_attribution.unwrap_or(false),
@@ -159,6 +175,13 @@ impl Stored {
             show_conversation_metrics: self.show_conversation_metrics.unwrap_or(true),
             legacy_migrated: self.legacy_migrated,
         }
+    }
+
+    fn directml_at_startup(&self) -> Option<bool> {
+        // An upgraded webview may still hold an explicit CPU choice. Keep the
+        // old CPU default until that hand-over has had a chance to read it.
+        self.parakeet_directml
+            .or((!self.legacy_migrated).then_some(false))
     }
 }
 
@@ -253,8 +276,6 @@ pub(crate) fn finish_migration(backing: &dyn Backing) -> Result<(), String> {
 /// Puts the stored values into the running core. Called during start-up,
 /// before a recording can start.
 pub(crate) fn apply(settings: &BehaviorSettings) {
-    crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
-        .store(settings.parakeet_directml, Ordering::Relaxed);
     crate::parakeet_engine::parakeet_engine::USE_PARAKEET_WORKER
         .store(settings.parakeet_worker, Ordering::Relaxed);
     crate::audio::recording_commands::set_cloud_transcription_runtime(settings.cloud_transcription);
@@ -273,10 +294,23 @@ fn open<R: Runtime>(
 /// Load and apply during start-up. A store that cannot be read gives the
 /// defaults (the cloud opt-in stays off).
 pub fn load_and_apply<R: Runtime>(app: &AppHandle<R>) {
+    use crate::parakeet_engine::parakeet_engine::set_directml_preference;
+    #[cfg(all(windows, feature = "directml"))]
+    {
+        use tauri::Manager;
+        if let Ok(app_data) = app.path().app_data_dir() {
+            crate::parakeet_engine::parakeet_engine::set_directml_probe_directory(app_data);
+        }
+    }
     let settings = match open(app) {
-        Ok(store) => Stored::read(store.as_ref()).effective(),
+        Ok(store) => {
+            let stored = Stored::read(store.as_ref());
+            set_directml_preference(stored.directml_at_startup());
+            stored.effective()
+        }
         Err(_) => {
             log::warn!("Behaviour settings could not be read; using the defaults");
+            set_directml_preference(Some(false));
             defaults()
         }
     };
@@ -345,9 +379,13 @@ pub(crate) fn save_language<R: Runtime>(app: &AppHandle<R>, language: &str) -> R
 pub async fn get_behavior_settings<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<BehaviorSettings, String> {
-    tauri::async_runtime::spawn_blocking(move || Ok(Stored::read(open(&app)?.as_ref()).effective()))
+    tauri::async_runtime::spawn_blocking(move || Ok(read_settings(open(&app)?.as_ref())))
         .await
         .map_err(|_| "Could not read the settings".to_string())?
+}
+
+fn read_settings(backing: &dyn Backing) -> BehaviorSettings {
+    Stored::read(backing).effective()
 }
 
 /// Hands the webview's old values to the core, once and only where the core
@@ -385,14 +423,25 @@ pub async fn migrate_legacy_behavior_settings(
             Change::Language(language) => crate::apply_language(&app, &language).await?,
         }
     }
+    let activate_default = !stored.legacy_migrated
+        && stored.parakeet_directml.is_none()
+        && legacy.parakeet_directml.is_none();
+    let job = activate_default
+        .then(crate::audio::inference::claim_job)
+        .transpose()?;
     let finisher = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let settings = tauri::async_runtime::spawn_blocking(move || {
         let store = open(&finisher)?;
         finish_migration(store.as_ref())?;
-        Ok::<_, String>(Stored::read(store.as_ref()).effective())
+        Ok::<_, String>(read_settings(store.as_ref()))
     })
     .await
-    .map_err(|_| "Could not migrate the settings".to_string())?
+    .map_err(|_| "Could not migrate the settings".to_string())??;
+    if activate_default {
+        crate::parakeet_engine::commands::apply_running_directml_preference(None).await;
+    }
+    drop(job);
+    Ok(settings)
 }
 
 /// Whether the "recording started" notice is shown.
@@ -420,6 +469,109 @@ pub async fn set_conversation_metrics_preference<R: Runtime>(
     })
     .await
     .map_err(|_| "Could not save the setting".to_string())?
+}
+
+fn load_auto_update(backing: &dyn Backing, legacy_enabled: Option<bool>) -> Result<bool, String> {
+    if let Some(enabled) = backing
+        .read(AUTO_UPDATE_CHECK)
+        .and_then(|value| value.as_bool())
+    {
+        return Ok(enabled);
+    }
+    if let Some(enabled) = legacy_enabled {
+        persist_bool(backing, AUTO_UPDATE_CHECK, enabled)?;
+    }
+    Ok(legacy_enabled.unwrap_or(true))
+}
+
+type PlayerShortcuts = BTreeMap<String, String>;
+
+fn valid_player_binding(action: &str, chord: &str) -> bool {
+    PLAYER_ACTIONS.contains(&action)
+        && !chord.trim().is_empty()
+        && chord.len() <= 128
+        && !chord.chars().any(char::is_control)
+}
+
+fn load_shortcuts(
+    backing: &dyn Backing,
+    legacy_bindings: Option<PlayerShortcuts>,
+) -> Result<PlayerShortcuts, String> {
+    if let Some(bindings) = backing
+        .read(PLAYER_SHORTCUTS)
+        .and_then(|value| serde_json::from_value::<PlayerShortcuts>(value).ok())
+        .filter(|bindings| {
+            bindings
+                .iter()
+                .all(|(action, chord)| valid_player_binding(action, chord))
+        })
+    {
+        return Ok(bindings);
+    }
+    let mut bindings = legacy_bindings.unwrap_or_default();
+    bindings.retain(|action, chord| valid_player_binding(action, chord));
+    if !bindings.is_empty() {
+        persist(backing, PLAYER_SHORTCUTS, json!(bindings))?;
+    }
+    Ok(bindings)
+}
+
+#[tauri::command]
+pub async fn load_auto_update_preference<R: Runtime>(
+    app: AppHandle<R>,
+    legacy_enabled: Option<bool>,
+) -> Result<bool, String> {
+    let _change = CHANGE_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        load_auto_update(open(&app)?.as_ref(), legacy_enabled)
+    })
+    .await
+    .map_err(|_| "Could not read the update preference".to_string())?
+}
+
+#[tauri::command]
+pub async fn set_auto_update_preference<R: Runtime>(
+    app: AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let _change = CHANGE_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        persist_bool(open(&app)?.as_ref(), AUTO_UPDATE_CHECK, enabled)
+    })
+    .await
+    .map_err(|_| "Could not save the update preference".to_string())?
+}
+
+#[tauri::command]
+pub async fn load_player_shortcuts<R: Runtime>(
+    app: AppHandle<R>,
+    legacy_bindings: Option<PlayerShortcuts>,
+) -> Result<PlayerShortcuts, String> {
+    let _change = CHANGE_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        load_shortcuts(open(&app)?.as_ref(), legacy_bindings)
+    })
+    .await
+    .map_err(|_| "Could not read the player shortcuts".to_string())?
+}
+
+#[tauri::command]
+pub async fn set_player_shortcuts<R: Runtime>(
+    app: AppHandle<R>,
+    bindings: PlayerShortcuts,
+) -> Result<(), String> {
+    if !bindings
+        .iter()
+        .all(|(action, chord)| valid_player_binding(action, chord))
+    {
+        return Err("Invalid player shortcut".into());
+    }
+    let _change = CHANGE_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        persist(open(&app)?.as_ref(), PLAYER_SHORTCUTS, json!(bindings))
+    })
+    .await
+    .map_err(|_| "Could not save the player shortcuts".to_string())?
 }
 
 #[cfg(test)]
@@ -473,6 +625,40 @@ pub(crate) mod test_memory {
 }
 
 #[cfg(test)]
+mod ui_preference_tests {
+    use super::{test_memory::Memory, *};
+
+    #[test]
+    fn native_ui_preferences_migrate_once() {
+        let backing = Memory::default();
+        assert!(!load_auto_update(&backing, Some(false)).unwrap());
+        assert!(!load_auto_update(&backing, Some(true)).unwrap());
+
+        let legacy = [
+            ("toggle".into(), "P".into()),
+            ("unknown".into(), "Q".into()),
+        ]
+        .into_iter()
+        .collect();
+        let saved = load_shortcuts(&backing, Some(legacy)).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved["toggle"], "P");
+        let stale = [("toggle".into(), "Z".into())].into_iter().collect();
+        assert_eq!(load_shortcuts(&backing, Some(stale)).unwrap(), saved);
+    }
+
+    #[test]
+    fn a_failed_ui_preference_migration_can_retry() {
+        let backing = Memory::default();
+        *backing.fail_saves.borrow_mut() = true;
+        assert!(load_auto_update(&backing, Some(false)).is_err());
+        assert!(backing.read(AUTO_UPDATE_CHECK).is_none());
+        *backing.fail_saves.borrow_mut() = false;
+        assert!(!load_auto_update(&backing, Some(false)).unwrap());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::test_memory::Memory;
     use super::*;
@@ -481,7 +667,8 @@ mod tests {
     fn an_empty_store_gives_the_defaults_with_everything_off() {
         let settings = Stored::read(&Memory::default()).effective();
         assert_eq!(settings, defaults());
-        assert!(!settings.parakeet_directml && !settings.parakeet_worker);
+        assert_eq!(settings.parakeet_directml, None);
+        assert!(!settings.parakeet_worker);
         assert!(!settings.cloud_transcription && !settings.source_attribution);
         assert_eq!(settings.language, "auto");
         assert!(!settings.legacy_migrated);
@@ -528,7 +715,7 @@ mod tests {
         assert_eq!(stored.parakeet_directml, None);
         assert_eq!(stored.language, None);
         let settings = stored.effective();
-        assert!(!settings.parakeet_directml);
+        assert_eq!(settings.parakeet_directml, None);
         assert!(settings.parakeet_worker && settings.source_attribution);
         assert_eq!(settings.language, "auto");
     }
@@ -722,5 +909,27 @@ mod tests {
         ] {
             assert!(settings.get(key).is_some(), "{key}");
         }
+    }
+}
+#[test]
+fn settings_read_returns_only_the_stored_directml_choice() {
+    let memory = test_memory::Memory::default();
+    let read = || serde_json::to_value(read_settings(&memory)).unwrap()["parakeetDirectml"].clone();
+    assert_eq!(read(), Value::Null);
+    for explicit in [true, false] {
+        persist_bool(&memory, PARAKEET_DIRECTML, explicit).unwrap();
+        assert_eq!(read(), json!(explicit));
+    }
+}
+
+#[test]
+fn parakeet_defers_the_automatic_default_until_the_legacy_choice_is_read() {
+    let mut stored = Stored::default();
+    assert_eq!(stored.directml_at_startup(), Some(false));
+    stored.legacy_migrated = true;
+    assert_eq!(stored.directml_at_startup(), None);
+    for explicit in [true, false] {
+        stored.parakeet_directml = Some(explicit);
+        assert_eq!(stored.directml_at_startup(), Some(explicit));
     }
 }

@@ -2,6 +2,9 @@ import type {
   AssistantReply,
   CitationContextLink,
   KnowledgeScope,
+  DocumentAttachment,
+  ScopedDocument,
+  SearchMode,
 } from "@/types/knowledge";
 import type { ProjectFilter } from "@/lib/library";
 
@@ -116,14 +119,22 @@ export function libraryScope(
   };
 }
 export function scopeReady(scope: KnowledgeScope): boolean {
-  return scope.kind === "meeting"
-    ? !!scope.meeting_id.trim()
-    : (scope.filter.all_meetings || scope.filter.meeting_ids.length > 0) &&
-        !(
-          scope.filter.from &&
-          scope.filter.to &&
-          scope.filter.from > scope.filter.to
-        );
+  if (scope.kind === "meeting") return !!scope.meeting_id.trim();
+  const { all_meetings, meeting_ids, tags, untagged, from, to } = scope.filter;
+  return !!(all_meetings || meeting_ids.length || tags.length || untagged || from || to) &&
+    !(from && to && from > to);
+}
+
+export function knowledgeSearchMode(chosen: SearchMode | null, semanticReady: boolean): SearchMode {
+  return semanticReady ? chosen ?? "hybrid" : "keyword";
+}
+
+export function selectedReferences(rows: ScopedDocument[], ids: string[], imports: DocumentAttachment[]) {
+  const selected = new Set([...ids, ...imports.map(file => file.id)]);
+  const verified = rows.flatMap(({ attachment }) => selected.has(attachment.id) ? [attachment] : []);
+  const verifiedIds = new Set(verified.map(file => file.id));
+  const pending = imports.filter(file => !verifiedIds.has(file.id));
+  return { files: [...verified, ...pending], ids: [...verifiedIds], verifying: pending.length > 0 };
 }
 export interface CitationPart {
   text: string;

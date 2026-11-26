@@ -1,13 +1,18 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { MeetingTag } from '@/lib/library';
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, MAX, readStoredSidebarWidth } from '@/lib/sidebarWidth';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useTranscriptionConfig } from '@/contexts/ConfigContext';
+import { useLiveTranscriptionReadiness } from '@/hooks/useLiveTranscriptionReadiness';
+import { reportStartFailure, useStartRecordingSession } from '@/hooks/useRecordingStart';
+import { audioSourceReadiness } from '@/lib/audioDevicePreferences';
+import { recordingActionBlock, startReadinessReason } from '@/lib/recording-start-readiness';
 import { useSummaryPolling } from '@/hooks/useSummaryPolling';
 import { allowLoadedMeetingDrafts, discardMeetingDraft } from '@/lib/meetingDrafts';
 
@@ -54,10 +59,10 @@ interface SidebarContextType extends ReturnType<typeof useSummaryPolling> {
   isMeetingActive: boolean;
   setIsMeetingActive: (active: boolean) => void;
   handleRecordingToggle: () => void;
-  setServerAddress: (address: string) => void;
-  serverAddress: string;
-  transcriptServerAddress: string;
-  setTranscriptServerAddress: (address: string) => void;
+  recordingActionReason: string | null;
+  nextMeetingTitle: string;
+  setNextMeetingTitle: React.Dispatch<React.SetStateAction<string>>;
+  liveReadiness: ReturnType<typeof useLiveTranscriptionReadiness>;
   // Refetch meetings from backend
   refetchMeetings: () => Promise<void>;
 
@@ -90,7 +95,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     } catch { if (version === tagsVersion.current) setProjectTagsError('Could not load project tags.'); }
     finally { if (version === tagsVersion.current) setProjectTagsLoading(false); }
   }, []);
-  const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>({ id: 'intro-call', title: '+ New Call' });
+  const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>(null);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [sidebarWidth, updateSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [sidebarMaxWidth, setSidebarMaxWidth] = useState(MAX);
@@ -122,50 +127,61 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const meetingVersion = React.useRef(0);
   const meetingLoadPending = React.useRef(false);
   const [isMeetingActive, setIsMeetingActive] = useState(false);
-  const [serverAddress, setServerAddress] = useState('');
-  const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
+  const [nextMeetingTitle, setNextMeetingTitle] = useState('');
+  const startingFromSidebar = React.useRef(false);
   const { activeSummaryPolls, startSummaryPolling, stopSummaryPolling, attachSummaryPolling } = useSummaryPolling();
 
   // Use recording state from RecordingStateContext (single source of truth)
-  const { isRecording } = useRecordingState();
+  const recording = useRecordingState();
+  const { isRecording, recordingMode, isSavingMode } = recording;
+  const { audioDeviceInventory, selectedDevices, devicePreferencesStatus, isSavingDevicePreferences, transcriptModelConfig } = useTranscriptionConfig();
+  const { data: inventory, status: inventoryStatus, refresh } = audioDeviceInventory;
+  useEffect(() => { void refresh(); }, [refresh]);
+  const liveReadiness = useLiveTranscriptionReadiness(recordingMode === 'live', transcriptModelConfig.provider, transcriptModelConfig.model);
+  const startReason = startReadinessReason({
+    inventoryStatus, preferencesStatus: devicePreferencesStatus, mode: recordingMode,
+    mic: inventory && audioSourceReadiness(inventory, 'Input', selectedDevices.micDevice),
+    system: inventory && audioSourceReadiness(inventory, 'Output', selectedDevices.systemDevice),
+    hasReadiness: Boolean(liveReadiness.data), readinessError: liveReadiness.error,
+    modelIssue: liveReadiness.data?.modelIssue, savingDevices: isSavingDevicePreferences, savingMode: isSavingMode,
+  });
+  const recordingActionReason = recordingActionBlock(recording, startReason);
+  const start = useStartRecordingSession(setIsMeetingActive);
 
   const pathname = usePathname();
   const sidebarOffset = isCollapsed || pathname === '/settings' ? '4rem' : `${sidebarWidth}px`;
-  const router = useRouter();
 
   // Extract fetchMeetings as a reusable function
   const fetchMeetings = React.useCallback(async () => {
-    if (serverAddress) {
-      const version = ++meetingVersion.current;
-      meetingLoadPending.current = true;
-      setMeetingsLoading(true);
-      try {
-        const meetings = await invoke<CurrentMeeting[]>('api_get_meetings');
-        if (version !== meetingVersion.current) return;
-        const transformedMeetings = meetings.map(meeting => ({
-          id: meeting.id,
-          title: meeting.title,
-          created_at: meeting.created_at,
-          updated_at: meeting.updated_at,
-        }));
-        allowLoadedMeetingDrafts(transformedMeetings);
-        updateMeetings(transformedMeetings);
-        setMeetingsError(null);
-        Analytics.trackBackendConnection(true);
-      } catch (error) {
-        if (version !== meetingVersion.current) return;
-        console.error('Error fetching meetings:', error);
-        // Keep what was loaded before; an empty list would pass for an empty library.
-        setMeetingsError('Could not load your meetings.');
-        Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
-      } finally {
-        if (version === meetingVersion.current) {
-          meetingLoadPending.current = false;
-          setMeetingsLoading(false);
-        }
+    const version = ++meetingVersion.current;
+    meetingLoadPending.current = true;
+    setMeetingsLoading(true);
+    try {
+      const meetings = await invoke<CurrentMeeting[]>('api_get_meetings');
+      if (version !== meetingVersion.current) return;
+      const transformedMeetings = meetings.map(meeting => ({
+        id: meeting.id,
+        title: meeting.title,
+        created_at: meeting.created_at,
+        updated_at: meeting.updated_at,
+      }));
+      allowLoadedMeetingDrafts(transformedMeetings);
+      updateMeetings(transformedMeetings);
+      setMeetingsError(null);
+      Analytics.trackBackendConnection(true);
+    } catch (error) {
+      if (version !== meetingVersion.current) return;
+      console.error('Error fetching meetings:', error);
+      // Keep what was loaded before; an empty list would pass for an empty library.
+      setMeetingsError('Could not load your meetings.');
+      Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
+    } finally {
+      if (version === meetingVersion.current) {
+        meetingLoadPending.current = false;
+        setMeetingsLoading(false);
       }
     }
-  }, [serverAddress]);
+  }, []);
 
   const setMeetings = React.useCallback<SidebarContextType['setMeetings']>(update => {
     updateMeetings(update);
@@ -200,14 +216,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     };
   }, [refreshProjectTags, fetchMeetings, setMeetings]);
 
-  useEffect(() => {
-    const fetchSettings = async () => {
-      setServerAddress('http://localhost:5167');
-      setTranscriptServerAddress('http://127.0.0.1:8178/stream');
-    };
-    fetchSettings();
-  }, []);
-
   const sidebarItems = React.useMemo<SidebarItem[]>(() => [
     {
       id: 'meetings',
@@ -219,47 +227,30 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     },
   ], [meetings]);
 
-  const toggleCollapse = () => {
-    setIsCollapsed(!isCollapsed);
-  };
+  const toggleCollapse = React.useCallback(() => setIsCollapsed(collapsed => !collapsed), []);
 
   // Update current meeting when on home page
   useEffect(() => {
     if (pathname === '/') {
-      setCurrentMeeting({ id: 'intro-call', title: '+ New Call' });
+      setCurrentMeeting(null);
     }
   }, [pathname]);
 
   // Function to handle recording toggle from sidebar
-  const handleRecordingToggle = () => {
+  const handleRecordingToggle = React.useCallback(() => {
+    if (recordingActionReason || startingFromSidebar.current) return;
     if (!isRecording) {
-      // Check if already on home page
-      if (pathname === '/') {
-        // Already on home - trigger recording directly via custom event
-        console.log('Triggering recording from sidebar (already on home page)');
-        window.dispatchEvent(new CustomEvent('start-recording-from-sidebar'));
-      } else {
-        // Not on home - navigate and use auto-start mechanism
-        console.log('Navigating to home page with auto-start flag');
-        sessionStorage.setItem('autoStartRecording', 'true');
-        router.push('/');
-      }
-
-      // Track recording initiation from sidebar
-      Analytics.trackButtonClick('start_recording', 'sidebar');
-    } else {
-      // Already recording - clicking the indicator stops the recording. The
-      // app-wide RecordingPostProcessingProvider handles it, so it works from
-      // any page without navigating.
-      console.log('Stopping recording from sidebar');
-      window.dispatchEvent(new CustomEvent('stop-recording-from-sidebar'));
-      Analytics.trackButtonClick('stop_recording', 'sidebar');
+      startingFromSidebar.current = true;
+      void start('sidebar_direct', undefined, nextMeetingTitle).then(() => {
+        setNextMeetingTitle(current => current === nextMeetingTitle ? '' : current);
+      }).catch(reportStartFailure).finally(() => { startingFromSidebar.current = false; });
+      return;
     }
-    // Starting is handled by the Home component; stopping by the provider.
-  };
+    window.dispatchEvent(new CustomEvent('stop-recording-from-sidebar'));
+    Analytics.trackButtonClick('stop_recording', 'sidebar');
+  }, [isRecording, nextMeetingTitle, recordingActionReason, start]);
 
-  return (
-    <SidebarContext.Provider value={{
+  const value = React.useMemo<SidebarContextType>(() => ({
       deleteTarget, setDeleteTarget,
       projectTags,
       projectTagsError,
@@ -283,17 +274,27 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       isMeetingActive,
       setIsMeetingActive,
       handleRecordingToggle,
-      setServerAddress,
-      serverAddress,
-      transcriptServerAddress,
-      setTranscriptServerAddress,
+      recordingActionReason,
+      nextMeetingTitle,
+      setNextMeetingTitle,
+      liveReadiness,
       activeSummaryPolls,
       startSummaryPolling,
       stopSummaryPolling,
       attachSummaryPolling,
       refetchMeetings: fetchMeetings,
+  }), [
+    deleteTarget, projectTags, projectTagsError, projectTagsLoading, refreshProjectTags,
+    currentMeeting, sidebarItems, isCollapsed, sidebarWidth, setSidebarWidth,
+    sidebarMaxWidth, sidebarOffset, isSidebarResizing, toggleCollapse, meetings,
+    meetingsError, meetingsLoading, setMeetings, isMeetingActive, handleRecordingToggle, recordingActionReason, nextMeetingTitle,
+    liveReadiness.data, liveReadiness.error, liveReadiness.refresh,
+    activeSummaryPolls, startSummaryPolling,
+    stopSummaryPolling, attachSummaryPolling, fetchMeetings,
+  ]);
 
-    }}>
+  return (
+    <SidebarContext.Provider value={value}>
       {children}
     </SidebarContext.Provider>
   );

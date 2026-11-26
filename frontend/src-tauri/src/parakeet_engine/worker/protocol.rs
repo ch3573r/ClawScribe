@@ -8,6 +8,8 @@ pub const MAX_SECTION_BYTES: usize = 256 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Request {
+    ProbeDirectml,
+    ProbeVulkan,
     Load {
         model_dir: PathBuf,
         precision_suffix: Option<String>,
@@ -20,6 +22,12 @@ pub enum Request {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Response {
+    VulkanProbe {
+        available: bool,
+    },
+    DirectmlProbe {
+        available: bool,
+    },
     Loaded {
         directml_registered: bool,
     },
@@ -27,6 +35,8 @@ pub enum Response {
         text: String,
         timestamps: Vec<f32>,
         tokens: Vec<String>,
+        #[serde(default)]
+        encoder_length_clamped: bool,
     },
     Error(String),
 }
@@ -156,6 +166,7 @@ mod tests {
                 text: "test".into(),
                 timestamps: vec![0.1],
                 tokens: vec!["test".into()],
+                encoder_length_clamped: true,
             },
             Response::Error("Engine unavailable".into()),
         ] {

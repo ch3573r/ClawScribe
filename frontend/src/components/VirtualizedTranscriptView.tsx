@@ -10,17 +10,21 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { Button } from "./ui/button";
 import { SpeakerLabelPopover, SpeakerDot } from "./MeetingDetails/SpeakerLabelPopover";
 import { buildSpeakerCatalog, getSpeakerColor, speakerLabel, type SpeakerDetails } from "@/lib/speaker-labels";
-import { Pencil } from "lucide-react";
+import { BookmarkPlus, Pencil } from "lucide-react";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import { splitForHighlight } from "@/lib/transcript-find";
+import { activePlaybackSegment, indexPlaybackRanges } from "@/hooks/transcript-playback";
 
 export interface VirtualizedTranscriptViewProps {
     speakerSegments?: TranscriptSegmentData[];
     sourceAttributionEnabled?: boolean;
+    attendeeNames?: readonly string[];
+    highlightedSpeaker?: string | null;
     focusedSource?: { id: string; request: number };
-    onEditSegment?: (segment: TranscriptSegmentData) => void;
+    onEditSegment?: (id: string) => void;
+    onBookmarkSegment?: (seconds: number, anchor: HTMLButtonElement) => void;
     /** Transcript segments to display */
     segments: TranscriptSegmentData[];
     /** Saved-meeting empty state; recording keeps its live status. */
@@ -98,16 +102,20 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onApplySpeakerToMatching,
     speakerCatalog,
     sourceAttributionEnabled,
+    attendeeNames,
+    isSpeakerHighlighted,
     isActive,
     onSeekToTime,
     onEdit,
+    onBookmark,
     originalText,
     highlight,
     isFindCurrent = false,
 }: {
     highlight?: string;
     isFindCurrent?: boolean;
-    onEdit?: () => void;
+    onEdit?: (id: string) => void;
+    onBookmark?: (seconds: number, anchor: HTMLButtonElement) => void;
     originalText?: string | null;
     id: string;
     timestamp: number;
@@ -121,6 +129,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number> | number | void;
     speakerCatalog: readonly SpeakerDetails[];
     sourceAttributionEnabled: boolean;
+    attendeeNames?: readonly string[];
+    isSpeakerHighlighted: boolean;
     /** Whether playback is currently inside this segment. Computed by the
      * parent so a clock tick only re-renders the rows whose state flips. */
     isActive: boolean;
@@ -133,7 +143,9 @@ const TranscriptSegment = memo(function TranscriptSegment({
             : part.text)
         : displayText;
     const currentSpeaker = showSpeakerLabels ? speakerLabel(speaker) : null;
-    const canSeek = Boolean(onSeekToTime && Number.isFinite(timestamp) && timestamp >= 0);
+    const hasTimestamp = Number.isFinite(timestamp) && timestamp >= 0;
+    const canSeek = Boolean(onSeekToTime && hasTimestamp);
+    const canBookmark = Boolean(onBookmark && hasTimestamp);
 
     const seekToSegment = () => {
         if (canSeek) {
@@ -144,7 +156,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div
             id={`segment-${id}`}
-            className={`group/segment relative mb-3 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isFindCurrent ? "bg-primary/10 ring-2 ring-ring" : isActive ? "bg-primary/10 ring-1 ring-primary/30" : ""}`}
+            data-speaker-highlighted={isSpeakerHighlighted || undefined}
+            className={`group/segment relative mb-3 rounded-[4px] px-1 py-0.5 transition-colors motion-reduce:transition-none ${isSpeakerHighlighted ? "before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:rounded-sm before:bg-primary" : ""} ${isFindCurrent ? "bg-primary/10 ring-2 ring-ring" : isActive ? "bg-primary/10 ring-1 ring-primary/30" : isSpeakerHighlighted ? "bg-accent/55" : ""}`}
         >
             <div className="flex items-start gap-3">
                 <Tooltip>
@@ -166,22 +179,16 @@ const TranscriptSegment = memo(function TranscriptSegment({
                         )}
                     </TooltipContent>
                 </Tooltip>
-                <div className="min-w-0 flex-1 pr-7">
+                <div className="min-w-0 flex-1">
                     {showSpeakerLabels && onSpeakerChange ? (
                         <SpeakerLabelPopover segmentId={id} timestamp={formatRecordingTime(timestamp).slice(1, -1)}
-                            speaker={speaker} catalog={speakerCatalog} sourceAttributionEnabled={sourceAttributionEnabled}
+                            speaker={speaker} catalog={speakerCatalog} sourceAttributionEnabled={sourceAttributionEnabled} attendeeNames={attendeeNames}
                             onSpeakerChange={onSpeakerChange} onRename={onApplySpeakerToMatching} />
                     ) : showSpeakerLabels && currentSpeaker && (
                         <span className="mb-0.5 inline-flex items-center gap-1.5 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-foreground">
                             <SpeakerDot color={getSpeakerColor(speakerCatalog, currentSpeaker)} />{currentSpeaker}
                         </span>
                     )}
-                    {onEdit && <div className="absolute right-1 top-1 flex items-center gap-1">
-                        {originalText != null && originalText !== text && <span className="text-xs text-primary">Edited</span>}
-                        <Tooltip><TooltipTrigger asChild>
-                          <Button variant="ghost" size="icon" type="button" onClick={onEdit} className="h-7 w-7 bg-card opacity-0 group-hover/segment:opacity-100 group-focus-within/segment:opacity-100 focus-visible:opacity-100" aria-label="Edit segment"><Pencil className="h-3.5 w-3.5" /></Button>
-                        </TooltipTrigger><TooltipContent>Edit segment</TooltipContent></Tooltip>
-                    </div>}
                     {isStreaming ? (
                         <div className="bg-muted border border-border rounded-lg px-3 py-2">
                             <p className="font-reading text-[15px] leading-[1.5] text-foreground/90">{content}</p>
@@ -190,6 +197,15 @@ const TranscriptSegment = memo(function TranscriptSegment({
                         <p className="font-reading text-[15px] leading-[1.5] text-foreground/90">{content}</p>
                     )}
                 </div>
+                {(onEdit || canBookmark) && <div className="flex shrink-0 items-center gap-1">
+                    {onEdit && originalText != null && originalText !== text && <span className="text-xs text-primary">Edited</span>}
+                    {canBookmark && <Tooltip><TooltipTrigger asChild>
+                      <Button variant="ghost" size="icon" type="button" onClick={event => onBookmark?.(timestamp, event.currentTarget)} className="h-7 w-7 opacity-0 group-hover/segment:opacity-100 group-focus-within/segment:opacity-100 focus-visible:opacity-100" aria-label={`Add bookmark at ${formatRecordingTime(timestamp).slice(1, -1)}`}><BookmarkPlus className="h-3.5 w-3.5" /></Button>
+                    </TooltipTrigger><TooltipContent>Add bookmark</TooltipContent></Tooltip>}
+                    {onEdit && <Tooltip><TooltipTrigger asChild>
+                      <Button variant="ghost" size="icon" type="button" onClick={() => onEdit(id)} className="h-7 w-7 opacity-0 group-hover/segment:opacity-100 group-focus-within/segment:opacity-100 focus-visible:opacity-100" aria-label="Edit segment"><Pencil className="h-3.5 w-3.5" /></Button>
+                    </TooltipTrigger><TooltipContent>Edit segment</TooltipContent></Tooltip>}
+                </div>}
             </div>
         </div>
     );
@@ -197,8 +213,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
 
 export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps> = ({
     onEditSegment,
+    onBookmarkSegment,
     speakerSegments,
     sourceAttributionEnabled = false,
+    attendeeNames,
+    highlightedSpeaker,
     focusedSource,
     segments,
     emptyState,
@@ -291,6 +310,15 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         else scrollRef.current?.querySelectorAll('[data-segment-id]')[index]?.scrollIntoView({ block: align === 'center' ? 'center' : 'nearest' });
         return true;
     };
+
+    const scrolledSpeaker = useRef<string | null | undefined>(undefined);
+    useEffect(() => {
+        if (highlightedSpeaker === undefined) { scrolledSpeaker.current = undefined; return; }
+        if (scrolledSpeaker.current === highlightedSpeaker) return;
+        const first = segments.find(segment => speakerLabel(segment.speaker) === highlightedSpeaker);
+        if (first && scrollToSegment(first.id, 'center')) scrolledSpeaker.current = highlightedSpeaker;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [highlightedSpeaker, segments]);
 
     // Find in transcript: bring the current match into view once per request,
     // waiting for its page to load if it is not loaded yet.
@@ -396,16 +424,9 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     // Resolve the playback position to a single active segment id, so clock
     // ticks re-render at most the two rows whose highlight state changes
     // instead of every visible (memo-broken) row.
-    const activeSegmentId = useMemo(() => {
-        if (activeTime === undefined) return null;
-        for (const segment of segments) {
-            const end = segment.endTime ?? segment.timestamp + 0.75;
-            if (activeTime >= segment.timestamp && activeTime < end) {
-                return segment.id;
-            }
-        }
-        return null;
-    }, [segments, activeTime]);
+    const hasPlayback = activeTime !== undefined;
+    const playbackRanges = useMemo(() => hasPlayback ? indexPlaybackRanges(segments) : [], [hasPlayback, segments]);
+    const activeSegmentId = activePlaybackSegment(playbackRanges, activeTime);
 
     // Follow playback: scroll when the spoken segment changes, never on every clock tick.
     const followedSegment = useRef<string | null>(null);
@@ -498,7 +519,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         originalText={segment.original_text}
-                                        onEdit={onEditSegment ? () => onEditSegment(segment) : undefined}
+                                        onEdit={onEditSegment}
+                                        onBookmark={onBookmarkSegment}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
                                         showSpeakerLabels={showSpeakerLabels}
@@ -508,6 +530,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
                                         speakerCatalog={speakerCatalog}
                                         sourceAttributionEnabled={sourceAttributionEnabled}
+                                        attendeeNames={attendeeNames}
+                                        isSpeakerHighlighted={highlightedSpeaker !== undefined && speakerLabel(segment.speaker) === highlightedSpeaker}
                                         isActive={segment.id === activeSegmentId || segment.id === focusedSource?.id}
                                         onSeekToTime={onSeekToTime}
                                         highlight={findQuery}
@@ -568,7 +592,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         originalText={segment.original_text}
-                                        onEdit={onEditSegment ? () => onEditSegment(segment) : undefined}
+                                        onEdit={onEditSegment}
+                                        onBookmark={onBookmarkSegment}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
                                         showSpeakerLabels={showSpeakerLabels}
@@ -578,6 +603,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         onApplySpeakerToMatching={showSpeakerLabels ? onApplySpeakerToMatching : undefined}
                                         speakerCatalog={speakerCatalog}
                                         sourceAttributionEnabled={sourceAttributionEnabled}
+                                        attendeeNames={attendeeNames}
+                                        isSpeakerHighlighted={highlightedSpeaker !== undefined && speakerLabel(segment.speaker) === highlightedSpeaker}
                                         isActive={segment.id === activeSegmentId || segment.id === focusedSource?.id}
                                         onSeekToTime={onSeekToTime}
                                         highlight={findQuery}

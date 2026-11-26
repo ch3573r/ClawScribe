@@ -71,7 +71,11 @@ pnpm run tauri:dev:openblas
 ```
 
 `windows-gpu` is the normal Windows release feature set. It combines Whisper
-Vulkan support with DirectML for ONNX/sherpa paths.
+Vulkan support with DirectML for ONNX/sherpa paths. On Windows, a supervised
+child checks for a compatible System32 Vulkan loader and device before Whisper
+initializes. A missing device or a probe crash keeps Whisper unavailable until
+restart. After a timeout or start failure, ClawScribe can retry twice, at least
+30 seconds apart. Home shows the runtime issue before recording starts.
 
 The automatic scripts are useful for normal development, but explicit scripts
 make performance regressions easier to compare.

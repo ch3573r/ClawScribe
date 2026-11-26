@@ -13,10 +13,13 @@ static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Initialize the models directory path using app_data_dir
 /// This should be called during app setup before parakeet_init
 pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .expect("Failed to get app data dir");
+    let app_data_dir = match app.path().app_data_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            log::warn!("Could not resolve the model storage directory: {error}");
+            return;
+        }
+    };
 
     let models_dir = app_data_dir.join("models");
 
@@ -30,18 +33,18 @@ pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
 
     log::info!("Parakeet models directory set to: {}", models_dir.display());
 
-    let mut guard = MODELS_DIR.lock().unwrap();
+    let mut guard = MODELS_DIR.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(models_dir);
 }
 
 /// Get the configured models directory
 fn get_models_directory() -> Option<PathBuf> {
-    MODELS_DIR.lock().unwrap().clone()
+    MODELS_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 #[command]
 pub async fn parakeet_init() -> Result<(), String> {
-    let mut guard = PARAKEET_ENGINE.lock().unwrap();
+    let mut guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_some() {
         return Ok(());
     }
@@ -56,7 +59,7 @@ pub async fn parakeet_init() -> Result<(), String> {
 #[command]
 pub async fn parakeet_get_available_models() -> Result<Vec<ModelInfo>, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -77,7 +80,7 @@ pub async fn parakeet_load_model<R: Runtime>(
 ) -> Result<(), String> {
     let _job = crate::audio::inference::claim_job()?;
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -131,7 +134,7 @@ pub async fn parakeet_load_model<R: Runtime>(
 #[command]
 pub async fn parakeet_get_current_model() -> Result<Option<String>, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -145,7 +148,7 @@ pub async fn parakeet_get_current_model() -> Result<Option<String>, String> {
 #[command]
 pub async fn parakeet_is_model_loaded() -> Result<bool, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -159,7 +162,7 @@ pub async fn parakeet_is_model_loaded() -> Result<bool, String> {
 #[command]
 pub async fn parakeet_has_available_models() -> Result<bool, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -184,7 +187,7 @@ pub async fn parakeet_has_available_models() -> Result<bool, String> {
 #[command]
 pub async fn parakeet_validate_model_ready() -> Result<String, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -240,7 +243,7 @@ pub(crate) async fn parakeet_validate_model_ready_for(
         check_model_files, LiveModelFailure, ModelFileState,
     };
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -311,7 +314,7 @@ pub(crate) async fn parakeet_validate_model_ready_for(
 #[command]
 pub async fn parakeet_transcribe_audio(audio_data: Vec<f32>) -> Result<String, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -328,7 +331,7 @@ pub async fn parakeet_transcribe_audio(audio_data: Vec<f32>) -> Result<String, S
 #[command]
 pub async fn parakeet_get_models_directory() -> Result<String, String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -346,7 +349,7 @@ pub async fn parakeet_download_model<R: Runtime>(
     model_name: String,
 ) -> Result<(), String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -440,7 +443,7 @@ pub async fn parakeet_cancel_download<R: Runtime>(
     model_name: String,
 ) -> Result<(), String> {
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -475,7 +478,7 @@ pub async fn parakeet_retry_download<R: Runtime>(
     log::info!("Retrying download for: {}", model_name);
 
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -499,7 +502,7 @@ pub async fn parakeet_retry_download<R: Runtime>(
 pub async fn parakeet_delete_corrupted_model(model_name: String) -> Result<String, String> {
     let _job = crate::audio::inference::claim_job()?;
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
 
@@ -553,7 +556,7 @@ pub async fn open_parakeet_models_folder() -> Result<(), String> {
     Ok(())
 }
 
-/// Beta (opt-in): route Parakeet inference through the DirectML (Windows GPU)
+/// Set an explicit preference for the Parakeet DirectML (Windows GPU)
 /// execution provider. Unloads any loaded model so the change applies on the
 /// next load. No effect unless the build includes the `directml` feature.
 #[command]
@@ -581,26 +584,65 @@ pub(crate) async fn apply_parakeet_directml<R: tauri::Runtime>(
     })
     .await
     .map_err(|_| "Could not save the setting".to_string())??;
-    crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
-        .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    apply_running_directml_preference(Some(enabled)).await;
+    log::info!("Parakeet DirectML set to {enabled}; unloaded model so it reloads with the change");
+    Ok(())
+}
 
+/// The caller owns the inference slot so a loaded model can safely be released.
+pub(crate) async fn apply_running_directml_preference(preference: Option<bool>) {
+    super::parakeet_engine::set_directml_preference(preference);
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
     if let Some(engine) = engine {
         engine.unload_model().await;
     }
-    log::info!("Parakeet DirectML set to {enabled}; unloaded model so it reloads with the change");
-    Ok(())
 }
 
 #[command]
 pub async fn get_parakeet_use_directml() -> Result<bool, String> {
-    Ok(
-        crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML
-            .load(std::sync::atomic::Ordering::Relaxed),
-    )
+    tokio::task::spawn_blocking(|| super::parakeet_engine::resolved_directml().0)
+        .await
+        .map_err(|_| "Could not check the DirectML setting".into())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedDirectml {
+    requested: bool,
+    automatic: bool,
+    last_load_fell_back: bool,
+    default_unavailable: bool,
+    session_disabled: bool,
+}
+
+/// Resolved preference, including the result of any automatic DirectML probe.
+#[command]
+pub async fn get_parakeet_directml_status() -> Result<ResolvedDirectml, String> {
+    tokio::task::spawn_blocking(|| {
+        let (requested, automatic) = super::parakeet_engine::resolved_directml();
+        ResolvedDirectml {
+            requested,
+            automatic,
+            last_load_fell_back: requested
+                && super::parakeet_engine::last_directml_load_fell_back(),
+            default_unavailable: cfg!(all(windows, feature = "directml"))
+                && automatic
+                && !requested,
+            session_disabled: super::worker::directml_session_disabled(),
+        }
+    })
+    .await
+    .map_err(|_| "Could not check the DirectML setting".into())
+}
+
+#[command]
+pub async fn get_parakeet_directml_default_unavailable() -> Result<bool, String> {
+    tokio::task::spawn_blocking(super::parakeet_engine::directml_default_unavailable)
+        .await
+        .map_err(|_| "Could not check the DirectML provider".into())
 }
 
 #[command]
@@ -608,7 +650,7 @@ pub async fn get_parakeet_directml_session_disabled() -> Result<bool, String> {
     Ok(crate::parakeet_engine::worker::directml_session_disabled())
 }
 
-/// Beta opt-in: isolate Parakeet in a supervised process on the next load.
+/// Beta opt-in: isolate Parakeet CPU inference on the next load.
 #[command]
 pub async fn set_parakeet_use_worker<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -636,7 +678,7 @@ pub(crate) async fn apply_parakeet_worker<R: tauri::Runtime>(
         .store(enabled, std::sync::atomic::Ordering::Relaxed);
 
     let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
+        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     };
     if let Some(engine) = engine {

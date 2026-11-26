@@ -19,6 +19,7 @@ export function createHookHarness() {
       return slot.value;
     },
     useCallback(callback, dependencies) { return react.useMemo(() => callback, dependencies); },
+    useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot(); },
     useEffect(callback, dependencies) {
       const slot = slots[cursor++] ??= {};
       if (changed(slot.dependencies, dependencies)) {

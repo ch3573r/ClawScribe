@@ -17,9 +17,9 @@ const DISK_SPACE_TOAST = 'recording-disk-space-low';
 /** App-wide handling of native Stop completion and recording errors. */
 export function RecordingPostProcessingProvider({ children }: { children: React.ReactNode }) {
   useRecordingStop();
-  const { isRecording, isStopping, status, setStatus } = useRecordingState();
-  const latest = useRef({ isRecording, isStopping, status, setStatus });
-  latest.current = { isRecording, isStopping, status, setStatus };
+  const recording = useRecordingState();
+  const latest = useRef(recording);
+  latest.current = recording;
   const stopFlow = useRef<Promise<void> | null>(null);
 
   // A Stop that failed leaves the recording running: say why and return to the
@@ -41,11 +41,15 @@ export function RecordingPostProcessingProvider({ children }: { children: React.
       try {
         const dataDir = await appDataDir();
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        await recordingService.stopRecording(`${dataDir}/recording-${timestamp}.wav`);
+        const stopped = await recordingService.stopRecording(`${dataDir}/recording-${timestamp}.wav`);
+        if (stopped === false && !await current.reconcileNothingToStop(stopped)) {
+          throw new Error('Could not verify whether the recording stopped. Try again.');
+        }
       } catch (error) {
+        if (await current.reconcileNothingToStop(error)) return;
         // The recording is still running: show why, skip the save flow and go
         // back to the recording state at once.
-        console.error('Failed to stop recording:', error);
+        console.error('Failed to stop recording');
         showStopFailure(error);
       }
     })().finally(() => { stopFlow.current = null; });

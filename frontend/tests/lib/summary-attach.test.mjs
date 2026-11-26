@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { loadTsModule } from './load-ts-module.mjs';
 import test from 'node:test';
-import { createHookHarness } from './hook-harness.mjs';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
 // A summary already running in the core (for example the automatic one started
 // while the user was elsewhere) is shown as generating and its result is taken.
-function setup() {
+function setup(start) {
   const hooks = createHookHarness();
   const polls = [];
   const events = { aiSummary: [], toasts: [], stopped: [], invocations: [] };
@@ -14,6 +14,7 @@ function setup() {
     react: hooks.react,
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       events.invocations.push({ command, args });
+      if (start && command === 'api_generate_meeting_summary') return start.promise;
       return { process_id: 'saved-meeting' };
     } },
     '@tauri-apps/plugin-dialog': { confirm: async () => true },
@@ -26,7 +27,7 @@ function setup() {
     '@/lib/utils': {},
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
     '@/lib/meetingCalendar': { getMeetingCalendar: () => null },
-    '@/lib/summary-language-preferences': {},
+    '@/lib/summary-language-preferences': { readMeetingSummaryLanguage: async () => ({ language: null }) },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({
       startSummaryPolling: (meetingId, processId, onUpdate) => polls.push({ meetingId, onUpdate }),
       attachSummaryPolling: (meetingId, onUpdate) => { polls.push({ meetingId, onUpdate }); return () => {}; },
@@ -41,6 +42,18 @@ function setup() {
   }));
   return { render, polls, events, hooks };
 }
+
+test('a start response arriving after unmount cannot register a poll', async () => {
+  const start = deferred();
+  const app = setup(start);
+  const generating = app.render().handleGenerateSummary('Project notes');
+  await flush();
+  assert.equal(app.events.invocations.at(-1)?.command, 'api_generate_meeting_summary');
+  app.hooks.unmount();
+  start.resolve({ process_id: 'saved-meeting' });
+  await generating;
+  assert.equal(app.polls.length, 0);
+});
 
 test('attaching shows the run as generating and polls for the meeting once', t => {
   const app = setup();
@@ -66,6 +79,7 @@ test('translation retry keeps the saved draft and submits the explicit target on
   assert.equal(app.render().summaryStatus, 'regenerating');
   assert.deepEqual(app.events.aiSummary, []);
   assert.equal(app.events.invocations.length, 1);
+  assert.deepEqual(app.events.stopped, ['saved-meeting']);
   const { command, args } = app.events.invocations[0];
   assert.equal(command, 'api_generate_meeting_summary');
   assert.equal(args.summaryLanguage, 'de');

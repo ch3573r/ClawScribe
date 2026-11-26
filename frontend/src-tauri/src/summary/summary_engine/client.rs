@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,8 +52,65 @@ enum Response {
 // Global Sidecar Manager
 // ============================================================================
 
-lazy_static::lazy_static! {
-    static ref SIDECAR_MANAGER: Arc<Mutex<Option<Arc<SidecarManager>>>> = Arc::new(Mutex::new(None));
+#[derive(Default)]
+struct Sidecars {
+    active: Option<Arc<SidecarManager>>,
+    draining: Vec<Arc<SidecarManager>>,
+}
+
+impl Sidecars {
+    fn retire_active(&mut self) -> Option<Arc<SidecarManager>> {
+        let manager = self.active.take()?;
+        manager.retire();
+        self.draining.push(manager.clone());
+        Some(manager)
+    }
+
+    async fn shutdown_draining(&mut self) -> Result<()> {
+        let results = tokio::time::timeout(
+            Duration::from_secs(15),
+            futures_util::future::join_all(self.draining.iter().map(|manager| manager.shutdown())),
+        )
+        .await
+        .context("Local summary helper shutdown exceeded the time limit")?;
+        let mut results = results.into_iter();
+        let mut failure = None;
+        self.draining.retain(|_| match results.next() {
+            Some(Ok(())) => false,
+            Some(Err(error)) => {
+                failure = Some(error);
+                true
+            }
+            None => true,
+        });
+        failure.map_or(Ok(()), Err)
+    }
+
+    async fn get_or_init(&mut self, app_data_dir: PathBuf) -> Result<Arc<SidecarManager>> {
+        check_exit_admission()?;
+        if let Some(manager) = &self.active {
+            return Ok(manager.clone());
+        }
+        self.shutdown_draining().await?;
+        check_exit_admission()?;
+        let manager = Arc::new(SidecarManager::new(app_data_dir)?);
+        self.active = Some(manager.clone());
+        Ok(manager)
+    }
+}
+
+static SIDECAR_MANAGER: Lazy<Mutex<Sidecars>> = Lazy::new(|| Mutex::new(Sidecars::default()));
+static SIDECARS_EXITING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn is_exiting() -> bool {
+    SIDECARS_EXITING.load(Ordering::Acquire)
+}
+
+pub(super) fn check_exit_admission() -> Result<()> {
+    if is_exiting() {
+        return Err(anyhow!("The application is closing"));
+    }
+    Ok(())
 }
 
 // Model path cache to avoid repeated filesystem I/O and model lookups
@@ -61,16 +119,19 @@ static MODEL_PATH_CACHE: Lazy<RwLock<HashMap<String, PathBuf>>> =
 
 /// Initialize the global sidecar manager
 pub async fn init_sidecar_manager(app_data_dir: PathBuf) -> Result<()> {
-    let manager = SidecarManager::new(app_data_dir)?;
-    let mut global_manager = SIDECAR_MANAGER.lock().await;
-    *global_manager = Some(Arc::new(manager));
-    Ok(())
+    SIDECAR_MANAGER
+        .lock()
+        .await
+        .get_or_init(app_data_dir)
+        .await
+        .map(drop)
 }
 
 /// Get the global sidecar manager
 async fn get_sidecar_manager() -> Result<Arc<SidecarManager>> {
     let global_manager = SIDECAR_MANAGER.lock().await;
     global_manager
+        .active
         .clone()
         .ok_or_else(|| anyhow!("Sidecar manager not initialized. Call init_sidecar_manager first."))
 }
@@ -79,7 +140,9 @@ async fn get_sidecar_manager() -> Result<Arc<SidecarManager>> {
 fn get_cached_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<PathBuf> {
     // Try read lock first (fast path for cache hits)
     {
-        let cache = MODEL_PATH_CACHE.read().unwrap();
+        let cache = MODEL_PATH_CACHE
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
         if let Some(path) = cache.get(model_name) {
             // Verify file still exists before returning cached path
             if path.exists() {
@@ -89,7 +152,9 @@ fn get_cached_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<Pat
     }
 
     // Cache miss or file deleted - acquire write lock and update cache
-    let mut cache = MODEL_PATH_CACHE.write().unwrap();
+    let mut cache = MODEL_PATH_CACHE
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
 
     // Double-check after acquiring write lock (another thread may have updated it)
     if let Some(path) = cache.get(model_name) {
@@ -159,20 +224,20 @@ pub(crate) async fn generate_with_builtin(
         .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
 
     // Resolve model path with caching (avoids repeated filesystem I/O)
-    let model_path = get_cached_model_path(app_data_dir, model_name)?;
+    let model_path = {
+        let directory = app_data_dir.clone();
+        let name = model_name.to_owned();
+        tokio::task::spawn_blocking(move || get_cached_model_path(&directory, &name)).await??
+    };
 
     // Apply model-specific chat template
     let formatted_prompt = models::format_prompt(&model_def.template, system_prompt, user_prompt)?;
     // Get or initialize sidecar manager
-    let manager = {
-        let mut global_manager = SIDECAR_MANAGER.lock().await;
-        if global_manager.is_none() {
-            log::info!("Initializing sidecar manager");
-            let new_manager = SidecarManager::new(app_data_dir.clone())?;
-            *global_manager = Some(Arc::new(new_manager));
-        }
-        global_manager.clone().unwrap()
-    };
+    let manager = SIDECAR_MANAGER
+        .lock()
+        .await
+        .get_or_init(app_data_dir.clone())
+        .await?;
 
     // Prepare generation request with model-specific sampling parameters
     let sampling = model_def.sampling.sanitize_for_llama_helper();
@@ -239,6 +304,24 @@ pub(crate) async fn generate_with_builtin(
 mod consent_tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn force_cleanup_reaches_a_detached_draining_helper() {
+        let (manager, _stderr) =
+            super::super::sidecar::protocol_tests::fake_sidecar("Start-Sleep -Seconds 60").await;
+        let mut sidecars = Sidecars {
+            active: Some(manager.clone()),
+            ..Default::default()
+        };
+        let retired = sidecars.retire_active().unwrap();
+        assert!(Arc::ptr_eq(&manager, &retired));
+        assert!(sidecars.active.is_none());
+        assert!(manager.is_healthy());
+        sidecars.shutdown_draining().await.unwrap();
+        assert!(sidecars.draining.is_empty());
+        assert!(!manager.is_healthy());
+    }
+
     #[tokio::test]
     async fn revoked_authorization_is_checked_without_a_cancellation_token() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
@@ -259,44 +342,60 @@ mod consent_tests {
     }
 }
 
-/// Shutdown the global sidecar (graceful cleanup)
-/// Detaches the current manager and spawns a background task to drain active requests
+/// Detach the current manager and let its active exchange finish in the background.
 pub async fn shutdown_sidecar_gracefully() -> Result<()> {
-    let manager_opt = {
-        let mut global_manager = SIDECAR_MANAGER.lock().await;
-        global_manager.take()
-    };
-
-    if let Some(manager) = manager_opt {
-        log::info!("Detaching sidecar manager for graceful shutdown");
-
-        // Spawn background task to wait for active requests and then kill
+    if let Some(manager) = SIDECAR_MANAGER.lock().await.retire_active() {
         tokio::spawn(async move {
-            if let Err(e) = manager.shutdown_gracefully().await {
-                log::error!("Error during graceful shutdown: {}", e);
+            match manager.shutdown_gracefully().await {
+                Ok(()) => SIDECAR_MANAGER
+                    .lock()
+                    .await
+                    .draining
+                    .retain(|other| !Arc::ptr_eq(other, &manager)),
+                Err(error) => log::error!("Local summary helper drain failed: {error}"),
             }
         });
     }
-
     Ok(())
 }
 
-/// Force shutdown the global sidecar (for app exit)
-/// Directly kills the process without waiting for active requests to complete.
-/// This is synchronous and blocks until the sidecar is terminated.
+/// Stop active and draining helpers, allowing a later request after foreground work.
 pub async fn force_shutdown_sidecar() -> Result<()> {
-    let manager_opt = {
-        let mut global_manager = SIDECAR_MANAGER.lock().await;
-        global_manager.take()
-    };
+    let mut sidecars = SIDECAR_MANAGER.lock().await;
+    sidecars.retire_active();
+    sidecars.shutdown_draining().await
+}
 
-    if let Some(manager) = manager_opt {
-        log::info!("Force shutting down sidecar for app exit");
-        // Call shutdown() directly - sends shutdown command and force kills after 3s
-        manager.shutdown().await?;
+/// Close admission permanently before cleaning up the helpers on app exit.
+pub(crate) async fn shutdown_sidecars_for_exit() -> Result<()> {
+    {
+        let route = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::super::automatic::ROUTE_CHANGE_LOCK.lock(),
+        )
+        .await;
+        if route.is_err() {
+            log::warn!("Timed out waiting for the summary route lock during application exit");
+        }
+        SIDECARS_EXITING.store(true, Ordering::Release);
+        super::super::SummaryService::cancel_local_summaries_for_exit();
     }
-
-    Ok(())
+    let drained = {
+        let mut sidecars = SIDECAR_MANAGER.lock().await;
+        sidecars.retire_active();
+        sidecars.shutdown_draining().await
+    };
+    // Give automatic jobs time to save their pause reason before DB cleanup.
+    if tokio::time::timeout(
+        Duration::from_secs(2),
+        super::super::SummaryService::wait_for_exit_pauses(),
+    )
+    .await
+    .is_err()
+    {
+        log::warn!("Automatic notes did not finish pausing before application exit");
+    }
+    drained
 }
 
 /// Check if sidecar is healthy

@@ -7,7 +7,7 @@ import { createEvidenceIntent } from '@/lib/knowledge-navigation';
 import { knowledgeService } from '@/services/knowledgeService';
 import { documentAnchor } from '@/lib/knowledge-documents';
 import type { KnowledgeSearchState } from '@/hooks/useKnowledgeSearch';
-export function EvidencePreview({state,onNavigate}:{state:KnowledgeSearchState;onNavigate?:()=>void}) {
+export function EvidencePreview({state,onNavigate}:{state:KnowledgeSearchState;onNavigate?:(target:{meetingId:string;play:boolean})=>void}) {
   const router=useRouter();const {setCurrentMeeting}=useSidebar();
   async function navigate(play:boolean) {
     const preview=state.preview;if(!preview||state.previewBusy)return;
@@ -22,7 +22,7 @@ export function EvidencePreview({state,onNavigate}:{state:KnowledgeSearchState;o
       setCurrentMeeting({id:resolved.navigation.meeting_id,title:resolved.passage.title});
       router.push(`/meeting-details?id=${encodeURIComponent(resolved.navigation.meeting_id)}&evidence=${encodeURIComponent(token)}`);
       state.previewTrigger.current = null;
-      onNavigate?.();
+      onNavigate?.({meetingId:resolved.navigation.meeting_id,play});
       state.closePreview();
     }catch{if(current())void state.inspect(preview.reference,preview.metadata,preview.contextReference);}
   }

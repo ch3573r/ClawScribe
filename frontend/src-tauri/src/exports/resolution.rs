@@ -1,5 +1,7 @@
 //! Read-only destination checks for recovering interrupted or stale exports.
 
+use std::borrow::Cow;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -9,7 +11,8 @@ use super::exporter::{
     graph_url_with_path_segments as graph_url, json_request, now_rfc3339, ExportContext,
 };
 use super::ledger::{
-    artifact_key_hash, microsoft_web_url, valid_remote_id, DriveBinding, ExportLedger,
+    artifact_key_hash, graph_ledger_id, microsoft_web_url, onenote_ledger_prefix,
+    read_graph_ledger_id, require_remote_ids, valid_remote_id, DriveBinding, ExportLedger,
 };
 use super::transport::GraphTransport;
 
@@ -25,20 +28,19 @@ pub(super) fn drive_binding(
     }
 }
 
-#[derive(Clone, Copy)]
 enum Target<'a> {
     Planner {
-        plan: &'a str,
-        bucket: &'a str,
+        plan: Cow<'a, str>,
+        bucket: Cow<'a, str>,
     },
     Todo {
-        list: &'a str,
+        list: Cow<'a, str>,
     },
     Section {
         notebook: &'a str,
     },
     Page {
-        section: &'a str,
+        section: Cow<'a, str>,
     },
     Drive {
         binding: &'a DriveBinding,
@@ -70,6 +72,7 @@ impl<'a> Target<'a> {
             if section.tenant_id != account.tenant_id || section.user_id != account.user_id {
                 return Err(WRONG_ACCOUNT.into());
             }
+            require_remote_ids(&[&section.notebook_id])?;
             return Ok((
                 Self::Section {
                     notebook: &section.notebook_id,
@@ -89,16 +92,24 @@ impl<'a> Target<'a> {
                 {
                     return Err(WRONG_ACCOUNT.into());
                 }
+                require_remote_ids(&[&binding.drive_id, &binding.parent_id])?;
                 Self::Drive { binding, kind }
             }
             [provider, tenant, user, destination, tail @ ..]
-                if *tenant == account.tenant_id && *user == account.user_id =>
+                if *tenant == graph_ledger_id(account.tenant_id)
+                    && *user == graph_ledger_id(account.user_id) =>
             {
+                let destination = read_graph_ledger_id(destination);
+                require_remote_ids(&[&destination])?;
                 match (*provider, tail) {
-                    ("planner", [bucket, ..]) => Self::Planner {
-                        plan: destination,
-                        bucket,
-                    },
+                    ("planner", [bucket, ..]) => {
+                        let bucket = read_graph_ledger_id(bucket);
+                        require_remote_ids(&[&bucket])?;
+                        Self::Planner {
+                            plan: destination,
+                            bucket,
+                        }
+                    }
                     ("todo", _) => Self::Todo { list: destination },
                     ("onenote", _) => Self::Page {
                         section: destination,
@@ -111,7 +122,7 @@ impl<'a> Target<'a> {
         Ok((target, entry.resource_id.as_deref()))
     }
 
-    fn list_url(self) -> String {
+    fn list_url(&self) -> String {
         match self {
             Self::Planner { plan, .. } => graph_url(&["planner", "plans", plan, "tasks"]),
             Self::Todo { list } => graph_url(&["me", "todo", "lists", list, "tasks"]),
@@ -129,7 +140,7 @@ impl<'a> Target<'a> {
         }
     }
 
-    fn item_url(self, id: &str) -> String {
+    fn item_url(&self, id: &str) -> String {
         match self {
             Self::Planner { .. } => graph_url(&["planner", "tasks", id]),
             Self::Todo { list } => graph_url(&["me", "todo", "lists", list, "tasks", id]),
@@ -145,22 +156,23 @@ impl<'a> Target<'a> {
         }
     }
 
-    fn matches(self, item: &Value, from_list: bool) -> bool {
+    fn matches(&self, item: &Value, from_list: bool) -> bool {
         match self {
             Self::Planner { plan, bucket } => {
-                field(item, "/planId") == Some(plan) && field(item, "/bucketId") == Some(bucket)
+                field(item, "/planId") == Some(plan.as_ref())
+                    && field(item, "/bucketId") == Some(bucket.as_ref())
             }
             Self::Todo { .. } => true, // Both URLs include the signed-in user's list.
             Self::Section { notebook } => {
-                from_list || field(item, "/parentNotebook/id") == Some(notebook)
+                from_list || field(item, "/parentNotebook/id") == Some(*notebook)
             }
             Self::Page { section } => {
-                from_list || field(item, "/parentSection/id") == Some(section)
+                from_list || field(item, "/parentSection/id") == Some(section.as_ref())
             }
             Self::Drive { binding, kind } => {
                 field(item, "/parentReference/driveId") == Some(binding.drive_id.as_str())
                     && field(item, "/parentReference/id") == Some(binding.parent_id.as_str())
-                    && if kind == "folder" {
+                    && if *kind == "folder" {
                         item.get("folder").is_some_and(Value::is_object)
                     } else {
                         item.get("file").is_some_and(Value::is_object)
@@ -251,7 +263,10 @@ pub(super) async fn candidates<T: GraphTransport, S: Sleeper>(
         .path()
         .strip_prefix("/v1.0/me/")
         .filter(|_| valid_remote_id(account.user_id))
-        .map(|collection| format!("/v1.0/users/{}/{collection}", account.user_id));
+        .map(|collection| {
+            let user = super::files::encode_graph_path_segment(account.user_id);
+            format!("/v1.0/users/{user}/{collection}")
+        });
     let mut next = Some(list);
     let mut items = Vec::new();
     for _ in 0..8 {
@@ -304,7 +319,7 @@ pub(super) async fn candidates<T: GraphTransport, S: Sleeper>(
 async fn check_item<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     account: &ExportContext<'_>,
-    target: Target<'_>,
+    target: &Target<'_>,
     id: &str,
 ) -> Result<Option<ExportCandidate>, String> {
     if !valid_remote_id(id) {
@@ -346,16 +361,17 @@ pub(super) async fn reconcile<T: GraphTransport, S: Sleeper>(
     let (target, previous) = Target::recorded(ledger, key, account)?;
     let previous = previous.map(str::to_owned);
     let verified = if let Some(id) = candidate {
-        let item = check_item(client, account, target, id).await?
+        let item = check_item(client, account, &target, id).await?
             .ok_or("That item was not found in the original destination. Choose another item or check the destination again.")?;
         if matches!(target, Target::Page { .. })
             && ledger.entry(key).is_some_and(|entry| {
                 entry.code.as_deref() == Some(super::onenote_resume::UNCONFIRMED_UPDATE)
             })
         {
-            let revision = key
-                .split(':')
-                .nth(4)
+            let revision = ledger
+                .entry(key)
+                .and_then(|entry| entry.content_revision.as_deref())
+                .or_else(|| key.split(':').nth(4))
                 .ok_or("Invalid OneNote revision in export history.")?;
             super::onenote_resume::verify_updated_notes(
                 client,
@@ -369,7 +385,7 @@ pub(super) async fn reconcile<T: GraphTransport, S: Sleeper>(
         Some(item)
     } else {
         if let Some(ref id) = previous {
-            if check_item(client, account, target, id).await?.is_some() {
+            if check_item(client, account, &target, id).await?.is_some() {
                 return Err("The saved item is still in the original destination. Open it or choose the correct item instead.".into());
             }
         }
@@ -385,7 +401,7 @@ pub(super) async fn reconcile<T: GraphTransport, S: Sleeper>(
     };
     let replacement = verified.as_ref().map(|item| item.id.as_str());
     if previous.as_deref() != replacement {
-        protect_children(ledger, key, account, target, previous.as_deref())?;
+        protect_children(ledger, key, account, &target, previous.as_deref())?;
     }
     if let (Target::Planner { .. } | Target::Todo { .. }, Some(id)) = (target, replacement) {
         let parts = if key.starts_with("planner:") { 5 } else { 4 };
@@ -414,7 +430,7 @@ fn protect_children(
     ledger: &ExportLedger,
     entry_key: &str,
     account: &ExportContext<'_>,
-    target: Target<'_>,
+    target: &Target<'_>,
     previous: Option<&str>,
 ) -> Result<(), String> {
     let Some(previous) = previous else {
@@ -436,12 +452,13 @@ fn protect_children(
                     },
                 )
         }),
-        Target::Section { .. } => ledger.entries.iter().any(|(key, entry)| {
-            key.split(':')
-                .take(4)
-                .eq(["onenote", account.tenant_id, account.user_id, previous])
-                && entry.can_resolve()
-        }),
+        Target::Section { .. } => {
+            let prefix = onenote_ledger_prefix(account.tenant_id, account.user_id, previous);
+            ledger
+                .entries
+                .iter()
+                .any(|(key, entry)| key.starts_with(&prefix) && entry.can_resolve())
+        }
         _ => false,
     };
     if have_children {
@@ -458,9 +475,16 @@ pub(super) async fn page_is_in_section<T: GraphTransport, S: Sleeper>(
     page: &str,
     section: &str,
 ) -> Result<bool, String> {
-    Ok(check_item(client, account, Target::Page { section }, page)
-        .await?
-        .is_some())
+    Ok(check_item(
+        client,
+        account,
+        &Target::Page {
+            section: section.into(),
+        },
+        page,
+    )
+    .await?
+    .is_some())
 }
 
 pub(super) async fn section_is_in_notebook<T: GraphTransport, S: Sleeper>(
@@ -470,7 +494,7 @@ pub(super) async fn section_is_in_notebook<T: GraphTransport, S: Sleeper>(
     notebook: &str,
 ) -> Result<bool, String> {
     Ok(
-        check_item(client, account, Target::Section { notebook }, section)
+        check_item(client, account, &Target::Section { notebook }, section)
             .await?
             .is_some(),
     )
@@ -483,7 +507,7 @@ pub(super) async fn check_saved_drive_item<T: GraphTransport, S: Sleeper>(
     id: &str,
     kind: &str,
 ) -> Result<String, String> {
-    let item = check_item(client, account, Target::Drive { binding, kind }, id)
+    let item = check_item(client, account, &Target::Drive { binding, kind }, id)
         .await?
         .ok_or_else(|| {
             "The saved OneDrive item is missing or has moved. Review its link in Export history."
@@ -499,6 +523,31 @@ mod tests {
     use crate::exports::ledger::task_key;
     use crate::exports::model::ExportStatus;
     use crate::exports::transport::{GraphResponse, MockGraphTransport};
+
+    #[test]
+    fn recorded_scope_round_trips_colons_and_literal_percent_escapes() {
+        let account = account("user");
+        let mut ledger = ExportLedger::new("meeting");
+        let destination = crate::exports::planner::PlannerDestination {
+            plan_id: "plan/with+:part".into(),
+            bucket_id: "bucket:%3A".into(),
+        };
+        let scope =
+            crate::exports::planner::task_scope(account.tenant_id, account.user_id, &destination);
+        let key = task_key(&scope, "meeting", "action-1", "aaaaaaaaaaaaaaaa");
+        ledger.begin_attempt(&key, now_rfc3339());
+        ledger.entries.get_mut(&key).unwrap().status = ExportStatus::UnknownAfterSubmit;
+        let (target, _) = Target::recorded(&ledger, &key, &account).unwrap();
+        assert!(target.matches(
+            &serde_json::json!({
+                "planId": destination.plan_id, "bucketId": destination.bucket_id,
+            }),
+            false
+        ));
+        assert!(target
+            .list_url()
+            .ends_with("/plans/plan%2Fwith+:part/tasks"));
+    }
 
     fn account(user: &str) -> ExportContext<'_> {
         ExportContext {

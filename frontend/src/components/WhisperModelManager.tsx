@@ -1,25 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import {
   ModelInfo,
   ModelStatus,
-  getModelIcon,
   getWhisperModelDisplayName,
-  formatFileSize,
   getModelPerformanceBadge,
   isQuantizedModel,
   getModelTagline,
-  speedLabel,
   WhisperAPI
 } from '../lib/whisper';
 import { DEFAULT_WHISPER_MODEL } from '@/constants/modelDefaults';
 import { recommendedForSpeed, usePcTestResults } from '@/components/settings/pcTestResults';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
-import { Button } from '@/components/ui/button';
-
-const MotionButton = motion(Button);
+import { ConfirmationModal } from '@/components/ConfirmationModel/confirmation-modal';
+import { SettingsCard, SettingsRow } from '@/components/ui/settings-layout';
+import { TranscriptionModelTable } from '@/components/settings/ParakeetModelTable';
 
 interface ModelManagerProps {
   selectedModel?: string;
@@ -37,6 +33,11 @@ export function ModelManager({
   const [error, setError] = useState<string | null>(null);
   const [initialized, setInitialized] = useState(false);
   const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const deleting = useRef(false);
+  const deleteTrigger = useRef<HTMLElement | null>(null);
+  const modelList = useRef<HTMLDivElement | null>(null);
 
   const retryDownload = useRef<((name: string) => Promise<void>) | null>(null);
 
@@ -296,15 +297,19 @@ export function ModelManager({
 
   useEffect(() => { retryDownload.current = downloadModel; });
 
-  const deleteModel = async (modelName: string) => {
+  const confirmDelete = async () => {
+    if (!pendingDelete || deleting.current) return;
+    const modelName = pendingDelete;
     const displayName = getWhisperModelDisplayName(modelName);
+    deleting.current = true;
+    setIsDeleting(true);
 
     try {
       await WhisperAPI.deleteCorruptedModel(modelName);
 
-      // Refresh models list
-      const modelList = await WhisperAPI.getAvailableModels();
-      setModels(modelList);
+      deleteTrigger.current = modelList.current;
+      setModels(list => list.map(model => model.name === modelName ? { ...model, status: 'Missing' } : model));
+      setPendingDelete(null);
 
       toast.success(`${displayName} deleted`, {
         description: 'Model removed to free up space',
@@ -317,315 +322,68 @@ export function ModelManager({
         description: err instanceof Error ? err.message : 'Delete failed',
         duration: 4000
       });
+    } finally {
+      deleting.current = false;
+      setIsDeleting(false);
     }
   };
 
-  if (loading) {
-    return (
-      <div className={`space-y-3 ${className}`}>
-        <div className="animate-pulse space-y-3">
-          <div className="h-20 bg-muted rounded-lg"></div>
-          <div className="h-20 bg-muted rounded-lg"></div>
-          <div className="h-20 bg-muted rounded-lg"></div>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className={`bg-error border border-error-border/30 rounded-lg p-4 ${className}`}>
-        <p className="text-sm text-error-foreground">Failed to load models</p>
-        <p className="text-xs text-error-foreground mt-1">{error}</p>
-      </div>
-    );
-  }
-
-  const basicModelNames = ["small", "medium-q5_0", "large-v3-q5_0", "large-v3-turbo", "large-v3"];
-  const basicModels = models.filter(m => basicModelNames.includes(m.name))
-    .sort((a, b) => basicModelNames.indexOf(a.name) - basicModelNames.indexOf(b.name));
+  const basicModelNames = ['small', 'medium-q5_0', 'large-v3-q5_0', 'large-v3-turbo', 'large-v3'];
   const speedRecommendations = recommendedForSpeed(models, pcResults);
-  const advancedModels = models.filter(m => !basicModelNames.includes(m.name));
+  const rows = models.map(model => ({
+    name: model.name,
+    label: getWhisperModelDisplayName(model.name),
+    bestFor: getModelTagline(model.name, model.speed, model.accuracy),
+    sizeMb: model.size_mb,
+    status: model.status,
+    recommendation: speedRecommendations.get(model.name) ?? (model.name === DEFAULT_WHISPER_MODEL ? 'Recommended starting model' : undefined),
+    badge: isQuantizedModel(model.name) ? getModelPerformanceBadge(model.name).label : undefined,
+  }));
+  const basicModels = rows.filter(model => basicModelNames.includes(model.name))
+    .sort((a, b) => basicModelNames.indexOf(a.name) - basicModelNames.indexOf(b.name));
+  const advancedModels = rows.filter(model => !basicModelNames.includes(model.name));
+  const tableProps = {
+    selectedModel,
+    results: pcResults,
+    onSelect: onModelSelect,
+    onDownload: downloadModel,
+    onCancel: cancelDownload,
+    onDelete: (name: string, trigger: HTMLButtonElement | null) => {
+      deleteTrigger.current = trigger;
+      setPendingDelete(name);
+    },
+  };
 
   return (
-    <div className={`space-y-3 ${className}`}>
-      {/* Basic Models */}
-      <div className="space-y-3">
-        {basicModels.map((model) => (
-          <ModelCard
-            key={model.name}
-            model={model}
-            isSelected={selectedModel === model.name}
-            recommendation={speedRecommendations.get(model.name) ?? (model.name === DEFAULT_WHISPER_MODEL ? 'Recommended starting model' : undefined)}
-            onSelect={onModelSelect ? () => onModelSelect(model.name) : undefined}
-            onDownload={() => downloadModel(model.name)}
-            onCancel={() => cancelDownload(model.name)}
-            onDelete={() => deleteModel(model.name)}
-            displayName={getWhisperModelDisplayName(model.name)}
-          />
-        ))}
-      </div>
-
-      {/* Advanced Models */}
-      {advancedModels.length > 0 && (
-        <Accordion type="single" collapsible className="w-full">
-          <AccordionItem value="advanced-models">
-            <AccordionTrigger>
-              <span className='text-lg'>Advanced models</span>
-            </AccordionTrigger>
-            <AccordionContent>
-              <div className="space-y-3 pt-4">
-                {advancedModels.map((model) => (
-                  <ModelCard
-                    key={model.name}
-                    model={model}
-                    isSelected={selectedModel === model.name}
-                    recommendation={speedRecommendations.get(model.name)}
-                    onSelect={onModelSelect ? () => onModelSelect(model.name) : undefined}
-                    onDownload={() => downloadModel(model.name)}
-                    onCancel={() => cancelDownload(model.name)}
-                    onDelete={() => deleteModel(model.name)}
-                    displayName={getWhisperModelDisplayName(model.name)}
-                  />
-                ))}
-              </div>
-            </AccordionContent>
-          </AccordionItem>
-        </Accordion>
-      )}
+    <div className={className} ref={modelList} tabIndex={-1}>
+      <SettingsCard title="Whisper models" aria-busy={loading}>
+        {loading ? <SettingsRow title="Loading models" role="status" />
+          : error ? <SettingsRow title="Models unavailable" description={error} role="alert" />
+          : models.length === 0 ? <SettingsRow title="No Whisper models available" />
+          : <>
+            {basicModels.length > 0 && <TranscriptionModelTable label="Whisper models" models={basicModels} {...tableProps} />}
+            {advancedModels.length > 0 && (
+              <Accordion type="single" collapsible>
+                <AccordionItem value="advanced-models" className="border-b-0">
+                  <AccordionTrigger className="px-5">Advanced models</AccordionTrigger>
+                  <AccordionContent className="pb-0">
+                    <TranscriptionModelTable label="Advanced Whisper models" models={advancedModels} {...tableProps} />
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
+            )}
+          </>}
+      </SettingsCard>
+      <ConfirmationModal
+        isOpen={pendingDelete !== null}
+        title="Delete model?"
+        text={pendingDelete ? `This removes ${getWhisperModelDisplayName(pendingDelete)} from this PC. You can download it again later.` : ''}
+        confirmLabel={isDeleting ? 'Deleting…' : 'Delete model'}
+        confirmDisabled={isDeleting}
+        returnFocus={deleteTrigger}
+        onCancel={() => { if (!deleting.current) setPendingDelete(null); }}
+        onConfirm={confirmDelete}
+      />
     </div>
-  );
-}
-
-// Model Card Component
-interface ModelCardProps {
-  model: ModelInfo;
-  isSelected: boolean;
-  recommendation?: string;
-  onSelect?: () => void;
-  onDownload: () => void;
-  onCancel: () => void;
-  onDelete: () => void;
-  displayName: string;
-}
-
-function ModelCard({
-  model,
-  isSelected,
-  recommendation,
-  onSelect,
-  onDownload,
-  onCancel,
-  onDelete,
-  displayName
-}: ModelCardProps) {
-  const [isHovered, setIsHovered] = useState(false);
-
-  const isAvailable = model.status === 'Available';
-  const isMissing = model.status === 'Missing';
-  const isError = typeof model.status === 'object' && 'Error' in model.status;
-  const isCorrupted = typeof model.status === 'object' && 'Corrupted' in model.status;
-  const downloadProgress =
-    typeof model.status === 'object' && 'Downloading' in model.status
-      ? model.status.Downloading
-      : null;
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 5 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2 }}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      className={`
-        relative rounded-lg border-2 transition-all
-        ${isSelected && isAvailable
-          ? 'border-primary bg-primary/10'
-          : isAvailable
-            ? 'border-border hover:border-border bg-card'
-            : 'border-border bg-muted'
-        }
-      `}
-    >
-      {/* Recommended Badge */}
-      {recommendation && (
-        <div className="absolute -top-2 -right-2 bg-primary text-primary-foreground text-xs px-2 py-0.5 rounded-full font-medium">
-          {recommendation}
-        </div>
-      )}
-
-      <div className="p-3">
-        <div className="flex items-start justify-between mb-2">
-          <div className="flex-1">
-            {/* Model Name and Tagline */}
-            <div className="flex items-center gap-2 flex-wrap mb-2">
-              <span className="text-2xl">{getModelIcon(model.accuracy)}</span>
-              <h3 className="font-semibold text-foreground">{displayName}</h3>
-              <span className="text-sm text-muted-foreground">•</span>
-              <span className="text-sm text-muted-foreground">{getModelTagline(model.name, model.speed, model.accuracy)}</span>
-              {isSelected && isAvailable && (
-                <motion.span
-                  initial={{ scale: 0 }}
-                  animate={{ scale: 1 }}
-                  className="bg-primary text-primary-foreground px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1"
-                >
-                  Selected
-                </motion.span>
-              )}
-              {isQuantizedModel(model.name) && (
-                <span className={`px-2 py-0.5 rounded-full text-xs ${getModelPerformanceBadge(model.name).color === 'green'
-                  ? 'bg-success text-success-foreground'
-                  : getModelPerformanceBadge(model.name).color === 'orange'
-                    ? 'bg-warning text-warning-foreground'
-                    : 'bg-muted text-foreground'
-                  }`}>
-                  {getModelPerformanceBadge(model.name).label}
-                </span>
-              )}
-            </div>
-
-            {/* Model Specs */}
-            <div className="flex items-center space-x-4 text-sm text-muted-foreground ml-9 mt-1.5">
-              <span className="flex items-center space-x-1">
-                <span>📦</span>
-                <span>{formatFileSize(model.size_mb)}</span>
-              </span>
-              <span className="flex items-center space-x-1">
-                <span>🎯</span>
-                <span>{model.accuracy} accuracy</span>
-              </span>
-              <span className="flex items-center space-x-1">
-                <span>⚡</span>
-                <span>{speedLabel(model.speed)} processing</span>
-              </span>
-            </div>
-          </div>
-
-          {/* Status/Action */}
-          <div className="ml-4 flex items-center gap-2">
-            {isAvailable && (
-              <>
-                <div className="flex items-center gap-1.5 text-success-foreground">
-                  <div className="w-2 h-2 bg-success-foreground rounded-full"></div>
-                  <span className="text-xs font-medium">Ready</span>
-                </div>
-                {!isSelected && onSelect && <Button variant="outline" size="sm" aria-label={`Use ${displayName}`} onClick={onSelect}>Use</Button>}
-                <AnimatePresence>
-                  {isHovered && (
-                    <MotionButton variant="ghost"
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.8 }}
-                      transition={{ duration: 0.15 }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDelete();
-                      }}
-                      className="text-muted-foreground hover:text-error-foreground transition-colors p-1 h-auto hover:bg-transparent"
-                      title="Delete model to free up space"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </MotionButton>
-                  )}
-                </AnimatePresence>
-              </>
-            )}
-
-            {isMissing && (
-              <Button variant="ghost"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDownload();
-                }}
-                className="bg-primary text-primary-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-primary transition-colors h-auto hover:text-primary-foreground"
-              >
-                Download
-              </Button>
-            )}
-
-            {downloadProgress === null && isError && (
-              <Button variant="ghost"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDownload();
-                }}
-                className="bg-destructive text-destructive-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-destructive/90 transition-colors h-auto hover:text-destructive-foreground"
-              >
-                Retry
-              </Button>
-            )}
-
-            {isCorrupted && (
-              <div className="flex gap-2">
-                <Button variant="ghost"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete();
-                  }}
-                  className="bg-warning text-warning-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-warning/80 transition-colors h-auto hover:text-warning-foreground"
-                >
-                  Delete
-                </Button>
-                <Button variant="ghost"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDownload();
-                  }}
-                  className="bg-primary text-primary-foreground px-3 py-1.5 rounded-md text-sm font-medium hover:bg-primary transition-colors h-auto hover:text-primary-foreground"
-                >
-                  Re-download
-                </Button>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Full-width Download Progress Bar - PROMINENT */}
-        {downloadProgress !== null && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="mt-3 pt-3 border-t border-border"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-primary">Downloading...</span>
-                <span className="text-sm font-semibold text-primary">{Math.round(downloadProgress)}%</span>
-              </div>
-              <Button variant="ghost"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onCancel();
-                }}
-                className="text-xs text-muted-foreground hover:text-error-foreground font-medium transition-colors px-2 py-1 rounded hover:bg-error h-auto"
-                title="Cancel download"
-              >
-                Cancel
-              </Button>
-            </div>
-            <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
-              <motion.div
-                className="h-full bg-primary rounded-full"
-                initial={{ width: 0 }}
-                animate={{ width: `${downloadProgress}%` }}
-                transition={{ duration: 0.3, ease: 'easeOut' }}
-              />
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">
-              {model.size_mb ? (
-                <>
-                  {formatFileSize(model.size_mb * downloadProgress / 100)} / {formatFileSize(model.size_mb)}
-                </>
-              ) : (
-                'Downloading...'
-              )}
-            </p>
-          </motion.div>
-        )}
-      </div>
-    </motion.div>
   );
 }

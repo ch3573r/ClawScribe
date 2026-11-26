@@ -1,4 +1,5 @@
-use crate::openai::model_catalog;
+use crate::database::repositories::setting::SettingsRepository;
+use crate::openai::{model_catalog, secret_destination::same_destination};
 use serde::{Deserialize, Serialize};
 use tauri::command;
 
@@ -53,30 +54,74 @@ fn is_chat_model(model_id: &str) -> bool {
 pub async fn get_openai_models(
     state: tauri::State<'_, crate::state::AppState>,
     api_key: Option<String>,
+    custom_endpoint: Option<String>,
 ) -> Result<Vec<OpenAIModel>, String> {
-    // The webview sends a key only when the user just typed one; otherwise the
-    // stored key is used here and never leaves the core.
-    let api_key = crate::database::repositories::setting::SettingsRepository::effective_api_key(
-        state.db_manager.pool(),
-        "openai",
-        api_key,
-    )
-    .await
-    .map_err(|_| "Failed to read the saved API key".to_string())?;
-    fetch_openai_models(api_key).await
+    let pool = state.db_manager.pool();
+    if let Some(endpoint) = custom_endpoint {
+        if !is_official_openai_endpoint(&endpoint) {
+            return Err("catalog_unavailable".into());
+        }
+        let config = SettingsRepository::get_custom_openai_config(pool)
+            .await
+            .map_err(|_| "catalog_unavailable")?
+            .filter(|config| {
+                is_official_openai_endpoint(&config.endpoint)
+                    && same_destination(&config.endpoint, &endpoint)
+            });
+        let (stored_key, organization, project) = config
+            .map(|config| (config.api_key, config.organization, config.project))
+            .unwrap_or_default();
+        let key = catalog_api_key(api_key, stored_key);
+        return fetch_openai_models(key, organization, project).await;
+    }
+    let key = SettingsRepository::effective_api_key(pool, "openai", api_key)
+        .await
+        .map_err(|_| "Failed to read the saved API key".to_string())?;
+    fetch_openai_models(key, None, None).await
 }
 
-/// The model list for a key the core already holds.
-async fn fetch_openai_models(api_key: Option<String>) -> Result<Vec<OpenAIModel>, String> {
+fn catalog_api_key(override_key: Option<String>, stored_key: Option<String>) -> Option<String> {
+    override_key
+        .filter(|key| !key.trim().is_empty())
+        .or(stored_key)
+}
+
+fn is_official_openai_endpoint(value: &str) -> bool {
+    url::Url::parse(value.trim()).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("api.openai.com")
+            && url.port_or_known_default() == Some(443)
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && matches!(
+                url.path().trim_end_matches('/'),
+                "" | "/v1" | "/v1/chat/completions" | "/v1/responses"
+            )
+    })
+}
+
+async fn fetch_openai_models(
+    api_key: Option<String>,
+    organization: Option<String>,
+    project: Option<String>,
+) -> Result<Vec<OpenAIModel>, String> {
     let api_key = api_key
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .ok_or("missing_api_key")?;
     let client = model_catalog::client()?;
-    let request = client
+    let mut request = client
         .get("https://api.openai.com/v1/models")
-        .header("Authorization", format!("Bearer {}", api_key));
+        .bearer_auth(api_key);
+    if let Some(organization) = organization {
+        request = request.header("OpenAI-Organization", organization);
+    }
+    if let Some(project) = project {
+        request = request.header("OpenAI-Project", project);
+    }
     let api_response: OpenAIApiResponse = model_catalog::read(request).await?;
 
     // Filter to only chat models and map to our struct
@@ -88,4 +133,47 @@ async fn fetch_openai_models(api_key: Option<String>) -> Result<Vec<OpenAIModel>
         .collect();
 
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{catalog_api_key, is_official_openai_endpoint};
+
+    #[test]
+    fn blank_catalog_key_uses_the_saved_key_for_the_same_endpoint() {
+        for value in [None, Some(""), Some("  "), Some("override")] {
+            let expected = if value == Some("override") {
+                "override"
+            } else {
+                "saved"
+            };
+            assert_eq!(
+                catalog_api_key(value.map(str::to_owned), Some("saved".into())).as_deref(),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn custom_catalog_accepts_only_official_https_endpoints() {
+        for accepted in [
+            "https://api.openai.com",
+            "https://api.openai.com:443/v1/",
+            "https://api.openai.com/v1/chat/completions",
+            "https://api.openai.com/v1/responses",
+        ] {
+            assert!(is_official_openai_endpoint(accepted), "{accepted}");
+        }
+        for rejected in [
+            "http://api.openai.com/v1",
+            "https://api.openai.com.example.com/v1",
+            "https://api.openai.com:8443/v1",
+            "https://api.openai.com@elsewhere.example/v1",
+            "https://user@api.openai.com/v1",
+            "https://api.openai.com/v1?redirect=example",
+            "https://api.openai.com/other/v1",
+        ] {
+            assert!(!is_official_openai_endpoint(rejected), "{rejected}");
+        }
+    }
 }

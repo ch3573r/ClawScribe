@@ -33,6 +33,8 @@ struct Priority {
     active: Option<Weak<AtomicBool>>,
 }
 static PRIORITY: Lazy<Mutex<Priority>> = Lazy::new(|| Mutex::new(Priority::default()));
+pub(super) static FOREGROUND_RELEASED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 pub(crate) fn foreground_waiting() -> bool {
     PRIORITY.lock().unwrap().foreground > 0
 }
@@ -67,7 +69,11 @@ impl ForegroundPriority {
 }
 impl Drop for ForegroundPriority {
     fn drop(&mut self) {
-        PRIORITY.lock().unwrap().foreground -= 1;
+        let mut priority = PRIORITY.lock().unwrap();
+        priority.foreground -= 1;
+        if priority.foreground == 0 {
+            FOREGROUND_RELEASED.notify_waiters();
+        }
     }
 }
 pub(crate) struct ActiveCall {
@@ -557,6 +563,19 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::{cell::Cell, path::Path};
+
+    #[tokio::test]
+    async fn releasing_foreground_priority_wakes_indexing() {
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let priority = ForegroundPriority::enter();
+        let released = FOREGROUND_RELEASED.notified();
+        tokio::pin!(released);
+        assert!(!released.as_mut().enable());
+        drop(priority);
+        tokio::time::timeout(Duration::from_millis(250), released)
+            .await
+            .expect("the worker should wake when the foreground query ends");
+    }
 
     fn verification_fixture() -> (tempfile::TempDir, ModelPins) {
         let root = tempfile::tempdir().unwrap();

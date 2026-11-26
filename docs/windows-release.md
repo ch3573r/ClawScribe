@@ -146,12 +146,21 @@ or elevation.
 
 ### Vulkan
 
-The `windows-gpu` and `vulkan` builds have a load-time dependency on
-`vulkan-1.dll`. A machine without the loader can fail before the app opens or
-native tests are discovered, even if no GPU inference is requested. Use a
-supported GPU driver or the official LunarG Vulkan runtime. Do not download
-individual DLLs from third-party sites. The 0.5.42 installer does not install
-a GPU driver or the Vulkan runtime for you.
+The `windows-gpu` and `vulkan` builds delay-load `vulkan-1.dll`
+(`/DELAYLOAD:vulkan-1.dll`, set in `frontend/src-tauri/build.rs`), so the
+loader is not in the executable's normal import table and the app starts on a
+PC without it. Before Whisper can load a model, a supervised child checks the
+System32 Vulkan loader and enumerates at least one device with Whisper's Vulkan
+backend. The first check can take up to 15 seconds. A missing device or a
+probe crash keeps Whisper unavailable until restart. After a timeout or start
+failure, ClawScribe can retry twice, at least 30 seconds apart. If the loader or
+driver is unavailable, Home and Settings report that Whisper cannot start.
+Parakeet and Nemotron remain available. To confirm a build,
+`dumpbin /imports clawscribe.exe` must list `vulkan-1.dll` only under the delay-load section.
+
+To use Whisper on such a PC, install or update the supported GPU driver and
+restart ClawScribe. Whisper requires both the loader and a compatible device.
+The installer does not install a GPU driver or the Vulkan runtime for you.
 
 Extracting the Vulkan SDK supplies headers, libraries, and build tools; it does
 not run its bundled `Helpers/VulkanRT.exe`. The release workflow explicitly
@@ -446,11 +455,11 @@ commit separately instead of relabeling the binaries.
 
 ## Artifacts And Signing
 
-For source version 0.68.0-preview.1, installer filenames are:
+For source version 0.68.1-preview.1, installer filenames are:
 
 ```text
-ClawScribe_0.68.0_x64-setup.exe
-ClawScribe_0.68.0_x64_en-US.msi
+ClawScribe_0.68.1_x64-setup.exe
+ClawScribe_0.68.1_x64_en-US.msi
 ```
 
 Published installers include detached Tauri updater signatures (`.sig`).

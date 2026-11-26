@@ -1,15 +1,13 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
-import { ChevronDown, ChevronUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { Switch } from '@/components/ui/switch';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Textarea } from '@/components/ui/textarea';
 import { MultiSelect } from '@/components/ui/multi-select';
-import { PageSection } from '@/components/ui/page-section';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { CitedAnswer } from '@/components/Knowledge/KnowledgeChat';
@@ -26,14 +24,11 @@ function time(seconds: number) {
   const total = Math.max(0, Math.floor(seconds));
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 }
-/** The existing transcript view owns scrolling; this panel adds no scroll lane. */
 export function LiveAssistancePanel() {
   const live = useLiveAssistance();
   const { state, actions } = live;
   const recording = useRecordingState();
-  const { meetings, currentMeeting } = useSidebar();
-  const router = useRouter();
-  const [expanded, setExpanded] = useState(false);
+  const { meetings } = useSidebar();
   const [question, setQuestion] = useState('');
   const [referencesOpen, setReferencesOpen] = useState(false);
   const [preview, setPreview] = useState<{ sessionId: string; metadata: EvidenceDisplay; resolved: ResolvedEvidence | null } | null>(null);
@@ -91,27 +86,18 @@ export function LiveAssistancePanel() {
   const locator = source?.passage?.evidence.locator;
   const selectedNames = meetings.filter(meeting => state.meetingIds.includes(meeting.id)).map(meeting => meeting.title);
   const selectedDocuments = state.documents.filter(row => state.documentIds.includes(row.attachment.id));
-  // Nothing here works without transcript sharing, so the panel stays out of the
-  // recording screen until it is switched on in Settings. It remains while open
-  // (the switch inside it can be turned back on) and while it carries the only
-  // visible recording status error.
-  if (!state.transcriptSharing && !expanded && !statusError) return null;
-  return <PageSection className="mb-5" aria-label="Live assistance">
-    <div className="space-y-2 p-4">
-      <div className="flex items-center justify-between gap-3">
-        <Button variant="ghost" size="sm" className="h-auto justify-start px-0 text-left" aria-expanded={expanded} aria-controls="live-assistance-body" onClick={() => setExpanded(value => !value)}>
-          {expanded ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />} Live assistance
-        </Button>
-        <span className="text-xs text-muted-foreground">Manual · Preview</span>
-      </div>
+  return <>
+    <header className="shrink-0 space-y-2 border-b border-border p-4">
+      <h2 className="text-sm font-semibold">Live assistance</h2>
       <p role="status" className="text-xs text-muted-foreground">{state.snapshot
         ? `Finalized through ${time(state.snapshot.finalized_through_seconds)}${state.snapshot.transcription_incomplete ? ' · Transcript incomplete' : ''}`
         : state.sessionId ? 'Reading finalized transcript status…' : 'Available during a recording with live transcription.'}</p>
       <p className="text-xs text-muted-foreground">Uses the last 10 minutes of finalized speech. Recent speech may still be behind.</p>
       {statusError && <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-xs text-destructive">{statusError}</p>
         <Button variant="outline" size="sm" onClick={() => { recording.retryVerification(); void actions.refresh(); }}>Retry status</Button></div>}
-    </div>
-    {expanded && <div id="live-assistance-body" className="space-y-4 border-t border-border p-4">
+    </header>
+    <ScrollArea className="min-h-0 flex-1 [&_[data-radix-scroll-area-viewport]>div]:!block">
+      <div className="space-y-4 p-4">
       <div className="flex flex-wrap items-center gap-2 text-sm"><span>Provider: {knowledgeProviderLabel(state.provider)}</span>
         {state.model && <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm">{friendlyModel(state.model)}</Button></TooltipTrigger><TooltipContent>{state.model}</TooltipContent></Tooltip>}
       </div>
@@ -124,7 +110,6 @@ export function LiveAssistancePanel() {
         : builtin ? <p role="status" className="text-sm text-muted-foreground">Built-in AI is unavailable during recording. After recording, open the saved meeting and use Chat with this meeting.</p>
         : !state.sessionId ? <p role="status" className="text-sm text-muted-foreground">Live messages clear when recording stops. Open the saved meeting to continue with Chat with this meeting.</p>
         : !state.provider || !state.model ? <p role="status" className="text-sm text-muted-foreground">Choose a summary provider and model in Settings.</p> : null}
-      {recording.status === 'completed' && currentMeeting && <Button variant="outline" onClick={() => router.push(`/meeting-details?id=${encodeURIComponent(currentMeeting.id)}`)}>Open saved meeting</Button>}
       <div className="space-y-2">
         <Button variant="outline" size="sm" aria-expanded={referencesOpen} aria-controls="live-reference-selection" disabled={!state.sessionId || state.pending} onClick={() => setReferencesOpen(value => !value)}>Selected references</Button>
         <p className="break-words text-xs text-muted-foreground">Current recording{selectedNames.length ? ` + ${selectedNames.join(', ')}` : ' only'}
@@ -193,6 +178,7 @@ export function LiveAssistancePanel() {
             : source && <p role="status" className="text-sm text-muted-foreground">This source has expired, changed or become unavailable. Ask again using current evidence.</p>}
         </DialogContent>
       </Dialog>
-    </div>}
-  </PageSection>;
+      </div>
+    </ScrollArea>
+  </>;
 }

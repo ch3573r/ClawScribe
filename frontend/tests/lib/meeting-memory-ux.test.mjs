@@ -14,16 +14,18 @@ function surface(file,name,props={},indexStatus={semantic_enabled:false,semantic
     '@/components/Sidebar/SidebarProvider':{useSidebar:()=>({meetings,projectTags:[],projectTagsLoading:false,projectTagsError:null,...sidebar})},
     '@/contexts/ImportDialogContext':{useImportDialog:()=>({openImportDialog:sidebar.openImportDialog})},
     '@/contexts/RecordingStateContext':{useRecordingState:()=>({})},
-    '@/contexts/ConfigContext':{useConfig:()=>({modelConfig:{provider:'fixture',model:'fixture'}})},
+    '@/contexts/ConfigContext':{useSummaryConfig:()=>({modelConfig:{provider:'fixture',model:'fixture'}})},
     '@/components/LibraryBackup':{LibraryBackup:'backup'},'@/components/Knowledge/KnowledgeArchive':{KnowledgeArchive:'memory'},
     '@/components/Archive/ArchiveMeetingRows':{ArchiveMeetingRows:'archive-rows',useArchiveMetadata:()=>({metadata:sidebar.metadata??null,error:false,refresh:async()=>{}})},'@/components/Archive/ArchiveStorageButton':{ArchiveStorageButton:'storage'},
     '@/components/Archive/OpenMeetingActions':{OpenMeetingActions:'open-actions'},
+    '@/components/Archive/ArchiveBulkActions':{ArchiveBulkActions:'bulk-actions'},
     '@/components/MeetingDetails/ProjectTags':{ProjectTags:'project-tags'},
     './ArchiveAudioRemoval':{ArchiveAudioRemoval:'audio-removal'},
     '@/components/MeetingDetails/ReferenceDocuments':{ReferenceDocuments:'references'},
     '@/components/MeetingDetails/AttachReferenceButton':{AttachReferenceButton:'attach'},
-    '@/components/ui/button':{Button:'button'},'@/components/ui/dropdown-menu':{},'@/components/ui/select':{},'@/components/ui/input-group':{InputGroupInput:'title-filter'},
+    '@/components/ui/button':{Button:'button'},'@/components/ui/dropdown-menu':{},'@/components/ui/select':{Select:'select'},'@/components/ui/input-group':{InputGroupInput:'title-filter'},
     '@/components/ui/textarea':{Textarea:'textarea'},'@/components/ui/scroll-area':{ScrollArea:'scroll-area'},'@/components/ui/tooltip':{},
+    '@/components/ui/dialog':{},
     '@/components/ui/input':{Input:'input'},'@/components/ui/checkbox':{Checkbox:'checkbox'},'@/components/ui/switch':{Switch:'switch'},
     '@/components/ui/tabs':{Tabs:'tabs',TabsList:'tablist',TabsTrigger:'tab',TabsContent:'tab-panel'},
     '@/services/knowledgeService':{knowledgeService:{indexStatus:async()=>indexStatus,history:async()=>[]}},
@@ -42,6 +44,28 @@ test('Meetings opens the archive and keeps Meeting memory mounted across tab cha
   tree=app.render();assert.equal(panel(tree).props.hidden,false);
   nodes(tree).find(node=>node.type==='tabs').props.onValueChange('archive');
   assert.equal(nodes(panel(app.render())).filter(node=>node.type==='memory').length,1);app.unmount();
+});
+test('Meetings consumes the deep-linked tab and preserves other URL parameters and history state', t => {
+  const previousWindow = globalThis.window;
+  const state = { fixture: true };
+  const window = {
+    location: new URL('https://example.com/meetings?tab=actions&source=fixture#saved'),
+    history: { state, replaceState(nextState, _title, url) {
+      assert.equal(nextState, state);
+      window.location = new URL(url, window.location);
+    } },
+    addEventListener() {}, removeEventListener() {},
+  };
+  globalThis.window = window;
+  const app = surface('src/app/meetings/page.tsx', 'default');
+  t.after(() => { app.unmount(); globalThis.window = previousWindow; });
+  const tab = () => nodes(app.render()).find(node => node.type === 'tabs');
+  tab();
+  assert.equal(tab().props.value, 'actions');
+  assert.equal(window.location.search, '?source=fixture');
+  assert.equal(window.location.hash, '#saved');
+  tab().props.onValueChange('archive');
+  tab();
 });
 test('meeting picker searches titles and exposes selected chips without broadening the scope',()=>{
   const app=surface('src/components/Knowledge/KnowledgeArchive.tsx','KnowledgeArchive',{meetings,projectFilter:{tags:[],untagged:false,mode:'any'}});
@@ -69,6 +93,18 @@ test('configured library chat enables the first question before a conversation e
   assert.equal(nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,false);app.unmount();
 });
 
+test('project and date filters activate Ask without switching on all meetings',()=>{
+  for (const filter of [{tags:['Roadmap']}, {from:'2026-02-01'}]) {
+    const state={scope:{kind:'library',filter:{all_meetings:false,meeting_ids:[],tags:[],tag_mode:'any',untagged:false,from:null,to:null,...filter}},
+      owner:null,messages:[],threads:[],historyLoading:false,sending:false,creating:false};
+    const app=surface('src/components/Knowledge/KnowledgeChat.tsx','KnowledgeChat',{state,mode:'keyword',provider:'fixture',model:'fixture'});
+    try {
+      nodes(app.render()).find(node=>node.type==='textarea').props.onChange({target:{value:'Decision?'}});
+      assert.equal(nodes(app.render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,false);
+    } finally { app.unmount(); }
+  }
+});
+
 test('archive empty state starts recording and imports through the shared flows',()=>{
   const calls=[];
   const app=surface('src/app/meetings/page.tsx','default',{},undefined,{meetings:[],handleRecordingToggle:()=>calls.push('record'),openImportDialog:()=>calls.push('import')});
@@ -81,14 +117,29 @@ test('archive empty state starts recording and imports through the shared flows'
 });
 
 test('archive filtering keeps controls and clear filters restores all rows',()=>{
-  const app=surface('src/app/meetings/page.tsx','default');
+  const metadata = new Map([['a', { id: 'a', series: { id: 'weekly', label: 'Weekly review' } }]]);
+  const app=surface('src/app/meetings/page.tsx','default', {}, undefined, { metadata });
   let tree=app.render();assert.match(text(tree),/2 meetings/);
   assert.deepEqual([...nodes(tree).find(node=>node.type==='archive-rows').props.meetings.map(meeting=>meeting.id)],['b','a']);
+  nodes(tree).find(node=>node.type==='select'&&node.props.value==='all').props.onValueChange('weekly');
+  tree=app.render();
+  assert.equal(nodes(tree).find(node=>node.type==='archive-rows').props.meetings.length,1);
   nodes(tree).find(node=>node.type==='title-filter').props.onChange({target:{value:'missing'}});
   tree=app.render();assert.match(text(tree),/No meetings match/);
   nodes(tree).find(node=>node.type==='button'&&text(node)==='Clear filters').props.onClick();
   tree=app.render();assert.match(text(tree),/2 meetings/);
   assert.equal(nodes(tree).find(node=>node.type==='archive-rows').props.meetings.length,2);app.unmount();
+});
+
+test('selected Archive rows open Meeting memory with only those IDs and no preset question', () => {
+  const archive = surface('src/app/meetings/page.tsx', 'default');
+  const rows = nodes(archive.render()).find(node => node.type === 'archive-rows');
+  rows.props.onAsk(['b']);
+  const memory = nodes(archive.render()).find(node => node.type === 'memory');
+  assert.equal(memory.props.active, true);
+  assert.deepEqual(Array.from(memory.props.initialMatches.ids), ['b']);
+  assert.equal(memory.props.initialMatches.question, undefined);
+  archive.unmount();
 });
 
 test('archive shows titles and passages and restores date and query when returning',()=>{

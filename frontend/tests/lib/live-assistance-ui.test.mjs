@@ -9,6 +9,32 @@ const text = node => typeof node === 'string' || typeof node === 'number' ? Stri
 const liveSnapshot = { session_id: 'session-ui', recording_generation: '1', finalized_through_seconds: 3540, segments: [{ sequence_id: 700, text: 'Public finalized fixture', start_seconds: 3535, end_seconds: 3540 }], transcription_incomplete: true, transcription_available: true };
 const reply = request => ({ request_id: request.request_id, message_id: 'assistant-ui', content: 'The rollout remains open.', evidence: [], evidence_metadata: [], cited_tags: [], context_links: [], retrieval_mode: 'keyword', provider: 'custom-openai', model: 'actual-model', live_context: { session_id: 'session-ui', finalized_through_seconds: 3500, transcription_incomplete: true } });
 
+test('the recording header opens a dock beside the transcript only for this session', () => {
+  const hooks = createHookHarness();
+  const { LiveAssistanceDock } = loadTsModule('src/components/LiveAssistanceDock.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@/components/ui/button': { Button: 'button' },
+    '@/components/LiveAssistancePanel': { LiveAssistancePanel: 'assistance' },
+  });
+  const transcript = jsx('transcript', {});
+  const render = sessionId => hooks.render(() => LiveAssistanceDock({ sessionId, children: transcript }));
+  try {
+    assert.equal(nodes(render(null)).some(node => node.type === 'button'), false);
+    const launcher = nodes(render('first')).find(node => node.type === 'button');
+    assert.equal(launcher.props['aria-expanded'], false);
+    assert.equal(nodes(render('first')).some(node => node.type === 'assistance'), false);
+    launcher.props.onClick();
+    const opened = nodes(render('first'));
+    const aside = opened.find(node => node.type === 'aside');
+    assert.ok(aside);
+    assert.ok(nodes(aside).some(node => node.type === 'assistance'));
+    assert.ok(opened.some(node => node.props?.children?.includes?.(transcript) && node.props.children.includes(aside)),
+      'the dock and transcript share a layout parent outside the transcript scrolling surface');
+    assert.equal(nodes(render(null)).some(node => node.type === 'aside'), false);
+    assert.equal(nodes(render('second')).some(node => node.type === 'aside'), false);
+  } finally { hooks.unmount(); }
+});
+
 async function panel({ sharing = true, available = true, provider = 'custom-openai', ask, snapshotRead, recordingState, status = 'recording', save } = {}) {
   const requests = []; const cancelled = [];
   const events = new Map();
@@ -28,6 +54,7 @@ async function panel({ sharing = true, available = true, provider = 'custom-open
     '@/contexts/RecordingStateContext': { useRecordingState: () => recordingState ?? ({ isRecording: true, sessionMode: available ? 'live' : 'audio_only' }) },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ meetings: [{ id: 'saved-ui', title: 'Public meeting' }], currentMeeting: null }) },
     '@/components/ui/button': { Button: 'button' }, '@/components/ui/textarea': { Textarea: 'textarea' },
+    '@/components/ui/scroll-area': { ScrollArea: 'scroll-area' },
     '@/components/ui/switch': { Switch: 'switch' }, '@/components/ui/checkbox': { Checkbox: 'checkbox' },
     '@/components/ui/page-section': { PageSection: 'section' }, '@/components/ui/multi-select': { MultiSelect: 'multi-select' },
     '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'trigger', TooltipContent: 'content' },
@@ -39,8 +66,7 @@ async function panel({ sharing = true, available = true, provider = 'custom-open
   });
   const render = () => hooks.render(() => LiveAssistancePanel());
   const button = label => nodes(render()).find(node => node.type === 'button' && text(node) === label);
-  const expand = () => { const toggle = nodes(render()).find(node => node.type === 'button' && node.props['aria-controls'] === 'live-assistance-body'); assert.ok(toggle, 'a keyboard-accessible collapse toggle exists'); toggle.props.onClick(); };
-  return { owner, requests, cancelled, render, button, expand, dispose() { hooks.unmount(); disconnect(); } };
+  return { owner, requests, cancelled, render, button, dispose() { hooks.unmount(); disconnect(); } };
 }
 
 test('a completed live reply is saved only on selection and Stop invalidates its pending UI state', async () => {
@@ -51,7 +77,6 @@ test('a completed live reply is saved only on selection and Stop invalidates its
     return pending.promise;
   } });
   try {
-    app.expand();
     app.button('List open questions').props.onClick();
     await flush();
     assert.equal(saves.length, 0);
@@ -85,7 +110,7 @@ test('existing Retry status shows global verification failure and retries both o
     return liveSnapshot;
   } });
   try {
-    app.expand(); assert.equal(reads, 2); assert.equal(app.requests.length, 0);
+    assert.equal(reads, 2); assert.equal(app.requests.length, 0);
     assert.match(text(app.render()), /Could not verify the current recording\. Retry status\./, 'the global context failure is visible in the existing panel');
     const retry = app.button('Retry status'); assert.ok(retry, 'the existing status retry is available while Starting');
     retry.props.onClick(); await flush();
@@ -97,11 +122,11 @@ test('existing Retry status shows global verification failure and retries both o
   } finally { app.dispose(); }
 });
 
-test('manual panel stays quiet, reports finalized lag while collapsed, and Enter submits once', async () => {
+test('manual panel stays quiet, reports finalized lag, and Enter submits once', async () => {
   const pending = deferred(); const app = await panel({ ask: () => pending.promise });
   try {
     assert.match(text(app.render()), /59:00/); assert.match(text(app.render()), /incomplete|behind/i); assert.equal(app.requests.length, 0);
-    app.expand(); const input = nodes(app.render()).find(node => node.type === 'textarea'); assert.ok(input);
+    const input = nodes(app.render()).find(node => node.type === 'textarea'); assert.ok(input);
     input.props.onChange({ target: { value: 'What remains open?' } });
     let prevented = 0; const enter = { key: 'Enter', shiftKey: false, nativeEvent: { isComposing: false }, preventDefault() { prevented++; } };
     nodes(app.render()).find(node => node.type === 'textarea').props.onKeyDown({ ...enter, shiftKey: true }); assert.equal(app.requests.length, 0);
@@ -117,7 +142,7 @@ test('manual panel stays quiet, reports finalized lag while collapsed, and Enter
 test('each manual action displays the response finalized time and actual provider, even after newer status', async () => {
   const app = await panel();
   try {
-    app.expand(); assert.ok(app.button('Summarize the last 10 minutes')); assert.ok(app.button('List open questions'));
+    assert.ok(app.button('Summarize the last 10 minutes')); assert.ok(app.button('List open questions'));
     app.button('Summarize the last 10 minutes').props.onClick(); await flush();
     assert.equal(app.requests.length, 1); assert.match(app.requests[0].search.query, /summar.*last 10 minutes/i);
     assert.match(text(app.render()), /58:20/); assert.match(text(app.render()), /59:00/);
@@ -128,11 +153,11 @@ test('each manual action displays the response finalized time and actual provide
 
 test('sharing remains an explicit separate control and unavailable modes offer saved-meeting guidance', async () => {
   const hidden = await panel({ sharing: false });
-  try { assert.equal(hidden.render(), null, 'the panel stays off the recording screen while sharing is off'); }
+  try { assert.match(text(hidden.render()), /Enable live transcript sharing to ask/); assert.equal(hidden.requests.length, 0); }
   finally { hidden.dispose(); }
   const app = await panel();
   try {
-    app.expand(); await app.owner.setTranscriptSharing(false);
+    await app.owner.setTranscriptSharing(false);
     const controls = nodes(app.render()).filter(node => node.type === 'switch');
     const transcriptControl = nodes(app.render()).find(node => node.type?.name === 'TranscriptSharingControl');
     assert.ok(transcriptControl, 'the live transcript control renders as a child component');
@@ -142,7 +167,7 @@ test('sharing remains an explicit separate control and unavailable modes offer s
   } finally { app.dispose(); }
   for (const configuration of [{ available: false }, { provider: 'builtin-ai' }]) {
     const unavailable = await panel(configuration);
-    try { unavailable.expand(); assert.match(text(unavailable.render()), /saved meeting|after recording|transcribe/i); assert.equal(unavailable.requests.length, 0); }
+    try { assert.match(text(unavailable.render()), /saved meeting|after recording|transcribe/i); assert.equal(unavailable.requests.length, 0); }
     finally { unavailable.dispose(); }
   }
 });
@@ -154,7 +179,7 @@ test('global Live provider connects once across subscribers and receives synchro
   const { LiveAssistanceProvider } = loadTsModule('src/contexts/LiveAssistanceContext.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ status: 'recording', subscribeLifecycle }) },
-    '@/contexts/ConfigContext': { useConfig: () => ({ modelConfig: { provider: 'custom-openai', model: 'selected-model' } }) },
+    '@/contexts/ConfigContext': { useSummaryConfig: () => ({ modelConfig: { provider: 'custom-openai', model: 'selected-model' } }) },
     '@tauri-apps/api/event': { listen: async (event, callback) => { subscriptions++; events.set(event, callback); return () => { released++; events.delete(event); }; } },
     '@/services/knowledgeService': { knowledgeService: {
       liveSnapshot: async () => liveSnapshot, liveSharing: async () => true, documentSharing: async () => false,

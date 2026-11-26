@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ProviderDataAside } from "@/components/settings/summary-provider-parts";
 import { providerLabel } from "@/components/settings/provider-data";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useSummaryConfig } from "@/contexts/ConfigContext";
 import { useSummaryDestination, type SummaryDestination } from "@/hooks/useSummaryDestination";
 
 /**
@@ -20,7 +20,7 @@ import { useSummaryDestination, type SummaryDestination } from "@/hooks/useSumma
  * button; each control saves as it changes.
  */
 export function SummarySettings() {
-  const { modelConfig, isAutoSummary, automaticSummaryBusy, toggleIsAutoSummary } = useConfig();
+  const { modelConfig, isAutoSummary, automaticSummaryBusy, toggleIsAutoSummary } = useSummaryConfig();
   const { destination, error, refresh } = useSummaryDestination(true, modelConfig, isAutoSummary);
   const [review, setReview] = useState<SummaryDestination | null>(null);
   const autoSwitch = useRef<HTMLButtonElement>(null);

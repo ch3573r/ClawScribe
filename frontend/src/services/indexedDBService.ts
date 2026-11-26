@@ -9,6 +9,7 @@ import type { Transcript, TranscriptUpdate } from '@/types';
 // Database schema interfaces
 export interface MeetingMetadata {
   meetingId: string;          // Primary key: "meeting-{timestamp}"
+  sessionId?: string;         // Native session that owns this recovery entry
   title: string;              // Meeting title
   startTime: number;          // Unix timestamp (ms)
   lastUpdated: number;        // Unix timestamp (ms)
@@ -111,6 +112,28 @@ class IndexedDBService {
       console.warn('Failed to save meeting metadata to IndexedDB:', error);
       // Fail silently - don't interrupt recording
     }
+  }
+
+  /**
+   * Update the title without replacing other recovery metadata.
+   */
+  async updateMeetingTitle(meetingId: string, sessionId: string, title: string): Promise<void> {
+    if (!this.db) await this.init();
+
+    const transaction = this.db!.transaction(['meetings'], 'readwrite');
+    const store = transaction.objectStore('meetings');
+    await new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+      const request = store.get(meetingId);
+      request.onsuccess = () => {
+        const meeting = request.result as MeetingMetadata | undefined;
+        if (meeting?.sessionId === sessionId && !meeting.savedToSQLite && meeting.title !== title) {
+          store.put({ ...meeting, title, lastUpdated: Date.now() });
+        }
+      };
+    });
   }
 
   /**

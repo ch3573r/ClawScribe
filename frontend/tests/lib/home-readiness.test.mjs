@@ -9,6 +9,52 @@ const devices = [
 ];
 const inventory = { devices, defaultMicrophone: 'Desk mic', defaultOutput: null };
 
+test('focus refreshes device and live readiness without hiding the previous results', async t => {
+  const previousWindow = globalThis.window;
+  const window = globalThis.window = new EventTarget();
+  const deviceHooks = createHookHarness();
+  const liveHooks = createHookHarness();
+  t.after(() => {
+    deviceHooks.unmount();
+    liveHooks.unmount();
+    globalThis.window = previousWindow;
+  });
+  const deviceRefresh = deferred();
+  const liveRefresh = deferred();
+  const ready = { provider: 'parakeet', hostedBatchProvider: null, modelIssue: null };
+  let deviceReads = 0, liveReads = 0;
+  const { useAudioDeviceInventory } = loadTsModule('src/hooks/useAudioDeviceInventory', {
+    react: deviceHooks.react,
+    '@tauri-apps/api/core': { invoke: () => ++deviceReads === 1 ? Promise.resolve(inventory) : deviceRefresh.promise },
+  });
+  const { useLiveTranscriptionReadiness } = loadTsModule('src/hooks/useLiveTranscriptionReadiness', {
+    react: liveHooks.react,
+    '@tauri-apps/api/core': { invoke: () => ++liveReads === 1 ? Promise.resolve(ready) : liveRefresh.promise },
+    '@tauri-apps/api/event': { listen: async () => () => {} },
+  });
+  const renderDevice = () => deviceHooks.render(useAudioDeviceInventory);
+  const renderLive = (model = 'default') => liveHooks.render(() => useLiveTranscriptionReadiness(true, 'parakeet', model));
+  renderLive();
+  await renderDevice().refresh();
+  await flush();
+  assert.equal(renderDevice().data, inventory);
+  assert.equal(renderLive().data, ready);
+
+  window.dispatchEvent(new Event('focus'));
+  assert.equal(deviceReads, 2);
+  assert.equal(liveReads, 2);
+  assert.equal(renderDevice().status, 'ready');
+  assert.equal(renderDevice().data, inventory);
+  assert.equal(renderLive().data, ready);
+  assert.equal(renderLive('different-model').data, null, 'another model needs its own result');
+
+  deviceRefresh.resolve({ ...inventory, devices: [] });
+  liveRefresh.reject(new Error('Fixture readiness failure'));
+  await flush();
+  assert.equal(renderDevice().data.devices.length, 0);
+  assert.equal(renderLive('different-model').error, true);
+});
+
 test('a preferred device can disappear without changing the saved preference', () => {
   const { audioSourceReadiness } = loadTsModule('src/lib/audioDevicePreferences');
   assert.equal(audioSourceReadiness(inventory, 'Input', 'Headset (input)'), 'preferred_unavailable');
@@ -31,6 +77,7 @@ test('start remediation uses native error codes, not words in raw error text', (
   assert.equal(liveModelStartFailure('live_model:missing'), 'missing');
   assert.equal(liveModelStartFailure('live_model:load_failed'), 'load_failed');
   assert.equal(liveModelStartFailure('live_model:unsupported_provider'), 'unsupported_provider');
+  assert.equal(liveModelStartFailure('live_model:vulkan_runtime_missing'), 'vulkan_runtime_missing');
   assert.equal(liveModelStartFailure('live_model:unknown'), null);
 });
 
@@ -58,7 +105,8 @@ function recordingSettings(t, { preferences, save }) {
     '@/components/ui/settings-layout': Object.fromEntries(['Meta', 'SettingsCard', 'SettingsColumns', 'SettingsRow'].map(name => [name, name])),
     '@/components/settings/AudioDevicesCard': { AudioDevicesCard: 'AudioDevicesCard' },
     '@/components/settings/CallDetectionSettings': { CallDetectionSettings: 'CallDetectionSettings' },
-    '@/components/settings/SignalCheck': { SignalCheck: 'SignalCheck' },
+    '@/components/settings/SignalCheck': { SignalCheck: 'SignalCheck', MicrophoneCheck: 'MicrophoneCheck' },
+    '@/components/settings/useSignalCheck': { useSignalCheck: () => ({}) },
     '@/components/settings/useAudioLevelFeed': { useAudioLevelFeed: () => ({}) },
     '@/lib/sourceAttribution': { setSourceAttribution: () => calls.push(['setSourceAttribution']) },
     '@/lib/analytics': { default: { track: () => {} }, __esModule: true },
@@ -69,7 +117,7 @@ function recordingSettings(t, { preferences, save }) {
       refreshBehaviorSettings: async () => behavior,
     },
     '@/contexts/ConfigContext': {
-      useConfig: () => ({ selectedDevices: preferred, devicePreferencesStatus: 'ready', saveSelectedDevices }),
+      useTranscriptionConfig: () => ({ selectedDevices: preferred, devicePreferencesStatus: 'ready', saveSelectedDevices }),
     },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ recordingMode: 'audio_only' }) },
     sonner: { toast: { error: message => calls.push(['error', message]), success: () => {} } },
@@ -151,6 +199,8 @@ test('Home can change a disconnected device without leaving the signal path', as
   let rechecks = 0;
   const state = { status: 'ready', data: inventory, refresh: () => { rechecks++; } };
   const preferred = { micDevice: null, systemDevice: null };
+  const liveReadiness = { data: { provider: 'parakeet', hostedBatchProvider: 'mai-transcribe', modelIssue: null }, error: false };
+  let nextMeetingTitle = '';
   const savedDevices = [];
   const jsx = (type, props) => ({ type, props });
   const stub = (...names) => Object.fromEntries(names.map(name => [name, name]));
@@ -158,12 +208,17 @@ test('Home can change a disconnected device without leaving the signal path', as
     react: { ...hook.react, useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot() },
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@/components/ui/button': stub('Button'),
+    '@/components/ui/input': stub('Input'),
     '@/components/AudioDeviceSelect': stub('AudioDeviceSelect'),
     '@/components/RecordingControls': stub('RecordingControls'),
     '@/components/RecordingModeSelect': stub('RecordingModeSelect'),
     '@/components/UpcomingMeetings': stub('UpcomingMeetings'),
-    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ meetings: [] }) },
-    '@/contexts/ConfigContext': { useConfig: () => ({
+    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({
+      meetings: [], liveReadiness, nextMeetingTitle, setNextMeetingTitle: title => { nextMeetingTitle = title; },
+      recordingActionReason: state.status === 'error' ? 'Could not check audio devices'
+        : preferred.micDevice === 'Unplugged mic (input)' ? 'Preferred microphone unavailable' : null,
+    }) },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
       selectedDevices: preferred, selectedLanguage: 'auto', audioDeviceInventory: state, devicePreferencesStatus: 'ready',
       saveSelectedDevices: async devices => { savedDevices.push(devices); Object.assign(preferred, devices); },
     }) },
@@ -175,9 +230,7 @@ test('Home can change a disconnected device without leaving the signal path', as
     'next/navigation': { useRouter: () => ({ push() {} }) },
     'lucide-react': stub('ArrowRight', 'AudioLines', 'ChevronRight', 'Clock3', 'FileText', 'Languages', 'Mic', 'Settings2', 'RefreshCw', 'Sparkles', 'Upload', 'Volume2'),
   });
-  const render = () => hook.render(() => HomeDashboard({
-    liveReadiness: { data: { provider: 'parakeet', hostedBatchProvider: 'mai-transcribe', modelIssue: null }, error: false },
-  }));
+  const render = () => hook.render(() => HomeDashboard({}));
   const nodes = root => Array.isArray(root) ? root.flatMap(nodes) :
     root && typeof root === 'object' ? [root, ...nodes(root.props.children)] : [];
   const text = root => Array.isArray(root) ? root.map(text).join('') :
@@ -188,6 +241,9 @@ test('Home can change a disconnected device without leaving the signal path', as
   assert.match(text(home), /Azure Speech · Hosted file transcription/);
   assert.match(text(home), /Only your microphone will be recorded/);
   assert.equal(nodes(home).find(node => node.type === 'RecordingControls').props.isRecordingDisabled, false);
+  const titleInput = () => nodes(render()).find(node => node.props.id === 'next-meeting-title');
+  titleInput().props.onChange({ target: { value: 'Synthetic\tplanning\u0085meeting' } });
+  assert.equal(titleInput().props.value, 'Synthetic planning meeting');
 
   preferred.micDevice = 'Unplugged mic (input)';
   const stale = render();
@@ -199,7 +255,7 @@ test('Home can change a disconnected device without leaving the signal path', as
   assert.equal(JSON.stringify(savedDevices), JSON.stringify([{ micDevice: 'Desk mic (input)', systemDevice: null }]));
   assert.equal(nodes(render()).find(node => node.type === 'RecordingControls').props.isRecordingDisabled, false);
   nodes(stale).find(node => node.type === 'Button' && /Recheck devices/.test(text(node))).props.onClick();
-  assert.equal(rechecks, 2);
+  assert.equal(rechecks, 1);
 
   state.status = 'error';
   state.data = null;

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
 import { createHookHarness, flush } from './hook-harness.mjs';
 
-function editor(t, { personal, bundled }) {
+function editor(t, { personal, bundled, search }) {
   const hooks = createHookHarness();
   t.after(() => hooks.unmount());
   const selected = { id: 'fixture', name: 'Example template', personal, bundled };
@@ -12,6 +12,8 @@ function editor(t, { personal, bundled }) {
   let removalError = false;
   const stub = (...names) => Object.fromEntries(names.map(name => [name, name]));
   const jsx = (type, props) => ({ type, props });
+  const previousWindow = globalThis.window;
+  if (search) globalThis.window = { location: { search } };
   const { SummaryTemplateSettings } = loadTsModule('src/components/SummaryTemplateSettings.tsx', {
     react: hooks.react,
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
@@ -36,6 +38,7 @@ function editor(t, { personal, bundled }) {
     '@/components/settings/summary-provider-parts': { ...stub('SaveMark'), withError: () => null },
     '@/hooks/meeting-details/useTemplates': { useTemplates: () => ({ availableTemplates: [selected], defaultTemplate: selected.id }) },
   });
+  globalThis.window = previousWindow;
   const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object'
     ? [node, ...nodes(node.props.children), ...nodes(node.props.actions)] : [];
   const find = predicate => nodes(hooks.render(SummaryTemplateSettings)).find(predicate);
@@ -52,6 +55,12 @@ function editor(t, { personal, bundled }) {
     failRemoval: () => { removalError = true; },
   };
 }
+
+test('the manage templates deep link opens the editor', t => {
+  const ui = editor(t, { personal: false, bundled: true, search: '?tab=summary&manageTemplates=1' });
+  ui.find(() => false);
+  assert.equal(ui.find(node => node.type === 'Dialog').props.open, true);
+});
 
 test('unmodified bundled templates have no removal action', async t => {
   const ui = editor(t, { personal: false, bundled: true });

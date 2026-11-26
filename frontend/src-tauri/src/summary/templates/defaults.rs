@@ -9,16 +9,30 @@ pub const DAILY_STANDUP: &str = include_str!("../../../templates/daily_standup.j
 /// Standard meeting notes template
 pub const STANDARD_MEETING: &str = include_str!("../../../templates/standard_meeting.json");
 
-/// Registry of all built-in templates
-///
-/// Maps template identifiers to their embedded JSON content
-#[cfg(test)]
-pub fn get_builtin_templates() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("daily_standup", DAILY_STANDUP),
-        ("standard_meeting", STANDARD_MEETING),
-    ]
-}
+const BUILTIN_TEMPLATES: &[(&str, &str)] = &[
+    ("daily_standup", DAILY_STANDUP),
+    ("standard_meeting", STANDARD_MEETING),
+    (
+        "one_on_one",
+        include_str!("../../../templates/one_on_one.json"),
+    ),
+    (
+        "customer_discovery",
+        include_str!("../../../templates/customer_discovery.json"),
+    ),
+    (
+        "technical_design_review",
+        include_str!("../../../templates/technical_design_review.json"),
+    ),
+    (
+        "interview",
+        include_str!("../../../templates/interview.json"),
+    ),
+    (
+        "executive_brief",
+        include_str!("../../../templates/executive_brief.json"),
+    ),
+];
 
 /// Get a built-in template by identifier
 ///
@@ -28,16 +42,14 @@ pub fn get_builtin_templates() -> Vec<(&'static str, &'static str)> {
 /// # Returns
 /// The template JSON content if found, None otherwise
 pub fn get_builtin_template(id: &str) -> Option<&'static str> {
-    match id {
-        "daily_standup" => Some(DAILY_STANDUP),
-        "standard_meeting" => Some(STANDARD_MEETING),
-        _ => None,
-    }
+    BUILTIN_TEMPLATES
+        .iter()
+        .find_map(|&(key, content)| (key == id).then_some(content))
 }
 
 /// List all built-in template identifiers
 pub fn list_builtin_template_ids() -> Vec<&'static str> {
-    vec!["daily_standup", "standard_meeting"]
+    BUILTIN_TEMPLATES.iter().map(|&(id, _)| id).collect()
 }
 
 #[cfg(test)]
@@ -45,15 +57,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_builtin_templates_valid_json() {
-        for (id, content) in get_builtin_templates() {
-            let result = serde_json::from_str::<serde_json::Value>(content);
+    fn test_builtin_templates_are_valid() {
+        for id in list_builtin_template_ids() {
+            let result = super::super::loader::validate_and_parse_template(
+                get_builtin_template(id).unwrap(),
+            );
             assert!(
                 result.is_ok(),
                 "Built-in template '{}' contains invalid JSON: {:?}",
                 id,
                 result.err()
             );
+        }
+    }
+
+    #[test]
+    fn meeting_specific_templates_keep_evidence_in_their_instructions() {
+        for (id, name) in [
+            ("one_on_one", "1:1 check-in"),
+            ("customer_discovery", "Customer / discovery call"),
+            ("technical_design_review", "Technical / design review"),
+            ("interview", "Interview"),
+            ("executive_brief", "Executive brief"),
+        ] {
+            assert!(list_builtin_template_ids().contains(&id));
+            let template = super::super::loader::validate_and_parse_template(
+                get_builtin_template(id).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(template.name, name);
+            assert!(template.to_section_instructions().contains("source tag"));
         }
     }
 

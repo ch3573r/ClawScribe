@@ -39,6 +39,22 @@ test('source presets are offered only for source-labelled meetings or enabled Be
   assert.deepEqual(Array.from(getSpeakerOptions(buildSpeakerCatalog([{ speaker: 'Me', timestamp: 0 }]), false)), ['Me', 'Participants']);
 });
 
+test('confirmed attendance supplies name suggestions without email addresses or duplicate speakers', () => {
+  const { buildSpeakerCatalog, getConfirmedAttendeeNames, getSpeakerOptions, resolveSpeakerName } = load();
+  const confirmed = getConfirmedAttendeeNames([
+    { attendance: 'present', name: '  Ada   Lovelace  ' },
+    { attendance: 'present', name: 'ada lovelace' },
+    { attendance: 'present', name: 'Grace Hopper' },
+    { attendance: 'present', name: null, email: 'test@example.com' },
+    { attendance: 'absent', name: 'Absent attendee' },
+    { attendance: 'unreviewed', name: 'Invited attendee' },
+  ]);
+  assert.deepEqual(Array.from(confirmed), ['Ada Lovelace', 'Grace Hopper']);
+  const catalog = buildSpeakerCatalog([{ speaker: 'ADA Lovelace' }]);
+  assert.deepEqual(Array.from(getSpeakerOptions(catalog, false, confirmed)), ['ADA Lovelace', 'Grace Hopper']);
+  assert.equal(resolveSpeakerName(catalog, 'grace hopper', false, confirmed), 'Grace Hopper');
+});
+
 test('rename detects merging into another speaker and reports the full matching count', () => {
   const { buildSpeakerCatalog, getSpeakerRename } = load();
   const catalog = buildSpeakerCatalog([{ speaker: 'A', timestamp: 0 }, { speaker: 'B', timestamp: 1 }, { speaker: 'A', timestamp: 2 }]);

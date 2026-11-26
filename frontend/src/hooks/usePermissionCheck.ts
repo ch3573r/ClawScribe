@@ -1,10 +1,10 @@
-import { useConfig } from '@/contexts/ConfigContext';
+import { useTranscriptionConfig } from '@/contexts/ConfigContext';
 import { audioSourceReadiness } from '@/lib/audioDevicePreferences';
 
 // This reports enumerated devices. Device access itself is verified when the
 // core opens a stream.
 export function usePermissionCheck() {
-  const { audioDeviceInventory, selectedDevices, devicePreferencesStatus } = useConfig();
+  const { audioDeviceInventory, selectedDevices, devicePreferencesStatus } = useTranscriptionConfig();
   const { data, status, refresh } = audioDeviceInventory;
   const hasMicrophone = devicePreferencesStatus === 'ready' && data !== null &&
     audioSourceReadiness(data, 'Input', selectedDevices.micDevice) === 'available';

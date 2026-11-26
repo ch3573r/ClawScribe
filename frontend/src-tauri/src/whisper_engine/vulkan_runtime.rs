@@ -1,0 +1,332 @@
+//! Runtime probe for the Vulkan backend used by Whisper.
+//!
+//! Windows MSVC builds with the `vulkan` feature delay-load `vulkan-1.dll`
+//! (see `build.rs`). The app therefore starts on PCs without the Vulkan
+//! loader, but the first Vulkan call would raise a delay-load exception and
+//! terminate the process. whisper.cpp touches Vulkan from every context load
+//! (its backend registry enumerates Vulkan devices even for CPU-only
+//! contexts), so Whisper must not be initialized at all when the loader is
+//! missing or ggml cannot enumerate devices. Every native Whisper entry point
+//! calls [`ensure_whisper_runtime`].
+
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+use crate::parakeet_engine::worker::WorkerError;
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+use std::time::{Duration, Instant};
+
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// User-facing explanation when Whisper cannot run in this build.
+pub const VULKAN_RUNTIME_MISSING_MESSAGE: &str =
+    "Whisper in this GPU build needs a working Vulkan runtime and a compatible device. \
+Install or update your graphics driver, then restart ClawScribe. \
+Parakeet transcription works without Vulkan.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VulkanRuntime {
+    /// This build does not link the Vulkan backend.
+    NotRequired,
+    /// The Vulkan runtime passed its preflight.
+    Available,
+    /// The build needs Vulkan, but the runtime could not be used.
+    Missing,
+}
+
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+#[derive(Default)]
+struct ProbeCache {
+    definite: Option<VulkanRuntime>,
+    attempts: u8,
+    last_transient_failure: Option<Instant>,
+}
+
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+impl ProbeCache {
+    fn check(
+        &mut self,
+        now: impl Fn() -> Instant,
+        probe: impl FnOnce(Duration) -> Result<bool, WorkerError>,
+    ) -> VulkanRuntime {
+        const MAX_ATTEMPTS: u8 = 3;
+        if let Some(result) = self.definite {
+            return result;
+        }
+        if self.attempts >= MAX_ATTEMPTS
+            || self
+                .last_transient_failure
+                .is_some_and(|failed_at| now().duration_since(failed_at) < RETRY_INTERVAL)
+        {
+            return VulkanRuntime::Missing;
+        }
+        let deadline = Duration::from_secs(if self.attempts == 0 { 15 } else { 5 });
+        self.attempts += 1;
+        let runtime = match probe(deadline) {
+            Ok(true) => VulkanRuntime::Available,
+            Ok(false) | Err(WorkerError::Crashed) => VulkanRuntime::Missing,
+            Err(_) => {
+                self.last_transient_failure = Some(now());
+                log::warn!(
+                    "Vulkan preflight did not complete; Whisper is unavailable for this check"
+                );
+                return VulkanRuntime::Missing;
+            }
+        };
+        if runtime == VulkanRuntime::Missing {
+            log::warn!("Vulkan preflight failed; Whisper is unavailable");
+        }
+        self.definite = Some(runtime);
+        runtime
+    }
+}
+
+/// On Windows, the first check can wait for a driver running in a child.
+pub async fn vulkan_runtime() -> VulkanRuntime {
+    #[cfg(all(windows, feature = "vulkan"))]
+    {
+        use std::sync::{Mutex, OnceLock};
+        static PROBE: OnceLock<Mutex<ProbeCache>> = OnceLock::new();
+        tokio::task::spawn_blocking(|| {
+            let Ok(mut cache) = PROBE.get_or_init(Mutex::default).lock() else {
+                return VulkanRuntime::Missing;
+            };
+            cache.check(Instant::now, |deadline| {
+                if !crate::parakeet_engine::worker::vulkan_device_available(deadline)? {
+                    return Ok(false);
+                }
+                let Some(loader) = load_compatible_loader() else {
+                    log::warn!("System Vulkan loader could not be loaded; Whisper is unavailable");
+                    return Ok(false);
+                };
+                // MSVC's delayhlp.cpp calls LoadLibraryEx with flags 0 and the
+                // bare DLL name. Windows consults loaded modules by base name
+                // before searching directories, so retain the System32 module
+                // for the lifetime of this process.
+                std::mem::forget(loader);
+                Ok(true)
+            })
+        })
+        .await
+        .unwrap_or(VulkanRuntime::Missing)
+    }
+    #[cfg(not(all(windows, feature = "vulkan")))]
+    {
+        // Other Vulkan builds resolve the loader at link time.
+        classify(cfg!(feature = "vulkan"), || true)
+    }
+}
+
+#[cfg(any(test, not(all(windows, feature = "vulkan"))))]
+fn classify(requires_vulkan: bool, probe: impl FnOnce() -> bool) -> VulkanRuntime {
+    if !requires_vulkan {
+        VulkanRuntime::NotRequired
+    } else if probe() {
+        VulkanRuntime::Available
+    } else {
+        VulkanRuntime::Missing
+    }
+}
+
+/// Fails closed before native Whisper initialization if the preflight failed.
+pub async fn ensure_whisper_runtime() -> Result<(), String> {
+    runtime_result(vulkan_runtime().await)
+}
+
+fn runtime_result(runtime: VulkanRuntime) -> Result<(), String> {
+    match runtime {
+        VulkanRuntime::Missing => Err(VULKAN_RUNTIME_MISSING_MESSAGE.to_string()),
+        VulkanRuntime::NotRequired | VulkanRuntime::Available => Ok(()),
+    }
+}
+
+/// ggml-vulkan creates its instance with Vulkan API 1.2.
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+const REQUIRED_API_VERSION: u32 = (1 << 22) | (2 << 12);
+
+/// A loader older than 1.1 lacks exports that ggml-vulkan imports; the
+/// delay-load helper would then fail at the first such call.
+#[cfg(any(test, all(windows, feature = "vulkan")))]
+fn loader_supports(api_version: Option<u32>) -> bool {
+    api_version.is_some_and(|version| version >= REQUIRED_API_VERSION)
+}
+
+#[cfg(all(windows, feature = "vulkan"))]
+struct VulkanLoader(windows::Win32::Foundation::HMODULE);
+
+#[cfg(all(windows, feature = "vulkan"))]
+impl Drop for VulkanLoader {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns one reference obtained with LoadLibraryExW.
+        let _ = unsafe { windows::Win32::Foundation::FreeLibrary(self.0) };
+    }
+}
+
+#[cfg(all(windows, feature = "vulkan"))]
+fn load_compatible_loader() -> Option<VulkanLoader> {
+    use windows::core::{s, w};
+    use windows::Win32::System::LibraryLoader::{
+        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+    };
+
+    // SAFETY: the argument is a static NUL-terminated wide string.
+    let loader = VulkanLoader(
+        unsafe { LoadLibraryExW(w!("vulkan-1.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?,
+    );
+    // SAFETY: the guard owns a live module and the export names are static.
+    let enumerate = unsafe { GetProcAddress(loader.0, s!("vkEnumerateInstanceVersion")) }?;
+    unsafe { GetProcAddress(loader.0, s!("vkGetPhysicalDeviceFeatures2")) }?;
+    type EnumerateInstanceVersion = unsafe extern "system" fn(*mut u32) -> i32;
+    // SAFETY: the export has the documented vkEnumerateInstanceVersion
+    // signature; it writes one u32 and returns a VkResult (0 = VK_SUCCESS).
+    let enumerate: EnumerateInstanceVersion = unsafe { std::mem::transmute(enumerate) };
+    let mut version = 0u32;
+    let result = unsafe { enumerate(&mut version) };
+    loader_supports((result == 0).then_some(version)).then_some(loader)
+}
+
+#[cfg(all(windows, feature = "vulkan"))]
+pub(crate) fn probe_device_in_child() -> bool {
+    extern "C" {
+        // ggml-vulkan.h from the same whisper-rs-sys static library that
+        // Whisper uses. This enters the actual backend's device enumeration.
+        fn ggml_backend_vk_get_device_count() -> std::ffi::c_int;
+    }
+    let Some(_loader) = load_compatible_loader() else {
+        return false;
+    };
+    // SAFETY: the loader is retained through the call, which runs only in the
+    // supervised child. The delay-load table keeps its own reference.
+    unsafe { ggml_backend_vk_get_device_count() > 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn transient_preflight_errors_allow_a_later_definite_answer() {
+        let mut cache = ProbeCache::default();
+        let now = Cell::new(Instant::now());
+        for error in [WorkerError::TimedOut, WorkerError::Spawn] {
+            assert_eq!(
+                cache.check(|| now.get(), |_| Err(error)),
+                VulkanRuntime::Missing
+            );
+            now.set(now.get() + RETRY_INTERVAL);
+        }
+        assert_eq!(
+            cache.check(|| now.get(), |_| Ok(true)),
+            VulkanRuntime::Available
+        );
+        assert_eq!(
+            cache.check(|| now.get(), |_| panic!("available result was cached")),
+            VulkanRuntime::Available
+        );
+    }
+
+    #[test]
+    fn first_attempt_gets_more_time_and_retries_wait_from_failure() {
+        let mut cache = ProbeCache::default();
+        let now = Cell::new(Instant::now());
+        assert_eq!(
+            cache.check(
+                || now.get(),
+                |deadline| {
+                    assert_eq!(deadline, Duration::from_secs(15));
+                    now.set(now.get() + deadline);
+                    Err(WorkerError::TimedOut)
+                }
+            ),
+            VulkanRuntime::Missing
+        );
+        now.set(now.get() + Duration::from_secs(29));
+        assert_eq!(
+            cache.check(
+                || now.get(),
+                |_| panic!("probe retried before 30 seconds elapsed")
+            ),
+            VulkanRuntime::Missing
+        );
+        now.set(now.get() + Duration::from_secs(1));
+        assert_eq!(
+            cache.check(
+                || now.get(),
+                |deadline| {
+                    assert_eq!(deadline, Duration::from_secs(5));
+                    Ok(true)
+                }
+            ),
+            VulkanRuntime::Available
+        );
+    }
+
+    #[test]
+    fn unavailable_and_crashed_preflights_are_cached() {
+        for result in [Ok(false), Err(WorkerError::Crashed)] {
+            let mut cache = ProbeCache::default();
+            assert_eq!(
+                cache.check(Instant::now, |_| result),
+                VulkanRuntime::Missing
+            );
+            assert_eq!(
+                cache.check(Instant::now, |_| panic!("definite failure was cached")),
+                VulkanRuntime::Missing
+            );
+        }
+    }
+
+    #[test]
+    fn transient_preflights_have_a_session_limit() {
+        let mut cache = ProbeCache::default();
+        let now = Cell::new(Instant::now());
+        for error in [
+            WorkerError::Spawn,
+            WorkerError::TimedOut,
+            WorkerError::TimedOut,
+        ] {
+            assert_eq!(
+                cache.check(|| now.get(), |_| Err(error)),
+                VulkanRuntime::Missing
+            );
+            now.set(now.get() + RETRY_INTERVAL);
+        }
+        assert_eq!(
+            cache.check(|| now.get(), |_| panic!("retry budget exhausted")),
+            VulkanRuntime::Missing
+        );
+        assert_eq!(cache.definite, None);
+    }
+
+    #[test]
+    fn builds_without_vulkan_never_probe() {
+        let runtime = classify(false, || panic!("must not probe"));
+        assert_eq!(runtime, VulkanRuntime::NotRequired);
+        assert!(runtime_result(runtime).is_ok());
+    }
+
+    #[test]
+    fn missing_loader_fails_closed_with_guidance() {
+        let runtime = classify(true, || false);
+        assert_eq!(runtime, VulkanRuntime::Missing);
+        let err = runtime_result(runtime).unwrap_err();
+        assert!(err.contains("Vulkan runtime"));
+        assert!(err.contains("Parakeet"));
+    }
+
+    #[test]
+    fn loaders_older_than_vulkan_1_2_are_rejected() {
+        assert!(!loader_supports(None));
+        assert!(!loader_supports(Some(1 << 22)));
+        assert!(!loader_supports(Some((1 << 22) | (1 << 12) | 200)));
+        assert!(loader_supports(Some(REQUIRED_API_VERSION)));
+        assert!(loader_supports(Some((1 << 22) | (3 << 12) | 250)));
+    }
+
+    #[test]
+    fn available_loader_allows_whisper() {
+        let runtime = classify(true, || true);
+        assert_eq!(runtime, VulkanRuntime::Available);
+        assert!(runtime_result(runtime).is_ok());
+    }
+}

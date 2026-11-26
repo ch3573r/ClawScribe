@@ -6,10 +6,90 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::fs;
 use tokio::sync::RwLock;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+const INITIAL_PROMPT_BYTES: usize = 192;
+const INITIAL_PROMPT_TERMS: usize = 16;
+
+fn vocabulary_initial_prompt(words: &[String]) -> String {
+    let mut prompt = String::new();
+    for term in words.iter().take(INITIAL_PROMPT_TERMS) {
+        // The store validates entries; also exclude Whisper's special-token
+        // spelling here so only ordinary words can bias the decoder.
+        if term.is_empty() || term.chars().any(char::is_control) || term.contains("<|") {
+            continue;
+        }
+        let separator = if prompt.is_empty() { " " } else { ", " };
+        if prompt.len() + separator.len() + term.len() > INITIAL_PROMPT_BYTES {
+            if prompt.is_empty() {
+                continue;
+            }
+            break;
+        }
+        prompt.push_str(separator);
+        prompt.push_str(term);
+    }
+    prompt
+}
+
+#[cfg(test)]
+mod vocabulary_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_priority_order_and_ignores_non_text_tokens() {
+        let words = ["Müller", "<|en|>", "A\0B", "ClawScribe", "井上"].map(str::to_owned);
+        assert_eq!(
+            vocabulary_initial_prompt(&words),
+            " Müller, ClawScribe, 井上"
+        );
+        assert!(vocabulary_initial_prompt(&[]).is_empty());
+    }
+
+    #[test]
+    fn prompt_caps_bytes_and_terms_without_splitting_phrases() {
+        let priority = "ß".repeat(64);
+        let words = vec![priority.clone(), "🚀".repeat(40), "Lower priority".into()];
+        assert_eq!(vocabulary_initial_prompt(&words), format!(" {priority}"));
+        let words = (0..40)
+            .map(|index| format!("Term {index}"))
+            .collect::<Vec<_>>();
+        let prompt = vocabulary_initial_prompt(&words);
+        assert!(prompt.len() <= INITIAL_PROMPT_BYTES);
+        assert_eq!(
+            prompt.trim_start().split(", ").count(),
+            INITIAL_PROMPT_TERMS
+        );
+        assert!(prompt.ends_with("Term 15"));
+    }
+}
+
+struct VocabularyPrompt {
+    path: PathBuf,
+    cache: Mutex<Option<(Instant, String)>>,
+}
+
+impl VocabularyPrompt {
+    fn read(&self) -> String {
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((read_at, prompt)) = cache.as_ref() {
+            if read_at.elapsed() < Duration::from_secs(3) {
+                return prompt.clone();
+            }
+        }
+        let (words, _) = crate::audio::vocabulary_settings::read_saved_words(&self.path);
+        let prompt = vocabulary_initial_prompt(&words);
+        *cache = Some((Instant::now(), prompt.clone()));
+        prompt
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelStatus {
@@ -38,6 +118,7 @@ pub struct ModelInfo {
 
 pub struct WhisperEngine {
     models_dir: PathBuf,
+    vocabulary_prompt: Option<Arc<VocabularyPrompt>>,
     current_context: Arc<RwLock<Option<WhisperContext>>>,
     current_model: Arc<RwLock<Option<String>>>,
     available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
@@ -85,6 +166,17 @@ impl WhisperEngine {
         std::env::set_var("GGML_METAL_LOG_LEVEL", "1"); // 0=off, 1=error, 2=warn, 3=info
         std::env::set_var("WHISPER_LOG_LEVEL", "1"); // Reduce whisper.cpp verbosity
 
+        // The app's configured Whisper directory is app_data_dir/models.
+        // Standalone/default model discovery has no associated app profile.
+        let vocabulary_prompt = models_dir
+            .as_ref()
+            .and_then(|dir| dir.parent())
+            .map(|profile| {
+                Arc::new(VocabularyPrompt {
+                    path: crate::audio::vocabulary_settings::portable_path(profile),
+                    cache: Mutex::new(None),
+                })
+            });
         let models_dir = if let Some(dir) = models_dir {
             // Use provided directory (for production with app_data_dir)
             dir
@@ -146,6 +238,7 @@ impl WhisperEngine {
 
         let engine = Self {
             models_dir,
+            vocabulary_prompt,
             current_context: Arc::new(RwLock::new(None)),
             current_model: Arc::new(RwLock::new(None)),
             available_models: Arc::new(RwLock::new(HashMap::new())),
@@ -289,6 +382,11 @@ impl WhisperEngine {
                 }
 
                 log::info!("Loading model: {}", model_name);
+                // whisper.cpp enumerates Vulkan devices on every context load;
+                // without the delay-loaded loader that call would abort the app.
+                super::vulkan_runtime::ensure_whisper_runtime()
+                    .await
+                    .map_err(|e| anyhow!(e))?;
                 self.validate_model_file(&model_info.path).await?;
 
                 // PERFORMANCE OPTIMIZATION: Use comprehensive hardware profile for optimal GPU configuration
@@ -422,6 +520,7 @@ impl WhisperEngine {
         Option<&'static str>,
     )> {
         let ctx_lock = self.current_context.clone().read_owned().await;
+        let vocabulary = self.vocabulary_prompt.clone();
         crate::audio::inference::run(move |cancelled| {
             let ctx = ctx_lock
                 .as_ref()
@@ -431,11 +530,22 @@ impl WhisperEngine {
             let hardware_profile = crate::audio::HardwareProfile::detect();
             let adaptive_config = hardware_profile.get_whisper_config();
 
+            // whisper.cpp accepts either initial_prompt text or the equivalent
+            // prompt tokens. The pinned text setter leaks its CString per call;
+            // borrow these tokens only for the lifetime of this decode.
+            let initial_prompt_tokens = vocabulary
+                .map(|vocabulary| vocabulary.read())
+                .filter(|prompt| !prompt.is_empty())
+                .and_then(|prompt| ctx.tokenize(&prompt, INITIAL_PROMPT_BYTES).ok());
+
             // ADAPTIVE parameters - optimized for current hardware
             let mut params = FullParams::new(SamplingStrategy::BeamSearch {
                 beam_size: adaptive_config.beam_size as i32,
                 patience: 1.0,
             });
+            if let Some(tokens) = &initial_prompt_tokens {
+                params.set_tokens(tokens);
+            }
 
             // Configure with adaptive settings
             // If language is "auto" or None, use automatic language detection (pass None)

@@ -256,7 +256,10 @@ pub async fn microsoft_sign_out<R: tauri::Runtime>(
         crate::teams_detection::monitor::join::cancel_microsoft_pending(&app);
         session.end_session(token_store::delete_token)?;
     }
-    crate::library::calendar::clear_microsoft(app_state.db_manager.pool()).await
+    let _calendar_edits = crate::library::recording_calendar::EDIT.lock().await;
+    crate::library::calendar::clear_microsoft(app_state.db_manager.pool()).await?;
+    crate::audio::recording_commands::refresh_active_recording_title(&app).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -423,17 +426,19 @@ pub async fn export_to_onenote<R: Runtime>(
     summary_json: String,
     section_id: String,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&section_id])?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Notes.Create").await?;
 
     let notes: crate::summary::codex_provider::MeetingNotesOutput =
         serde_json::from_str(&summary_json).map_err(|e| format!("Failed to parse summary: {e}"))?;
 
-    let meeting_export =
+    let mut meeting_export =
         crate::exports::meeting_export_from_notes(&meeting_id, &meeting_title, None, &notes, None);
 
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     let _export_guard = export_guard()?;
+    meeting_export.metadata = onenote_export_header(&app, &meeting_id, None).await?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
 
     let ctx = ExportContext {
@@ -470,6 +475,7 @@ pub async fn export_to_planner<R: Runtime>(
     plan_id: String,
     bucket_id: String,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&plan_id, &bucket_id])?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
 
     let notes: crate::summary::codex_provider::MeetingNotesOutput =
@@ -531,9 +537,10 @@ pub async fn export_meeting_markdown_to_onenote<R: Runtime>(
     markdown: String,
     section_id: String,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&section_id])?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Notes.Create").await?;
 
-    let meeting_export = crate::exports::markdown_notes::meeting_export_for_onenote(
+    let mut meeting_export = crate::exports::markdown_notes::meeting_export_for_onenote(
         &meeting_id,
         &meeting_title,
         None,
@@ -543,6 +550,7 @@ pub async fn export_meeting_markdown_to_onenote<R: Runtime>(
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
     let _export_guard = export_guard()?;
+    meeting_export.metadata = onenote_export_header(&app, &meeting_id, None).await?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
 
     let ctx = ExportContext {
@@ -604,6 +612,7 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     resume_id: Option<String>,
     replace_existing: Option<bool>,
 ) -> Result<ExportReportResponse, String> {
+    validate_onenote_notebook_input(&notebook_id, resume_id.as_deref())?;
     let replace_existing = replace_existing.unwrap_or(false);
     let scope = if replace_existing {
         "Notes.ReadWrite"
@@ -612,6 +621,7 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
     };
     let (token, tenant_id, user_id) = get_token_and_context(&state, scope).await?;
     let _export_guard = export_guard()?;
+    let metadata = onenote_export_header(&app, &meeting_id, options.as_ref()).await?;
     let mut ledger = load_ledger(&app, &meeting_id).await?;
     let client = GraphClient::new(
         ReqwestGraphTransport::new(),
@@ -632,6 +642,7 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
             section_name: sanitize_onenote_section_name(&section_name),
             page_title: meeting_title,
             markdown,
+            metadata,
             options,
             resume_id,
             replace_existing,
@@ -642,6 +653,31 @@ pub async fn export_meeting_to_onenote_section<R: Runtime>(
         state.inner.write().await.connection_state = MicrosoftConnectionState::Expired;
     }
     Ok(report.into())
+}
+
+fn validate_onenote_notebook_input(
+    notebook_id: &str,
+    resume_id: Option<&str>,
+) -> Result<(), String> {
+    if resume_id.is_none() {
+        super::ledger::require_remote_ids(&[notebook_id])?;
+    }
+    Ok(())
+}
+
+async fn onenote_export_header<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    options: Option<&super::ledger::OneNoteOptions>,
+) -> Result<super::metadata::OneNoteHeader, String> {
+    let state = app.state::<crate::state::AppState>();
+    let header = super::metadata::Header::load(
+        state.db_manager.pool(),
+        meeting_id,
+        options.is_some_and(|options| options.bookmarks),
+    )
+    .await?;
+    Ok(header.onenote(options.is_none_or(|options| options.timestamps)))
 }
 
 #[derive(Serialize)]
@@ -866,6 +902,7 @@ pub async fn export_meeting_markdown_to_planner<R: Runtime>(
     plan_id: String,
     bucket_id: String,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&plan_id, &bucket_id])?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Tasks.ReadWrite").await?;
 
     let meeting_export = crate::exports::markdown_notes::meeting_export_for_planner(
@@ -924,6 +961,7 @@ pub struct PlannerTaskPreview {
     pub title: String,
     pub original_title_hash: Option<String>,
     pub details: String,
+    pub saved_details: Option<String>,
     pub owner: Option<String>,
     pub due_date: Option<String>,
 }
@@ -970,7 +1008,7 @@ pub async fn preview_planner_tasks(
                 task: action.title,
                 owner: action.owner,
                 due_date: action.due_date,
-                details: None,
+                details: action.details,
                 legacy_action: action.legacy_action,
             })
             .collect();
@@ -997,10 +1035,10 @@ pub async fn preview_planner_tasks(
             title: action.task.clone(),
             original_title_hash: super::ledger::is_positional_action_id(&action.local_action_id)
                 .then(|| super::planner::action_hash(action)),
-            details: crate::exports::planner::build_task_details_description(
-                &meeting_export,
-                action,
-            ),
+            details: action.details.clone().unwrap_or_else(|| {
+                crate::exports::planner::build_task_details_description(&meeting_export, action)
+            }),
+            saved_details: action.details.clone(),
             owner: action.owner.clone(),
             due_date: action.due_date.clone(),
         })
@@ -1243,6 +1281,10 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
         return Err("No tasks selected to export.".to_string());
     }
 
+    super::ledger::require_remote_ids(&[&plan_id])?;
+    for task in &tasks {
+        super::ledger::require_remote_ids(&[&task.bucket_id])?;
+    }
     let reviewed = super::actions::load(
         app.state::<crate::state::AppState>().db_manager.pool(),
         &meeting_id,
@@ -1278,6 +1320,7 @@ pub async fn export_selected_planner_tasks<R: Runtime>(
             action_items,
             transcript_excerpt: None,
             summary_html: None,
+            metadata: Default::default(),
         };
 
         let destination = PlannerDestination {
@@ -1374,6 +1417,7 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
     tasks: Vec<ToDoTaskInput>,
     preview_candidates: Option<Vec<TaskPreviewCandidate>>,
 ) -> Result<ExportReportResponse, String> {
+    super::ledger::require_remote_ids(&[&list_id])?;
     let tasks: Vec<ToDoTaskInput> = tasks
         .into_iter()
         .filter(|t| !t.title.trim().is_empty())
@@ -1406,6 +1450,7 @@ pub async fn export_selected_todo_tasks<R: Runtime>(
         action_items,
         transcript_excerpt: None,
         summary_html: None,
+        metadata: Default::default(),
     };
     let destination = ToDoDestination { list_id };
     let _export_guard = export_guard()?;
@@ -1604,9 +1649,18 @@ pub async fn export_meeting_to_onedrive_files<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, MicrosoftAuthState>,
     request: files::OneDriveExportRequest,
+    include_bookmarks: Option<bool>,
+    timestamps: Option<bool>,
 ) -> Result<files::OneDriveExportResponse, String> {
     let _guard = export_guard()?;
     let (token, tenant_id, user_id) = get_token_and_context(&state, "Files.ReadWrite").await?;
+    let app_state = app.state::<crate::state::AppState>();
+    let header = super::metadata::Header::load(
+        app_state.db_manager.pool(),
+        &request.meeting_id,
+        include_bookmarks.unwrap_or(false),
+    )
+    .await?;
     let mut ledger = load_ledger(&app, &request.meeting_id).await?;
     let transport = ReqwestGraphTransport::new();
     let client = GraphClient::new(transport, TokioSleeper, RetryPolicy::default());
@@ -1615,7 +1669,14 @@ pub async fn export_meeting_to_onedrive_files<R: Runtime>(
         user_id: &user_id,
         bearer_token: &token,
     };
-    files::export_meeting_files(&client, &mut ledger, &account, request).await
+    files::export_meeting_files(
+        &client,
+        &mut ledger,
+        &account,
+        request,
+        &header.document(timestamps.unwrap_or(true)),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1652,6 +1713,13 @@ pub async fn list_todo_lists(
 #[cfg(test)]
 mod export_history_tests {
     use super::*;
+
+    #[test]
+    fn resuming_onenote_uses_the_saved_notebook_instead_of_the_request_field() {
+        assert!(validate_onenote_notebook_input("", Some("saved-attempt")).is_ok());
+        assert!(validate_onenote_notebook_input("", None).is_err());
+        assert!(validate_onenote_notebook_input("test-notebook", None).is_ok());
+    }
 
     #[test]
     fn selected_exports_use_full_preview_or_saved_action_history() {

@@ -1,0 +1,32 @@
+{
+  "name": "Technical / design review",
+  "description": "Record options, trade-offs, design decisions, and outstanding verification work.",
+  "sections": [
+    {
+      "title": "Review scope",
+      "instruction": "Describe the technical problem, constraints, and success criteria discussed. Cite the supplied source tags",
+      "format": "paragraph"
+    },
+    {
+      "title": "Options and trade-offs",
+      "instruction": "List the options considered and the reasons given for each. Distinguish observed results from expectations and cite a supplied source tag beside each point",
+      "format": "list"
+    },
+    {
+      "title": "Decisions and rationale",
+      "instruction": "List accepted, rejected, and deferred decisions with their stated rationale. Identify proposals as proposals and cite the supplied source tags",
+      "format": "list"
+    },
+    {
+      "title": "Action items",
+      "instruction": "List agreed changes and verification work. Include explicitly stated owners and dates, and copy the supplied source tag beside each task",
+      "format": "list",
+      "item_format": "- Task in one sentence. Owner: name or Unassigned; Due: date or Not specified"
+    },
+    {
+      "title": "Open risks",
+      "instruction": "List unresolved risks, assumptions, and questions with the supplied source tags that support them",
+      "format": "list"
+    }
+  ]
+}

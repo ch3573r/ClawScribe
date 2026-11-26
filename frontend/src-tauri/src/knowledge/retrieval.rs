@@ -40,7 +40,7 @@ pub async fn freeze_scope_in_connection(
     freeze_scope_rows(connection, scope, None).await
 }
 
-pub(super) async fn freeze_scope_rows(
+pub(crate) async fn freeze_scope_rows(
     connection: &mut sqlx::SqliteConnection,
     scope: &KnowledgeScope,
     row_limit: Option<i64>,
@@ -53,13 +53,7 @@ pub(super) async fn freeze_scope_rows(
         KnowledgeScope::Library { filter } => filter.clone(),
         KnowledgeScope::Live { .. } => return Err(KnowledgeError::InvalidInput),
     };
-    if !filter.all_meetings
-        && filter.meeting_ids.is_empty()
-        && filter.tags.is_empty()
-        && !filter.untagged
-        && filter.from.is_none()
-        && filter.to.is_none()
-    {
+    if !filter.has_selection() || (filter.untagged && !filter.tags.is_empty()) {
         return Err(KnowledgeError::InvalidInput);
     }
     let parse_bound = |value: &str| {
@@ -1730,7 +1724,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn empty_scope_never_broadens_and_untagged_has_precedence() {
+    async fn empty_or_conflicting_scope_is_rejected() {
         let pool = fixture().await;
         assert!(freeze_scope(
             &pool,
@@ -1747,8 +1741,21 @@ mod tests {
                 ..Default::default()
             },
         };
+        assert!(matches!(
+            freeze_scope(&pool, &scope).await,
+            Err(KnowledgeError::InvalidInput)
+        ));
+        let untagged_only = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                untagged: true,
+                ..Default::default()
+            },
+        };
         assert_eq!(
-            freeze_scope(&pool, &scope).await.unwrap().meeting_ids,
+            freeze_scope(&pool, &untagged_only)
+                .await
+                .unwrap()
+                .meeting_ids,
             vec!["three"]
         );
     }

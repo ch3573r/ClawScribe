@@ -3,6 +3,10 @@ import { Lock, Sparkles, Cpu } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
+import { usePlatform } from '@/hooks/usePlatform';
+import { useTranscriptionConfig } from '@/contexts/ConfigContext';
+import { SignalCheck } from '@/components/settings/SignalCheck';
+import { useSignalCheck } from '@/components/settings/useSignalCheck';
 
 export function WelcomeStep({ onRecordAudio, finishing, error }: {
   onRecordAudio: () => void;
@@ -10,6 +14,10 @@ export function WelcomeStep({ onRecordAudio, finishing, error }: {
   error: string | null;
 }) {
   const { goNext } = useOnboarding();
+  const windows = usePlatform() === 'windows';
+  const { selectedDevices, devicePreferencesStatus } = useTranscriptionConfig();
+  const feed = useSignalCheck(windows && devicePreferencesStatus === 'ready' && !finishing,
+    selectedDevices.micDevice, selectedDevices.systemDevice);
 
   const features = [
     {
@@ -31,7 +39,6 @@ export function WelcomeStep({ onRecordAudio, finishing, error }: {
       title="Welcome to ClawScribe"
       description="Save your meetings on this device."
       step={1}
-      hideProgress={true}
     >
       <div className="flex flex-col items-center space-y-10">
         {/* Divider */}
@@ -53,6 +60,14 @@ export function WelcomeStep({ onRecordAudio, finishing, error }: {
             );
           })}
         </div>
+
+        {windows && <div className="w-full max-w-md">
+          <SignalCheck feed={feed} unavailableReason={devicePreferencesStatus === 'loading'
+            ? 'Checking audio devices…'
+            : devicePreferencesStatus === 'ready'
+              ? finishing ? 'Finishing setup' : null
+              : 'Audio devices are unavailable'} />
+        </div>}
 
         {/* CTA Section */}
         <div className="w-full max-w-xs space-y-3">

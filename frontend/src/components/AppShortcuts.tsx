@@ -9,7 +9,7 @@ import { useRouter } from "next/navigation";
  * layer in shortcuts.rs and configured under Settings → Shortcuts.)
  *
  *   Ctrl/⌘ + ,   open Settings
- *   Ctrl/⌘ + K   focus the meeting search
+ *   Ctrl/⌘ + K   open the command palette
  *   Ctrl/⌘ + G   generate / regenerate the summary (Meeting Notes listens)
  *
  * K and G stand down while you're typing in an input or the summary editor, so
@@ -21,11 +21,10 @@ export function AppShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
-      if (!mod || e.altKey) return;
+      if (!mod || e.altKey || e.defaultPrevented || e.isComposing) return;
       const key = e.key.toLowerCase();
+      if (document.querySelector('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]')) return;
 
-      // Settings is harmless nav and "," isn't an editor key, so allow it
-      // anywhere.
       if (key === ",") {
         e.preventDefault();
         router.push("/settings");
@@ -33,22 +32,14 @@ export function AppShortcuts() {
       }
 
       const t = e.target as HTMLElement | null;
-      const typing =
-        !!t &&
-        (t.tagName === "INPUT" ||
-          t.tagName === "TEXTAREA" ||
-          t.isContentEditable);
+      const typing = t?.isContentEditable || t?.tagName === "INPUT" || t?.tagName === "TEXTAREA" ||
+        t?.closest?.("[role='textbox']");
       if (typing) return;
 
       if (key === "k") {
-        const archive = document.getElementById("meetings-search") as HTMLInputElement | null;
-        const search = archive ?? (document.getElementById("meeting-search") as HTMLInputElement | null);
-        if (!search) return;
+        if (e.repeat || e.shiftKey) return;
         e.preventDefault();
-        if (archive?.closest("[hidden]")) {
-          document.getElementById("meetings-archive-tab")?.click();
-        }
-        window.requestAnimationFrame(() => { search.focus(); search.select(); });
+        window.dispatchEvent(new CustomEvent("shortcut:open-command-palette"));
       } else if (key === "g") {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent("shortcut:generate-summary"));

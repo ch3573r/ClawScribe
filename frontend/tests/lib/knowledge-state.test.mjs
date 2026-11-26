@@ -10,6 +10,32 @@ function controller() {
   return module.createKnowledgeController;
 }
 const scope = id => ({kind:'meeting',meeting_id:id});
+test('project and date filters are sufficient scope for a library question', () => {
+  const { libraryScope, scopeReady } = loadTsModule('src/lib/knowledge-state.ts');
+  const projects = { tags: [], untagged: false, mode: 'any' };
+  assert.equal(scopeReady(libraryScope([], false, projects)), false);
+  assert.equal(scopeReady(libraryScope([], false, { ...projects, tags: ['Roadmap'] })), true);
+  assert.equal(scopeReady(libraryScope([], false, { ...projects, untagged: true })), true);
+  assert.equal(scopeReady(libraryScope([], false, projects, '2026-10-04')), true);
+  assert.equal(scopeReady(libraryScope([], false, projects, '', '2026-10-04')), true);
+  assert.equal(scopeReady(libraryScope([], true, projects, '2026-10-04', '2026-10-03')), false);
+});
+
+test('an imported file is visible immediately but is only sent after scope verification', () => {
+  const { selectedReferences } = loadTsModule('src/lib/knowledge-state.ts');
+  const file = { id: 'one', display_name: 'Reference.md' };
+  const normalized = (...args) => JSON.parse(JSON.stringify(selectedReferences(...args)));
+  assert.deepEqual(normalized([], [], [file]), { files: [file], ids: [], verifying: true });
+  assert.deepEqual(normalized([{ attachment: file }], [], [file]), { files: [file], ids: ['one'], verifying: false });
+  assert.deepEqual(normalized([{ attachment: file }], ['one'], [file]), { files: [file], ids: ['one'], verifying: false });
+});
+
+test('semantic search defaults to hybrid only when available', () => {
+  const { knowledgeSearchMode } = loadTsModule('src/lib/knowledge-state.ts');
+  assert.equal(knowledgeSearchMode(null, true), 'hybrid');
+  assert.equal(knowledgeSearchMode('keyword', true), 'keyword');
+  assert.equal(knowledgeSearchMode('hybrid', false), 'keyword');
+});
 test('old_query_cannot_replace_new_results', async () => {
   const owner = controller()(); const old = deferred(); const latest = deferred(); let visible;
   const a = owner.run('search', () => old.promise, v => { visible = v; });

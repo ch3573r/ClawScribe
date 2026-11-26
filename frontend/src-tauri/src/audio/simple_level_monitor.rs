@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Sample, SampleFormat, SampleRate, Stream, StreamConfig};
+use cpal::{Sample, SampleFormat, Stream, SupportedStreamConfig};
 use log::{error, info, warn};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -11,6 +11,231 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Runtime};
 
 use super::audio_processing::audio_to_mono;
+
+#[cfg(windows)]
+const SIGNAL_CHECK_DURATION: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const SIGNAL_CHECK_GRACE: Duration = Duration::from_secs(1);
+
+#[cfg(windows)]
+fn begin_signal_check(
+    check: &Mutex<std::sync::Weak<Instant>>,
+    now: Instant,
+) -> Result<Arc<Instant>, &'static str> {
+    let mut active = check.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(deadline) = active.upgrade() {
+        return Err(if now >= *deadline + SIGNAL_CHECK_GRACE {
+            "The audio device is not responding. Try again later."
+        } else {
+            "A signal check is already running."
+        });
+    }
+    let deadline = Arc::new(now + SIGNAL_CHECK_DURATION);
+    *active = Arc::downgrade(&deadline);
+    Ok(deadline)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SignalResult {
+    Detected,
+    NoSignal,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalUpdate {
+    source: &'static str,
+    rms: f32,
+    peak: f32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalCheckResult {
+    microphone: SignalResult,
+    system_audio: SignalResult,
+}
+
+#[cfg(windows)]
+struct SignalObservation {
+    source: &'static str,
+    level: Option<SignalUpdate>,
+    detected: bool,
+}
+
+#[cfg(windows)]
+impl SignalObservation {
+    fn observe(&mut self, level: &LevelSnapshot) {
+        self.detected |= level.is_active;
+        self.level = Some(SignalUpdate {
+            source: self.source,
+            rms: level.rms_level,
+            peak: level.peak_level,
+        });
+    }
+
+    fn result(&self) -> SignalResult {
+        if self.detected {
+            SignalResult::Detected
+        } else {
+            SignalResult::NoSignal
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn check_audio_signal(
+    microphone: Option<String>,
+    system_audio: Option<String>,
+    updates: tauri::ipc::Channel<SignalUpdate>,
+) -> Result<SignalCheckResult, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (microphone, system_audio, updates);
+        Err("The dual-source signal check is available on Windows.".into())
+    }
+    #[cfg(windows)]
+    {
+        use super::devices::{default_input_device, default_output_device, DeviceType};
+        static CHECK: Mutex<std::sync::Weak<Instant>> = Mutex::new(std::sync::Weak::new());
+        let permit = begin_signal_check(&CHECK, Instant::now())?;
+        if super::recording_commands::audio_signal_check_blocked() {
+            return Err("The signal check is unavailable while recording or saving.".into());
+        }
+        let deadline = *permit;
+        let epoch = super::recording_commands::recording_epoch();
+        let start = |name, kind, default, source, updates| {
+            let permit = permit.clone();
+            let runtime = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                measure_signal_source(
+                    runtime, name, kind, default, source, updates, deadline, epoch,
+                )
+            })
+        };
+        let microphone = start(
+            microphone,
+            DeviceType::Input,
+            default_input_device as fn() -> _,
+            "microphone",
+            updates.clone(),
+        );
+        let system_audio = start(
+            system_audio,
+            DeviceType::Output,
+            default_output_device,
+            "systemAudio",
+            updates,
+        );
+        let finish = |task| async move {
+            // A stalled driver must not strand the UI or admit more check workers.
+            match tokio::time::timeout_at((deadline + SIGNAL_CHECK_GRACE).into(), task).await {
+                Ok(Ok(result)) => result,
+                _ => SignalResult::Unavailable,
+            }
+        };
+        let (microphone, system_audio) = tokio::join!(finish(microphone), finish(system_audio));
+        if super::recording_commands::audio_signal_check_blocked()
+            || super::recording_commands::recording_epoch() != epoch
+        {
+            return Err("The signal check ended because recording or saving started.".into());
+        }
+        Ok(SignalCheckResult {
+            microphone,
+            system_audio,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn measure_signal_source(
+    runtime: tokio::runtime::Handle,
+    name: Option<String>,
+    kind: super::devices::DeviceType,
+    default: fn() -> Result<super::devices::AudioDevice>,
+    source: &'static str,
+    updates: tauri::ipc::Channel<SignalUpdate>,
+    deadline: Instant,
+    epoch: u64,
+) -> SignalResult {
+    use super::devices::{get_device_and_config, parse_audio_device};
+    let recording_interrupted = || {
+        super::recording_commands::audio_signal_check_blocked()
+            || super::recording_commands::recording_epoch() != epoch
+    };
+    let can_measure = || Instant::now() < deadline && !recording_interrupted();
+    let run = || -> Result<SignalResult> {
+        if !can_measure() {
+            return Ok(SignalResult::Unavailable);
+        }
+        super::com_anchor::ensure_device_enumerator();
+        let endpoint = match name {
+            Some(name) => parse_audio_device(&name)?,
+            None => default()?,
+        };
+        if endpoint.device_type != kind {
+            return Ok(SignalResult::Unavailable);
+        }
+        let (device, config) = runtime.block_on(get_device_and_config(&endpoint))?;
+        if !can_measure() {
+            return Ok(SignalResult::Unavailable);
+        }
+        let observation = Arc::new(Mutex::new(SignalObservation {
+            source,
+            level: None,
+            detected: false,
+        }));
+        let callback_state = observation.clone();
+        let failed = Arc::new(AtomicBool::new(false));
+        let callback_failed = failed.clone();
+        // WASAPI input streams on render endpoints are loopback streams, the
+        // same device and format path used by recording. Only levels leave here.
+        let _stream = create_level_stream(
+            &device,
+            config,
+            move |samples, channels| {
+                if let Some(level) = calculate_levels(samples, channels) {
+                    if let Ok(mut state) = callback_state.try_lock() {
+                        state.observe(&level);
+                    }
+                }
+            },
+            move |_| callback_failed.store(true, Ordering::Release),
+        )?;
+        while can_measure() && !failed.load(Ordering::Acquire) {
+            let level = observation
+                .lock()
+                .map_err(|_| anyhow!("Signal check state unavailable"))?
+                .level
+                .take();
+            if updates
+                .send(level.unwrap_or(SignalUpdate {
+                    source,
+                    rms: 0.0,
+                    peak: 0.0,
+                }))
+                .is_err()
+            {
+                break;
+            }
+            std::thread::sleep(
+                Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+        if failed.load(Ordering::Acquire) || recording_interrupted() {
+            return Ok(SignalResult::Unavailable);
+        }
+        let result = observation
+            .lock()
+            .map_err(|_| anyhow!("Signal check state unavailable"))?
+            .result();
+        Ok(result)
+    };
+    run().unwrap_or(SignalResult::Unavailable)
+}
 
 #[derive(Debug, Serialize, Clone)]
 pub struct AudioLevelData {
@@ -288,62 +513,58 @@ fn create_input_level_stream(
     let config = device
         .default_input_config()
         .map_err(|err| anyhow!("Failed to get default input config: {}", err))?;
-    let sample_rate = config.sample_rate().0;
-    let channels = config.channels();
-    let sample_format = config.sample_format();
-    let stream_config = StreamConfig {
-        channels,
-        sample_rate: SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Default,
-    };
-
-    info!(
-        "Opening microphone level stream for '{}': {} Hz, {} channels, {:?}",
-        device_name, sample_rate, channels, sample_format
-    );
-
     let device_name = device_name.to_string();
-    let stream = match sample_format {
-        SampleFormat::F32 => {
-            let levels = levels.clone();
-            let device_name = device_name.clone();
+    create_level_stream(
+        device,
+        config,
+        move |samples, channels| {
+            if let Some(level) = calculate_levels(samples, channels) {
+                if let Ok(mut levels) = levels.try_lock() {
+                    levels.insert(device_name.clone(), level);
+                }
+            }
+        },
+        |err| error!("Microphone level stream error: {}", err),
+    )
+}
+
+fn create_level_stream(
+    device: &cpal::Device,
+    config: SupportedStreamConfig,
+    mut on_samples: impl FnMut(&[f32], u16) + Send + 'static,
+    on_error: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> Result<Stream> {
+    let channels = config.channels();
+    let stream_config = config.config();
+    macro_rules! converted_stream {
+        ($sample:ty) => {
             device.build_input_stream(
                 &stream_config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    update_levels(data, channels, &device_name, levels.clone());
+                move |samples: &[$sample], _| {
+                    let samples: Vec<f32> =
+                        samples.iter().map(|&sample| sample.to_sample()).collect();
+                    on_samples(&samples, channels);
                 },
-                |err| error!("Microphone level stream error: {}", err),
+                on_error,
                 None,
             )?
-        }
-        SampleFormat::I16 => {
-            let levels = levels.clone();
-            let device_name = device_name.clone();
-            device.build_input_stream(
-                &stream_config,
-                move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    let data: Vec<f32> = data.iter().map(|&sample| sample.to_sample()).collect();
-                    update_levels(&data, channels, &device_name, levels.clone());
-                },
-                |err| error!("Microphone level stream error: {}", err),
-                None,
-            )?
-        }
-        SampleFormat::U16 => {
-            let levels = levels.clone();
-            let device_name = device_name.clone();
-            device.build_input_stream(
-                &stream_config,
-                move |data: &[u16], _: &cpal::InputCallbackInfo| {
-                    let data: Vec<f32> = data.iter().map(|&sample| sample.to_sample()).collect();
-                    update_levels(&data, channels, &device_name, levels.clone());
-                },
-                |err| error!("Microphone level stream error: {}", err),
-                None,
-            )?
-        }
+        };
+    }
+    let stream = match config.sample_format() {
+        SampleFormat::F32 => device.build_input_stream(
+            &stream_config,
+            move |samples: &[f32], _| on_samples(samples, channels),
+            on_error,
+            None,
+        )?,
+        SampleFormat::I16 => converted_stream!(i16),
+        SampleFormat::U16 => converted_stream!(u16),
+        SampleFormat::I32 => converted_stream!(i32),
         other => {
-            return Err(anyhow!("Unsupported microphone sample format: {:?}", other));
+            return Err(anyhow!(
+                "Unsupported level stream sample format: {:?}",
+                other
+            ))
         }
     };
 
@@ -351,46 +572,37 @@ fn create_input_level_stream(
     Ok(stream)
 }
 
-fn update_levels(
-    data: &[f32],
-    channels: u16,
-    device_name: &str,
-    levels: Arc<Mutex<HashMap<String, LevelSnapshot>>>,
-) {
-    if data.is_empty() {
-        return;
-    }
-
+fn calculate_levels(data: &[f32], channels: u16) -> Option<LevelSnapshot> {
+    let mono;
     let mono_data = if channels > 1 {
-        audio_to_mono(data, channels)
+        mono = audio_to_mono(data, channels);
+        mono.as_slice()
     } else {
-        data.to_vec()
+        data
     };
-
     if mono_data.is_empty() {
-        return;
+        return None;
     }
 
     let rms = (mono_data.iter().map(|sample| sample * sample).sum::<f32>()
         / mono_data.len() as f32)
-        .sqrt()
-        .min(1.0);
+        .sqrt();
+    if !rms.is_finite() {
+        return None;
+    }
+    let rms = rms.min(1.0);
     let peak = mono_data
         .iter()
         .map(|sample| sample.abs())
         .fold(0.0, f32::max)
         .min(1.0);
 
-    let snapshot = LevelSnapshot {
+    Some(LevelSnapshot {
         rms_level: rms,
         peak_level: peak,
         is_active: rms > 0.001,
         updated_at: Instant::now(),
-    };
-
-    if let Ok(mut levels) = levels.try_lock() {
-        levels.insert(device_name.to_string(), snapshot);
-    }
+    })
 }
 
 fn build_level_update(
@@ -489,5 +701,45 @@ mod tests {
             ]),
             vec!["Microphone (2- USB Headset)".to_string()]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn signal_check_reports_a_stalled_driver_until_its_workers_exit() {
+        use super::{begin_signal_check, Duration, Instant, Mutex};
+        let check = Mutex::default();
+        let start = Instant::now();
+        let permit = begin_signal_check(&check, start).unwrap();
+        let worker = permit.clone();
+        assert_eq!(
+            begin_signal_check(&check, start + Duration::from_secs(1)).unwrap_err(),
+            "A signal check is already running."
+        );
+        drop(permit);
+        let after_timeout = start + Duration::from_secs(6);
+        assert_eq!(
+            begin_signal_check(&check, after_timeout).unwrap_err(),
+            "The audio device is not responding. Try again later."
+        );
+        drop(worker);
+        assert!(begin_signal_check(&check, after_timeout).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn signal_check_retains_detection_after_the_source_goes_quiet() {
+        use super::{calculate_levels, SignalObservation, SignalResult};
+        let mut observation = SignalObservation {
+            source: "systemAudio",
+            level: None,
+            detected: false,
+        };
+        assert_eq!(observation.result(), SignalResult::NoSignal);
+        assert!(calculate_levels(&[], 2).is_none());
+        assert!(calculate_levels(&[f32::NAN], 1).is_none());
+        observation.observe(&calculate_levels(&[0.5, 0.5], 2).unwrap());
+        observation.observe(&calculate_levels(&[0.0, 0.0], 2).unwrap());
+        assert_eq!(observation.result(), SignalResult::Detected);
+        assert_eq!(observation.level.unwrap().rms, 0.0);
     }
 }

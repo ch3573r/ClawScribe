@@ -36,7 +36,7 @@ test('empty library scope leaves references empty without reporting a loading fa
 
 test('unselected_document_not_retrieved: search and answer carry only explicitly selected IDs',async()=>{
   const searches=[],asks=[];
-  const app=view({search:async request=>{searches.push(request);return searchResult('search');},ask:async request=>{asks.push(request);}});
+  const app=view({documentSharing:async()=>true,search:async request=>{searches.push(request);return searchResult('search');},ask:async request=>{asks.push(request);}});
   await ready(app);await app.render().search('before selection','keyword');
   assert.deepEqual([...searches[0].document_ids],[]);
   select(app.render(),'selected');await ready(app);
@@ -44,6 +44,35 @@ test('unselected_document_not_retrieved: search and answer carry only explicitly
   assert.deepEqual([...searches[1].document_ids],['selected']);assert.deepEqual([...asks[0].search.document_ids],['selected']);
   select(app.render(),'selected',false);await ready(app);await app.render().ask('Another question?','keyword');
   assert.deepEqual([...asks[1].search.document_ids],[]);app.unmount();
+});
+
+test('an attached file survives verification and reaches an external provider only after sharing is enabled',async()=>{
+  const verification=deferred(), asks=[];
+  let reads=0;
+  const app=view({
+    scopeDocuments:()=>++reads===1 ? Promise.resolve([]) : verification.promise,
+    ask:async request=>{asks.push(request);},
+  });
+  try {
+    await ready(app);
+    const file=attachment('added');
+    app.render().selectImportedDocument(file);
+    await ready(app);
+    assert.equal(app.render().selectedFiles[0].id,'added');
+    assert.equal(app.render().verifyingDocuments,true);
+    await app.render().ask('Question?','keyword');
+    verification.resolve([scoped('added')]);
+    await ready(app);
+    assert.equal(app.render().verifyingDocuments,false);
+    assert.equal(app.render().sharingEnabled,false);
+    await app.render().ask('Question?','keyword');
+    assert.equal(asks.length,0);
+    await app.render().setDocumentSharing(true);
+    await ready(app);
+    assert.equal(asks.length,0,'allowing future sharing does not submit the current question');
+    await app.render().ask('Question?','keyword');
+    assert.deepEqual([...asks[0].search.document_ids],['added']);
+  } finally { app.unmount(); }
 });
 
 test('foreign_attachment_rejected: selection rejects unknown IDs and prunes IDs outside a new scope',async()=>{
@@ -58,7 +87,7 @@ test('foreign_attachment_rejected: selection rejects unknown IDs and prunes IDs 
 for(const change of ['scope','provider','selection']) {
   test(`${change} change cancels document answer and discards its late response`,async()=>{
     const answer=deferred(),cancelled=[],owners=[];
-    const app=view({cancel:async id=>{cancelled.push(id);},ask:()=>answer.promise,history:async owner=>{owners.push(owner.id);return [];}});
+    const app=view({documentSharing:async()=>true,cancel:async id=>{cancelled.push(id);},ask:()=>answer.promise,history:async owner=>{owners.push(owner.id);return [];}});
     await ready(app);select(app.render(),'selected');await ready(app);
     const work=app.render().ask('Question?','keyword');
     if(change==='scope')app.scope(meeting('two'));
@@ -72,7 +101,7 @@ for(const change of ['scope','provider','selection']) {
 
 test('non-resetting document refresh drops a pending answer when a selected file disappears',async()=>{
   const answer=deferred(),cancelled=[],requests=[];let documents=[scoped('selected')],historyReads=0;
-  const app=view({scopeDocuments:async()=>documents,cancel:async id=>cancelled.push(id),ask:request=>{requests.push(request);return answer.promise;},history:async()=>{historyReads++;return [];}});
+  const app=view({documentSharing:async()=>true,scopeDocuments:async()=>documents,cancel:async id=>cancelled.push(id),ask:request=>{requests.push(request);return answer.promise;},history:async()=>{historyReads++;return [];}});
   try {
     await ready(app);select(app.render(),'selected');await ready(app);
     const work=app.render().ask('Question with a reference?','keyword');
@@ -196,11 +225,11 @@ for(const [provider,selectedDocumentIds] of [['codex',[]],['builtin-ai',['select
       'lucide-react':{Info:'info',MoreHorizontal:'more'},
       '@/components/ConfirmationModel/confirmation-modal':{ConfirmationModal:()=>null},
       '@/services/knowledgeService':{knowledgeService:{}},
-      '@/components/ui/button':{Button:'button'},'@/components/ui/textarea':{Textarea:'textarea'},
+      '@/components/ui/button':{Button:'button'},'@/components/ui/textarea':{Textarea:'textarea'},'@/components/ui/input':{Input:'input'},'@/components/ui/dialog':{},
       '@/components/ui/scroll-area':{ScrollArea:'scroll-area'},
       '@/components/ui/tooltip':{},'@/components/ui/dropdown-menu':{},
     });
-    const state={scope:meeting('one'),owner:{kind:'meeting',id:'one'},threads:[],messages:[],historyLoading:false,sending:false,creating:false,selectedDocumentIds,sharingEnabled:false,sharingLoading:true,ask:async()=>{}};
+    const state={scope:meeting('one'),owner:{kind:'meeting',id:'one'},threads:[],messages:[],historyLoading:false,sending:false,creating:false,selectedDocumentIds,selectedFiles:selectedDocumentIds.map(attachment),sharingEnabled:false,sharingLoading:true,ask:async()=>{}};
     const render=()=>hooks.render(()=>KnowledgeChat({state,mode:'keyword',provider,model:'fixture'}));
     nodes(render()).find(node=>node.type==='textarea').props.onChange({target:{value:'What was decided?'}});
     assert.equal(nodes(render()).find(node=>node.type==='button'&&text(node)==='Ask').props.disabled,false);

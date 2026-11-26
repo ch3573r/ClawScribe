@@ -216,7 +216,9 @@ source revision remains stale. Library threads have durable owner rows;
 request UUIDs are globally unique and an input fingerprint prevents changed
 inputs from replaying an unrelated result. Deletion dependencies include any
 prior-turn evidence actually sent in a later prompt. Clearing history cancels
-pending requests before deleting both legacy and new turns.
+pending requests before deleting both legacy and new turns. Clearing or deleting
+a library thread removes its owner and associated document permission. An
+optional thread title is stored with the owner and carried in portable archives.
 
 The current request's scope also constrains inherited prompt history. Omit
 prior turns whose scope or evidence cannot be validated within the frozen
@@ -271,7 +273,8 @@ number of supervised owners so failed cleanup cannot accumulate unbounded work.
 
 Scope is visible beside the input: This meeting, Selected meetings, or Current
 recording, plus selected reference documents. A saved meeting remains the
-default. A library-wide scope requires a deliberate selection. Project filters
+default. A project or date filter can define a library scope on its own.
+Searching the entire unfiltered library requires a deliberate selection. Project filters
 must behave like the existing Any/All/Untagged controls.
 
 ## Reference document boundary

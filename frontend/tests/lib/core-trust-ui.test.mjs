@@ -20,7 +20,7 @@ test("a core message that is a plain string is shown, not Unknown error", () => 
 });
 
 test("the stop and save flow shows what the core said instead of Unknown error", () => {
-  for (const file of ["src/hooks/useRecordingStop.ts", "src/hooks/useTranscriptRecovery.ts", "src/app/page.tsx"]) {
+  for (const file of ["src/hooks/useRecordingStop.ts", "src/hooks/useTranscriptRecovery.ts", "src/components/TranscriptRecovery/TranscriptRecovery.tsx"]) {
     const source = read(file);
     assert.doesNotMatch(source, /'Unknown error/, file);
     assert.match(source, /errorText\(/, file);

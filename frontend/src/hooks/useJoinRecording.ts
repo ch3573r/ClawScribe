@@ -10,6 +10,17 @@ import { calendarLinkFromEvent, microsoftCalendarRevision } from "@/lib/meetingC
 import { confirmCallPrompt } from "@/services/callDetectionService";
 import { teamsJoinLink } from "@/lib/teams-join-link";
 
+function isMeetJoinLink(value: string): boolean {
+  if (value.length > 4096 || /[\s\\\u0000-\u001f\u007f]/.test(value) ||
+    !/^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:[?#]|$)/i.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return /^\/[a-z]{3}-[a-z]{4}-[a-z]{3}$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 interface JoinView {
   id: string;
   subject: string;
@@ -20,7 +31,7 @@ interface JoinView {
 export function supportsJoinRecording({ event, allDay }: UpcomingEntry): boolean {
   if (allDay || event.isCancelled || !event.joinUrl || !event.start ||
       !(Date.parse(event.end ?? "") > Math.max(Date.now(), Date.parse(event.start)))) return false;
-  return teamsJoinLink(event.joinUrl) !== null;
+  return teamsJoinLink(event.joinUrl) !== null || isMeetJoinLink(event.joinUrl);
 }
 
 export function useJoinRecording() {

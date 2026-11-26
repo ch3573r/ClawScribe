@@ -110,6 +110,27 @@ test('meeting recovery failures preserve diagnostics and leave recovery availabl
   assert.equal(nodes(render()).find(node=>node.type==='button'&&text(node)==='Recover').props.disabled,false);hooks.unmount();
 });
 
+test('recovering a selected entry leaves the dialog open for the next interrupted recording', async t => {
+  const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
+  const { TranscriptRecovery } = loadTsModule('src/components/TranscriptRecovery/TranscriptRecovery.tsx', {
+    ...primitives, react: hooks.react,
+  });
+  let closed = false;
+  const props = {
+    isOpen: true, onClose: () => { closed = true; },
+    recoverableMeetings: ['First', 'Second'].map(title => ({ meetingId: title, title, lastUpdated: Date.now(), startTime: Date.now(), transcriptCount: 1 })),
+    onLoadPreview: async () => [],
+    onRecover: async id => { props.recoverableMeetings = props.recoverableMeetings.filter(meeting => meeting.meetingId !== id); },
+  };
+  const render = () => nodes(hooks.render(() => TranscriptRecovery(props)));
+  render(); await flush();
+  await render().find(node => node.type === 'button' && text(node) === 'Recover').props.onClick();
+  assert.equal(closed, false);
+  assert.equal(render().find(node => node.type === 'dialog').props.open, true);
+  assert.match(render().map(text).join(' '), /Second/);
+});
+
 test('a late recovery preview cannot replace the selected meeting', async () => {
   const hooks = createHookHarness();
   const first = deferred();

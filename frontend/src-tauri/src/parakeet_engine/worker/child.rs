@@ -29,6 +29,16 @@ pub(super) fn run() -> i32 {
             return 2;
         }
         let response = match request {
+            Request::ProbeVulkan => {
+                #[cfg(all(windows, feature = "vulkan"))]
+                let available = crate::whisper_engine::vulkan_runtime::probe_device_in_child();
+                #[cfg(not(all(windows, feature = "vulkan")))]
+                let available = false;
+                Response::VulkanProbe { available }
+            }
+            Request::ProbeDirectml => Response::DirectmlProbe {
+                available: super::super::model::directml_available(),
+            },
             Request::Load {
                 model_dir,
                 precision_suffix,
@@ -54,6 +64,7 @@ pub(super) fn run() -> i32 {
                         text: result.text,
                         timestamps: result.timestamps,
                         tokens: result.tokens,
+                        encoder_length_clamped: std::mem::take(&mut model.encoder_length_clamped),
                     },
                     Err(_) => Response::Error("Parakeet transcription failed".into()),
                 },

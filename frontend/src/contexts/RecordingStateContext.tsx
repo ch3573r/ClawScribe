@@ -7,6 +7,7 @@ import { recordingIdentity, compareGeneration, sameIdentity, type RecordingIdent
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
+import { drainEta } from '@/lib/recording-progress';
 export type RecordingMode = 'live' | 'audio_only';
 
 /**
@@ -36,8 +37,6 @@ interface RecordingState {
   isRecording: boolean;           // Is a recording session active
   isPaused: boolean;              // Is the recording paused
   isActive: boolean;              // Is actively recording (recording && !paused)
-  recordingDuration: number | null;  // Total duration including pauses
-  activeDuration: number | null;     // Active recording time (excluding pauses)
 
   // NEW: Lifecycle status
   status: RecordingStatus;
@@ -46,12 +45,14 @@ interface RecordingState {
 }
 
 interface RecordingStateContextType extends RecordingState {
+  floatingControlsVisible: boolean;
   recordingMode: RecordingMode | null;
   modeError: string | null;
   isSavingMode: boolean;
   setRecordingMode: (mode: RecordingMode) => Promise<boolean>;
   // NEW: Setters for status management
   setStatus: (status: RecordingStatus, message?: string) => void;
+  reconcileNothingToStop: (result: unknown) => Promise<boolean>;
   subscribeLifecycle: (callback: (status: RecordingStatus) => void) => () => void;
   subscribeStopped: (callback: RecordingStoppedListener) => () => void;
   retryVerification: () => void;
@@ -73,6 +74,11 @@ const shutdownStages = {
 } as const;
 
 const RecordingStateContext = createContext<RecordingStateContextType | null>(null);
+const RecordingElapsedContext = createContext(0);
+
+export function useRecordingElapsedSeconds() {
+  return useContext(RecordingElapsedContext);
+}
 
 export const useRecordingState = () => {
   const context = useContext(RecordingStateContext);
@@ -114,12 +120,33 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     isRecording: false,
     isPaused: false,
     isActive: false,
-    recordingDuration: null,
-    activeDuration: null,
     status: RecordingStatus.IDLE,  // NEW: Initialize with IDLE status
     statusMessage: undefined,       // NEW: No message initially
     verificationError: null,
   });
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [floating, setFloating] = useState<{ sessionId: string; visible: boolean } | null>(null);
+  const sessionId = state.sessionId;
+  useEffect(() => {
+    if (!sessionId) return;
+    let disposed = false;
+    let changed = false;
+    const subscription = listen<[string, boolean]>('floating-controls-visibility-changed', ({ payload: [owner, visible] }) => {
+      if (disposed || owner !== sessionId) return;
+      changed = true;
+      setFloating({ sessionId, visible });
+    });
+    const hydrate = async () => {
+      const visible = await invoke<boolean>('floating_controls_visible', { sessionId });
+      if (!disposed && !changed) setFloating({ sessionId, visible: visible === true });
+    };
+    void subscription.then(hydrate, hydrate).catch(() => {});
+    return () => {
+      disposed = true;
+      void subscription.then(unlisten => unlisten(), () => {});
+    };
+  }, [sessionId]);
+  const floatingControlsVisible = floating?.sessionId === sessionId && floating.visible;
 
   const lifecycleListeners = useRef(new Set<(status: RecordingStatus) => void>());
   const stoppedListeners = useRef(new Set<RecordingStoppedListener>());
@@ -144,6 +171,22 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     lifecycleListeners.current.forEach(callback => callback(status));
     setState(prev => ({ ...prev, status, statusMessage: message, verificationError: null }));
   }, []);
+
+  const reconcileNothingToStop = useCallback(async (result: unknown) => {
+    if (result !== false) return false;
+    const revision = lifecycleRevision.current;
+    const backend = await recordingService.getRecordingState().catch(() => {
+      console.warn('Could not read the recording state after Stop returned no recording.');
+      return null;
+    });
+    // A newer lifecycle event owns the UI if it arrived during the state read.
+    if (!backend?.is_recording && revision === lifecycleRevision.current && lifecycleStatus.current === RecordingStatus.STOPPING) {
+      setStatus(RecordingStatus.IDLE);
+      setElapsedSeconds(0);
+      setState(prev => ({ ...prev, sessionId: null, isRecording: false, isPaused: false, isActive: false }));
+    }
+    return true;
+  }, [setStatus]);
 
   useEffect(() => {
     let active = true;
@@ -202,9 +245,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
             prev.sessionMode === (backend.recording_mode ?? 'live') &&
             prev.isRecording === backend.is_recording &&
             prev.isPaused === backend.is_paused &&
-            prev.isActive === backend.is_active &&
-            prev.recordingDuration === backend.recording_duration &&
-            prev.activeDuration === backend.active_duration
+              prev.isActive === backend.is_active
           ) return prev;
           return {
             ...prev, status, sessionId,
@@ -212,10 +253,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
             isRecording: backend.is_recording,
             isPaused: backend.is_paused,
             isActive: backend.is_active,
-            recordingDuration: backend.recording_duration,
-            activeDuration: backend.active_duration,
           };
         });
+        setElapsedSeconds(Math.floor(backend.active_duration ?? 0));
       } catch {
         if (active) console.error('Could not synchronize recording state.');
       } finally {
@@ -278,15 +318,17 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     };
     // Register all events before the initial snapshot, including after a WebView reload.
     void Promise.all([
-      subscribe(listen<{ identity?: { session_id: string; recording_generation: string }; stage: keyof typeof shutdownStages; chunks_remaining?: number }>(
+      subscribe(listen<{ identity?: { session_id: string; recording_generation: string }; stage: keyof typeof shutdownStages; chunks_remaining?: number; estimated_seconds_remaining?: number | null }>(
         'recording-shutdown-progress', ({ payload }) => {
           const identity = recordingIdentity(payload.identity?.session_id, payload.identity?.recording_generation);
           if (!active || !identity || !Object.hasOwn(shutdownStages, payload.stage) ||
             (stoppedGeneration && compareGeneration(identity.generation, stoppedGeneration) <= 0) ||
             (lifecycleOwner && !sameIdentity(lifecycleOwner, identity))) return;
           lifecycleOwner = identity;
-          const message = payload.stage === 'processing_transcripts' && typeof payload.chunks_remaining === 'number' && payload.chunks_remaining > 0
+          const stageMessage = payload.stage === 'processing_transcripts' && typeof payload.chunks_remaining === 'number' && payload.chunks_remaining > 0
             ? `Finishing live transcription (${payload.chunks_remaining} segments remaining)…` : shutdownStages[payload.stage];
+          const estimate = payload.stage === 'processing_transcripts' ? drainEta(payload.estimated_seconds_remaining) : null;
+          const message = estimate ? `${stageMessage} ${estimate}.` : stageMessage;
           if (lifecycleStatus.current !== RecordingStatus.STOPPING) setStatus(RecordingStatus.STOPPING, message);
           setState(prev => prev.statusMessage === message && prev.sessionId === identity.id ? prev : {
             ...prev, statusMessage: message, sessionId: identity.id,
@@ -342,12 +384,12 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
           : payload.library_save_failed ? RecordingStatus.ERROR : RecordingStatus.IDLE;
         lifecycleStatus.current = status;
         stopPolling();
+        setElapsedSeconds(0);
         listeners.forEach(callback => callback(RecordingStatus.STOPPING));
         setState(prev => ({
             ...prev, status,
             statusMessage: payload?.library_save_failed ? payload.message : undefined,
             sessionId: null, isRecording: false, isPaused: false, isActive: false,
-            recordingDuration: null, activeDuration: null,
             verificationError: null,
         }));
         if (payload) stoppedListeners.current.forEach(callback => callback(payload,
@@ -391,17 +433,20 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
 
   const contextValue = useMemo(() => ({
     recordingMode, modeError, isSavingMode, setRecordingMode,
+    floatingControlsVisible,
     ...state,
-    setStatus, subscribeLifecycle, subscribeStopped, retryVerification,
+    setStatus, reconcileNothingToStop, subscribeLifecycle, subscribeStopped, retryVerification,
     isStarting: state.status === RecordingStatus.STARTING,
     isStopping: state.status === RecordingStatus.STOPPING,
     isProcessing: state.status === RecordingStatus.PROCESSING_TRANSCRIPTS,
     isSaving: state.status === RecordingStatus.SAVING,
-  }), [state, setStatus, subscribeLifecycle, subscribeStopped, retryVerification, recordingMode, modeError, isSavingMode, setRecordingMode]);
+  }), [state, setStatus, reconcileNothingToStop, subscribeLifecycle, subscribeStopped, retryVerification, recordingMode, modeError, isSavingMode, setRecordingMode, floatingControlsVisible]);
 
   return (
     <RecordingStateContext.Provider value={contextValue}>
-      {children}
+      <RecordingElapsedContext.Provider value={elapsedSeconds}>
+        {children}
+      </RecordingElapsedContext.Provider>
     </RecordingStateContext.Provider>
   );
 }

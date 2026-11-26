@@ -5,8 +5,9 @@ use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, Runtime,
+    AppHandle, Emitter, Listener, Manager, Runtime,
 };
+use tokio::{sync::Notify, time::Instant};
 
 use crate::start_request::{StartOutcome, StartSource};
 use crate::teams_detection::monitor::PromptView;
@@ -79,7 +80,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
         "settings" => {
             focus_main_window(app);
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.eval("window.location.assign('/settings')");
+                let _ = window.eval("if (typeof window.openSettings === 'undefined') window.location.assign('/settings'); else window.openSettings?.();");
             }
         }
         "check_updates" => check_updates_handler(app),
@@ -317,12 +318,13 @@ fn check_updates_handler<R: Runtime>(app: &AppHandle<R>) {
 }
 
 pub fn update_tray_menu<R: Runtime>(app: &AppHandle<R>) {
+    LIFECYCLE_WAKE.notify_one();
     // For sync update, spawn async task to get current state
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         // Small delay to ensure recording state has been updated
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        update_tray_menu_async(&app_clone).await;
+        refresh_tray_menu(&app_clone).await;
     });
 }
 
@@ -341,9 +343,8 @@ pub fn set_tray_state<R: Runtime>(app: &AppHandle<R>, state: RecordingState) {
     }
 }
 
-/// The recorder's own state, read without logging: the lifecycle loop calls it
-/// every second. A start the core has asked the window for counts as starting
-/// until the recording is running or the request has ended.
+/// The recorder's own state, read without logging. A start the core has asked
+/// the window for counts as starting until capture runs or the request ends.
 async fn get_current_recording_state() -> RecordingState {
     if crate::audio::recording_commands::is_stopping() {
         return RecordingState::Stopping;
@@ -369,6 +370,11 @@ pub(crate) async fn check_can_record<R: Runtime>(app: &AppHandle<R>) -> bool {
 }
 
 pub async fn update_tray_menu_async<R: Runtime>(app: &AppHandle<R>) {
+    LIFECYCLE_WAKE.notify_one();
+    refresh_tray_menu(app).await;
+}
+
+async fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
     // Get the current recording state
     let recording_state = get_current_recording_state().await;
     log::info!("Tray: Current recording state: {:?}", recording_state);
@@ -412,15 +418,7 @@ fn build_menu<R: Runtime>(
                     builder = builder.item(
                         &MenuItemBuilder::with_id(
                             format!("confirm_call:{}", prompt.key),
-                            prompt.event_title.as_ref().map_or_else(
-                                || format!("Record this {} call", prompt.provider.label()),
-                                |title| {
-                                    format!(
-                                        "Record this Teams call as {}",
-                                        clean_title(title).unwrap_or_default().replace('&', "&&")
-                                    )
-                                },
-                            ),
+                            prompt_menu_label(&prompt),
                         )
                         .build(app)?,
                     );
@@ -544,6 +542,8 @@ pub(crate) fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
 // ── Recording lifecycle: tray icon, tooltip and the power request ─────────
 
 static LIFECYCLE_STARTED: AtomicBool = AtomicBool::new(false);
+static LIFECYCLE_WAKE: Notify = Notify::const_new();
+const LIFECYCLE_SAFETY_CHECK: Duration = Duration::from_secs(30);
 
 /// What the tray shows, read from the recorder.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -563,24 +563,49 @@ pub fn start_lifecycle<R: Runtime>(app: &AppHandle<R>) {
         return;
     }
     crate::notifications::commands::listen_for_background_alerts(app);
+    for event in [
+        "recording-start-requested",
+        "recording-started",
+        "recording-paused",
+        "recording-resumed",
+        "recording-shutdown-progress",
+        "recording-stopped",
+        "recording-stop-failed",
+        "recording-error",
+    ] {
+        app.listen(event, |_| LIFECYCLE_WAKE.notify_one());
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         lifecycle_loop(app).await;
     });
 }
 
+pub(crate) fn wake_lifecycle() {
+    LIFECYCLE_WAKE.notify_one();
+}
+
+#[cfg(test)]
+pub(crate) fn lifecycle_notify_for_test() -> &'static Notify {
+    &LIFECYCLE_WAKE
+}
+
 async fn lifecycle_loop<R: Runtime>(app: AppHandle<R>) {
     let mut shown: Option<TrayView> = None;
     loop {
+        let changed = LIFECYCLE_WAKE.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let fallback = Instant::now() + LIFECYCLE_SAFETY_CHECK;
         // Each reading runs as a task of its own: if it panics (a poisoned
         // recorder lock, say) the loop survives, and the power request is let
         // go because the state is no longer known.
-        let view = match tauri::async_runtime::spawn(read_view()).await {
-            Ok(view) => view,
+        let (view, minute_tick) = match tauri::async_runtime::spawn(read_view()).await {
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 log::error!("Tray: could not read the recording state: {error}");
                 crate::power::reconcile(false);
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let _ = tokio::time::timeout_at(fallback, changed).await;
                 continue;
             }
         };
@@ -601,24 +626,35 @@ async fn lifecycle_loop<R: Runtime>(app: AppHandle<R>) {
             if state_changed || prompt_changed {
                 let app_for_menu = app.clone();
                 let _ = tauri::async_runtime::spawn(async move {
-                    update_tray_menu_async(&app_for_menu).await;
+                    refresh_tray_menu(&app_for_menu).await;
                 })
                 .await;
             }
             shown = Some(view);
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        let deadline = minute_tick.map_or(fallback, |minute| minute.min(fallback));
+        let _ = tokio::time::timeout_at(deadline, changed).await;
     }
 }
 
-async fn read_view() -> TrayView {
+fn time_to_next_minute(seconds: f64) -> Duration {
+    Duration::from_secs_f64(60.0 - seconds.max(0.0) % 60.0)
+}
+
+async fn read_view() -> (TrayView, Option<Instant>) {
     let state = get_current_recording_state().await;
     let live = matches!(state, RecordingState::Recording | RecordingState::Paused);
-    let (minutes, title) = if live {
+    let (minutes, title, minute_tick) = if live {
         let snapshot = crate::audio::recording_commands::get_recording_state().await;
         let seconds = snapshot
             .get("active_duration")
-            .and_then(|value| value.as_f64());
+            .and_then(|value| value.as_f64())
+            .filter(|value| value.is_finite());
+        let minute_tick = if state == RecordingState::Recording {
+            seconds.map(|value| Instant::now() + time_to_next_minute(value))
+        } else {
+            None
+        };
         let title = crate::audio::recording_commands::get_recording_meeting_name()
             .await
             .ok()
@@ -626,16 +662,20 @@ async fn read_view() -> TrayView {
         (
             seconds.map(|seconds| (seconds.max(0.0) / 60.0) as u64),
             title,
+            minute_tick,
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
-    TrayView {
-        state,
-        minutes,
-        title,
-        prompt: crate::teams_detection::monitor::pending_prompt(),
-    }
+    (
+        TrayView {
+            state,
+            minutes,
+            title,
+            prompt: crate::teams_detection::monitor::pending_prompt(),
+        },
+        minute_tick,
+    )
 }
 
 fn show_view<R: Runtime>(app: &AppHandle<R>, view: &TrayView, state_changed: bool) {
@@ -699,6 +739,14 @@ fn truncate_chars(text: &str, limit: usize) -> String {
 }
 
 /// A one-line, bounded title: control characters become spaces.
+fn prompt_menu_label(prompt: &crate::teams_detection::monitor::PromptView) -> String {
+    let label = format!("Record this {} call", prompt.provider.label());
+    match prompt.event_title.as_deref().and_then(clean_title) {
+        Some(title) => format!("{label} as {}", title.replace('&', "&&")),
+        None => label,
+    }
+}
+
 fn clean_title(raw: &str) -> Option<String> {
     let flat: String = raw
         .chars()
@@ -832,6 +880,14 @@ mod tests {
     }
 
     #[test]
+    fn the_next_tooltip_update_aligns_with_the_capture_clock() {
+        assert_eq!(time_to_next_minute(0.0), Duration::from_secs(60));
+        assert_eq!(time_to_next_minute(59.75), Duration::from_millis(250));
+        assert_eq!(time_to_next_minute(60.0), Duration::from_secs(60));
+        assert_eq!(time_to_next_minute(125.5), Duration::from_millis(54_500));
+    }
+
+    #[test]
     fn the_tooltip_tells_the_truth_about_each_state() {
         assert_eq!(
             tooltip_text(&view(RecordingState::Stopped, None, None)),
@@ -892,6 +948,20 @@ mod tests {
             "ClawScribe"
         );
         assert_eq!(clean_title("  \n\t "), None);
+    }
+
+    #[test]
+    fn a_calendar_prompt_uses_the_call_provider_in_its_menu_label() {
+        let prompt = PromptView {
+            key: "k".into(),
+            provider: Provider::GoogleMeet,
+            retry: false,
+            event_title: Some("Planning & review".into()),
+        };
+        assert_eq!(
+            prompt_menu_label(&prompt),
+            "Record this Google Meet call as Planning && review"
+        );
     }
 
     #[test]

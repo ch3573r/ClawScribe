@@ -56,15 +56,12 @@ test('saved audio offers transcription only after a click, sharing the toolbar d
   view.hooks.unmount();
 });
 
-test('missing audio offers opening the recording folder', async () => {
-  let opened = 0;
-  const view = panel({ audioStatus: 'missing', onOpenMeetingFolder: async () => { opened++; } });
+test('missing audio explains the transcript state without a duplicate folder action', () => {
+  const view = panel({ audioStatus: 'missing' });
   const empty = find(view.render(), 'VirtualizedTranscriptView').props.emptyState;
   assert.match(text(empty), /No transcript yet, and no audio file was found in this meeting's folder\./);
   assert.doesNotMatch(text(empty), /Transcribe now/);
-  assert.equal(text(find(empty, 'button')), 'Open recording folder');
-  await find(empty, 'button').props.onClick();
-  assert.equal(opened, 1);
+  assert.doesNotMatch(text(empty), /Open recording folder/);
   view.hooks.unmount();
 });
 
@@ -86,11 +83,32 @@ test('audio lookup shows loading without an offer or a missing-audio flash', () 
   view.hooks.unmount();
 });
 
+test('an untrusted recordings folder explains why saved audio cannot open', () => {
+  const reason = "This meeting's folder is not one of your recordings folders. Choose that folder again in Settings to play its audio.";
+  const view = panel({ audioStatus: 'missing', audioUnavailableReason: reason, transcripts: [{ id: 'segment-one', text: 'Synthetic speech.' }] });
+  assert.match(text(view.render()), /not one of your recordings folders/);
+  assert.doesNotMatch(text(view.render()), /Saved audio is unavailable/);
+  view.hooks.unmount();
+});
+
 test('meeting without a folder explains that no recording is attached', () => {
   const view = panel({ audioStatus: 'missing', meetingFolderPath: null });
   const empty = find(view.render(), 'VirtualizedTranscriptView').props.emptyState;
   assert.equal(text(empty), 'No transcript or recording is attached to this meeting.');
   assert.equal(find(empty, 'button'), undefined);
+  view.hooks.unmount();
+});
+
+test('a restored transcript without a recording folder shows missing audio without recovery actions', () => {
+  const view = panel({
+    audioStatus: 'missing',
+    meetingFolderPath: null,
+    transcripts: [{ id: 'restored-segment', text: 'Synthetic restored speech.' }],
+  });
+  const tree = view.render();
+  assert.match(text(tree), /Saved audio is unavailable\. You can still read and correct the transcript\./);
+  assert.doesNotMatch(text(tree), /recover|transcribe now|check again/i);
+  assert.equal(find(tree, 'TranscriptButtonGroup').props.audioAvailable, false);
   view.hooks.unmount();
 });
 
@@ -146,6 +164,7 @@ test('toolbar opens and closes the controlled transcription dialog', () => {
     '@tauri-apps/api/event': { listen: async () => () => {} },
     '@/lib/analytics': { trackButtonClick() {} },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/dialog': stubs(['Dialog', 'DialogContent', 'DialogHeader', 'DialogFooter', 'DialogTitle', 'DialogDescription']),
     '@/components/ui/textarea': { Textarea: 'textarea' },
     '@/components/ui/button-group': stubs(['ButtonGroup']),
     '@/components/ui/dropdown-menu': {},

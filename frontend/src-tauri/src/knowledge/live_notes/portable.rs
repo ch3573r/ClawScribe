@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-const MAX_TAG: usize = 12;
+const MAX_TAG: usize = evidence::MAX_EVIDENCE_ENTRIES;
 
 fn uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value)

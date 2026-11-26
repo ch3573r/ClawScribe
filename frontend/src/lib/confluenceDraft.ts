@@ -1,44 +1,15 @@
 "use client";
 
-export interface ConfluenceDraftInput {
-  meetingTitle: string;
-  meetingCreatedAt?: string | null;
-  summaryMarkdown: string;
-}
+import type { MeetingExportHeader } from "@/lib/meetingExportContent";
 
 export type ClipboardWriteMode = "rich" | "markdown";
 
-function formatDateTime(value?: string | null): string {
-  if (!value) return "Unknown";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString([], {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-export function buildConfluenceDraftMarkdown({
-  meetingTitle,
-  meetingCreatedAt,
-  summaryMarkdown,
-}: ConfluenceDraftInput): string {
-  const title = meetingTitle.trim() || "Untitled meeting";
+export function buildConfluenceDraft(header: MeetingExportHeader, summaryMarkdown: string): MeetingExportHeader {
   const body = summaryMarkdown.replace(/\[([^\]\n]*)\]\(#clawscribe-source-[0-9a-f]+\)/gi, "($1)").trim();
-  return [
-    `# ${title}`,
-    "",
-    `**Meeting date:** ${formatDateTime(meetingCreatedAt)}`,
-    `**Prepared by:** ClawScribe`,
-    "",
-    "---",
-    "",
-    body,
-    "",
-  ].join("\n");
+  return {
+    markdown: header.markdown.trimEnd() + "\n\n" + body + "\n",
+    html: markdownToConfluenceHtml(body, header.html),
+  };
 }
 
 function escapeHtml(value: string): string {
@@ -50,13 +21,20 @@ function escapeHtml(value: string): string {
 }
 
 function inlineMarkdownToHtml(value: string): string {
-  return value.split(/(`[^`]+`)/g).map((part, index) => {
-    if (index % 2) return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
-    return escapeHtml(part)
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
-  }).join("");
+  const tokens: string[] = [];
+  const token = (html: string) => `\u0000${tokens.push(html) - 1}\u0000`;
+  const emphasize = (text: string) => text
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  const formatLabel = (label: string) => label.split(/(`[^`]+`)/g)
+    .map((part, index) => index % 2 ? `<code>${part.slice(1, -1)}</code>` : emphasize(part)).join("");
+  const text = escapeHtml(value.replace(/\u0000/g, '\uFFFD')).replace(
+    /`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_match, code: string | undefined, label: string, href: string) => code === undefined
+      ? token(`<a href="${href}">${formatLabel(label)}</a>`)
+      : token(`<code>${code}</code>`),
+  );
+  return emphasize(text).replace(/\u0000(\d+)\u0000/g, (_match, index) => tokens[Number(index)]);
 }
 
 function splitTableRow(line: string): string[] {
@@ -196,15 +174,14 @@ function renderBlocks(lines: string[], quoteDepth = 0): string {
   return html.join("\n");
 }
 
-export function markdownToConfluenceHtml(markdown: string): string {
+export function markdownToConfluenceHtml(markdown: string, headerHtml = ""): string {
   const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
-  return `<div data-clawscribe-confluence-draft="true">${renderBlocks(lines)}</div>`;
+  return `<div data-clawscribe-confluence-draft="true">${headerHtml}${renderBlocks(lines)}</div>`;
 }
 
 export async function writeConfluenceDraftToClipboard(
-  markdown: string,
+  { markdown, html }: MeetingExportHeader,
 ): Promise<ClipboardWriteMode> {
-  const html = markdownToConfluenceHtml(markdown);
   const ClipboardItemCtor = window.ClipboardItem;
 
   if (navigator.clipboard?.write && ClipboardItemCtor) {

@@ -7,8 +7,9 @@ import { useUpcomingEvents } from "@/hooks/useUpcomingEvents";
 import { supportsJoinRecording, useJoinRecording } from "@/hooks/useJoinRecording";
 import { CalendarClock, Video } from "lucide-react";
 import { toast } from "sonner";
-import { calendarLinkFromEvent, setPendingCalendar, type MeetingCalendarLink } from "@/lib/meetingCalendar";
+import { setPendingCalendar, type MeetingCalendarLink } from "@/lib/meetingCalendar";
 import { UpcomingSeriesPreparation } from "@/components/MeetingDetails/SeriesPreparation";
+import { upcomingSeriesLink } from "@/lib/meeting-follow-through";
 
 function formatWhen(iso: string | null, allDay: boolean): string {
   if (!iso) return "";
@@ -45,6 +46,20 @@ function NextRecordingCalendar({ hasCalendars, choice }: {
   );
 }
 
+export function renderJoinRecordingStatus(recording: ReturnType<typeof useJoinRecording>) {
+  const { pending } = recording;
+  if (!pending) return null;
+  return <>
+    <span role="status" className="min-w-0 flex-1 break-words text-sm text-muted-foreground">
+      {pending.opening ? `Opening “${pending.subject}”…`
+        : pending.promptKey ? `Is this the call for “${pending.subject}”?`
+        : `Waiting for the call for “${pending.subject}”.`}
+    </span>
+    {pending.promptKey && <Button size="sm" disabled={recording.busy} onClick={recording.confirm}>Record this call</Button>}
+    <Button size="sm" variant="ghost" onClick={recording.cancel}>Cancel recording request</Button>
+  </>;
+}
+
 export function UpcomingMeetings() {
   const { entries: events, choice, isSelected, select, hasCalendars } = useUpcomingEvents(5);
   const recording = useJoinRecording();
@@ -64,6 +79,7 @@ export function UpcomingMeetings() {
         {events.map((entry) => {
           const { event: ev, sourceId, allDay, label } = entry;
           const selected = isSelected(entry);
+          const series = upcomingSeriesLink(entry);
           return (
             <div key={(sourceId ?? "microsoft") + ":" + ev.id} className="flex flex-wrap items-center justify-between gap-4 px-6 py-4">
               <div className="min-w-0">
@@ -73,10 +89,7 @@ export function UpcomingMeetings() {
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                {ev.seriesId && ev.start && <Button size="sm" variant="ghost" onClick={() => {
-                  const link = calendarLinkFromEvent({ ...ev, sourceId });
-                  setBrief({ ...link, attendees: [] });
-                }}>Preparation brief</Button>}
+                {series && <Button size="sm" variant="ghost" onClick={() => setBrief(series)}>Preparation brief</Button>}
                 <Button size="sm" variant="ghost" onClick={() => select(entry)} disabled={selected}>
                   {selected ? "Selected for next recording" : "Use for next recording"}
                 </Button>
@@ -96,13 +109,7 @@ export function UpcomingMeetings() {
       </div>
       {recording.pending && (
         <div className="flex flex-wrap items-center gap-2 border-t border-border px-6 py-2">
-          <span role="status" className="min-w-0 flex-1 break-words text-sm text-muted-foreground">
-            {recording.pending.opening ? `Opening “${recording.pending.subject}”…`
-              : recording.pending.promptKey ? `Is this Teams call “${recording.pending.subject}”?`
-              : `Waiting for the Teams call for “${recording.pending.subject}”.`}
-          </span>
-          {recording.pending.promptKey && <Button size="sm" disabled={recording.busy} onClick={recording.confirm}>Record this call</Button>}
-          <Button size="sm" variant="ghost" onClick={recording.cancel}>Cancel recording request</Button>
+          {renderJoinRecordingStatus(recording)}
         </div>
       )}
       <NextRecordingCalendar hasCalendars={hasCalendars} choice={choice} />

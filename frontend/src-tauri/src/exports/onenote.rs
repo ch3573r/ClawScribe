@@ -52,10 +52,25 @@ pub fn escape_xml(input: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
+            '\u{9}'
+            | '\u{a}'
+            | '\u{d}'
+            | '\u{20}'..='\u{d7ff}'
+            | '\u{e000}'..='\u{fffd}'
+            | '\u{10000}'..='\u{10ffff}' => out.push(c),
+            _ => {}
         }
     }
     out
+}
+
+#[cfg(test)]
+#[test]
+fn xhtml_strips_xml_invalid_characters_from_saved_text() {
+    assert_eq!(
+        escape_xml("<A\u{0}\u{b}\u{1f}\u{fffe}\u{ffff}>\t\n\r&😀"),
+        "&lt;A&gt;\t\n\r&amp;😀"
+    );
 }
 
 /// Build the OneNote page series for a meeting.
@@ -96,6 +111,7 @@ fn build_notes_xhtml(meeting: &MeetingExport) -> String {
     let mut body = String::new();
 
     body.push_str(&format!("<h1>{title}</h1>"));
+    body.push_str(&meeting.metadata.html);
     body.push_str("<p><b>Recorded by:</b> ClawScribe</p>");
 
     body.push_str("<h2>Summary</h2>");
@@ -143,7 +159,7 @@ fn build_notes_xhtml(meeting: &MeetingExport) -> String {
     let marker = format!(
         "{}{}",
         notes_marker_prefix(&meeting.meeting_id),
-        notes_revision(meeting)
+        notes_content_revision(meeting)
     );
     wrap_page(
         &title,
@@ -160,10 +176,21 @@ pub(super) fn notes_marker_prefix(meeting_id: &str) -> String {
 }
 
 pub(super) fn notes_revision(meeting: &MeetingExport) -> String {
-    super::ledger::artifact_key_hash(&[
-        &meeting.artifact_hash(),
+    let artifact = meeting.artifact_hash();
+    let mut parts = vec![
+        artifact.as_str(),
         meeting.summary_html.as_deref().unwrap_or(""),
-    ])
+    ];
+    parts.extend(meeting.metadata.bookmark_revision.as_deref());
+    super::ledger::artifact_key_hash(&parts)
+}
+
+pub(super) fn notes_content_revision(meeting: &MeetingExport) -> String {
+    let revision = notes_revision(meeting);
+    match &meeting.metadata.revision {
+        Some(metadata) => super::ledger::artifact_key_hash(&[&revision, metadata]),
+        None => revision,
+    }
 }
 
 /// Split the transcript into page bodies that each stay under the byte budget.
@@ -263,6 +290,7 @@ mod tests {
             }],
             transcript_excerpt: transcript,
             summary_html: None,
+            metadata: Default::default(),
         }
     }
 
@@ -280,6 +308,33 @@ mod tests {
         assert!(xhtml.contains("Unassigned"));
         assert!(xhtml.contains("due 2026-06-20"));
         assert!(!contains_active_content(xhtml));
+    }
+
+    #[test]
+    fn notes_header_renders_saved_metadata_and_versions_the_bookmark_selection() {
+        let mut meeting = sample(None);
+        let revision = notes_revision(&meeting);
+        let header = super::super::metadata::Header {
+            date: "2026-06-15 10:00".into(),
+            duration: Some("00:30:00".into()),
+            attendees: vec!["Alex & Dana".into()],
+            tags: vec!["Roadmap".into()],
+            bookmarks: vec![(42.0, "<Decision>".into())],
+        };
+        meeting.metadata = header.onenote(true);
+        let pages = build_pages(&meeting, DEFAULT_PAGE_BUDGET_BYTES);
+        let body = &pages[0].xhtml;
+        assert!(body.contains("<li>Date: 2026-06-15 10:00</li><li>Duration: 00:30:00</li>"));
+        assert!(body.contains("<li>Attendees: Alex &amp; Dana</li><li>Project tags: Roadmap</li>"));
+        assert!(body.contains("<li><strong>[00:00:42]</strong> &lt;Decision&gt;</li>"));
+        assert!(body.find("Notes and bookmarks").unwrap() < body.find("<h2>Summary").unwrap());
+        assert_ne!(notes_revision(&meeting), revision);
+        meeting.metadata = super::super::metadata::Header {
+            bookmarks: Vec::new(),
+            ..header
+        }
+        .onenote(true);
+        assert_eq!(notes_revision(&meeting), revision);
     }
 
     #[test]

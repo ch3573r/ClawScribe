@@ -131,6 +131,13 @@ pub(crate) fn resolve_recording_folder(
     folder: &Path,
     roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
+    resolve_recording_folder_if_present(folder, roots)?.ok_or_else(|| REFUSED.into())
+}
+
+pub(crate) fn resolve_recording_folder_if_present(
+    folder: &Path,
+    roots: &[PathBuf],
+) -> Result<Option<PathBuf>, String> {
     if folder.as_os_str().is_empty() {
         return Err(REFUSED.into());
     }
@@ -140,17 +147,21 @@ pub(crate) fn resolve_recording_folder(
     if !crate::trusted_roots::text_allowed(&folder.to_string_lossy(), roots) {
         return Err(REFUSED.into());
     }
-    if is_cleanup_path(folder) || directory_chain(folder).is_err() {
+    if is_cleanup_path(folder) {
         return Err(REFUSED.into());
     }
-    let canonical = folder.canonicalize().map_err(|_| REFUSED.to_string())?;
+    let canonical = match directory_chain(folder).and_then(|()| folder.canonicalize()) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(REFUSED.into()),
+    };
     let inside = roots
         .iter()
         .filter(|root| directory_chain(root).is_ok())
         .filter_map(|root| root.canonicalize().ok())
         .any(|root| canonical != root && canonical.starts_with(&root));
     if inside && !is_cleanup_path(&canonical) {
-        Ok(canonical)
+        Ok(Some(canonical))
     } else {
         Err(REFUSED.into())
     }

@@ -11,6 +11,7 @@ use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 
 use super::models;
 
@@ -38,11 +39,21 @@ pub struct SidecarManager {
     /// Health status
     is_healthy: Arc<AtomicBool>,
 
-    /// Shutdown flag
-    should_shutdown: Arc<AtomicBool>,
+    /// Cancels the health and idle tasks that belong to the current spawn.
+    /// Each spawn installs a fresh token so tasks never outlive their process.
+    background: Arc<std::sync::Mutex<CancellationToken>>,
 
-    /// A resource whose cleanup has not actually completed cannot be reused.
+    /// Serialize process and pipe replacement with teardown.
+    lifecycle: Arc<Mutex<()>>,
+
+    /// Once detached, this manager can finish existing work but cannot spawn.
+    retired: Arc<AtomicBool>,
+
+    /// Reject queued exchanges while the lifecycle owner is cleaning up.
     quarantined: Arc<AtomicBool>,
+
+    #[cfg(windows)]
+    job: Arc<crate::windows_job::Job>,
 
     /// Active request count (for graceful shutdown)
     active_request_count: Arc<AtomicUsize>,
@@ -155,10 +166,16 @@ impl SidecarManager {
             request_lock: Arc::new(Mutex::new(())),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
-            should_shutdown: Arc::new(AtomicBool::new(false)),
+            background: Arc::new(std::sync::Mutex::new(cancelled_token())),
+            lifecycle: Arc::new(Mutex::new(())),
+            retired: Arc::new(AtomicBool::new(false)),
             quarantined: Arc::new(AtomicBool::new(false)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path,
+            #[cfg(windows)]
+            job: Arc::new(
+                crate::windows_job::Job::new().context("Could not create local helper job")?,
+            ),
             current_model_path: Arc::new(RwLock::new(None)),
             idle_timeout_secs,
         })
@@ -192,10 +209,15 @@ impl SidecarManager {
 
     /// Ensure sidecar is running, spawn if needed
     pub async fn ensure_running(&self, model_path: PathBuf) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.check_retired()?;
         // Check if already running with correct model
         {
             let current_model = self.current_model_path.read().await;
-            if current_model.as_ref() == Some(&model_path) && self.is_healthy() {
+            if current_model.as_ref() == Some(&model_path)
+                && self.is_healthy()
+                && self.child_running().await
+            {
                 log::debug!("Sidecar already running with correct model");
                 self.update_activity().await;
                 return Ok(());
@@ -209,7 +231,8 @@ impl SidecarManager {
     /// Spawn the sidecar process
     async fn spawn(&self, model_path: PathBuf) -> Result<()> {
         // Shutdown existing process if running
-        self.shutdown().await?;
+        self.shutdown_locked(SHUTDOWN_DEADLINE).await?;
+        self.check_retired()?;
 
         log::info!("Spawning llama-helper sidecar");
         log::info!("Model path: {}", model_path.display());
@@ -228,7 +251,10 @@ impl SidecarManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) // Log stderr to main process
-            .env("LLAMA_IDLE_TIMEOUT", self.idle_timeout_secs.to_string());
+            .env(
+                "LLAMA_IDLE_TIMEOUT",
+                helper_idle_backstop_secs(self.idle_timeout_secs).to_string(),
+            );
 
         #[cfg(target_os = "windows")]
         {
@@ -240,12 +266,25 @@ impl SidecarManager {
 
         // Retain the manager slot before spawning; no await may lose a new child.
         let mut child_lock = self.child_process.lock().await;
+        self.check_retired()?;
         let mut child = command.spawn().with_context(|| {
             format!(
                 "Failed to spawn llama-helper at {:?}",
                 self.helper_binary_path
             )
         })?;
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::BorrowedHandle;
+            let handle = child
+                .raw_handle()
+                .ok_or_else(|| anyhow!("Local helper exited during startup"))?;
+            // SAFETY: child owns this handle for the duration of assignment.
+            self.job
+                .assign(unsafe { BorrowedHandle::borrow_raw(handle) })
+                .context("Could not contain the local helper process")?;
+        }
 
         let stdin = child
             .stdin
@@ -277,14 +316,15 @@ impl SidecarManager {
         }
 
         self.is_healthy.store(true, Ordering::SeqCst);
-        self.should_shutdown.store(false, Ordering::SeqCst);
         self.update_activity().await;
 
         log::info!("Sidecar spawned successfully");
 
-        // Start background tasks
-        self.start_health_check_loop();
-        self.start_idle_check_loop();
+        // Start background tasks bound to this spawn only. The preceding
+        // shutdown() cancelled the previous spawn's tasks.
+        let token = self.replace_background_token();
+        self.start_health_check_loop(token.clone());
+        self.start_idle_check_loop(token);
 
         Ok(())
     }
@@ -316,6 +356,7 @@ impl SidecarManager {
             _ = token.cancelled() => return Err(anyhow!("Generation cancelled while queued")),
             lock = self.request_lock.lock() => lock,
         };
+        self.check_retired()?;
         if self.quarantined.load(Ordering::SeqCst) {
             return Err(anyhow!(
                 "Local summary helper is quarantined until cleanup completes"
@@ -326,8 +367,22 @@ impl SidecarManager {
             _ = token.cancelled() => None,
             result = async {
                 // Model switches and process startup belong to the exchange owner too.
-                if let Some(model) = model { self.ensure_running(model).await?; }
-                self.exchange_request(request_json, timeout).await
+                if let Some(path) = &model { self.ensure_running(path.clone()).await?; }
+                let started = Instant::now();
+                let result = self.exchange_request(&request_json, timeout).await;
+                // A sleeping machine can miss the parent's idle timer. The
+                // helper may already have written Goodbye or closed its pipes.
+                // Retry an idle handshake or a disconnect before a response.
+                if let (Some(model), Err(error)) = (model, &result) {
+                    if error.is::<RetryableHelperDisconnect>() {
+                        self.ensure_running_after_disconnect(model).await?;
+                        return self.exchange_request(
+                            &request_json,
+                            timeout.saturating_sub(started.elapsed()),
+                        ).await;
+                    }
+                }
+                result
             } => Some(result),
         };
         match result {
@@ -344,69 +399,57 @@ impl SidecarManager {
         }
     }
 
-    async fn exchange_request(&self, request_json: String, timeout: Duration) -> Result<String> {
-        // Write request to stdin
-        {
-            let mut stdin_lock = self.stdin_writer.lock().await;
-            let stdin = stdin_lock
-                .as_mut()
-                .ok_or_else(|| anyhow!("Sidecar not running"))?;
+    async fn ensure_running_after_disconnect(&self, model: PathBuf) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.check_retired()?;
+        self.spawn(model).await
+    }
 
-            stdin
-                .write_all(request_json.as_bytes())
-                .await
-                .context("Failed to write request to stdin")?;
-            stdin
-                .write_all(b"\n")
-                .await
-                .context("Failed to write newline")?;
-            stdin.flush().await.context("Failed to flush stdin")?;
+    async fn exchange_request(&self, request_json: &str, timeout: Duration) -> Result<String> {
+        if timeout.is_zero() {
+            return Err(anyhow!("Request timed out"));
         }
+        tokio::time::timeout(timeout, async {
+            {
+                let mut stdin_lock = self.stdin_writer.lock().await;
+                let stdin = stdin_lock
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Sidecar not running"))?;
+                stdin
+                    .write_all(request_json.as_bytes())
+                    .await
+                    .map_err(|error| {
+                        classify_stdin_error("Failed to write request to stdin", error)
+                    })?;
+                stdin
+                    .write_all(b"\n")
+                    .await
+                    .map_err(|error| classify_stdin_error("Failed to write newline", error))?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|error| classify_stdin_error("Failed to flush stdin", error))?;
+            }
 
-        // Read response from stdout with timeout
-        match tokio::time::timeout(timeout, self.read_response()).await {
-            Ok(Ok(response)) => {
-                self.update_activity().await;
-                Ok(response)
+            let response = self.read_response(Some(Instant::now())).await?;
+            if is_goodbye(&response) {
+                return Err(RetryableHelperDisconnect("Local summary helper went idle").into());
             }
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                // Timeout reached - shutdown sidecar to stop generation
-                log::error!("Request timeout after {:?}, shutting down sidecar", timeout);
-                if let Err(shutdown_err) = self.shutdown().await {
-                    log::error!("Failed to shutdown sidecar after timeout: {}", shutdown_err);
-                }
-                Err(anyhow!("Request timed out after {:?}", timeout))
-            }
-        }
+            self.update_activity().await;
+            Ok(response)
+        })
+        .await
+        .map_err(|_| anyhow!("Request timed out after {timeout:?}"))?
     }
 
     /// Read a single line response from stdout
-    async fn read_response(&self) -> Result<String> {
+    async fn read_response(&self, written_at: Option<Instant>) -> Result<String> {
         let mut stdout_lock = self.stdout_reader.lock().await;
         let reader = stdout_lock
             .as_mut()
             .ok_or_else(|| anyhow!("Sidecar not running"))?;
 
-        const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-        let mut line = Vec::new();
-        (&mut *reader)
-            .take((MAX_RESPONSE_BYTES + 1) as u64)
-            .read_until(b'\n', &mut line)
-            .await
-            .context("Failed to read response from stdout")?;
-        if line.len() > MAX_RESPONSE_BYTES {
-            return Err(anyhow!("Local helper response exceeds its protocol limit"));
-        }
-
-        if line.is_empty() {
-            return Err(anyhow!("Sidecar closed stdout (process may have crashed)"));
-        }
-
-        Ok(String::from_utf8(line)
-            .map_err(|_| anyhow!("Local helper response is not UTF-8"))?
-            .trim()
-            .to_string())
+        read_response_line(reader, written_at).await
     }
 
     /// Send ping to keep sidecar alive
@@ -436,7 +479,7 @@ impl SidecarManager {
             }
 
             // Read response
-            let response = tokio::time::timeout(timeout, self.read_response()).await??;
+            let response = tokio::time::timeout(timeout, self.read_response(None)).await??;
 
             let resp: serde_json::Value = serde_json::from_str(&response)?;
             if resp.get("type").and_then(|t| t.as_str()) == Some("pong") {
@@ -457,13 +500,24 @@ impl SidecarManager {
         result
     }
 
+    pub(super) fn retire(&self) {
+        self.retired.store(true, Ordering::SeqCst);
+        self.cancel_background();
+    }
+
+    fn check_retired(&self) -> Result<()> {
+        super::client::check_exit_admission()?;
+        if self.retired.load(Ordering::SeqCst) {
+            return Err(anyhow!("Local summary helper is stopping"));
+        }
+        Ok(())
+    }
+
     /// Gracefully shutdown the sidecar
     /// Waits for active requests to complete before killing the process
     pub async fn shutdown_gracefully(&self) -> Result<()> {
         log::info!("Initiating graceful shutdown of sidecar");
-
-        // Set shutdown flag to prevent new internal tasks
-        self.should_shutdown.store(true, Ordering::SeqCst);
+        self.retire();
 
         // Wait for active requests to complete
         // We poll every 500ms
@@ -494,30 +548,91 @@ impl SidecarManager {
 
     /// Force shutdown the sidecar
     pub async fn shutdown(&self) -> Result<()> {
-        self.should_shutdown.store(true, Ordering::SeqCst);
+        self.shutdown_within(SHUTDOWN_DEADLINE).await
+    }
+
+    async fn shutdown_within(&self, deadline: Duration) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.shutdown_locked(deadline).await
+    }
+
+    async fn shutdown_locked(&self, deadline: Duration) -> Result<()> {
+        self.cancel_background();
         self.quarantined.store(true, Ordering::SeqCst);
         self.is_healthy.store(false, Ordering::SeqCst);
-        // Do not write a polite message into a potentially full stdin pipe.
-        // Keep the child in its manager slot across every await. If startup's
-        // waiter is cancelled, the next cleanup owner still has the actual child.
-        {
-            let mut child_lock = self.child_process.lock().await;
-            if let Some(child) = child_lock.as_mut() {
-                loop {
-                    let _ = child.start_kill();
-                    match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
-                        Ok(Ok(_)) => break,
-                        _ => tokio::time::sleep(Duration::from_millis(50)).await,
-                    }
-                }
+        // Kill the process before attempting to acquire pipe locks. Keep its
+        // handle in the manager until exit is confirmed, even on cancellation.
+        let confirmed = {
+            let mut slot = self.child_process.lock().await;
+            let confirmed = match slot.as_mut() {
+                Some(child) => kill_and_reap(child, deadline).await,
+                None => true,
+            };
+            if confirmed {
+                *slot = None;
             }
-            *child_lock = None;
-        }
-        *self.stdin_writer.lock().await = None;
-        *self.stdout_reader.lock().await = None;
-        *self.current_model_path.write().await = None;
+            confirmed
+        };
+        let cleanup = tokio::time::timeout(Duration::from_secs(2), async {
+            *self.stdin_writer.lock().await = None;
+            *self.stdout_reader.lock().await = None;
+            *self.current_model_path.write().await = None;
+        })
+        .await;
         self.quarantined.store(false, Ordering::SeqCst);
-        Ok(())
+        if !confirmed {
+            return Err(anyhow!(
+                "Local summary helper did not stop within {} seconds",
+                deadline.as_secs()
+            ));
+        }
+        cleanup.context("Local summary helper pipe cleanup timed out")
+    }
+
+    async fn child_running(&self) -> bool {
+        match self.child_process.lock().await.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+
+    fn replace_background_token(&self) -> CancellationToken {
+        let token = CancellationToken::new();
+        let previous = {
+            let mut slot = self.background.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::replace(&mut *slot, token.clone())
+        };
+        previous.cancel();
+        token
+    }
+
+    fn cancel_background(&self) {
+        self.background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancel();
+    }
+
+    /// A handle onto the same shared state for a background task.
+    fn shared(&self) -> Self {
+        Self {
+            child_process: self.child_process.clone(),
+            stdin_writer: self.stdin_writer.clone(),
+            stdout_reader: self.stdout_reader.clone(),
+            request_lock: self.request_lock.clone(),
+            last_activity: self.last_activity.clone(),
+            is_healthy: self.is_healthy.clone(),
+            background: self.background.clone(),
+            lifecycle: self.lifecycle.clone(),
+            retired: self.retired.clone(),
+            quarantined: self.quarantined.clone(),
+            #[cfg(windows)]
+            job: self.job.clone(),
+            active_request_count: self.active_request_count.clone(),
+            helper_binary_path: self.helper_binary_path.clone(),
+            current_model_path: self.current_model_path.clone(),
+            idle_timeout_secs: self.idle_timeout_secs,
+        }
     }
     /// Check if sidecar is healthy
     pub fn is_healthy(&self) -> bool {
@@ -536,33 +651,19 @@ impl SidecarManager {
         last_activity.elapsed().as_secs()
     }
 
-    /// Start health check loop (runs in background)
-    fn start_health_check_loop(&self) {
-        let manager = Self {
-            child_process: self.child_process.clone(),
-            stdin_writer: self.stdin_writer.clone(),
-            stdout_reader: self.stdout_reader.clone(),
-            request_lock: self.request_lock.clone(),
-            last_activity: self.last_activity.clone(),
-            is_healthy: self.is_healthy.clone(),
-            should_shutdown: self.should_shutdown.clone(),
-            quarantined: self.quarantined.clone(),
-            active_request_count: self.active_request_count.clone(),
-            helper_binary_path: self.helper_binary_path.clone(),
-            current_model_path: self.current_model_path.clone(),
-            idle_timeout_secs: self.idle_timeout_secs,
-        };
+    /// Start health check loop (runs in background until `token` is cancelled)
+    fn start_health_check_loop(&self, token: CancellationToken) {
+        let manager = self.shared();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            let mut interval = tokio::time::interval(HEALTH_CHECK_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                interval.tick().await;
-
-                if manager.should_shutdown.load(Ordering::SeqCst) {
-                    log::debug!("Health check loop: shutdown flag set, exiting");
-                    break;
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => break,
+                    _ = interval.tick() => {}
                 }
 
                 if !manager.is_healthy() {
@@ -576,7 +677,14 @@ impl SidecarManager {
                 }
 
                 log::debug!("Health check: sending ping");
-                if let Err(e) = manager.send_ping().await {
+                // Not raced against the token: dropping send_ping between its
+                // write and read would leave a stray pong for the next
+                // request. It is bounded by its own 5 s timeout.
+                let ping = manager.send_ping().await;
+                if token.is_cancelled() {
+                    break;
+                }
+                if let Err(e) = ping {
                     log::warn!("Health check failed: {}", e);
                     manager.is_healthy.store(false, Ordering::SeqCst);
                 }
@@ -586,33 +694,19 @@ impl SidecarManager {
         });
     }
 
-    /// Start idle check loop (runs in background)
-    fn start_idle_check_loop(&self) {
-        let manager = Self {
-            child_process: self.child_process.clone(),
-            stdin_writer: self.stdin_writer.clone(),
-            stdout_reader: self.stdout_reader.clone(),
-            request_lock: self.request_lock.clone(),
-            last_activity: self.last_activity.clone(),
-            is_healthy: self.is_healthy.clone(),
-            should_shutdown: self.should_shutdown.clone(),
-            quarantined: self.quarantined.clone(),
-            active_request_count: self.active_request_count.clone(),
-            helper_binary_path: self.helper_binary_path.clone(),
-            current_model_path: self.current_model_path.clone(),
-            idle_timeout_secs: self.idle_timeout_secs,
-        };
+    /// Start idle check loop (runs in background until `token` is cancelled)
+    fn start_idle_check_loop(&self, token: CancellationToken) {
+        let manager = self.shared();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(IDLE_CHECK_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                interval.tick().await;
-
-                if manager.should_shutdown.load(Ordering::SeqCst) {
-                    log::debug!("Idle check loop: shutdown flag set, exiting");
-                    break;
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => break,
+                    _ = interval.tick() => {}
                 }
 
                 // Don't shutdown if we are busy
@@ -626,6 +720,20 @@ impl SidecarManager {
                 log::debug!("Idle check: {}s since last activity", idle_secs);
 
                 if idle_secs > manager.idle_timeout_secs {
+                    // Own the exchange so no request for this helper is
+                    // mid-flight, then re-check: a newer spawn or a request
+                    // may have arrived since the tick.
+                    let Ok(_exchange) = manager.request_lock.try_lock() else {
+                        continue;
+                    };
+                    if token.is_cancelled() {
+                        break;
+                    }
+                    if manager.active_request_count.load(Ordering::SeqCst) > 0
+                        || manager.seconds_since_activity().await <= manager.idle_timeout_secs
+                    {
+                        continue;
+                    }
                     log::info!(
                         "Sidecar idle for {}s (timeout: {}s), shutting down",
                         idle_secs,
@@ -645,23 +753,214 @@ impl SidecarManager {
     }
 }
 
-impl Drop for SidecarManager {
-    fn drop(&mut self) {
-        // Set shutdown flag
-        self.should_shutdown.store(true, Ordering::SeqCst);
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
 
-        // Note: Actual cleanup happens in shutdown() method
-        // We can't do async work in Drop, so this is best-effort
-        log::debug!("SidecarManager dropped");
+/// The app ends an idle helper itself. The helper's own idle exit is only a
+/// backstop for an orphaned helper, so it must fire after the app's idle task
+/// would have acted; otherwise a request could write to an exited helper.
+fn helper_idle_backstop_secs(app_idle_timeout_secs: u64) -> u64 {
+    app_idle_timeout_secs
+        .saturating_add(2 * IDLE_CHECK_INTERVAL.as_secs())
+        .saturating_add(HEALTH_CHECK_INTERVAL.as_secs())
+}
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+const IDLE_DISCONNECT_WINDOW: Duration = Duration::from_millis(500);
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct RetryableHelperDisconnect(&'static str);
+
+fn classify_stdin_error(context: &'static str, error: std::io::Error) -> anyhow::Error {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
+    if matches!(error.kind(), BrokenPipe | ConnectionReset | UnexpectedEof) {
+        return RetryableHelperDisconnect(context).into();
+    }
+    anyhow::Error::new(error).context(context)
+}
+
+async fn read_response_line(
+    reader: impl tokio::io::AsyncBufRead + Unpin,
+    written_at: Option<Instant>,
+) -> Result<String> {
+    const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+    const CLOSED: &str = "Sidecar closed stdout (process may have crashed)";
+    let mut line = Vec::new();
+    let read = reader
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_until(b'\n', &mut line)
+        .await;
+    let closed = match &read {
+        Ok(0) => true,
+        Err(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
+        ),
+        Ok(_) => false,
+    };
+    if closed
+        && line.is_empty()
+        && written_at.is_some_and(|at| at.elapsed() <= IDLE_DISCONNECT_WINDOW)
+    {
+        return Err(RetryableHelperDisconnect(CLOSED).into());
+    }
+    read.context("Failed to read response from stdout")?;
+    if line.len() > MAX_RESPONSE_BYTES {
+        return Err(anyhow!("Local helper response exceeds its protocol limit"));
+    }
+    if !line.ends_with(b"\n") {
+        return Err(anyhow!(CLOSED));
+    }
+    Ok(String::from_utf8(line)
+        .map_err(|_| anyhow!("Local helper response is not UTF-8"))?
+        .trim()
+        .to_string())
+}
+
+fn is_goodbye(response: &str) -> bool {
+    // The helper emits a short JSONL control frame. Skip parsing large answers here.
+    response.len() <= 32
+        && serde_json::from_str::<serde_json::Value>(response)
+            .is_ok_and(|value| value == serde_json::json!({"type": "goodbye"}))
+}
+
+fn cancelled_token() -> CancellationToken {
+    let token = CancellationToken::new();
+    token.cancel();
+    token
+}
+
+/// Kills `child` and waits for it, retrying until `deadline` elapses.
+/// Returns whether the exit was confirmed.
+async fn kill_and_reap(child: &mut Child, deadline: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        let _ = child.start_kill();
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return false;
+        }
+        match tokio::time::timeout(remaining.min(Duration::from_secs(1)), child.wait()).await {
+            Ok(Ok(_)) => return true,
+            Ok(Err(error)) => {
+                log::warn!("Waiting for the local summary helper failed: {}", error);
+            }
+            Err(_) => {}
+        }
+        if started.elapsed() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn only_disconnects_while_sending_a_request_are_retryable() {
+        use std::io::{Error, ErrorKind};
+        for (kind, retryable) in [
+            (ErrorKind::BrokenPipe, true),
+            (ErrorKind::ConnectionReset, true),
+            (ErrorKind::UnexpectedEof, true),
+            (ErrorKind::TimedOut, false),
+            (ErrorKind::PermissionDenied, false),
+            (ErrorKind::WriteZero, false),
+        ] {
+            let error = classify_stdin_error("Could not send request", Error::from(kind));
+            assert_eq!(error.is::<RetryableHelperDisconnect>(), retryable);
+        }
+    }
+
+    #[tokio::test]
+    async fn only_an_immediate_disconnect_without_response_bytes_is_retryable() {
+        let recent = Instant::now();
+        let old = recent - IDLE_DISCONNECT_WINDOW - Duration::from_secs(1);
+        for (response, written_at, retryable) in [
+            (&b""[..], recent, true),
+            (&b""[..], old, false),
+            (&b"{\"type\":"[..], recent, false),
+        ] {
+            let error = read_response_line(response, Some(written_at))
+                .await
+                .unwrap_err();
+            assert_eq!(error.is::<RetryableHelperDisconnect>(), retryable);
+        }
+    }
+
+    #[test]
+    fn helper_idle_exit_is_a_backstop_after_the_app_idle_task() {
+        let app = 300;
+        let helper = helper_idle_backstop_secs(app);
+        assert!(helper >= app + IDLE_CHECK_INTERVAL.as_secs() + HEALTH_CHECK_INTERVAL.as_secs());
+        assert_eq!(helper_idle_backstop_secs(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn replacing_the_background_token_cancels_the_previous_spawn() {
+        let background = Arc::new(std::sync::Mutex::new(cancelled_token()));
+        let first = CancellationToken::new();
+        *background.lock().unwrap() = first.clone();
+        let next = CancellationToken::new();
+        let previous = std::mem::replace(&mut *background.lock().unwrap(), next.clone());
+        previous.cancel();
+        assert!(first.is_cancelled());
+        assert!(!next.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn kill_and_reap_confirms_a_killable_child() {
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("cmd.exe");
+        #[cfg(windows)]
+        command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+        #[cfg(not(windows))]
+        let mut command = tokio::process::Command::new("sleep");
+        #[cfg(not(windows))]
+        command.arg("30");
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        assert!(kill_and_reap(&mut child, Duration::from_secs(10)).await);
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn kill_and_reap_gives_up_at_a_zero_deadline() {
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("cmd.exe");
+        #[cfg(windows)]
+        command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+        #[cfg(not(windows))]
+        let mut command = tokio::process::Command::new("sleep");
+        #[cfg(not(windows))]
+        command.arg("30");
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        // Bounded: returns instead of looping forever.
+        assert!(!kill_and_reap(&mut child, Duration::ZERO).await);
     }
 }
 
 #[cfg(all(test, windows))]
-mod protocol_tests {
+pub(super) mod protocol_tests {
     use super::*;
     use tokio::process::{ChildStderr, Command};
 
-    async fn fake_sidecar(script: &str) -> (Arc<SidecarManager>, BufReader<ChildStderr>) {
+    pub(in crate::summary::summary_engine) async fn fake_sidecar(
+        script: &str,
+    ) -> (Arc<SidecarManager>, BufReader<ChildStderr>) {
         // Separate process startup from the protocol deadlines being tested.
         let script = format!("[Console]::Error.WriteLine('started');\n{script}");
         let mut child = Command::new("powershell.exe")
@@ -695,14 +994,50 @@ mod protocol_tests {
             request_lock: Arc::new(Mutex::new(())),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(true)),
-            should_shutdown: Arc::new(AtomicBool::new(false)),
+            background: Arc::new(std::sync::Mutex::new(cancelled_token())),
+            lifecycle: Arc::new(Mutex::new(())),
+            retired: Arc::new(AtomicBool::new(false)),
             quarantined: Arc::new(AtomicBool::new(false)),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path: PathBuf::new(),
+            job: Arc::new(crate::windows_job::Job::new().unwrap()),
             current_model_path: Arc::new(RwLock::new(None)),
             idle_timeout_secs: 600,
         });
         (manager, stderr)
+    }
+
+    #[tokio::test]
+    async fn retired_manager_cannot_start_another_helper() {
+        let (manager, _) = fake_sidecar("Start-Sleep -Seconds 60").await;
+        let lifecycle = manager.lifecycle.lock().await;
+        let requester = manager.clone();
+        let queued =
+            tokio::spawn(async move { requester.ensure_running("synthetic".into()).await });
+        manager.retire();
+        drop(lifecycle);
+        assert!(queued
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("stopping"));
+        manager.shutdown().await.unwrap();
+        assert!(manager.child_process.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unsolicited_idle_goodbye_is_handled_as_a_closed_helper() {
+        let (manager, _) = fake_sidecar(
+            "[Console]::In.ReadLine() | Out-Null; [Console]::Out.WriteLine('{\"type\":\"goodbye\"}')",
+        ).await;
+        let error = manager
+            .send_request("{}".into(), Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("went idle"));
+        assert!(error.is::<RetryableHelperDisconnect>());
+        assert!(manager.child_process.lock().await.is_none());
     }
 
     #[tokio::test]

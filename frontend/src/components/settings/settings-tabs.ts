@@ -3,7 +3,7 @@ export const SETTINGS_TABS = [
   "general", "privacy", "appearance", "recording", "shortcuts",
   "transcription", "summary", "memory",
   "ms365", "calendars", "confluence", "webhook", "assistant",
-  "diagnostics",
+  "diagnostics", "about",
 ] as const;
 
 // Tab values that older links and callers still use.

@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import { shortcutModifiers } from './shortcuts';
 import type { PlaybackShortcut, ShortcutEvent } from './playback-controls';
 
@@ -19,26 +20,56 @@ export const PLAYER_ACTIONS: { key: PlayerAction; label: string; command: Playba
   { key: 'faster', label: 'Faster playback', command: { type: 'rate', direction: 1 } },
   { key: 'follow', label: 'Follow playback in the transcript', command: { type: 'follow' } },
   { key: 'bookmark', label: 'Add a bookmark at this moment', command: { type: 'bookmark' } },
-  { key: 'find', label: 'Find in transcript', command: { type: 'find' } },
+  { key: 'find', label: 'Find in the focused pane', command: { type: 'find' } },
 ];
 
 export const PLAYER_BINDINGS_STORAGE = 'clawscribe.playerShortcuts.v1';
 
-export function loadPlayerBindings(): PlayerBindings {
-  const bindings = { ...DEFAULT_PLAYER_BINDINGS };
-  try {
-    const raw = window.localStorage.getItem(PLAYER_BINDINGS_STORAGE);
-    if (!raw) return bindings;
-    const saved = JSON.parse(raw);
-    for (const { key } of PLAYER_ACTIONS) {
-      if (typeof saved?.[key] === 'string' && saved[key].trim()) bindings[key] = saved[key];
-    }
-  } catch { /* The player is still usable when storage is unavailable. */ }
+let nativeBindings: PlayerBindings | null = null;
+let loading: Promise<PlayerBindings> | null = null;
+let savedRevision = 0;
+
+function readBindings(value: unknown): Partial<PlayerBindings> {
+  const bindings: Partial<PlayerBindings> = {};
+  if (!value || typeof value !== 'object') return bindings;
+  const source = value as Record<string, unknown>;
+  for (const { key } of PLAYER_ACTIONS) {
+    const chord = source[key];
+    if (typeof chord === 'string' && chord.trim()) bindings[key] = chord;
+  }
   return bindings;
 }
 
-export function savePlayerBindings(bindings: PlayerBindings) {
-  window.localStorage.setItem(PLAYER_BINDINGS_STORAGE, JSON.stringify(bindings));
+function readLegacyBindings(): Partial<PlayerBindings> | null {
+  try {
+    const raw = window.localStorage.getItem(PLAYER_BINDINGS_STORAGE);
+    return raw ? readBindings(JSON.parse(raw)) : null;
+  } catch { return null; }
+}
+
+export function loadPlayerBindings(): PlayerBindings {
+  return nativeBindings ?? { ...DEFAULT_PLAYER_BINDINGS, ...readLegacyBindings() };
+}
+
+export function refreshPlayerBindings(): Promise<PlayerBindings> {
+  const revision = savedRevision;
+  loading ??= invoke<unknown>('load_player_shortcuts', { legacyBindings: readLegacyBindings() })
+    .then(bindings => {
+      if (revision === savedRevision) nativeBindings = { ...DEFAULT_PLAYER_BINDINGS, ...readBindings(bindings) };
+      return loadPlayerBindings();
+    })
+    .catch(loadPlayerBindings)
+    .finally(() => { loading = null; });
+  return loading;
+}
+
+export async function savePlayerBindings(bindings: PlayerBindings): Promise<void> {
+  await invoke('set_player_shortcuts', { bindings });
+  savedRevision += 1;
+  nativeBindings = bindings;
+  try {
+    window.localStorage.setItem(PLAYER_BINDINGS_STORAGE, JSON.stringify(bindings));
+  } catch { /* This copy is for older builds. The native save already succeeded. */ }
   window.dispatchEvent(new Event(PLAYER_BINDINGS_STORAGE));
 }
 

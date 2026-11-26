@@ -1,17 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
-import { Loader2, CheckCircle2, Download, X } from 'lucide-react';
 import { recommendedForSpeed, usePcTestResults } from '@/components/settings/pcTestResults';
-import { Button } from '@/components/ui/button';
+import { TranscriptionModelTable } from '@/components/settings/ParakeetModelTable';
+import { SettingsCard, SettingsRow } from '@/components/ui/settings-layout';
+import { formatModelSize, type ModelStatus as TableModelStatus } from '@/lib/parakeet';
 
-type ModelStatus =
-  | 'Available'
-  | 'Missing'
-  | { Downloading: { progress: number } }
-  | { Error: string };
+type ModelStatus = Exclude<TableModelStatus, { Downloading: number }> | { Downloading: { progress: number } };
 
 interface RawModelInfo {
   name: string;
@@ -26,21 +22,6 @@ interface NemotronModelManagerProps {
   className?: string;
 }
 
-/** Short variant tag from the model id (the two exports share a display name). */
-function variantTag(name: string): string {
-  return name.includes('int8') ? 'INT8 · GPU only' : 'FP16';
-}
-
-function gbLabel(sizeMb: number): string {
-  return sizeMb >= 1024 ? `${(sizeMb / 1024).toFixed(1)} GB` : `${sizeMb} MB`;
-}
-
-/**
- * Settings model manager for the Nemotron streaming engine (Beta). Lists every
- * downloadable variant (fp16 — CPU-capable; int8 — smaller, GPU-only). Downloads
- * and selection mirror the Parakeet manager; the UI is token-colored for dark mode
- * and self-contained (no lib/nemotron layer).
- */
 export function NemotronModelManager({
   selectedModel,
   onModelSelect,
@@ -50,7 +31,8 @@ export function NemotronModelManager({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const speedRecommendations = recommendedForSpeed(models, usePcTestResults());
+  const pcResults = usePcTestResults();
+  const speedRecommendations = recommendedForSpeed(models, pcResults);
 
   // Patch one model in the list by name, leaving the others untouched.
   const patchModel = (name: string, patch: Partial<RawModelInfo>) =>
@@ -93,162 +75,57 @@ export function NemotronModelManager({
     return () => subscriptions.forEach(subscription => void subscription.then(unlisten => unlisten()));
   }, []);
 
-  const download = async (model: RawModelInfo) => {
-    patchModel(model.name, { status: { Downloading: { progress: 0 } } });
+  const download = async (modelName: string) => {
+    const model = models.find(item => item.name === modelName);
+    if (!model) return;
+    patchModel(modelName, { status: { Downloading: { progress: 0 } } });
     toast.info('Downloading Nemotron…', {
-      description: `About ${gbLabel(model.size_mb)} — this may take a few minutes`,
+      description: `This download is about ${formatModelSize(model.size_mb)}.`,
     });
     try {
-      await invoke('nemotron_download_model', { modelName: model.name });
+      await invoke('nemotron_download_model', { modelName });
     } catch (e) {
-      patchModel(model.name, { status: { Error: e instanceof Error ? e.message : 'Download failed' } });
+      patchModel(modelName, { status: { Error: e instanceof Error ? e.message : 'Download failed' } });
     }
   };
 
-  const cancel = async (model: RawModelInfo) => {
+  const cancel = async (modelName: string) => {
     try {
-      await invoke('nemotron_cancel_download', { modelName: model.name });
-      patchModel(model.name, { status: 'Missing' });
+      await invoke('nemotron_cancel_download', { modelName });
+      patchModel(modelName, { status: 'Missing' });
       toast.info('Download cancelled');
     } catch (e) {
       console.error('Cancel failed:', e);
+      toast.error('Failed to cancel download');
     }
   };
 
-  if (loading) {
-    return (
-      <div className={`space-y-3 ${className}`}>
-        <div className="h-24 animate-pulse rounded-lg bg-muted" />
-        <div className="h-24 animate-pulse rounded-lg bg-muted" />
-      </div>
-    );
-  }
-  if (error || models.length === 0) {
-    return (
-      <div className={`rounded-lg border border-destructive/30 bg-destructive/10 p-4 ${className}`}>
-        <p className="text-sm text-destructive">Failed to load Nemotron models</p>
-        {error && <p className="mt-1 text-xs text-destructive/80">{error}</p>}
-      </div>
-    );
-  }
+  const rows = models.map(model => ({
+    name: model.name,
+    label: model.name.includes('int8') ? 'Nemotron 3.5 ASR INT8' : 'Nemotron 3.5 ASR FP16',
+    bestFor: model.description || 'Multilingual streaming transcription',
+    sizeMb: model.size_mb,
+    status: typeof model.status === 'object' && 'Downloading' in model.status
+      ? { Downloading: model.status.Downloading.progress }
+      : model.status,
+    recommendation: speedRecommendations.get(model.name),
+    badge: model.name.includes('int8') ? 'GPU only' : undefined,
+  }));
 
   return (
-    <div className={`space-y-3 ${className}`}>
-      {models.map((model) => {
-        const isAvailable = model.status === 'Available';
-        const isMissing = model.status === 'Missing';
-        const isError = typeof model.status === 'object' && 'Error' in model.status;
-        const progress =
-          typeof model.status === 'object' && 'Downloading' in model.status
-            ? model.status.Downloading.progress
-            : null;
-        const isSelected = selectedModel === model.name;
-
-        return (
-          <div
-            key={model.name}
-            className={`relative rounded-lg border-2 p-4 transition-all ${
-              isSelected && isAvailable ? 'border-primary bg-primary/5' : 'border-border bg-card'
-            }`}
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1">
-                <div className="mb-1 flex items-center gap-2">
-                  <span className="text-2xl">🌊</span>
-                  <h3 className="font-semibold text-foreground">Nemotron 3.5 ASR</h3>
-                  <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
-                    {variantTag(model.name)}
-                  </span>
-                  <span className="rounded-full bg-warning px-2 py-0.5 text-xs font-medium text-warning-foreground">
-                    Beta
-                  </span>
-                  {speedRecommendations.has(model.name) && <span className="text-xs text-muted-foreground">{speedRecommendations.get(model.name)}</span>}
-                  {isSelected && isAvailable && (
-                    <span className="flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-xs font-medium text-primary-foreground">
-                      <CheckCircle2 className="h-3 w-3" /> Selected
-                    </span>
-                  )}
-                </div>
-                <p className="ml-9 text-sm text-muted-foreground">
-                  {model.description ??
-                    'Streaming, multilingual (incl. German). Tries GPU (DirectML).'}{' '}
-                  ~{gbLabel(model.size_mb)}.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {isAvailable && (
-                  <div className="flex items-center gap-1.5 text-success-foreground">
-                    <div className="h-2 w-2 rounded-full bg-success-foreground" />
-                    <span className="text-xs font-medium">Ready</span>
-                  </div>
-                )}
-                {isAvailable && !isSelected && onModelSelect && <Button variant="outline" size="sm" aria-label={`Use Nemotron ${variantTag(model.name)}`} onClick={() => onModelSelect(model.name)}>Use</Button>}
-                {isMissing && (
-                  <Button variant="ghost"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      download(model);
-                    }}
-                    className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 h-auto hover:text-primary-foreground"
-                  >
-                    <Download className="h-4 w-4" />
-                    Download
-                  </Button>
-                )}
-                {progress === null && isError && (
-                  <Button variant="ghost"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      download(model);
-                    }}
-                    className="rounded-md bg-destructive px-3 py-1.5 text-sm font-medium text-destructive-foreground transition-colors hover:bg-destructive/90 h-auto hover:text-destructive-foreground"
-                  >
-                    Retry
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            <AnimatePresence>
-              {progress !== null && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="mt-3 border-t border-border pt-3"
-                >
-                  <div className="mb-2 flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-primary">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      <span className="text-sm font-medium">Downloading…</span>
-                      <span className="text-sm font-semibold">{Math.round(progress)}%</span>
-                    </div>
-                    <Button variant="ghost"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        cancel(model);
-                      }}
-                      className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive h-auto [&_svg]:!size-3"
-                    >
-                      <X className="h-3 w-3" />
-                      Cancel
-                    </Button>
-                  </div>
-                  <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                    <motion.div
-                      className="h-full rounded-full bg-primary"
-                      initial={{ width: 0 }}
-                      animate={{ width: `${progress}%` }}
-                      transition={{ duration: 0.3, ease: 'easeOut' }}
-                    />
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        );
-      })}
-    </div>
+    <SettingsCard title="Nemotron models" description="Beta" className={className} aria-busy={loading}>
+      {loading ? <SettingsRow title="Loading models" role="status" />
+        : error ? <SettingsRow title="Models unavailable" description={error} role="alert" />
+        : rows.length === 0 ? <SettingsRow title="No Nemotron models available" />
+        : <TranscriptionModelTable
+          label="Nemotron models"
+          models={rows}
+          selectedModel={selectedModel}
+          results={pcResults}
+          onSelect={onModelSelect}
+          onDownload={download}
+          onCancel={cancel}
+        />}
+    </SettingsCard>
   );
 }

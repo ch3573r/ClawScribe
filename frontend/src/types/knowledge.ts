@@ -5,7 +5,7 @@ export interface MeetingFilter {
 }
 export type KnowledgeScope = { kind: 'meeting'; meeting_id: string } | { kind: 'library'; filter: MeetingFilter };
 export type ConversationOwner = { kind: 'meeting' | 'library'; id: string };
-export type LibraryConversation = ConversationOwner & { first_question?: string | null; created_at?: string };
+export type LibraryConversation = ConversationOwner & { title?: string | null; first_question?: string | null; created_at?: string };
 export interface TextSpan { transcript_id: string; start_byte: number; end_byte: number }
 export type EvidenceLocator = {kind:'transcript';meeting_id:string;transcript_ids:string[];spans:TextSpan[];start_seconds:number|null}
   | {kind:'document';document_id:string;page:number|null;paragraph:number;spans?:TextSpan[]}

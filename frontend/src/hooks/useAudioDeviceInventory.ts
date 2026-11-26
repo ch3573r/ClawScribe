@@ -11,7 +11,6 @@ export function useAudioDeviceInventory() {
   const revision = useRef(0);
   const refresh = useCallback(async () => {
     const request = ++revision.current;
-    setInventory({ status: 'checking', data: null });
     try {
       const data = await invoke<AudioDeviceInventory>('get_recording_device_inventory');
       if (request === revision.current) setInventory({ status: 'ready', data });

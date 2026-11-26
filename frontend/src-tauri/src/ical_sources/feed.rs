@@ -1,5 +1,8 @@
-use reqwest::{blocking::Client, redirect::Policy, Url};
-use std::{io::Read, time::Duration};
+use reqwest::{redirect::Policy, Client, Response, StatusCode, Url};
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    time::Duration,
+};
 
 // A published work calendar with full details exceeds 2 MiB within a year,
 // mostly through HTML meeting descriptions.
@@ -12,6 +15,7 @@ const DOWNLOAD_FAILED: &str =
     "Could not download the calendar. Check the subscription link and try again.";
 const REDIRECTED: &str =
     "The calendar redirected to another address. Use the final HTTPS subscription URL.";
+const MAX_REDIRECTS: usize = 3;
 
 pub(super) fn subscription_url(input: &str) -> Result<Url, String> {
     let input = input.trim();
@@ -202,46 +206,243 @@ pub(super) fn without_unused_text(calendar: &str) -> String {
     kept
 }
 
-// Only the explicitly subscribed URL is requested. Neither redirects nor
-// URIs embedded in calendar properties trigger follow-up requests.
-pub(super) fn download(url: Url) -> Result<String, String> {
-    let client = Client::builder()
-        .https_only(true)
-        .redirect(Policy::none())
-        .referer(false)
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|_| DOWNLOAD_FAILED)?;
-    let response = client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "text/calendar")
-        .timeout(Duration::from_secs(15))
-        .send()
-        .map_err(|_| DOWNLOAD_FAILED)?;
-    read_response(response.status(), response.content_length(), response)
+fn public_v4(ip: Ipv4Addr) -> bool {
+    let [first, second, ..] = ip.octets();
+    first != 0
+        && first < 224
+        && !(first == 100 && (64..=127).contains(&second))
+        && !(first == 198 && matches!(second, 18 | 19))
+        && ip.octets()[..3] != [192, 0, 0]
+        && !ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
 }
 
-fn read_response(
-    status: reqwest::StatusCode,
-    length: Option<u64>,
-    body: impl Read,
-) -> Result<String, String> {
+fn public_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => public_v4(ip),
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or_else(
+            || {
+                let [first, second, ..] = ip.segments();
+                first & 0xe000 == 0x2000 && first != 0x2002 && (first, second) != (0x2001, 0)
+            },
+            public_v4,
+        ),
+    }
+}
+
+fn redirect_target(
+    current: &Url,
+    location: &str,
+    redirects: usize,
+    proxy_configured: bool,
+) -> Result<Url, &'static str> {
+    if proxy_configured
+        || redirects >= MAX_REDIRECTS
+        || location.len() > 8192
+        || location
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return Err(REDIRECTED);
+    }
+    let target = current.join(location).map_err(|_| REDIRECTED)?;
+    if target.scheme() != "https"
+        || !target.username().is_empty()
+        || target.password().is_some()
+        || target.fragment().is_some()
+    {
+        return Err(REDIRECTED);
+    }
+    match target.host() {
+        Some(url::Host::Domain(host))
+            if !host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+                && !host.trim_end_matches('.').ends_with(".localhost") =>
+        {
+            Ok(target)
+        }
+        Some(url::Host::Ipv4(ip)) if public_address(ip.into()) => Ok(target),
+        Some(url::Host::Ipv6(ip)) if public_address(ip.into()) => Ok(target),
+        _ => Err(REDIRECTED),
+    }
+}
+
+pub(super) fn download(url: Url) -> Result<String, String> {
+    tauri::async_runtime::block_on(download_feed(url))
+}
+
+fn system_proxy_configured() -> bool {
+    let env_proxy = [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+    #[cfg(windows)]
+    let env_proxy = env_proxy || windows_proxy_enabled();
+    #[cfg(target_os = "macos")]
+    let env_proxy = env_proxy || macos_proxy_enabled();
+    env_proxy
+}
+
+#[cfg(windows)]
+fn windows_proxy_enabled() -> bool {
+    use windows::{core::w, Win32::UI::Shell::SHRegGetBoolUSValueW};
+    // Read the same Internet Settings flag used by reqwest on Windows.
+    unsafe {
+        SHRegGetBoolUSValueW(
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"),
+            w!("ProxyEnable"),
+            false,
+            false,
+        )
+    }
+    .as_bool()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_proxy_enabled() -> bool {
+    use std::ffi::c_void;
+    type CfRef = *const c_void;
+
+    #[link(name = "SystemConfiguration", kind = "framework")]
+    extern "C" {
+        fn SCDynamicStoreCopyProxies(store: CfRef) -> CfRef;
+        static kSCPropNetProxiesHTTPEnable: CfRef;
+        static kSCPropNetProxiesHTTPSEnable: CfRef;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFDictionaryGetValue(dictionary: CfRef, key: CfRef) -> CfRef;
+        fn CFGetTypeID(value: CfRef) -> usize;
+        fn CFNumberGetTypeID() -> usize;
+        fn CFNumberGetValue(number: CfRef, kind: u32, value: *mut i32) -> u8;
+        fn CFRelease(value: CfRef);
+    }
+    const CF_NUMBER_INT_TYPE: u32 = 9;
+
+    // Read the System Configuration snapshot that reqwest uses. Dictionary
+    // values are borrowed until the copied snapshot is released.
+    unsafe {
+        let proxies = SCDynamicStoreCopyProxies(std::ptr::null());
+        if proxies.is_null() {
+            return false;
+        }
+        let enabled = [kSCPropNetProxiesHTTPEnable, kSCPropNetProxiesHTTPSEnable]
+            .into_iter()
+            .any(|key| {
+                let value = CFDictionaryGetValue(proxies, key);
+                let mut flag = 0;
+                !value.is_null()
+                    && CFGetTypeID(value) == CFNumberGetTypeID()
+                    && CFNumberGetValue(value, CF_NUMBER_INT_TYPE, &mut flag) != 0
+                    && flag != 0
+            });
+        CFRelease(proxies);
+        enabled
+    }
+}
+
+fn request_failure(redirects: usize) -> &'static str {
+    if redirects == 0 {
+        DOWNLOAD_FAILED
+    } else {
+        REDIRECTED
+    }
+}
+
+async fn download_feed(mut target: Url) -> Result<String, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let builder = || {
+        Client::builder()
+            .https_only(true)
+            .redirect(Policy::none())
+            .referer(false)
+            .connect_timeout(Duration::from_secs(5))
+    };
+    let mut client = builder().build().map_err(|_| DOWNLOAD_FAILED)?;
+    for redirects in 0..=MAX_REDIRECTS {
+        let send = client
+            .get(target.clone())
+            .header(reqwest::header::ACCEPT, "text/calendar")
+            .send();
+        let response = tokio::time::timeout_at(deadline, send)
+            .await
+            .map_err(|_| request_failure(redirects))?
+            .map_err(|_| request_failure(redirects))?;
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return tokio::time::timeout_at(deadline, read_response(response))
+                .await
+                .map_err(|_| DOWNLOAD_FAILED)?;
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(REDIRECTED)?;
+        target = redirect_target(&target, location, redirects, system_proxy_configured())?;
+
+        // Pin the checked addresses so a second DNS lookup or proxy cannot
+        // resolve a redirect to a local endpoint. The original subscription
+        // remains explicitly configured by the user and can use system proxies.
+        let mut next = builder().no_proxy();
+        if let Some(url::Host::Domain(host)) = target.host() {
+            let port = target.port_or_known_default().ok_or(REDIRECTED)?;
+            let addresses =
+                tokio::time::timeout_at(deadline, tokio::net::lookup_host((host, port)))
+                    .await
+                    .map_err(|_| REDIRECTED)?
+                    .map_err(|_| REDIRECTED)?
+                    .collect::<Vec<_>>();
+            if addresses.is_empty()
+                || addresses
+                    .iter()
+                    .any(|address| !public_address(address.ip()))
+            {
+                return Err(REDIRECTED.into());
+            }
+            next = next.resolve_to_addrs(host, &addresses);
+        }
+        client = next.build().map_err(|_| REDIRECTED)?;
+    }
+    Err(REDIRECTED.into())
+}
+
+fn response_body_allowed(status: StatusCode, length: Option<u64>) -> Result<(), &'static str> {
     if status.is_redirection() {
-        return Err(REDIRECTED.into());
+        return Err(REDIRECTED);
     }
     if !status.is_success() {
-        return Err(DOWNLOAD_FAILED.into());
+        return Err(DOWNLOAD_FAILED);
     }
     if length.is_some_and(|n| n > MAX_BYTES as u64) {
-        return Err(TOO_LARGE.into());
+        return Err(TOO_LARGE);
     }
+    Ok(())
+}
+
+fn append_chunk(bytes: &mut Vec<u8>, chunk: &[u8]) -> Result<(), &'static str> {
+    if chunk.len() > MAX_BYTES.saturating_sub(bytes.len()) {
+        return Err(TOO_LARGE);
+    }
+    bytes.extend_from_slice(chunk);
+    Ok(())
+}
+
+async fn read_response(mut response: Response) -> Result<String, String> {
+    response_body_allowed(response.status(), response.content_length())?;
     let mut bytes = Vec::new();
-    body.take(MAX_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| DOWNLOAD_FAILED)?;
-    if bytes.len() > MAX_BYTES {
-        return Err(TOO_LARGE.into());
+    while let Some(chunk) = response.chunk().await.map_err(|_| DOWNLOAD_FAILED)? {
+        append_chunk(&mut bytes, &chunk)?;
     }
+    calendar_from_bytes(bytes)
+}
+
+fn calendar_from_bytes(bytes: Vec<u8>) -> Result<String, String> {
     let calendar = String::from_utf8(bytes).map_err(|_| INVALID_CALENDAR)?;
     validate_calendar(&calendar)?;
     Ok(without_unused_text(&calendar))
@@ -250,39 +451,89 @@ fn read_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::StatusCode;
+
+    #[test]
+    fn redirects_allow_bounded_https_hops_and_reject_local_or_unsafe_targets() {
+        let start = subscription_url("https://example.com/calendar.ics").unwrap();
+        assert_eq!(
+            redirect_target(&start, "/new.ics", 0, false)
+                .unwrap()
+                .as_str(),
+            "https://example.com/new.ics"
+        );
+        assert_eq!(
+            redirect_target(&start, "https://example.org/feed.ics", 2, false)
+                .unwrap()
+                .host_str(),
+            Some("example.org")
+        );
+        assert!(redirect_target(&start, "/new.ics", MAX_REDIRECTS, false).is_err());
+        for target in [
+            "http://example.org/feed.ics",
+            "https://user@example.org/feed.ics",
+            "https://example.org/feed.ics#secret",
+            "https://localhost./feed.ics",
+            "https://127.1/feed.ics",
+            "https://169.254.1.1/feed.ics",
+            "https://[::ffff:127.0.0.1]/feed.ics",
+            "https://192.0.0.255/feed.ics",
+            "https://198.19.255.255/feed.ics",
+            "https://[::ffff:198.18.0.1]/feed.ics",
+            "https://[2002:7f00:1::]/feed.ics",
+            "https://[2001:0::1]/feed.ics",
+            "https://[fc00::1]/feed.ics",
+            "https://[fe80::1]/feed.ics",
+        ] {
+            assert_eq!(
+                redirect_target(&start, target, 0, false).unwrap_err(),
+                REDIRECTED
+            );
+        }
+        for address in ["192.0.1.0", "198.20.0.0", "2001:1::1", "2003::1"] {
+            assert!(public_address(address.parse().unwrap()), "{address}");
+        }
+    }
+
+    #[test]
+    fn proxy_and_redirect_hop_failures_use_final_url_guidance() {
+        let start = subscription_url("https://example.com/calendar.ics").unwrap();
+        assert_eq!(
+            redirect_target(&start, "/new.ics", 0, true),
+            Err(REDIRECTED)
+        );
+        assert_eq!(request_failure(0), DOWNLOAD_FAILED);
+        assert_eq!(request_failure(1), REDIRECTED);
+    }
 
     #[test]
     fn rejects_redirects_and_failed_status_without_disclosing_response() {
-        let body = b"https://example.com/private-calendar".as_slice();
         assert_eq!(
-            read_response(StatusCode::TEMPORARY_REDIRECT, None, body).unwrap_err(),
+            response_body_allowed(StatusCode::TEMPORARY_REDIRECT, None).unwrap_err(),
             REDIRECTED
         );
         assert_eq!(
-            read_response(StatusCode::UNAUTHORIZED, None, body).unwrap_err(),
+            response_body_allowed(StatusCode::UNAUTHORIZED, None).unwrap_err(),
             DOWNLOAD_FAILED
         );
     }
 
     #[test]
     fn streamed_and_advertised_sizes_are_bounded_and_invalid_utf8_is_rejected() {
-        let bytes = vec![b'x'; MAX_BYTES + 1];
+        let mut bytes = vec![b'x'; MAX_BYTES - 1];
+        assert!(append_chunk(&mut bytes, b"x").is_ok());
+        assert_eq!(append_chunk(&mut bytes, b"y"), Err(TOO_LARGE));
+        assert_eq!(bytes.len(), MAX_BYTES);
         assert_eq!(
-            read_response(StatusCode::OK, None, bytes.as_slice()).unwrap_err(),
+            response_body_allowed(StatusCode::OK, Some(MAX_BYTES as u64 + 1)).unwrap_err(),
             TOO_LARGE
         );
         assert_eq!(
-            read_response(StatusCode::OK, Some(MAX_BYTES as u64 + 1), &b""[..]).unwrap_err(),
-            TOO_LARGE
-        );
-        assert_eq!(
-            read_response(StatusCode::OK, None, &[0xff][..]).unwrap_err(),
+            calendar_from_bytes(vec![0xff]).unwrap_err(),
             INVALID_CALENDAR
         );
         let sample = "BEGIN:VCALENDAR\nATTACH:https://example.com/attachment\nEND:VCALENDAR";
         assert_eq!(
-            read_response(StatusCode::OK, None, sample.as_bytes()).unwrap(),
+            calendar_from_bytes(sample.as_bytes().to_vec()).unwrap(),
             "BEGIN:VCALENDAR\nEND:VCALENDAR"
         );
     }

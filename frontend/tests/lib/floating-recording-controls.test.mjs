@@ -119,6 +119,35 @@ test('closing while paused leaves capture alone and stops polling', async t => {
   assert.equal(paused.hasTimer(), false);
 });
 
+test('the active panel shows the actual recording mode and can open the main window', async t => {
+  const app = panel(t, { ...live, mode: 'audio_only' });
+  await flush();
+  assert.ok(app.render().includes('Audio only'));
+  await app.control('Open main window').props.onClick();
+  assert.equal(app.calls.at(-1).name, 'floating_open_main');
+  assert.ok(app.control('Stop recording'));
+});
+
+test('the microphone warning appears immediately when reopening into a quiet capture', async t => {
+  const quiet = { ...live, levels: { mic: { rms: 0, peak: 0 }, system: null }, mic_no_signal: true };
+  const app = panel(t, quiet);
+  await flush();
+  assert.ok(app.render().includes('No microphone signal yet'));
+  await app.refresh({ ...quiet, paused: true });
+  assert.ok(!app.render().includes('No microphone signal yet'));
+  await app.refresh({ ...quiet, mic_no_signal: false });
+  assert.ok(!app.render().includes('No microphone signal yet'));
+});
+
+test('the saving panel shows an ETA only while the native drain provides one', async t => {
+  const saving = { state: 'saving', seconds: 70, progress: 40, message: 'Finishing live transcription…' };
+  const app = panel(t, { ...saving, estimated_seconds_remaining: 64.1 });
+  await flush();
+  assert.ok(app.render().includes('About 1 min 5 sec remaining'));
+  await app.refresh({ ...saving, progress: 90, message: 'Saving recording…' });
+  assert.ok(!app.render().includes('About 1 min 5 sec remaining'));
+});
+
 test('pause and resume target the bound recording and preserve an unfinished note', async t => {
   const app = panel(t);
   await flush();

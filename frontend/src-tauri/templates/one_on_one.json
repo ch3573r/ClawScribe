@@ -1,0 +1,27 @@
+{
+  "name": "1:1 check-in",
+  "description": "Capture priorities, feedback, support needs, and commitments from a one-to-one meeting.",
+  "sections": [
+    {
+      "title": "Check-in",
+      "instruction": "Summarize how each person described their current workload and priorities. Attribute views to the speaker and cite the supplied source tags",
+      "format": "paragraph"
+    },
+    {
+      "title": "Feedback and support",
+      "instruction": "List specific feedback, examples, blockers, and requests for support. Keep feedback separate from commitments and cite the supplied source tag for each point",
+      "format": "list"
+    },
+    {
+      "title": "Action items",
+      "instruction": "List agreed follow-ups. Copy the supplied source tag beside each task and include owners or dates only when explicitly stated",
+      "format": "list",
+      "item_format": "- Task in one sentence. Owner: name or Unassigned; Due: date or Not specified"
+    },
+    {
+      "title": "Topics to revisit",
+      "instruction": "List concerns or questions left open, using only the supplied source tags that support them",
+      "format": "list"
+    }
+  ]
+}

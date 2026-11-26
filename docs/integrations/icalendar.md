@@ -12,10 +12,14 @@ calendar's subscription address, which may give anyone holding it access to
 your calendar. The app protects the address with the operating system's
 credential storage.
 
+ClawScribe follows up to three HTTPS redirects to public destinations. If a
+redirect is rejected, enter the final HTTPS subscription URL from your provider.
+
 **Upcoming meetings** on Home shows the next five meetings across your
 configured calendars for the coming week. The Calendars page lists more
-occurrences. Timed invitations with a supported Teams URL offer **Join** and
-**Join and record** on Windows. ClawScribe accepts eligible Teams meeting URLs
+occurrences. The sidebar's **Next up** card also offers **Preparation brief**
+for a recurring event and **Join and record** for a supported Teams link on
+Windows. ClawScribe accepts eligible Teams meeting URLs
 from the event's URL field or, when that field has no supported Teams link,
 from the description if its eligible links all refer to one room. ClawScribe
 removes the description text and retains the selected join URL, including query
@@ -51,9 +55,10 @@ an email address cannot be named and are never sent. A title you edit
 yourself is your own text and is not withheld.
 
 A meeting without a link, or one you unlinked, shows **Link calendar event**.
-It lists events from the calendars connected now that overlap the recording.
-Imported calendars load only the coming week, so older recordings can be
-relinked from Microsoft 365 only. If a source could not be read, the list names
+It looks for events from the calendars connected now on the recording day.
+Change **Calendar date** to search a different day. iCalendar files and feeds
+can supply past events when the source still contains them.
+If a source could not be read, the list names
 it and offers **Check again**; the same action appears while recording when the
 automatic match was partial. A meeting whose saved link cannot be read, for
 example after restoring a damaged archive, appears unlinked and can be linked
@@ -62,11 +67,11 @@ still be the former event's subject.
 Older checked selections require review because earlier versions checked each
 invitation by default.
 
-In a saved meeting linked to a recurring iCalendar or Microsoft 365 event,
-open **Attendance** and choose **Template for this series**. The choice becomes
+After reviewing attendance for a saved recurring iCalendar or Microsoft 365
+event, choose **Recurring meeting** from the meeting menu. The template becomes
 the default for linked occurrences from that iCalendar source or Microsoft 365
 account, including rescheduled occurrences. Choose **Use the default template**
-to clear the preference. Changing a series template leaves attendance as it was.
+to clear the preference.
 Single events, detached iCalendar imports, and links without a stable series ID
 use the regular summary template settings. Series preferences are stored locally.
 
@@ -76,9 +81,11 @@ calendar source or Microsoft account. It lists open reviewed actions and
 approved decisions and notes with links to the source meetings. Briefs are
 assembled locally. Each saved recording needs a reviewed link to contribute.
 
-In the saved meeting menu, choose **Recurring meeting** to approve decisions
-and notes for that occurrence, choose a supported summary language for the
-series, or highlight a follow-up option in Export. An explicit meeting
+In the same dialog, choose a summary language and preferred follow-up for the
+series. Use **Draft prep notes from summary & decisions** to add text from the
+saved summary and its available structured decisions. Review and edit the draft
+before saving approved notes for this occurrence. Drafting uses the saved
+summary on your device. An explicit meeting
 language overrides the series language. The language setting leaves the
 existing automatic summary permission in force. Planner and Microsoft To Do
 use the destinations configured for the active Microsoft connection and still

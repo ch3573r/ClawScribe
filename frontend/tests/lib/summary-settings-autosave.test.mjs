@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
-import { createHookHarness, flush } from './hook-harness.mjs';
+import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 
 const jsx = (type, props) => ({ type, props });
 const nodes = node => !node || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(nodes)
@@ -10,6 +10,7 @@ const text = node => typeof node === 'string' || typeof node === 'number' ? Stri
   : node && typeof node === 'object' ? [node.props?.title, node.props?.description, node.props?.children].map(text).join('') : '';
 
 const KEY = 'synthetic-placeholder-key-0001';
+const { customOpenAIModelFields } = loadTsModule('src/services/configService');
 
 // ---- useCommitField and useSaveFeedback -------------------------------------------------
 
@@ -164,37 +165,60 @@ test('See everything in Privacy opens the Privacy tab', () => {
 
 // ---- Model settings: immediate-save mode versus the explicit Save button ----------------
 
-function modalHarness({ provider = 'claude', stored = false, onSave, catalogResponse, autosave = true, model = 'claude-sonnet-5' } = {}) {
+function modalHarness({ provider = 'claude', stored = false, onSave, catalogResponse, autosave = true, model = 'claude-sonnet-5', responses = {}, skipInitialFetch = true, downloads, claudeCode = {} } = {}) {
   const hooks = createHookHarness();
+  const pickerHooks = createHookHarness();
   const calls = [];
+  const warnings = [];
+  const refreshed = [];
   // The core never returns a stored key: the settings only know whether one is stored.
   const config = { provider, model, whisperModel: 'large-v3', apiKey: null, ollamaEndpoint: null };
   const context = {
     modelConfig: config,
     setModelConfig(next) { Object.assign(context, { modelConfig: typeof next === 'function' ? next(context.modelConfig) : next }); },
-    providerKeyStatus: { claude: { stored, hint: stored ? '0001' : null }, groq: { stored: false, hint: null }, openai: { stored: false, hint: null }, openrouter: { stored: false, hint: null } },
-    refreshProviderKeyStatus: async key => { context.providerKeyStatus = { ...context.providerKeyStatus, [key]: { stored: true, hint: null } }; },
+    providerKeyStatus: { claude: { stored: provider === 'claude' && stored, hint: stored ? '0001' : null }, groq: { stored: false, hint: null }, openai: { stored: provider === 'openai' && stored, hint: null }, openrouter: { stored: false, hint: null } },
+    refreshProviderKeyStatus: async key => { refreshed.push(key); context.providerKeyStatus = { ...context.providerKeyStatus, [key]: { stored: true, hint: null } }; },
   };
   const stub = name => ({ [name]: name });
+  const panels = new Set([
+    'BuiltInSettings', 'HostedProviderSettings', 'OpenAIKeyLink', 'OllamaSettings', 'OllamaEndpoint',
+    'CompatibleOpenAISettings', 'CompatibleOpenAIAdvanced', 'CodexSettings', 'CodexAdvanced',
+    'ClaudeCodeSettings', 'ClaudeCodeAdvanced', 'ProviderTextField', 'SimpleModelSelect', 'ModelSaveFeedback',
+  ]);
+  let pickerRendering = false;
+  const renderElement = (type, props) => {
+    if (type?.name === 'ModelPicker') {
+      pickerRendering = true;
+      try { return pickerHooks.render(() => type(props)); }
+      finally { pickerRendering = false; }
+    }
+    return panels.has(type?.name) ? type(props) : jsx(type, props);
+  };
+  const invoke = async (command, args) => {
+    calls.push([command, args]);
+    if (Object.hasOwn(responses, command)) return responses[command];
+    if (command === 'get_anthropic_models') return catalogResponse ? catalogResponse() : [{ id: 'claude-sonnet-5' }];
+    if (['get_groq_models', 'get_ollama_models', 'get_openrouter_models'].includes(command)) return [];
+    if (command === 'codex_get_config') return { processing: { codex: { model: 'gpt-5.6-sol', timeoutSeconds: 600 } } };
+    return null;
+  };
   const mocks = {
-    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' },
-    '@tauri-apps/api/core': { invoke: async (command, args) => {
-      calls.push([command, args]);
-      if (command === 'get_anthropic_models') return catalogResponse ? catalogResponse() : [{ id: 'claude-sonnet-5' }];
-      if (command === 'get_groq_models') return [];
-      if (command === 'codex_get_config') return {};
-      return null;
-    } },
+    react: {
+      ...hooks.react,
+      useState: (...args) => (pickerRendering ? pickerHooks.react.useState : hooks.react.useState)(...args),
+    },
+    'react/jsx-runtime': { jsx: renderElement, jsxs: renderElement, Fragment: 'fragment' },
+    '@tauri-apps/api/core': { invoke },
     '@tauri-apps/plugin-os': { platform: () => 'windows' },
     '@/lib/openExternal': { openExternal() {} },
     '@/components/UnencryptedHttpOptIn': { UnencryptedHttpOptIn: 'http-opt-in' },
     './Sidebar/SidebarProvider': { useSidebar: () => ({ serverAddress: null }) },
-    '@/contexts/OllamaDownloadContext': { useOllamaDownload: () => ({ isDownloading: () => false, getProgress: () => undefined, downloadingModels: new Set() }) },
+    '@/contexts/OllamaDownloadContext': { useOllamaDownload: () => downloads ?? ({ isDownloading: () => false, getProgress: () => undefined, downloadingModels: new Set() }) },
     '@/components/BuiltInModelManager': { BuiltInModelManager: 'built-in-models' },
-    '@/contexts/ConfigContext': { useConfig: () => context },
-    './ClaudeCodeProviderCard': {
+    '@/contexts/ConfigContext': { useSummaryConfig: () => context },
+    '@/components/ClaudeCodeProviderCard': {
       ClaudeCodeProviderCard: 'claude-code-card', CLAUDE_CODE_MODELS: ['sonnet', 'opus', 'haiku'],
-      useClaudeCodeSettings: () => ({ status: null, programPath: '', setProgramPath() {}, busy: false, check: async () => {}, save: async () => {} }),
+      useClaudeCodeSettings: () => ({ status: null, programPath: '', setProgramPath() {}, busy: false, check: async () => {}, save: async () => {}, ...claudeCode }),
     },
     '@/components/ui/button': { Button: 'button' }, '@/components/ui/input': { Input: 'input' }, '@/components/ui/label': { Label: 'label' },
     '@/components/ui/select': { Select: 'select', SelectContent: 'select-content', SelectGroup: 'select-group', SelectItem: 'select-item', SelectLabel: 'select-label', SelectTrigger: 'select-trigger', SelectValue: 'select-value' },
@@ -203,24 +227,252 @@ function modalHarness({ provider = 'claude', stored = false, onSave, catalogResp
     '@/components/ui/popover': { Popover: 'popover', PopoverContent: 'popover-content', PopoverTrigger: 'popover-trigger' },
     '@/components/ui/command': { Command: 'command', CommandEmpty: 'command-empty', CommandGroup: 'command-group', CommandInput: 'command-input', CommandItem: 'command-item', CommandList: 'command-list' },
     '@/components/settings/SecretKeyControl': { SecretKeyControl: 'secret-key-control', SecretKeyRow: 'secret-key-row' },
-    '@/services/configService': { configService: { clearApiKey: async () => {}, clearCustomOpenAIApiKey: async () => {}, getCustomOpenAIConfig: async () => null } },
+    '@/services/configService': {
+      configService: {
+        clearApiKey: async () => {},
+        clearCustomOpenAIApiKey: async () => {},
+        getCustomOpenAIConfig: () => invoke('api_get_custom_openai_config'),
+      },
+      customOpenAIModelFields,
+    },
     '@/components/settings/settings-parts': { NoteRow: 'note-row', ROW_SELECT: 'w-60' },
     '@/components/settings/summary-provider-parts': {
       CommitInputRow: 'commit-input-row', CopyCommandRow: 'copy-command-row', SaveMark: 'save-mark',
       withError: (description, error) => (error ? [description, error] : description),
     },
-    sonner: { toast: { error() {}, success() {}, info() {} } },
+    sonner: { toast: { error() {}, success() {}, info() {}, warning: message => warnings.push(message) } },
     'lucide-react': new Proxy({}, { get: (_target, name) => (name === '__esModule' ? false : String(name)) }),
   };
   const { ModelSettingsModal } = loadTsModule('src/components/ModelSettingsModal.tsx', mocks);
   const saves = [];
   const props = {
-    modelConfig: config, setModelConfig: context.setModelConfig, skipInitialFetch: true, autosave,
+    modelConfig: config, setModelConfig: context.setModelConfig, skipInitialFetch, autosave,
     onSave: onSave ?? (async next => { saves.push(next); }),
   };
   const render = () => hooks.render(() => ModelSettingsModal(props));
-  return { hooks, calls, saves, context, render };
+  return { hooks, calls, saves, context, render, warnings, refreshed, responses };
 }
+
+const customOpenAI = {
+  endpoint: 'http://gateway.example.com/v1', model: 'fixture-model', apiKeyStatus: { stored: true, hint: null },
+  maxTokens: 255, contextWindow: 16384, temperature: 0, topP: 0.5,
+  timeoutSeconds: 150, organization: 'fixture-org', project: 'fixture-project',
+  allow_unencrypted: true, destination_problem: 'Fixture destination warning',
+};
+
+test('Summary config hydrates the stored compatible provider fields together', async t => {
+  const hooks = createHookHarness();
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null, setItem() {} } });
+  t.after(() => {
+    if (previousStorage) Object.defineProperty(globalThis, 'localStorage', previousStorage);
+    else delete globalThis.localStorage;
+  });
+  const invoke = async command => ({
+    api_get_model_config: { provider: 'custom-openai', model: 'old-model', whisperModel: 'large-v3' },
+    api_get_custom_openai_config: customOpenAI,
+  })[command] ?? null;
+  const core = { invoke };
+  const { SummaryConfigProvider } = loadTsModule('src/contexts/SummaryConfigContext.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@tauri-apps/api/core': core,
+    '@tauri-apps/api/event': { listen: async () => () => {} },
+  });
+  t.after(() => hooks.unmount());
+  const render = () => hooks.render(() => SummaryConfigProvider({})).props.value.modelConfig;
+  render(); await flush();
+  const config = render();
+  assert.equal(config.model, customOpenAI.model);
+  for (const field of ['timeoutSeconds', 'organization', 'project', 'allow_unencrypted', 'destination_problem']) {
+    assert.equal(config[field], customOpenAI[field], field);
+  }
+});
+
+test('an obsolete Ollama failure cannot replace the response for the current endpoint', async t => {
+  const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
+  const obsolete = deferred();
+  const { SummaryConfigProvider } = loadTsModule('src/contexts/SummaryConfigContext.tsx', {
+    react: hooks.react, 'react/jsx-runtime': { jsx },
+    '@tauri-apps/api/core': { invoke: async (command, args) => command === 'get_ollama_models'
+      ? args.endpoint === 'http://old.example.com' ? obsolete.promise : [{ name: 'current-model' }] : null },
+    '@tauri-apps/api/event': { listen: async () => () => {} },
+  });
+  const render = () => hooks.render(() => SummaryConfigProvider({})).props.value;
+  render().setModelConfig(config => ({ ...config, provider: 'ollama', ollamaEndpoint: 'http://old.example.com' }));
+  render().setModelConfig(config => ({ ...config, ollamaEndpoint: 'http://new.example.com' }));
+  render(); await flush();
+  obsolete.reject(new Error('Old endpoint failed'));
+  await flush();
+  assert.equal(render().models[0].name, 'current-model');
+  assert.equal(render().error, '');
+});
+
+test('the model dialog keeps changes private and preserves a draft when Save fails', async t => {
+  let rejectSave = true;
+  const app = modalHarness({ autosave: false, stored: true, onSave: async () => {
+    if (rejectSave) throw new Error('Synthetic save failure');
+  } });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('groq');
+  find(node => node.props.id === 'legacy-api-key').props.onDraftChange(KEY);
+  assert.equal(app.context.modelConfig.provider, 'claude');
+  const submit = () => find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  submit(); await flush();
+  assert.equal(app.context.modelConfig.provider, 'claude');
+  assert.equal(find(node => node.props.id === 'legacy-api-key').props.draft, KEY);
+  rejectSave = false;
+  submit(); await flush();
+  assert.equal(app.context.modelConfig.provider, 'groq');
+  assert.equal(app.context.modelConfig.apiKey, null);
+});
+
+test('reopening a canceled model dialog shows the shared provider', t => {
+  const app = modalHarness({ autosave: false, stored: true });
+  t.after(() => app.hooks.unmount());
+  const provider = () => nodes(app.render()).find(node => node.type === 'select');
+  provider().props.onValueChange('groq');
+  assert.equal(provider().props.value, 'groq');
+  app.hooks.reset();
+  assert.equal(provider().props.value, 'claude');
+  assert.equal(app.saves.length, 0);
+});
+
+test('provider switching waits for Claude Code readiness and rejects a short hosted key', t => {
+  const claudeCode = { busy: true, status: { state: 'ready', version: 'Fixture' } };
+  const app = modalHarness({ stored: true, claudeCode });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  const preview = provider => find(node => node.type === 'select').props.onValueChange(provider);
+  const use = () => find(node => node.type === 'button' && /^Use /.test(text(node)));
+  preview('claude-code');
+  assert.equal(use().props.disabled, true);
+  claudeCode.busy = false;
+  assert.equal(use().props.disabled, false);
+  preview('groq');
+  find(node => node.props.id === 'summary-api-key').props.onDraftChange('short');
+  assert.equal(use().props.disabled, true);
+});
+
+test('compatible preview validates drafts and only persists settings on switch', async t => {
+  const app = modalHarness({ responses: { api_get_custom_openai_config: customOpenAI } });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  const button = label => find(node => node.type === 'button' && text(node) === label);
+  const field = id => find(node => node.props?.id === id && node.type === 'input');
+  const change = (id, value) => field(id).props.onChange({ target: { value } });
+  const writes = () => app.calls.filter(([command]) => command === 'api_save_custom_openai_config');
+  find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('custom-openai');
+  app.render(); await flush();
+  const use = () => find(node => node.type === 'button' && /^Use /.test(text(node)));
+  change('custom-endpoint', 'invalid');
+  assert.equal(use().props.disabled, true);
+  change('custom-endpoint', customOpenAI.endpoint);
+  change('custom-model', 'new-model');
+  button('Advanced').props.onClick();
+  assert.equal(button('Clear credentials'), undefined);
+  assert.equal(find(node => node.props.id === 'custom-api-key').props.onRemove, undefined);
+  change('custom-temperature', 'abc');
+  assert.equal(use().props.disabled, true);
+  change('custom-temperature', '0.7');
+  assert.equal(use().props.disabled, false);
+  assert.equal(writes().length, 0);
+  assert.equal(app.context.modelConfig.provider, 'claude');
+  use().props.onClick(); await flush();
+  assert.equal(writes().length, 1);
+  assert.equal(writes()[0][1].temperature, 0.7);
+  assert.equal(app.saves[0].model, 'new-model');
+});
+
+test('the Codex dialog keeps an empty timeout visible and blocks timeouts outside the supported range', async t => {
+  const app = modalHarness({ provider: 'codex', autosave: false });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  const button = label => find(node => node.type === 'button' && text(node) === label);
+  app.render(); await flush();
+  button('Advanced').props.onClick();
+  const timeout = () => find(node => node.type === 'input' && node.props.id === 'codex-timeout');
+  for (const value of ['', '1', '86401', 'abc']) {
+    timeout().props.onChange({ target: { value } });
+    assert.equal(timeout().props.value, value);
+    assert.equal(timeout().props['aria-invalid'], true);
+    assert.equal(button('Save').props.disabled, true);
+  }
+  timeout().props.onChange({ target: { value: '30' } });
+  assert.equal(button('Save').props.disabled, false);
+});
+
+test('the compatibility hook exposes all domains and keeps its value stable until one changes', () => {
+  const hooks = createHookHarness();
+  const summary = { modelConfig: { provider: 'ollama' } };
+  let transcription = { selectedLanguage: 'de' };
+  const preferences = { storageLocations: null };
+  const { useConfig } = loadTsModule('src/contexts/ConfigContext.tsx', {
+    react: hooks.react,
+    './SummaryConfigContext': { useSummaryConfig: () => summary },
+    './TranscriptionConfigContext': { useTranscriptionConfig: () => transcription },
+    './PreferenceConfigContext': { usePreferenceConfig: () => preferences },
+  });
+  const before = hooks.render(useConfig);
+  assert.equal(before.modelConfig, summary.modelConfig);
+  assert.equal(before.selectedLanguage, 'de');
+  assert.equal(before.storageLocations, null);
+  assert.equal(hooks.render(useConfig), before);
+  transcription = { selectedLanguage: 'en' };
+  const after = hooks.render(useConfig);
+  assert.equal(after.selectedLanguage, 'en');
+  assert.equal(after.modelConfig, before.modelConfig);
+});
+
+test('fetched compatible provider settings survive a rerender and an unrelated autosave', async () => {
+  const app = modalHarness({ skipInitialFetch: false, responses: {
+    api_get_model_config: { provider: 'custom-openai', model: customOpenAI.model, whisperModel: 'large-v3' },
+    api_get_custom_openai_config: customOpenAI,
+  } });
+  try {
+    app.render(); await flush(); app.render(); await flush();
+    const tree = app.render();
+    const http = nodes(tree).find(node => node.type === 'http-opt-in');
+    assert.equal(http.props.destinationProblem, customOpenAI.destination_problem);
+    assert.equal(http.props.checked, true);
+    const model = nodes(tree).find(node => node.type === 'commit-input-row' && node.props.value === customOpenAI.model);
+    assert.ok(model, 'the model row uses the fetched compatible settings');
+    await model.props.onCommit('another-model');
+    const saved = app.calls.find(([command]) => command === 'api_save_custom_openai_config')?.[1];
+    assert.ok(saved);
+    for (const field of ['timeoutSeconds', 'organization', 'project', 'temperature']) assert.equal(saved[field], customOpenAI[field]);
+    assert.equal(saved.allowUnencrypted, true);
+  } finally { app.hooks.unmount(); }
+});
+
+test('Codex preview checks the stored setup without writing it and disables sign-out when signed out', async () => {
+  const responses = {
+    codex_get_config: { processing: { codex: { model: 'fixture-codex', timeoutSeconds: 900 } } },
+    codex_check_installation: { found: true, authStatus: 'unauthenticated' },
+    codex_list_models: [{ id: 'fixture-codex', displayName: 'Fixture Codex', isDefault: true }],
+  };
+  const app = modalHarness({ stored: true, responses });
+  const button = label => nodes(app.render()).find(node => node.type === 'button' && text(node) === label);
+  try {
+    app.render(); await flush();
+    nodes(app.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('codex');
+    app.render(); await flush(); app.render();
+    const codexCalls = () => app.calls.map(([command]) => command).filter(command => command.startsWith('codex_'));
+    assert.deepEqual(codexCalls(), ['codex_get_config']);
+    assert.equal(button('Sign in with ChatGPT').props.disabled, true);
+    assert.equal(button('Check again').props.disabled, true);
+    button('Check again').props.onClick();
+    await flush();
+    assert.deepEqual(codexCalls(), ['codex_get_config']);
+    button('Use Codex').props.onClick();
+    await flush(); app.render(); await flush();
+    assert.ok(codexCalls().includes('codex_check_installation'));
+    assert.ok(!codexCalls().includes('codex_save_config'));
+    assert.equal(button('Sign in with ChatGPT').props.disabled, false);
+    assert.equal(button('Sign out').props.disabled, true);
+  } finally { app.hooks.unmount(); }
+});
 
 test('choosing another provider only previews it; the saved provider stays in use until the user switches', async () => {
   const app = modalHarness({ provider: 'claude', stored: true });
@@ -233,8 +485,8 @@ test('choosing another provider only previews it; the saved provider stays in us
   assert.equal(select().props.value, 'codex', 'the page shows the provider being looked at');
   assert.equal(app.context.modelConfig.provider, 'claude', 'summaries keep using the saved provider: the shared configuration is untouched');
   assert.match(text(app.render()), /Not in use yet/);
-  assert.match(text(app.render()), /Claude stays your summary provider until you switch/);
   await flush();
+  assert.match(text(app.render()), /Claude stays your summary provider until you switch/);
   assert.equal(app.calls.filter(([command]) => command === 'codex_get_config').length, 1, 'opening the Codex preview checks its configuration once');
 
   button('Keep Claude').props.onClick();
@@ -245,6 +497,7 @@ test('choosing another provider only previews it; the saved provider stays in us
   assert.doesNotMatch(text(app.render()), /Not in use yet/);
 
   select().props.onValueChange('codex');
+  app.render();
   await flush();
   button('Use Codex').props.onClick();
   await flush();
@@ -254,6 +507,51 @@ test('choosing another provider only previews it; the saved provider stays in us
   assert.doesNotMatch(text(app.render()), /Not in use yet/);
   assert.equal(nodes(app.render()).some(node => node.type === 'button' && text(node) === 'Save'), false, 'no Save button on the settings page');
   app.hooks.unmount();
+});
+
+test('a Codex preview selection is persisted only after the provider switch succeeds', async t => {
+  for (const succeeds of [true, false]) {
+    const switching = deferred();
+    const saved = { model: 'previous-codex', timeoutSeconds: 900 };
+    const app = modalHarness({
+      provider: 'codex',
+      model: saved.model,
+      stored: true,
+      responses: {
+        codex_get_config: { processing: { codex: saved } },
+        codex_check_installation: { found: true },
+        codex_list_models: [
+          { id: saved.model, displayName: 'Previous model' },
+          { id: 'picked-codex', displayName: 'Picked model' },
+        ],
+      },
+      onSave: () => switching.promise,
+    });
+    t.after(() => app.hooks.unmount());
+    const find = predicate => nodes(app.render()).find(predicate);
+    app.render();
+    await flush();
+    app.context.setModelConfig(previous => ({ ...previous, provider: 'claude', model: 'claude-sonnet-5' }));
+    find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('codex');
+    app.render();
+    await flush();
+    const picker = find(node => node.type === 'select' && node.props.value === saved.model);
+    assert.equal(picker.props.disabled, false);
+    assert.ok(nodes(picker).some(node => node.type === 'select-item' && node.props.value === 'picked-codex'));
+    picker.props.onValueChange('picked-codex');
+    find(node => node.type === 'button' && text(node) === 'Use Codex').props.onClick();
+    const modelWrites = () => app.calls.filter(([command]) => command === 'codex_save_config');
+    await flush();
+    assert.equal(modelWrites().length, 0);
+    if (succeeds) switching.resolve();
+    else switching.reject(new Error('Provider switch failed'));
+    await flush();
+    assert.equal(modelWrites().length, Number(succeeds));
+    if (succeeds) {
+      assert.equal(modelWrites()[0][1].config.model, 'picked-codex');
+      assert.equal(modelWrites()[0][1].config.timeoutSeconds, 900);
+    }
+  }
 });
 
 test('a provider that still needs a key cannot be switched to, and a failed switch shows no key', async () => {
@@ -269,6 +567,7 @@ test('a provider that still needs a key cannot be switched to, and a failed swit
   const failing = modalHarness({ provider: 'claude', stored: true, onSave: async () => { throw new Error(`database said ${KEY}`); } });
   failing.render(); await flush(); failing.render();
   nodes(failing.render()).find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('codex');
+  failing.render();
   await flush();
   nodes(failing.render()).find(node => node.type === 'button' && text(node) === 'Use Codex').props.onClick();
   await flush();
@@ -320,6 +619,43 @@ test('an API key is saved by committing the field and a half-typed key is never 
   assert.equal(app.calls.filter(([command]) => command === 'get_anthropic_models').length, 1, 'the committed key loads the model list');
   app.hooks.unmount();
 });
+
+for (const [provider, command] of [['claude', 'get_anthropic_models'], ['groq', 'get_groq_models']]) {
+  test(`${provider} sends a typed key only when the user checks it`, async t => {
+    const app = modalHarness({ provider, stored: false, autosave: false, responses: { [command]: [{ id: 'fixture-model' }] } });
+    t.after(() => app.hooks.unmount());
+    app.render(); await flush();
+    const catalogCalls = () => app.calls.filter(([name]) => name === command);
+    for (const draft of [KEY.slice(0, 10), KEY.slice(0, 14), '', KEY]) {
+      nodes(app.render()).find(node => node.props.id === 'legacy-api-key').props.onDraftChange(draft);
+      app.render(); await flush();
+      assert.equal(catalogCalls().length, 0);
+    }
+    const check = nodes(app.render()).find(node => node.type === 'button' && text(node) === 'Check again');
+    assert.equal(check.props.disabled, false);
+    check.props.onClick();
+    await flush();
+    assert.equal(catalogCalls().length, 1);
+    assert.equal(catalogCalls()[0][1].apiKey, KEY);
+    assert.match(text(app.render()), /Model list verified with this key/);
+  });
+
+  test(`${provider} loads a saved key once and makes no requests while editing its replacement`, async t => {
+    const app = modalHarness({ provider, autosave: false, responses: { [command]: [{ id: 'fixture-model' }] } });
+    t.after(() => app.hooks.unmount());
+    app.context.providerKeyStatus[provider] = { stored: true, hint: null };
+    app.render(); await flush();
+    const catalogCalls = () => app.calls.filter(([name]) => name === command);
+    assert.equal(catalogCalls().length, 1);
+    assert.equal(catalogCalls()[0][1].apiKey, null);
+    for (const draft of [KEY.slice(0, 10), '', KEY]) {
+      nodes(app.render()).find(node => node.props.id === 'legacy-api-key').props.onDraftChange(draft);
+      app.render(); await flush();
+      assert.equal(catalogCalls().length, 1);
+    }
+    assert.doesNotMatch(text(app.render()), /Model list verified with this key/);
+  });
+}
 
 test('switching providers in the explicit-save dialog discards the previous provider’s typed key before model discovery', async () => {
   const app = modalHarness({ provider: 'claude', autosave: false });
@@ -390,4 +726,236 @@ test('a fresh summary setup shows the local draft without claiming a selected mo
   assert.equal(app.context.modelConfig.model, '');
   assert.equal(app.saves.length, 0);
   app.hooks.unmount();
+});
+
+test('compatible provider stays read-only after a failed load, then hydrates on retry', async t => {
+  let reject;
+  const pending = new Promise((_resolve, fail) => { reject = fail; });
+  void pending.catch(() => {});
+  const responses = { api_get_custom_openai_config: pending };
+  const app = modalHarness({ responses });
+  t.after(() => app.hooks.unmount());
+  app.context.modelConfig.customOpenAIEndpoint = null;
+  const find = predicate => nodes(app.render()).find(predicate);
+  const button = label => find(node => node.type === 'button' && text(node) === label);
+  find(node => node.type === 'select' && node.props.value === 'claude').props.onValueChange('custom-openai');
+  app.render();
+  const field = () => find(node => node.type === 'input' && node.props.id === 'custom-endpoint');
+  assert.equal(field(), undefined);
+  reject(new Error('Fixture load failed'));
+  await flush();
+  assert.equal(field(), undefined);
+  assert.equal(find(node => node.type === 'button' && /^Use /.test(text(node))).props.disabled, true);
+  responses.api_get_custom_openai_config = customOpenAI;
+  button('Retry').props.onClick();
+  app.render();
+  await flush();
+  assert.equal(field().props.value, customOpenAI.endpoint);
+  assert.equal(app.calls.filter(([command]) => command === 'api_save_custom_openai_config').length, 0);
+});
+
+test('Codex sign-out remains available for an unknown authentication status', async t => {
+  const app = modalHarness({ provider: 'codex', responses: {
+    codex_check_installation: { found: true, authStatus: 'future-account-type' },
+    codex_list_models: [],
+  } });
+  t.after(() => app.hooks.unmount());
+  app.render();
+  await flush();
+  const signOut = nodes(app.render()).find(node => node.type === 'button' && text(node) === 'Sign out');
+  assert.equal(signOut.props.disabled, false);
+});
+
+test('installed Ollama models are buttons and a second model can be pulled with Enter', async t => {
+  const app = modalHarness({ provider: 'ollama', model: 'gemma3:1b', responses: {
+    get_ollama_models: [{ id: 'one', name: 'gemma3:1b', size: '800 MB' }, { id: 'two', name: 'qwen3:1b', size: '900 MB' }],
+  } });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  app.render(); await flush();
+  const card = name => find(node => node.type === 'button' && node.props['aria-pressed'] !== undefined && text(node).includes(name));
+  assert.equal(card('gemma3:1b')?.props['aria-pressed'], true);
+  assert.equal(card('qwen3:1b')?.props['aria-pressed'], false);
+  card('qwen3:1b').props.onClick();
+  await flush();
+  assert.equal(app.saves.at(-1)?.model, 'qwen3:1b');
+
+  const field = () => find(node => node.type === 'input' && node.props.id === 'summary-ollama-pull');
+  const submit = async value => {
+    field().props.onChange({ target: { value } });
+    const event = { key: 'Enter', preventDefault() {} };
+    field().props.onKeyDown(event);
+    await flush();
+  };
+  await submit('bad model?');
+  assert.equal(app.calls.some(([command]) => command === 'pull_ollama_model'), false);
+  assert.match(text(app.render()), /Enter a valid Ollama model name/);
+  await submit('example/another-model:2b');
+  assert.deepEqual(app.calls.filter(([command]) => command === 'pull_ollama_model').map(([, args]) => ({ ...args })), [
+    { modelName: 'example/another-model:2b', endpoint: null },
+  ]);
+  assert.equal(app.calls.filter(([command]) => command === 'get_ollama_models').length, 2);
+  assert.equal(app.saves.length, 1, 'pulling does not change the selected model');
+});
+
+test('the official compatible endpoint verifies its stored key and offers live model choices', async t => {
+  const endpoint = 'https://api.openai.com/v1';
+  const app = modalHarness({ provider: 'custom-openai', responses: {
+    api_get_custom_openai_config: { ...customOpenAI, endpoint, allow_unencrypted: false, destination_problem: null },
+    get_openai_models: [{ id: 'live-chat-model' }],
+  } });
+  t.after(() => app.hooks.unmount());
+  app.render(); await flush(); app.render(); await flush();
+  const tree = app.render();
+  assert.deepEqual(app.calls.filter(([command]) => command === 'get_openai_models').map(([, args]) => ({ ...args })), [
+    { customEndpoint: endpoint, apiKey: null },
+  ]);
+  assert.match(text(tree), /Model list verified with this key/);
+  assert.ok(nodes(tree).some(node => node.type === 'command-item' && node.props.value === 'live-chat-model'));
+  assert.equal(app.calls.some(([command]) => command === 'api_save_custom_openai_config'), false);
+});
+
+test('the meeting dialog only checks a typed OpenAI key on request and still requires Save', async t => {
+  const endpoint = 'https://api.openai.com/v1';
+  const app = modalHarness({ provider: 'custom-openai', autosave: false, responses: {
+    api_get_custom_openai_config: { ...customOpenAI, endpoint, apiKeyStatus: { stored: false, hint: null }, allow_unencrypted: false, destination_problem: null },
+    get_openai_models: [{ id: 'live-chat-model' }],
+  } });
+  t.after(() => app.hooks.unmount());
+  app.render(); await flush(); app.render();
+  const find = predicate => nodes(app.render()).find(predicate);
+  const requests = () => app.calls.filter(([command]) => command === 'get_openai_models');
+  find(node => node.type === 'secret-key-control' && node.props.id === 'custom-api-key').props.onDraftChange(KEY);
+  app.render(); await flush();
+  assert.equal(requests().length, 0);
+  find(node => node.type === 'button' && text(node) === 'Check connection').props.onClick();
+  await flush();
+  assert.equal(requests().length, 1);
+  assert.equal(requests()[0][1].apiKey, KEY);
+  assert.equal(app.calls.some(([command]) => command === 'api_save_custom_openai_config'), false);
+  find(node => node.type === 'command-item' && node.props.value === 'live-chat-model').props.onSelect();
+  assert.equal(find(node => node.type === 'input' && node.props.id === 'custom-model').props.value, 'live-chat-model');
+  assert.equal(app.saves.length, 0);
+  const submit = find(node => node.type === 'form').props.onSubmit;
+  submit({ preventDefault() {} });
+  submit({ preventDefault() {} });
+  await flush();
+  assert.equal(app.saves.length, 1);
+  assert.equal(app.saves[0].model, 'live-chat-model');
+  assert.equal(app.saves[0].customOpenAIApiKey, null);
+});
+
+test('Ollama pull progress is announced and repeated submission while waiting invokes once', async t => {
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const downloads = {
+    downloadingModels: new Set(),
+    isDownloading: name => downloads.downloadingModels.has(name),
+    getProgress: () => 45,
+  };
+  const app = modalHarness({ provider: 'ollama', model: 'gemma3:1b', downloads, responses: {
+    get_ollama_models: [{ id: 'one', name: 'gemma3:1b', size: '800 MB' }], pull_ollama_model: pending,
+  } });
+  const find = predicate => nodes(app.render()).find(predicate);
+  t.after(() => { finish(); app.hooks.unmount(); });
+  app.render(); await flush();
+  find(node => node.type === 'input' && node.props.id === 'summary-ollama-pull').props.onChange({ target: { value: 'qwen3:1b' } });
+  const start = find(node => node.type === 'button' && text(node) === 'Pull model').props.onClick;
+  start();
+  start();
+  downloads.downloadingModels = new Set(['qwen3:1b']);
+  const progress = find(node => node.type === 'progress');
+  assert.equal(progress.props['aria-label'], 'Download progress for qwen3:1b');
+  assert.equal(progress.props.value, 45);
+  assert.equal(app.calls.filter(([command]) => command === 'pull_ollama_model').length, 1);
+  downloads.downloadingModels = new Set();
+  finish();
+  await flush();
+  assert.equal(app.calls.filter(([command]) => command === 'get_ollama_models').length, 2);
+});
+
+test('a compatible gateway has no automatic credential request and HTTP testing requires opt-in', async t => {
+  const endpoint = 'http://gateway.local/v1';
+  const app = modalHarness({ provider: 'custom-openai', responses: {
+    api_get_custom_openai_config: { ...customOpenAI, endpoint, allow_unencrypted: false, destination_problem: null },
+    api_test_custom_openai_connection: { status: 'success', message: 'Connected' },
+  } });
+  t.after(() => app.hooks.unmount());
+  app.render(); await flush(); app.render(); await flush();
+  const diagnostics = () => app.calls.filter(([command]) => ['get_openai_models', 'api_test_custom_openai_connection'].includes(command));
+  assert.deepEqual(diagnostics(), []);
+  const check = () => nodes(app.render()).find(node => node.type === 'button' && /^Check (connection|again)$/.test(text(node)));
+  check().props.onClick(); await flush();
+  assert.deepEqual(diagnostics(), []);
+  assert.match(text(app.render()), /Allow unencrypted HTTP/);
+  nodes(app.render()).find(node => node.type === 'http-opt-in').props.onChange(true);
+  await flush(); app.render();
+  check().props.onClick(); await flush();
+  assert.deepEqual(diagnostics().map(([command]) => command), ['api_test_custom_openai_connection']);
+  assert.equal(diagnostics()[0][1].allowUnencrypted, true);
+  assert.equal(diagnostics()[0][1].apiKey, null);
+});
+
+test('Codex switch and dialog Save wait for the settings read and stay blocked on failure', async t => {
+  for (const autosave of [true, false]) {
+    const loading = deferred();
+    const app = modalHarness({ autosave, responses: { codex_get_config: loading.promise } });
+    t.after(() => app.hooks.unmount());
+    const find = predicate => nodes(app.render()).find(predicate);
+    find(node => node.type === 'select').props.onValueChange('codex');
+    const primary = () => find(node => node.type === 'button' && text(node) === (autosave ? 'Use Codex' : 'Save'));
+    assert.equal(primary().props.disabled, true, 'settings still loading');
+    loading.reject(new Error('Synthetic settings read failure'));
+    await flush();
+    assert.equal(primary().props.disabled, true, 'settings read failed');
+    assert.match(text(app.render()), /Could not load the Codex settings/);
+    if (!autosave) find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+    await flush();
+    assert.equal(app.saves.length, 0);
+    assert.equal(app.calls.some(([command]) => command === 'codex_save_config'), false);
+  }
+});
+
+test('a failed Codex model write leaves the provider switched and still refreshes its key status', async t => {
+  const saved = { model: 'saved-codex', codexHomePath: 'fixture-profile', timeoutSeconds: 900 };
+  const write = deferred();
+  const app = modalHarness({ provider: 'codex', model: saved.model, responses: {
+    codex_get_config: { processing: { codex: saved } },
+    codex_check_installation: { found: true },
+    codex_list_models: [{ id: 'picked-codex', displayName: 'Picked model' }],
+  } });
+  t.after(() => app.hooks.unmount());
+  const find = predicate => nodes(app.render()).find(predicate);
+  app.render(); await flush(); app.render(); await flush();
+  app.context.setModelConfig(previous => ({ ...previous, provider: 'claude', model: 'claude-sonnet-5' }));
+  find(node => node.type === 'select').props.onValueChange('codex');
+  app.render(); await flush();
+  find(node => node.type === 'select' && node.props.value === saved.model).props.onValueChange('picked-codex');
+  app.responses.codex_save_config = write.promise;
+  find(node => node.type === 'button' && text(node) === 'Use Codex').props.onClick();
+  await flush();
+  const [, args] = app.calls.find(([command]) => command === 'codex_save_config');
+  assert.equal(args.config.codexHomePath, saved.codexHomePath);
+  assert.equal(args.config.timeoutSeconds, saved.timeoutSeconds);
+  write.reject(new Error('Synthetic model write failure'));
+  await flush();
+  app.render(); await flush();
+  assert.deepEqual(app.refreshed, ['codex']);
+  assert.equal(app.context.modelConfig.provider, 'codex');
+  app.render();
+  assert.equal(app.context.modelConfig.model, saved.model);
+  assert.deepEqual(app.warnings, ['Could not save the Codex model']);
+  assert.doesNotMatch(text(app.render()), /Not in use yet|Could not save the provider|Could not save the Codex settings/);
+});
+
+test('the model dialog blocks Save for a missing model or an unready Claude Code provider', async t => {
+  for (const provider of ['builtin-ai', 'ollama', 'claude', 'claude-code']) {
+    const app = modalHarness({ autosave: false, provider, model: provider === 'claude-code' ? 'sonnet' : '   ', stored: true });
+    t.after(() => app.hooks.unmount());
+    app.render(); await flush();
+    const tree = app.render();
+    assert.equal(nodes(tree).find(node => node.type === 'button' && text(node) === 'Save').props.disabled, true, provider);
+    tree.props.onSubmit({ preventDefault() {} });
+    assert.equal(app.saves.length, 0);
+  }
 });

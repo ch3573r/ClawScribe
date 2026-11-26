@@ -1,9 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
-  ChevronDown,
   FileText,
   Mic,
   RefreshCw,
@@ -18,12 +17,14 @@ import { useRouter } from "next/navigation";
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useImportDialog } from "@/contexts/ImportDialogContext";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useSummaryConfig } from "@/contexts/ConfigContext";
 import { LibraryBackup } from "@/components/LibraryBackup";
 import { ArchiveMeetingRows, useArchiveMetadata } from "@/components/Archive/ArchiveMeetingRows";
 import { ArchiveStorageButton } from "@/components/Archive/ArchiveStorageButton";
+import { ArchiveBulkActions, type BulkAction } from "@/components/Archive/ArchiveBulkActions";
+import type { ArchiveMeeting } from "@/components/Archive/ArchiveAudioRemoval";
 import { OpenMeetingActions } from "@/components/Archive/OpenMeetingActions";
-import { archiveDateKey, archiveReview, parseArchiveDate } from "@/lib/archive-review";
+import { archiveDateKey, archiveReview, archiveSeriesChoices, formatArchiveDate, parseArchiveDate } from "@/lib/archive-review";
 import { receiveMatchScope, savedPassageUrl, sourceLabel, supportsPersonalExcerpts, type MatchScope, type SavedHit } from "@/lib/archive-search";
 import { SearchSnippet } from "@/components/Archive/SearchSnippet";
 import { KnowledgeArchive } from "@/components/Knowledge/KnowledgeArchive";
@@ -32,18 +33,14 @@ import { libraryScope } from "@/lib/knowledge-state";
 import { transcriptPassageUrl } from "@/lib/knowledge-navigation";
 import { useResultNotes } from "@/hooks/useResultNotes";
 import { useLibrarySearch, type TranscriptHit } from "@/hooks/useLibrarySearch";
+import { useKnowledgeIndexStatus } from "@/hooks/useKnowledgeIndexStatus";
+import { useDebouncedDiscovery } from "@/hooks/useDebouncedDiscovery";
+import { mergeArchivePassages } from "@/lib/archive-hybrid-search";
+import { knowledgeService } from "@/services/knowledgeService";
+import type { KnowledgeScope, SearchMode } from "@/types/knowledge";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuCheckboxItem,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuSeparator,
-  DropdownMenuItem,
-} from "@/components/ui/dropdown-menu";
+import { ProjectFilterMenu } from "@/components/Knowledge/ProjectFilterMenu";
 import {
   Select,
   SelectContent,
@@ -61,13 +58,13 @@ import {
 type SortMode = "newest" | "oldest" | "title";
 const noProjectFilter: ProjectFilter = { tags: [], untagged: false, mode: "any" };
 // Keep this view's filters in memory when a meeting route replaces it.
-let archiveView = { tab: "archive" as "archive" | "memory" | "actions", memoryProject: noProjectFilter, query: "", from: "", to: "", attentionOnly: false, sortMode: "newest" as SortMode, projectFilter: noProjectFilter };
+let archiveView = { tab: "archive" as "archive" | "memory" | "actions", memoryProject: noProjectFilter, query: "", from: "", to: "", series: "", attentionOnly: false, sortMode: "newest" as SortMode, projectFilter: noProjectFilter, searchMode: "keyword" as SearchMode };
 
 export default function MeetingsPage() {
   const router = useRouter();
   const { openImportDialog } = useImportDialog();
   const recording = useRecordingState();
-  const { modelConfig } = useConfig();
+  const { modelConfig } = useSummaryConfig();
   const {
     meetings,
     meetingsError,
@@ -76,19 +73,21 @@ export default function MeetingsPage() {
     handleRecordingToggle,
     refetchMeetings,
     projectTags,
-    projectTagsError,
-    projectTagsLoading,
-    refreshProjectTags,
   } = useSidebar();
   const [query, setQuery] = useState(archiveView.query);
   const [from, setFrom] = useState(archiveView.from);
   const [to, setTo] = useState(archiveView.to);
+  const [series, setSeries] = useState(archiveView.series);
   const [tab, setTab] = useState(archiveView.tab);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [sortMode, setSortMode] = useState(archiveView.sortMode);
   const [projectFilter, setProjectFilter] = useState(archiveView.projectFilter);
   const [memoryProject, setMemoryProject] = useState(archiveView.memoryProject);
   const [attentionOnly, setAttentionOnly] = useState(archiveView.attentionOnly);
+  const [searchMode, setSearchMode] = useState(archiveView.searchMode);
+  const [bulk, setBulk] = useState<{ action: BulkAction; meetings: ArchiveMeeting[] } | null>(null);
+  const bulkOpener = useRef<HTMLElement | null>(null);
+  const archiveTab = useRef<HTMLButtonElement>(null);
   const [matchSession, setMatchSession] = useState<{ scope: MatchScope; key: number } | null>(null);
   const askAboutMatches = useCallback((scope: MatchScope) => {
     if (!scope.ids.length) return;
@@ -97,24 +96,55 @@ export default function MeetingsPage() {
     setTab("memory");
   }, []);
   useEffect(() => receiveMatchScope(askAboutMatches), [askAboutMatches]);
-  useEffect(() => { archiveView = { query, from, to, sortMode, attentionOnly, projectFilter, tab, memoryProject }; }, [query, from, to, sortMode, attentionOnly, projectFilter, tab, memoryProject]);
+  useEffect(() => {
+    const navigate = (target: unknown) => {
+      if (target === "archive" || target === "memory" || target === "actions") setTab(target);
+    };
+    const onTab = (event: Event) => navigate((event as CustomEvent).detail);
+    if (typeof window === "undefined") return;
+    if (window.location?.href) {
+      const url = new URL(window.location.href);
+      const target = url.searchParams.get("tab");
+      if (target === "archive" || target === "memory" || target === "actions") {
+        navigate(target);
+        url.searchParams.delete("tab");
+        window.history.replaceState(window.history.state, "", url);
+      }
+    }
+    window.addEventListener("open-meetings-tab", onTab);
+    return () => window.removeEventListener("open-meetings-tab", onTab);
+  }, []);
+  useEffect(() => { archiveView = { query, from, to, series, sortMode, attentionOnly, projectFilter, tab, memoryProject, searchMode }; }, [query, from, to, series, sortMode, attentionOnly, projectFilter, tab, memoryProject, searchMode]);
   const [archiveRevision, setArchiveRevision] = useState(0);
   const archiveStatus = useArchiveMetadata(tab === "archive", archiveRevision, meetings.length);
   const attentionIds = useMemo(() => new Set(Array.from(archiveStatus.metadata?.values() ?? [])
     .filter(row => archiveReview(row).needsAttention).map(row => row.id)), [archiveStatus.metadata]);
-  const tagOptions = useMemo(() => [...new Map(projectTags.map(row => [row.tag.toLowerCase(), row.tag])).values()].sort((a, b) => a.localeCompare(b)), [projectTags]);
+  const seriesChoices = useMemo(() => archiveSeriesChoices(archiveStatus.metadata?.values() ?? []), [archiveStatus.metadata]);
+  const scopedIds = useMemo(() => new Set(Array.from(archiveStatus.metadata?.values() ?? [])
+    .filter(row => (!attentionOnly || attentionIds.has(row.id)) && (!series || row.series?.id === series))
+    .map(row => row.id)), [archiveStatus.metadata, attentionIds, attentionOnly, series]);
 
   const hasQuery = !!query.trim();
-  const hasScope = !!(attentionOnly || from || to || projectFilter.untagged || projectFilter.tags.length);
+  const restrictMeetings = attentionOnly || !!series;
+  const hasScope = !!(restrictMeetings || from || to || projectFilter.untagged || projectFilter.tags.length);
   const invalidDates = !!from && !!to && from > to;
-  const scope = hasScope ? libraryScope(attentionOnly ? [...attentionIds] : [], !attentionOnly, projectFilter, from, to) : undefined;
-  const { results, searching, error: searchError } = useLibrarySearch(query, tab === "archive" && !invalidDates && (!attentionOnly || attentionIds.size > 0), scope, false, meetings);
-  const noteSelection = useResultNotes(JSON.stringify({ query, projectFilter, attentionOnly, from, to }), supportsPersonalExcerpts(modelConfig?.provider));
+  const scope = hasScope ? libraryScope(restrictMeetings ? [...scopedIds] : [], !restrictMeetings, projectFilter, from, to) : undefined;
+  const searchActive = tab === "archive" && !invalidDates && (!restrictMeetings || scopedIds.size > 0);
+  const { results, searching: literalSearching, error: searchError } = useLibrarySearch(query, searchActive, scope, false, meetings);
+  const { semanticReady, index } = useKnowledgeIndexStatus(tab === "archive");
+  const mode = semanticReady ? searchMode : "keyword";
+  const scopeKey = JSON.stringify(scope ?? libraryScope([], true, noProjectFilter));
+  const hybridSearch = useCallback((text: string) => knowledgeService.search({
+    scope: JSON.parse(scopeKey) as KnowledgeScope, query: text, document_ids: [], mode: "hybrid",
+  }), [scopeKey]);
+  const hybrid = useDebouncedDiscovery(query, searchActive && mode === "hybrid" && !searchError && Array.from(query.trim()).length <= 256, hybridSearch, meetings);
+  const searching = literalSearching || hybrid.loading;
+  const noteSelection = useResultNotes(JSON.stringify({ query, projectFilter, attentionOnly, series, from, to, mode }), supportsPersonalExcerpts(modelConfig?.provider));
   const titleMatches = useMemo(() => new Map(results?.titles.map(hit => [hit.id, hit])), [results]);
 
   const sortedMeetings = useMemo(() => {
     const next = meetings.filter(meeting => {
-      if (invalidDates || (attentionOnly && !attentionIds.has(meeting.id)) || !matchesProjectFilter(meeting.id, projectFilter, projectTags)) return false;
+      if (invalidDates || (restrictMeetings && !scopedIds.has(meeting.id)) || !matchesProjectFilter(meeting.id, projectFilter, projectTags)) return false;
       if (!from && !to) return true;
       const date = archiveDateKey(meeting.created_at);
       return (!from || (!!date && date >= from)) && (!to || (!!date && date <= to));
@@ -131,7 +161,7 @@ export default function MeetingsPage() {
       return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
     });
     return next;
-  }, [meetings, sortMode, projectFilter, projectTags, from, to, invalidDates, attentionOnly, attentionIds]);
+  }, [meetings, sortMode, projectFilter, projectTags, from, to, invalidDates, restrictMeetings, scopedIds]);
   const memoryMeetings = useMemo(() => meetings.filter(meeting => matchesProjectFilter(meeting.id, memoryProject, projectTags)), [meetings, memoryProject, projectTags]);
   const excerpts = useMemo(() => {
     const groups = new Map<string, { passages: TranscriptHit[]; saved: SavedHit[] }>();
@@ -140,11 +170,12 @@ export default function MeetingsPage() {
       groups.set(id, value);
       return value;
     };
-    const passages = [...(results?.passages ?? [])].sort((a, b) => (a.start_seconds ?? Infinity) - (b.start_seconds ?? Infinity));
+    const passages = mergeArchivePassages(results?.passages ?? [], hybrid.data?.mode === "hybrid" ? hybrid.data.passages : [])
+      .sort((a, b) => (a.start_seconds ?? Infinity) - (b.start_seconds ?? Infinity));
     for (const hit of passages) group(hit.meeting_id).passages.push(hit);
     for (const hit of results?.saved ?? []) group(hit.reference.meeting_id).saved.push(hit);
     return groups;
-  }, [results]);
+  }, [results, hybrid.data]);
   const visibleMeetings = hasQuery ? sortedMeetings.filter(meeting => titleMatches.has(meeting.id) || excerpts.has(meeting.id)) : sortedMeetings;
   const matchIds = hasQuery && results ? visibleMeetings.map(meeting => meeting.id) : [];
 
@@ -194,64 +225,8 @@ export default function MeetingsPage() {
   }, [refetchMeetings]);
 
   const shownCount = visibleMeetings.length;
-  const clearFilters = () => { setQuery(""); setProjectFilter(noProjectFilter); setFrom(""); setTo(""); setAttentionOnly(false); };
+  const clearFilters = () => { setQuery(""); setProjectFilter(noProjectFilter); setFrom(""); setTo(""); setAttentionOnly(false); setSeries(""); };
   const recordingBusy = recording.isRecording || recording.isStarting || recording.isStopping || recording.isProcessing || recording.isSaving;
-
-  const projectControl = (projectFilter: ProjectFilter, setProjectFilter: Dispatch<SetStateAction<ProjectFilter>>) => {
-    const projectFilterLabel = projectFilter.untagged ? 'Untagged'
-      : projectFilter.tags.length === 0 ? 'All projects'
-      : projectFilter.tags.length === 1 ? projectFilter.tags[0]
-      : `${projectFilter.tags.length} projects`;
-    return <>
-<div className="flex items-center gap-2 text-sm">Project
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost"
-                      type="button"
-                      aria-label={`Project: ${projectFilterLabel}`}
-                      className="flex h-9 max-w-48 items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={projectTagsLoading || !!projectTagsError}
-                    >
-                      <span className="truncate">{projectFilterLabel}</span>
-                      <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
-                    <DropdownMenuRadioGroup
-                      aria-label="Project matching"
-                      value={projectFilter.mode}
-                      onValueChange={mode => setProjectFilter(current => ({ ...current, mode: mode as ProjectFilter['mode'] }))}
-                    >
-                      <DropdownMenuRadioItem value="any" disabled={projectFilter.tags.length < 2} onSelect={event => event.preventDefault()}>Match any</DropdownMenuRadioItem>
-                      <DropdownMenuRadioItem value="all" disabled={projectFilter.tags.length < 2} onSelect={event => event.preventDefault()}>Match all</DropdownMenuRadioItem>
-                    </DropdownMenuRadioGroup>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuCheckboxItem
-                      checked={projectFilter.untagged}
-                      onSelect={event => event.preventDefault()}
-                      onCheckedChange={checked => setProjectFilter(current => ({ ...current, tags: [], untagged: checked === true }))}
-                    >Untagged</DropdownMenuCheckboxItem>
-                    {tagOptions.map(tag => (
-                      <DropdownMenuCheckboxItem
-                        key={tag.toLowerCase()}
-                        checked={projectFilter.tags.some(selected => selected.toLowerCase() === tag.toLowerCase())}
-                        onSelect={event => event.preventDefault()}
-                        onCheckedChange={checked => setProjectFilter(current => ({
-                          ...current,
-                          untagged: false,
-                          tags: [...current.tags.filter(selected => selected.toLowerCase() !== tag.toLowerCase()), ...(checked === true ? [tag] : [])],
-                        }))}
-                      >{tag}</DropdownMenuCheckboxItem>
-                    ))}
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onSelect={() => setProjectFilter({ tags: [], untagged: false, mode: 'any' })}>Clear filter</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-              {projectTagsLoading && <span role="status">Loading project tags…</span>}
-              {projectTagsError && <Button variant="ghost" className="text-destructive underline" onClick={() => { void refreshProjectTags(); }}>Retry loading tags</Button>}
-  </>;
-  };
 
   return (
     <div className="h-full min-h-0 overflow-hidden bg-background text-foreground">
@@ -277,12 +252,12 @@ export default function MeetingsPage() {
 
         <Tabs value={tab} onValueChange={value => setTab(value as typeof tab)} className="flex min-h-0 flex-1 flex-col gap-4">
           <TabsList aria-label="Meetings views" className="w-fit shrink-0">
-            <TabsTrigger value="archive" id="meetings-archive-tab" aria-controls="meetings-archive-panel">Archive</TabsTrigger>
+            <TabsTrigger ref={archiveTab} value="archive" id="meetings-archive-tab" aria-controls="meetings-archive-panel">Archive</TabsTrigger>
             <TabsTrigger value="memory" id="meetings-memory-tab" aria-controls="meeting-memory-panel">Meeting memory</TabsTrigger>
             <TabsTrigger value="actions" id="meetings-actions-tab" aria-controls="meetings-actions-panel">Open actions</TabsTrigger>
           </TabsList>
           <TabsContent value="memory" forceMount id="meeting-memory-panel" hidden={tab !== "memory"} className={tab === "memory" ? "m-0 min-h-0 flex-1" : "hidden"}>
-            <KnowledgeArchive key={matchSession?.key ?? 0} initialMatches={matchSession?.scope} active={tab === "memory"} meetings={memoryMeetings} meetingTitles={meetings} projectFilter={memoryProject} setProjectFilter={setMemoryProject} projectControl={projectControl(memoryProject, setMemoryProject)} />
+            <KnowledgeArchive key={matchSession?.key ?? 0} initialMatches={matchSession?.scope} active={tab === "memory"} meetings={memoryMeetings} meetingTitles={meetings} projectFilter={memoryProject} setProjectFilter={setMemoryProject} projectControl={<ProjectFilterMenu filter={memoryProject} setFilter={setMemoryProject} />} />
           </TabsContent>
           <TabsContent value="actions" id="meetings-actions-panel" className="m-0 min-h-0 flex-1 overflow-y-auto">
             <OpenMeetingActions />
@@ -312,7 +287,24 @@ export default function MeetingsPage() {
             </InputGroup></div>
 
             <div className="flex flex-wrap items-center justify-start gap-3 text-sm text-muted-foreground xl:justify-end">
-              {projectControl(projectFilter, setProjectFilter)}
+              <Select value={mode} onValueChange={value => setSearchMode(value as SearchMode)}>
+                <SelectTrigger aria-label="Archive search mode" className="h-9 w-32"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="keyword">Keyword</SelectItem>
+                  <SelectItem value="hybrid" disabled={!semanticReady}>{semanticReady ? "Hybrid" : index?.semantic_enabled ? "Hybrid (preparing)" : "Hybrid (enable in Settings)"}</SelectItem>
+                </SelectContent>
+              </Select>
+              <ProjectFilterMenu filter={projectFilter} setFilter={setProjectFilter} />
+              {(series || seriesChoices.length > 0) && <Select value={series || "all"} onValueChange={value => setSeries(value === "all" ? "" : value)}>
+                <SelectTrigger aria-label="Recurring series" className="h-9 w-40"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All meetings</SelectItem>
+                  {series && !seriesChoices.some(choice => choice.id === series) && <SelectItem value={series} disabled>Selected series</SelectItem>}
+                  {seriesChoices.map(choice => <SelectItem key={choice.id} value={choice.id}>
+                    {choice.label}{choice.date ? ` · ${formatArchiveDate(choice.date)}` : ""}
+                  </SelectItem>)}
+                </SelectContent>
+              </Select>}
               {(attentionOnly || attentionIds.size > 0) && <Button variant={attentionOnly ? "secondary" : "ghost"} size="sm" aria-pressed={attentionOnly} onClick={() => setAttentionOnly(value => !value)}>Needs attention</Button>}
               <Popover>
                 <PopoverTrigger asChild><Button variant="outline" size="sm">Date range{from || to ? " · active" : ""}</Button></PopoverTrigger>
@@ -340,10 +332,11 @@ export default function MeetingsPage() {
         )}
 
         <div className="min-h-0">
-          {attentionOnly && archiveStatus.error && <p role="alert" className="text-sm text-destructive">Could not refresh meetings that need attention. <Button variant="ghost" size="sm" onClick={() => void archiveStatus.refresh()}>Retry</Button></p>}
+          {restrictMeetings && archiveStatus.error && <p role="alert" className="text-sm text-destructive">Could not refresh archive filters. <Button variant="ghost" size="sm" onClick={() => void archiveStatus.refresh()}>Retry</Button></p>}
           {invalidDates && <p role="alert" className="text-sm text-destructive">The start date must be on or before the end date.</p>}
           {searching && <p role="status" className="text-sm text-muted-foreground">Searching saved meetings…</p>}
           {searchError && <p role="alert" className="text-sm text-destructive">{searchError}</p>}
+          {(hybrid.error || hybrid.data?.mode === "keyword") && <p role="status" className="text-sm text-muted-foreground">Hybrid search is unavailable for this query. Showing keyword matches.</p>}
           {results?.limited && <p role="status" className="mb-3 text-sm text-muted-foreground">Search reached its limit. Try more specific text or narrow the filters.</p>}
           {meetingsError && meetings.length > 0 && (
             <div role="alert" className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-error-border/30 bg-error px-4 py-3 text-sm text-error-foreground">
@@ -360,6 +353,8 @@ export default function MeetingsPage() {
                 meetings={visibleMeetings}
                 projectTags={projectTags}
                 onOpen={setCurrentMeeting}
+                onBulk={(action, meetings, opener) => { bulkOpener.current = opener; setBulk({ action, meetings }); }}
+                onAsk={ids => askAboutMatches({ ids, project: noProjectFilter, from: "", to: "" })}
                 renderTitle={hasQuery ? meeting => <SearchSnippet text={meeting.title} highlights={titleMatches.get(meeting.id)?.title === meeting.title ? titleMatches.get(meeting.id)?.highlights : undefined} /> : undefined}
                 renderExcerpts={hasQuery ? renderExcerpts : undefined}
               />
@@ -394,6 +389,9 @@ export default function MeetingsPage() {
         </div>
           </TabsContent>
         </Tabs>
+        {bulk && <ArchiveBulkActions {...bulk} onClose={() => setBulk(null)}
+          onDeleted={() => void archiveStatus.refresh()}
+          onReturnFocus={() => { if (bulkOpener.current?.isConnected) bulkOpener.current.focus(); else archiveTab.current?.focus(); }} />}
       </div>
     </div>
   );

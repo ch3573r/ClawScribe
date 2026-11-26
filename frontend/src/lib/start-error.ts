@@ -27,7 +27,7 @@ export function describeRecordingsFolderRefusal(error: unknown): StartErrorDispl
   return null;
 }
 
-export type LiveModelFailure = 'missing' | 'downloading' | 'load_failed' | 'unsupported_provider';
+export type LiveModelFailure = 'missing' | 'downloading' | 'load_failed' | 'unsupported_provider' | 'vulkan_runtime_missing';
 
 export function liveModelStartFailure(error: unknown): LiveModelFailure | null {
   switch (startErrorText(error)) {
@@ -35,6 +35,7 @@ export function liveModelStartFailure(error: unknown): LiveModelFailure | null {
     case 'live_model:downloading': return 'downloading';
     case 'live_model:load_failed': return 'load_failed';
     case 'live_model:unsupported_provider': return 'unsupported_provider';
+    case 'live_model:vulkan_runtime_missing': return 'vulkan_runtime_missing';
     default: return null;
   }
 }
@@ -44,6 +45,7 @@ export const LIVE_MODEL_FAILURE_MESSAGE: Record<LiveModelFailure, string> = {
   downloading: 'The speech model is still downloading. Try again when it finishes.',
   load_failed: 'ClawScribe could not load the speech model. Retry or choose another model in Transcription settings.',
   unsupported_provider: 'Choose an on-device speech engine in Transcription settings.',
+  vulkan_runtime_missing: 'Whisper needs a working Vulkan runtime and a compatible device. Update your graphics driver and restart ClawScribe, or choose Parakeet in Transcription settings.',
 };
 
 export function transcriptionSettingsPath(provider?: string | null): string {

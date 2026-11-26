@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronDown, X } from "lucide-react";
-import { useConfig } from "@/contexts/ConfigContext";
+import { useSummaryConfig } from "@/contexts/ConfigContext";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -10,8 +10,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { libraryScope } from "@/lib/knowledge-state";
-import { knowledgeService } from "@/services/knowledgeService";
+import { knowledgeSearchMode, libraryScope, scopeReady } from "@/lib/knowledge-state";
+import { useKnowledgeIndexStatus } from "@/hooks/useKnowledgeIndexStatus";
 import { useKnowledgeSearch } from "@/hooks/useKnowledgeSearch";
 import { SearchResults } from "./SearchResults";
 import { KnowledgeChat } from "./KnowledgeChat";
@@ -22,7 +22,7 @@ import type { ProjectFilter } from "@/lib/library";
 import { supportsPersonalExcerpts, type MatchScope, type SavedReference } from "@/lib/archive-search";
 import { classifySummaryProvider } from "@/lib/privacy";
 import { archiveDateKey } from "@/lib/archive-review";
-import type { IndexStatus, MeetingFilter, SearchMode } from "@/types/knowledge";
+import type { DocumentAttachment, MeetingFilter, SearchMode } from "@/types/knowledge";
 
 // Route navigation unmounts the archive; keep only the user's explicit source
 // choices in this window. Document selection and sharing remain owner-scoped.
@@ -32,14 +32,12 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
   initialMatches?: MatchScope;
   active?: boolean; meetings: { id: string; title: string; created_at?: string }[]; meetingTitles?: { id: string; title: string }[]; projectFilter: ProjectFilter; setProjectFilter?: (filter: ProjectFilter) => void; projectControl?: ReactNode;
 }) {
-  const { modelConfig } = useConfig();
+  const { modelConfig } = useSummaryConfig();
   const destination = classifySummaryProvider(modelConfig?.provider, {
     ollamaEndpoint: modelConfig?.ollamaEndpoint, customEndpoint: modelConfig?.customOpenAIEndpoint,
   });
   const [query, setQuery] = useState("");
   const [chosenMode, setChosenMode] = useState<SearchMode | null>(null);
-  const [index, setIndex] = useState<IndexStatus | null>(null);
-  const [indexError, setIndexError] = useState(false);
   const [all, setAll] = useState(initialMatches ? false : memorySources.all);
   const [selected, setSelected] = useState(initialMatches?.ids ?? memorySources.selected);
   const [notes, setNotes] = useState<SavedReference[]>(initialMatches?.notes ?? []);
@@ -53,30 +51,8 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
   const [searchOpen, setSearchOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [referenceReveal, setReferenceReveal] = useState(0);
-  useEffect(() => {
-    if (!active) return;
-    let visible = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const refresh = async () => {
-      try {
-        const value = await knowledgeService.indexStatus();
-        if (!visible) return;
-        setIndex(value);
-        setIndexError(false);
-        if (value.semantic_enabled && value.pending > 0 && value.reason !== "paused") {
-          timer = setTimeout(refresh, 15_000);
-        }
-      } catch {
-        if (!visible) return;
-        setIndexError(true);
-        timer = setTimeout(refresh, 15_000);
-      }
-    };
-    void refresh();
-    return () => { visible = false; clearTimeout(timer); };
-  }, [active]);
-  const semanticReady = !!index?.semantic_enabled && index.semantic_ready > 0 && !indexError;
-  const mode = semanticReady ? chosenMode ?? "hybrid" : "keyword";
+  const { index, indexError, semanticReady } = useKnowledgeIndexStatus(active);
+  const mode = knowledgeSearchMode(chosenMode, semanticReady);
   const scope = useMemo(() => libraryScope(selected, all, projectFilter, from, to), [selected, all, projectFilter, from, to]);
   const state = useKnowledgeSearch(scope, null, { provider: modelConfig?.provider, model: modelConfig?.model }, {
     active,
@@ -91,15 +67,16 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
   });
   const matchingMeetings = meetings.filter(meeting => meeting.title.toLocaleLowerCase().includes(meetingQuery.trim().toLocaleLowerCase()));
   const invalidDates = !!from && !!to && from > to;
-  const sourcesReady = (all || selected.length > 0) && !invalidDates;
+  const sourcesReady = scopeReady(scope);
   const attachmentMeetings = meetings.filter(meeting => {
     const date = archiveDateKey(meeting.created_at);
     return !invalidDates && (!from || (!!date && date >= from)) && (!to || (!!date && date <= to));
   });
   const attachmentMeetingId = !all && selected.length === 1 && attachmentMeetings.some(meeting => meeting.id === selected[0]) ? selected[0] : undefined;
-  const attached = (id: string) => {
-    if (!all) setSelected(ids => [...new Set([...ids, id])]);
-    state.reloadDocuments(); setReferenceReveal(value => value + 1); setToolsOpen(true);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const attached = (id: string, attachment: DocumentAttachment) => {
+    if (!all && (selected.length > 0 || !sourcesReady)) setSelected(ids => [...new Set([...ids, id])]);
+    state.selectImportedDocument(attachment); setReferenceReveal(value => value + 1); setToolsOpen(true);
   };
   const secondary = <div className="space-y-3">
     <Button variant="ghost" size="sm" className="text-muted-foreground" aria-expanded={toolsOpen} aria-controls="memory-source-tools" onClick={() => setToolsOpen(value => !value)}>
@@ -132,10 +109,8 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
   </div>;
   const sources = <fieldset className="min-w-0 space-y-3">
       <legend className="mb-2 text-sm font-medium">Sources</legend>
-      {(all || selected.length > 0) && <p className="text-sm text-muted-foreground">
-        Asking uses {all ? "all meetings in this filter" : `${selected.length} selected meeting${selected.length === 1 ? "" : "s"}`}.
-        {" "}{destination.kind === "none" ? "Choose a summary provider in Settings before asking." :
-          `${notes.length ? "Confirming the preview sends" : "Choosing Ask sends"} your question, transcript evidence and any available summary overviews${state.selectedDocumentIds?.length ? " and selected references" : ""} to ${destination.label}.`}
+      {sourcesReady && <p className="text-sm text-muted-foreground">
+        Asking uses {all ? "all meetings in this filter" : !selected.length ? "meetings matching these filters" : `${selected.length} selected meeting${selected.length === 1 ? "" : "s"}`}.
         {" "}{notes.length ? `${notes.length} personal excerpt${notes.length === 1 ? "" : "s"} selected for review before sending.` : "Personal notes and bookmarks stay on this device."}
       </p>}
       <div className="flex flex-wrap items-center gap-3 text-sm [&_button]:text-sm">
@@ -161,7 +136,7 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
             {(from || to) && <Button variant="ghost" size="sm" onClick={() => { setFrom(""); setTo(""); }}>Clear dates</Button>}
           </PopoverContent>
         </Popover>
-        <AttachReferenceButton meetingId={attachmentMeetingId} meetings={attachmentMeetings} scopeKey={JSON.stringify(scope)} onAttached={attached} />
+        <AttachReferenceButton meetingId={attachmentMeetingId} meetings={attachmentMeetings} scopeKey={JSON.stringify([scope, state.owner])} onBusyChange={setAttachmentBusy} onAttached={attached} />
       </div>
       {!all && selected.length > 0 && <TooltipProvider><div className="flex flex-wrap gap-2" aria-label="Selected meetings">
         {selected.slice(0, 3).map(id => {
@@ -176,13 +151,13 @@ export function KnowledgeArchive({ active = true, initialMatches, meetings, meet
     </fieldset>;
   return <section className="h-full min-h-0 [container-name:meeting-memory] [container-type:size]" aria-label="Meeting memory">
     <KnowledgeChat state={state} mode={mode} provider={modelConfig?.provider} model={modelConfig?.model}
-      secondary={<div className="space-y-4">{sources}{secondary}</div>}
-      initialQuestion={initialMatches?.question} selectedNotes={excerptsSupported ? notes : undefined} reviewActive={active} destinationRevision={JSON.stringify([modelConfig?.ollamaEndpoint, modelConfig?.customOpenAIEndpoint, modelConfig?.organization, modelConfig?.project])}
+      secondary={<div className="space-y-4">{sources}{secondary}</div>} attachmentBusy={attachmentBusy}
+      initialQuestion={initialMatches?.question} selectedNotes={excerptsSupported ? notes : undefined} reviewActive={active} destinationLabel={destination.label} destinationRevision={JSON.stringify([modelConfig?.ollamaEndpoint, modelConfig?.customOpenAIEndpoint, modelConfig?.organization, modelConfig?.project])}
       removeNote={ref => setNotes(current => current.filter(value => value.fingerprint !== ref.fingerprint))}
       clearNotes={() => setNotes([])}
-      emptyState={!state.owner && !all && !selected.length ? <div className="flex flex-col items-center gap-2 text-center">
+      emptyState={!state.owner && !sourcesReady ? <div className="flex flex-col items-center gap-2 text-center">
         <h3 className="text-lg font-semibold">Choose meetings to ask about</h3>
-        <p className="text-sm text-muted-foreground">Pick one or more meetings, or search all saved meetings</p>
+        <p className="text-sm text-muted-foreground">Pick meetings, filter by project or date, or search all saved meetings.</p>
         <Button className="mt-4" onClick={() => setPickerOpen(true)}>Choose meetings</Button>
       </div> : undefined}
     />

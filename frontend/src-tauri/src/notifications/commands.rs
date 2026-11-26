@@ -10,6 +10,8 @@ use tokio::sync::RwLock;
 /// Shared notification manager state
 pub type NotificationManagerState<R> = Arc<RwLock<Option<NotificationManager<R>>>>;
 
+pub(crate) const CALL_FALLBACK_ALERT: &str = "call-detection-toast-fallback";
+
 /// The tray remains actionable even when Windows notifications are silenced.
 /// Never include the event payload (paths, calendar subjects or device names)
 /// in a desktop notification that could also be shown on the lock screen.
@@ -19,7 +21,7 @@ pub(crate) fn listen_for_background_alerts<R: Runtime>(app: &AppHandle<R>) {
     use std::time::{Duration, Instant};
     for (event, body, kind) in [
         (
-            "call-detection-prompt",
+            CALL_FALLBACK_ALERT,
             "A call was detected. Open the tray menu to record it.",
             NotificationType::MeetingReminder(0),
         ),
@@ -64,7 +66,7 @@ pub(crate) fn listen_for_background_alerts<R: Runtime>(app: &AppHandle<R>) {
         app.listen(event, move |_| {
             // Segment and device warnings can repeat rapidly. Bound work before
             // scheduling it, and keep window queries off the audio pipeline.
-            if event != "call-detection-prompt" {
+            if event != CALL_FALLBACK_ALERT {
                 let mut last = last_attempt.lock().unwrap();
                 if last.is_some_and(|when| when.elapsed() < Duration::from_secs(30)) {
                     return;

@@ -16,11 +16,3 @@ test('anything empty, unknown or too long becomes a plain message', () => {
   }
   assert.match(stop.STOP_FAILED_FALLBACK, /still running/);
 });
-
-test('"no recording in progress" is not a failure to report', () => {
-  assert.equal(stop.isNothingToStop('No recording in progress'), true);
-  assert.equal(stop.isNothingToStop(new Error('No recording in progress')), true);
-  assert.equal(stop.isNothingToStop(NOT_RESPONDING_TEXT()), false);
-});
-
-function NOT_RESPONDING_TEXT() { return 'The audio device is not responding.'; }

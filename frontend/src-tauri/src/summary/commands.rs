@@ -81,7 +81,6 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     mut summary: serde_json::Value,
-    _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let _install_guard = crate::updates::admit_work()?;
     let pool = state.db_manager.pool();
@@ -119,7 +118,7 @@ pub async fn api_restore_previous_summary<R: Runtime>(
         .await
         .map_err(|error| error.to_string())?;
     let _ = app.emit(super::automatic::CHANGED_EVENT, &meeting_id);
-    api_get_summary(app, state, meeting_id, None).await
+    api_get_summary(app, state, meeting_id).await
 }
 
 /// Gets the per-meeting summary language override from metadata.json.
@@ -249,11 +248,18 @@ fn summary_job_status(
     error: Option<String>,
 ) -> (String, Option<String>) {
     let status = status.to_lowercase();
-    if status == "cancelled" && error.as_deref() == Some(super::automatic::PAUSED_FOR_INFERENCE) {
-        if SummaryService::has_paused_automatic_job(meeting_id) {
-            return ("deferred".into(), error);
+    use super::automatic::{PAUSED_FOR_EXIT, PAUSED_FOR_INFERENCE, PAUSE_ENDED};
+    if status == "cancelled" {
+        match error.as_deref() {
+            Some(PAUSED_FOR_INFERENCE) if SummaryService::has_paused_automatic_job(meeting_id) => {
+                return ("deferred".into(), error);
+            }
+            Some(PAUSED_FOR_INFERENCE) => return (status, Some(PAUSE_ENDED.into())),
+            Some(PAUSED_FOR_EXIT) if !SummaryService::has_paused_automatic_job(meeting_id) => {
+                return (status, Some(PAUSE_ENDED.into()));
+            }
+            _ => {}
         }
-        return (status, Some(super::automatic::PAUSE_ENDED.into()));
     }
     (status, error)
 }
@@ -266,7 +272,6 @@ pub async fn api_get_summary<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
-    _auth_token: Option<String>,
 ) -> Result<SummaryResponse, String> {
     let pool = state.db_manager.pool();
 
@@ -365,7 +370,19 @@ pub(super) struct MeetingSummaryContext {
 #[cfg(test)]
 mod pause_status_tests {
     use super::*;
-    use crate::summary::automatic::{PAUSED_FOR_INFERENCE, PAUSE_ENDED};
+    use crate::summary::automatic::{PAUSED_FOR_EXIT, PAUSED_FOR_INFERENCE, PAUSE_ENDED};
+
+    #[test]
+    fn exit_pause_without_a_live_job_offers_manual_retry() {
+        assert_eq!(
+            summary_job_status(
+                "orphaned-exit-pause",
+                "cancelled".into(),
+                Some(PAUSED_FOR_EXIT.into())
+            ),
+            ("cancelled".into(), Some(PAUSE_ENDED.into()))
+        );
+    }
 
     #[tokio::test]
     async fn paused_notes_require_a_live_local_automatic_job_to_show_as_deferred() {
@@ -448,7 +465,6 @@ pub async fn api_process_transcript<R: Runtime>(
     custom_prompt: Option<String>,
     template_id: Option<String>,
     summary_language: Option<String>,
-    _auth_token: Option<String>,
 ) -> Result<ProcessTranscriptResponse, String> {
     use uuid::Uuid;
 

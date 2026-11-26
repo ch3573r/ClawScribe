@@ -60,10 +60,17 @@ struct Tool {
     text_offset: bool,
 }
 
-static TOOLS: [Tool; 8] = [
+static TOOLS: [Tool; 9] = [
     Tool {
         name: "list_meetings",
-        description: "List saved meetings, newest first. Use next_offset for the next page.",
+        description: "List saved meetings, newest first, optionally limited by inclusive dates and project tags. Use next_offset for the next page.",
+        required_text: None,
+        paged: true,
+        text_offset: false,
+    },
+    Tool {
+        name: "list_open_actions",
+        description: "List open reviewed actions across saved meetings, newest meeting first. Uses the library read permission. Use next_offset for the next page.",
         required_text: None,
         paged: true,
         text_offset: false,
@@ -77,14 +84,14 @@ static TOOLS: [Tool; 8] = [
     },
     Tool {
         name: "search_passages",
-        description: "Find up to 25 literal matches in current saved transcripts, optionally limited by inclusive dates and project tags. Results include meeting and segment IDs, speaker and available recording time.",
+        description: "Find up to 25 current transcript passages that contain every term. Use double quotes for a phrase. Supports inclusive dates and project tags, and optional local semantic matches when the index is ready.",
         required_text: Some("query"),
         paged: false,
         text_offset: false,
     },
     Tool {
         name: "get_meeting",
-        description: "Read a saved meeting's details, summary and notes. Use next_text_offset to continue long text.",
+        description: "Read a saved meeting's summary, notes, project tags, bookmarks and attachment metadata. Use next_text_offset or next_metadata_offset to continue.",
         required_text: Some("meeting_id"),
         paged: false,
         text_offset: true,
@@ -124,6 +131,10 @@ impl Tool {
         matches!(self.name, "get_meeting_metadata" | "list_reviewed_actions")
     }
 
+    fn meeting_filters(&self) -> bool {
+        matches!(self.name, "list_meetings" | "search_passages")
+    }
+
     fn schema(&self) -> Value {
         let mut properties = Map::new();
         if let Some(name) = self.required_text {
@@ -141,9 +152,12 @@ impl Tool {
             );
         }
         if self.text_offset {
-            properties.insert("text_offset".into(), offset);
+            properties.insert("text_offset".into(), offset.clone());
         }
-        if self.name == "search_passages" {
+        if self.name == "get_meeting" {
+            properties.insert("metadata_offset".into(), offset);
+        }
+        if self.meeting_filters() {
             for key in ["from", "to"] {
                 properties.insert(key.into(), json!({"type":"string","format":"date","description":"Inclusive date (YYYY-MM-DD)."}));
             }
@@ -153,6 +167,9 @@ impl Tool {
                 json!({"type":"string","enum":["any","all"],"default":"any"}),
             );
             properties.insert("untagged".into(), json!({"type":"boolean","default":false,"description":"Only meetings without project tags."}));
+        }
+        if self.name == "search_passages" {
+            properties.insert("semantic".into(), json!({"type":"boolean","default":false}));
         }
         json!({
             "name":self.name, "description":self.description,
@@ -175,6 +192,13 @@ impl Tool {
             ("offset", self.paged, 0, i32::MAX as u64, 0),
             ("limit", self.paged, 1, 100, 25),
             ("text_offset", self.text_offset, 0, i32::MAX as u64, 0),
+            (
+                "metadata_offset",
+                self.name == "get_meeting",
+                0,
+                i32::MAX as u64,
+                0,
+            ),
         ] {
             if allowed {
                 let n = match supplied.get(key) {
@@ -185,11 +209,17 @@ impl Tool {
                 args.insert(key.into(), Value::from(n));
             }
         }
-        if self.name == "search_passages" {
+        if self.meeting_filters() {
             for key in ["from", "to", "tags", "tag_mode", "untagged"] {
                 if let Some(value) = supplied.get(key) {
                     args.insert(key.into(), value.clone());
                 }
+            }
+        }
+        if self.name == "search_passages" {
+            if let Some(value) = supplied.get("semantic") {
+                let flag = value.as_bool().ok_or("Semantic must be true or false.")?;
+                args.insert("semantic".into(), Value::from(flag));
             }
         }
         if supplied.keys().any(|key| !args.contains_key(key)) {
@@ -469,10 +499,88 @@ async fn write_response(output: &mut (impl AsyncWrite + Unpin), response: Value)
     output.flush().await
 }
 
+async fn probe_response(input: &mut (impl AsyncBufRead + Unpin), id: u8) -> io::Result<Value> {
+    let mut line = Vec::new();
+    input
+        .take((MAX_RESPONSE + 1) as u64)
+        .read_until(b'\n', &mut line)
+        .await?;
+    if line.len() > MAX_RESPONSE || line.last() != Some(&b'\n') {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let frame: Value = serde_json::from_slice(&line)?;
+    if frame["jsonrpc"] != "2.0" || frame["id"] != id || !frame["result"].is_object() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(frame["result"].clone())
+}
+
+async fn probe_stdio(
+    mut input: impl AsyncBufRead + Unpin,
+    mut output: impl AsyncWrite + Unpin,
+    library: bool,
+    follow_through: bool,
+) -> io::Result<()> {
+    write_response(&mut output, json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":LEGACY_VERSION,"capabilities":{},"clientInfo":{"name":"ClawScribe settings","version":env!("CARGO_PKG_VERSION")}
+    }})).await?;
+    let init = probe_response(&mut input, 1).await?;
+    if init["protocolVersion"] != LEGACY_VERSION || init["serverInfo"]["name"] != "clawscribe" {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    write_response(
+        &mut output,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await?;
+    write_response(
+        &mut output,
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    )
+    .await?;
+    let response = probe_response(&mut input, 2).await?;
+    let tools = response["tools"]
+        .as_array()
+        .ok_or(io::ErrorKind::InvalidData)?;
+    if TOOLS.iter().any(|tool| {
+        let expected = if tool.follow_through() {
+            follow_through
+        } else {
+            library
+        };
+        tools.iter().any(|listed| {
+            listed["name"] == tool.name && listed["annotations"]["readOnlyHint"] == true
+        }) != expected
+    }) {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    output.shutdown().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn settings_probe_exercises_stdio_and_verifies_the_enabled_tool_scope() {
+        let root = tempfile::tempdir().unwrap();
+        settings::set_follow_through(root.path(), true).unwrap();
+        for (expected_library, succeeds) in [(false, true), (true, false)] {
+            let (client, server) = tokio::io::duplex(4096);
+            let (input, output) = tokio::io::split(server);
+            let worker = tokio::spawn(serve(root.path().into(), BufReader::new(input), output));
+            let (input, output) = tokio::io::split(client);
+            assert_eq!(
+                probe_stdio(BufReader::new(input), output, expected_library, true)
+                    .await
+                    .is_ok(),
+                succeeds
+            );
+            worker.await.unwrap().unwrap();
+        }
+    }
 
     fn request(id: u32, method: &str, params: Value) -> Value {
         json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
@@ -519,7 +627,7 @@ mod tests {
         ready(&mut server);
         let listed = server.handle(request(4, "tools/list", json!({}))).unwrap();
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
         assert!(tools
             .iter()
             .all(|t| t["annotations"]["readOnlyHint"] == true));
@@ -582,6 +690,16 @@ mod tests {
         assert_eq!(
             server
                 .handle(request(4, "tools/call", json!({"name":"list_meetings"})))
+                .unwrap()["result"]["isError"],
+            true
+        );
+        assert_eq!(
+            server
+                .handle(request(
+                    8,
+                    "tools/call",
+                    json!({"name":"list_open_actions"})
+                ))
                 .unwrap()["result"]["isError"],
             true
         );

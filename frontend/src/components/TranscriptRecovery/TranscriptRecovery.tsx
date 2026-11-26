@@ -100,10 +100,11 @@ export function TranscriptRecovery({
     setIsRecovering(true);
     try {
       await onRecover(selectedMeetingId);
-      onClose();
     } catch (error) {
       console.error('Meeting recovery failed:', error);
-      toast.error('Could not recover the meeting. Your recovery data is still available. Try again.');
+      toast.error('Could not recover the meeting. Your recovery data is still available. Try again.', {
+        description: errorText(error),
+      });
     } finally {
       setIsRecovering(false);
     }
@@ -117,7 +118,7 @@ export function TranscriptRecovery({
       const result = await onSaveOfflineTranscript(selectedMeetingId, fileCopy);
       if (result === 'library') {
         toast.success('Transcript saved to your library');
-        onClose();
+        if (!recoverableMeetings.some(meeting => meeting.meetingId !== selectedMeetingId)) onClose();
       } else if (result === 'file') {
         toast.success('Transcript copy saved');
       }

@@ -11,6 +11,8 @@ import { migrateLegacyMeetingCalendars } from '@/lib/meetingCalendarStore';
 import type { LibraryArchiveReport } from '@/lib/library';
 import { ScheduledBackups } from '@/components/ScheduledBackups';
 
+const audioExcludedNotice = 'This backup does not include recording audio.';
+
 export function LibraryBackup() {
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState('');
@@ -40,7 +42,7 @@ export function LibraryBackup() {
       const unreadable = report.unreadable_calendar_links ?? 0;
       const templatesSkipped = report.skipped_template_items ?? 0;
       const answersOmitted = report.omitted_saved_live_answers ?? 0;
-      const description = `${report.meetings} meetings, ${report.files} recording files.${report.skipped ? ` ${report.skipped} existing meetings skipped.` : ''}${unreadable ? ` ${unreadable} saved calendar links could not be read and were left unlinked.` : ''}${incomplete ? ` ${incomplete} meetings have incomplete audio; review the list below.` : ''}${answersOmitted ? ` Excluded ${answersOmitted} saved live ${answersOmitted === 1 ? 'answer' : 'answers'}.` : ''}`;
+      const description = `${report.meetings} meetings, ${report.files} recording files.${report.audio_excluded ? ` ${audioExcludedNotice}` : ''}${report.skipped ? ` ${report.skipped} existing meetings skipped.` : ''}${unreadable ? ` ${unreadable} saved calendar links could not be read and were left unlinked.` : ''}${incomplete ? ` ${incomplete} meetings have incomplete audio; review the list below.` : ''}${answersOmitted ? ` Excluded ${answersOmitted} saved live ${answersOmitted === 1 ? 'answer' : 'answers'}.` : ''}`;
       if (incomplete) toast.warning(restore ? 'Restore complete with incomplete audio' : 'Backup saved with incomplete audio', { description });
       else if (templatesSkipped) toast.warning(restore ? 'Restore complete with templates skipped' : 'Backup saved with templates skipped', { description });
       else if (answersOmitted) toast.warning(restore ? 'Restore complete with saved answers excluded' : 'Backup saved with saved answers excluded', { description });
@@ -58,12 +60,13 @@ export function LibraryBackup() {
       <DialogHeader><DialogTitle>Backup and restore</DialogTitle><DialogDescription>Save meetings, recordings, transcript history, notes, custom templates, vocabulary, and saved series preferences.</DialogDescription></DialogHeader>
       <p className="text-sm text-muted-foreground">Archives contain private content. Store these unencrypted files in a trusted folder.</p>
       <p className="text-sm text-muted-foreground">Restore adds missing meetings and keeps your existing preferences. Finish recording and transcription jobs first.</p>
-      {result && (incompleteMeetings.length > 0 || skippedTemplates > 0 || omittedAnswers > 0) && <div role="alert" className="space-y-2 rounded border border-warning-border/40 bg-warning p-3 text-sm">
+      {result && (result.report.audio_excluded || incompleteMeetings.length > 0 || skippedTemplates > 0 || omittedAnswers > 0) && <div role="alert" className="space-y-2 rounded border border-warning-border/40 bg-warning p-3 text-sm">
+        {result.report.audio_excluded && <p>{audioExcludedNotice}</p>}
         {skippedTemplates > 0 && <p>Skipped {skippedTemplates} template {skippedTemplates === 1 ? 'item' : 'items'} that could not be read or saved.</p>}
         {omittedAnswers > 0 && <p>{omittedAnswers === 1 ? '1 saved live answer was' : `${omittedAnswers} saved live answers were`} excluded.</p>}
         {incompleteMeetings.length > 0 && <>
           <p className="font-medium">{result.restore ? 'Restore complete with incomplete audio' : 'Backup saved with incomplete audio'}</p>
-          <p>Meeting data and available saved audio are included. If recovery files were excluded, keep a separate copy of the source recording folders, including hidden files.</p>
+          <p>{result.report.audio_excluded ? 'Meeting data is included.' : 'Meeting data and available saved audio are included.'} If recovery files were excluded, keep a separate copy of the source recording folders, including hidden files.</p>
           <ul className="list-disc space-y-1 pl-5">{incompleteMeetings.map(meeting => <li key={meeting.meeting_id}>
             <span className="font-medium">{meeting.title || 'Untitled meeting'}</span>: {[
               meeting.recovery_files_excluded && 'recovery files excluded',

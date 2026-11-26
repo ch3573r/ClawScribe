@@ -12,7 +12,9 @@ pub static NEMOTRON_ENGINE: Mutex<Option<Arc<NemotronEngine>>> = Mutex::new(None
 #[command]
 pub async fn nemotron_init<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     {
-        let guard = NEMOTRON_ENGINE.lock().unwrap();
+        let guard = NEMOTRON_ENGINE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if guard.is_some() {
             return Ok(());
         }
@@ -21,12 +23,18 @@ pub async fn nemotron_init<R: Runtime>(app: AppHandle<R>) -> Result<(), String> 
     let models_dir = app.path().app_data_dir().map(|d| d.join("models")).ok();
     let engine = NemotronEngine::new_with_models_dir(models_dir)
         .map_err(|e| format!("Failed to initialize Nemotron engine: {}", e))?;
-    *NEMOTRON_ENGINE.lock().unwrap() = Some(Arc::new(engine));
+    *NEMOTRON_ENGINE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(engine));
     Ok(())
 }
 
 fn engine() -> Option<Arc<NemotronEngine>> {
-    NEMOTRON_ENGINE.lock().unwrap().as_ref().cloned()
+    NEMOTRON_ENGINE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .cloned()
 }
 
 #[command]

@@ -63,7 +63,7 @@ impl VerifiedModel {
     pub fn root(&self) -> &Path {
         &self.root
     }
-    pub(super) fn verify_blocking(
+    pub(crate) fn verify_blocking(
         root: &Path,
         cancelled: &AtomicBool,
     ) -> Result<Self, KnowledgeError> {

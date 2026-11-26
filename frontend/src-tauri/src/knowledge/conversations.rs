@@ -31,31 +31,64 @@ pub async fn create_library(pool: &SqlitePool) -> Result<ConversationOwner, Stri
 pub struct LibraryConversation {
     #[serde(flatten)]
     pub owner: ConversationOwner,
+    title: Option<String>,
     first_question: Option<String>,
     created_at: String,
 }
 
 pub async fn library_list(pool: &SqlitePool) -> Result<Vec<LibraryConversation>, String> {
-    let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
-        "SELECT o.id,substr(trim(first.question),1,100),COALESCE(first.created_at,o.created_at)
+    let rows: Vec<(String, Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT o.id,o.title,substr(trim(first.question),1,100),COALESCE(first.created_at,o.created_at)
          FROM knowledge_owners o LEFT JOIN knowledge_requests first ON first.id=(
             SELECT r.id FROM knowledge_requests r WHERE r.owner_id=o.id AND r.question!=''
             ORDER BY r.created_at,r.id LIMIT 1)
-         WHERE o.kind='library' ORDER BY o.created_at,o.id",
+         WHERE o.kind='library' ORDER BY o.created_at DESC,o.rowid DESC",
     )
     .fetch_all(pool)
     .await
     .map_err(failure)?;
     Ok(rows
         .into_iter()
-        .filter_map(|(key, first_question, created_at)| {
+        .filter_map(|(key, title, first_question, created_at)| {
             Some(LibraryConversation {
                 owner: ConversationOwner::Library(key.strip_prefix("library:")?.to_owned()),
+                title,
                 first_question,
                 created_at,
             })
         })
         .collect())
+}
+
+pub async fn rename_library(
+    pool: &SqlitePool,
+    owner: &ConversationOwner,
+    title: &str,
+) -> Result<(), String> {
+    if !matches!(owner, ConversationOwner::Library(_)) {
+        return Err("Choose a saved library conversation".into());
+    }
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 100 || title.chars().any(char::is_control) {
+        return Err("Enter a conversation name between 1 and 100 characters".into());
+    }
+    let updated = sqlx::query("UPDATE knowledge_owners SET title=? WHERE id=? AND kind='library'")
+        .bind(title)
+        .bind(owner_key(owner)?)
+        .execute(pool)
+        .await
+        .map_err(failure)?;
+    if updated.rows_affected() == 0 {
+        return Err("This conversation is no longer available".into());
+    }
+    Ok(())
+}
+
+pub async fn delete_library(pool: &SqlitePool, owner: &ConversationOwner) -> Result<(), String> {
+    if !matches!(owner, ConversationOwner::Library(_)) {
+        return Err("Choose a saved library conversation".into());
+    }
+    clear(pool, owner).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -111,10 +144,13 @@ pub(crate) fn validate_request(request: &AskRequest) -> Result<(), String> {
             Ok(())
         }
         (ConversationOwner::Library(_), KnowledgeScope::Library { filter }) => {
-            if filter.all_meetings || !filter.meeting_ids.is_empty() {
+            if filter.has_selection() {
                 Ok(())
             } else {
-                Err("Choose saved meetings or explicitly allow all saved meetings".into())
+                Err(
+                    "Choose saved meetings, a project or date filter, or select all saved meetings"
+                        .into(),
+                )
             }
         }
         _ => Err("Conversation owner and scope do not match".into()),
@@ -520,7 +556,7 @@ pub async fn clear(pool: &SqlitePool, owner: &ConversationOwner) -> Result<u64, 
         .await
         .map_err(failure)?;
     let mut count = sqlx::query("DELETE FROM knowledge_requests WHERE owner_id=?")
-        .bind(key)
+        .bind(&key)
         .execute(&mut *tx)
         .await
         .map_err(failure)?
@@ -532,6 +568,12 @@ pub async fn clear(pool: &SqlitePool, owner: &ConversationOwner) -> Result<u64, 
             .await
             .map_err(failure)?
             .rows_affected();
+    } else if matches!(owner, ConversationOwner::Library(_)) {
+        sqlx::query("DELETE FROM knowledge_owners WHERE id=? AND kind='library'")
+            .bind(&key)
+            .execute(&mut *tx)
+            .await
+            .map_err(failure)?;
     }
     tx.commit().await.map_err(failure)?;
     Ok(count)
@@ -747,6 +789,17 @@ pub(crate) mod tests {
                 ..Default::default()
             },
         };
+        assert!(validate_request(&input).is_ok());
+        input.search.scope = KnowledgeScope::Library {
+            filter: MeetingFilter {
+                from: Some("2026-10-04".into()),
+                ..Default::default()
+            },
+        };
+        assert!(validate_request(&input).is_ok());
+        input.search.scope = KnowledgeScope::Library {
+            filter: MeetingFilter::default(),
+        };
         assert!(validate_request(&input).is_err());
         input.search.scope = KnowledgeScope::Library {
             filter: MeetingFilter {
@@ -758,6 +811,81 @@ pub(crate) mod tests {
     }
 
     use sqlx::SqlitePool;
+
+    #[tokio::test]
+    async fn adding_titles_preserves_existing_library_conversations() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let current = sqlx::migrate!("./migrations");
+        let previous = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                current
+                    .iter()
+                    .filter(|migration| migration.version < 20261122004700)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        previous.run(&pool).await.unwrap();
+        let owner = create_library(&pool).await.unwrap();
+        current.run(&pool).await.unwrap();
+        let threads = library_list(&pool).await.unwrap();
+        assert_eq!(threads[0].owner, owner);
+        assert!(threads[0].title.is_none());
+        rename_library(&pool, &owner, "Existing conversation")
+            .await
+            .unwrap();
+        assert_eq!(
+            library_list(&pool).await.unwrap()[0].title.as_deref(),
+            Some("Existing conversation")
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_an_empty_library_conversation_removes_its_owner_and_permission() {
+        let pool = database().await;
+        let owner = create_library(&pool).await.unwrap();
+        super::super::document_context::set_sharing(&pool, &owner, true)
+            .await
+            .unwrap();
+        assert_eq!(clear(&pool, &owner).await.unwrap(), 0);
+        assert!(!list_libraries(&pool).await.unwrap().contains(&owner));
+        assert!(!super::super::document_context::sharing(&pool, &owner)
+            .await
+            .unwrap());
+        assert!(reserve(&pool, &request(owner), "builtin-ai", "fixture")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn library_management_lists_newest_first_and_isolates_conversations() {
+        let pool = database().await;
+        let older = create_library(&pool).await.unwrap();
+        let newer = create_library(&pool).await.unwrap();
+        sqlx::query("UPDATE knowledge_owners SET created_at='2026-10-10T00:00:00Z' WHERE id=?")
+            .bind(owner_key(&older).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        rename_library(&pool, &newer, "  Planning notes  ")
+            .await
+            .unwrap();
+        let entries = library_list(&pool).await.unwrap();
+        assert_eq!(entries[0].owner, newer);
+        assert_eq!(entries[0].title.as_deref(), Some("Planning notes"));
+        assert_eq!(entries[1].owner, older);
+        assert!(rename_library(&pool, &newer, " ").await.is_err());
+        let meeting = ConversationOwner::Meeting("fixture".into());
+        assert!(rename_library(&pool, &meeting, "Name").await.is_err());
+        assert!(delete_library(&pool, &meeting).await.is_err());
+        reserve(&pool, &request(newer.clone()), "builtin-ai", "fixture")
+            .await
+            .unwrap();
+        delete_library(&pool, &newer).await.unwrap();
+        assert!(history(&pool, &newer).await.unwrap().is_empty());
+        assert_eq!(list_libraries(&pool).await.unwrap(), vec![older]);
+    }
 
     async fn database() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()

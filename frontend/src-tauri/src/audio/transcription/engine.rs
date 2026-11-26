@@ -58,6 +58,8 @@ pub enum LiveModelFailure {
     Downloading,
     LoadFailed,
     UnsupportedProvider,
+    /// Whisper in a Vulkan build needs the Vulkan runtime, which is missing.
+    VulkanRuntimeMissing,
 }
 
 impl LiveModelFailure {
@@ -67,6 +69,7 @@ impl LiveModelFailure {
             Self::Downloading => "downloading",
             Self::LoadFailed => "load_failed",
             Self::UnsupportedProvider => "unsupported_provider",
+            Self::VulkanRuntimeMissing => "vulkan_runtime_missing",
         };
         format!("live_model:{kind}")
     }
@@ -245,6 +248,9 @@ async fn inspect_live_model<R: Runtime>(
             )
         }
         Some("localWhisper") => {
+            whisper_engine::vulkan_runtime::ensure_whisper_runtime()
+                .await
+                .map_err(|_| LiveModelFailure::VulkanRuntimeMissing)?;
             whisper_engine::commands::whisper_init()
                 .await
                 .map_err(failed)?;
@@ -323,7 +329,7 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
             let engine = {
                 let guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
                     .lock()
-                    .unwrap();
+                    .unwrap_or_else(|error| error.into_inner());
                 guard.as_ref().cloned()
             };
 
@@ -352,7 +358,7 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
             let engine = {
                 let guard = crate::nemotron_engine::commands::NEMOTRON_ENGINE
                     .lock()
-                    .unwrap();
+                    .unwrap_or_else(|error| error.into_inner());
                 guard.as_ref().cloned()
             };
             match engine {
@@ -375,7 +381,7 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
         Some("localWhisper") => {
             let engine = crate::whisper_engine::commands::WHISPER_ENGINE
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|error| error.into_inner())
                 .as_ref()
                 .cloned();
             match engine {

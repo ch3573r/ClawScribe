@@ -8,8 +8,15 @@ function createView() {
   const harness = createHookHarness();
   const requests = [];
   const errors = [];
+  const errorWrites = [];
   const { usePaginatedTranscripts } = loadTsModule(fileURLToPath(new URL('../../src/hooks/usePaginatedTranscripts.ts', import.meta.url)), {
-    react: harness.react,
+    react: { ...harness.react, useState(initial) {
+      const [value, setValue] = harness.react.useState(initial);
+      return [value, next => {
+        if (typeof next === 'string' && next.startsWith('Failed to update')) errorWrites.push(next);
+        setValue(next);
+      }];
+    } },
     sonner: { toast: { error: message => errors.push(message) } },
     '@tauri-apps/api/core': { invoke(command, args) {
       const result = deferred();
@@ -19,7 +26,7 @@ function createView() {
   });
   let meetingId = 'first';
   const render = () => harness.render(() => usePaginatedTranscripts({ meetingId }));
-  return { ...harness, requests, errors, render, navigate(id) { meetingId = id; return render(); } };
+  return { ...harness, requests, errors, errorWrites, render, navigate(id) { meetingId = id; return render(); } };
 }
 
 const row = (id, text = id) => ({ id, text, audio_start_time: 1, audio_end_time: 2 });
@@ -227,6 +234,14 @@ test('a single speaker edit updates both views and failed edits refetch both', a
   await rejected;
   assert.equal(view.render().transcripts[0].speaker, 'Me');
   assert.equal(view.render().timelineSegments[0].speaker, 'Me');
+  const bulk = view.render().applySpeakerToMatching('Me', 'Alex');
+  const bulkRejected = assert.rejects(bulk, /Synthetic speaker failure/);
+  view.requests.at(-1).reject(new Error('Synthetic speaker failure'));
+  await flush();
+  resolveRows(view.requests.slice(-3));
+  await bulkRejected;
+  assert.equal(view.render().error, null);
+  assert.deepEqual(view.errorWrites, []);
   view.unmount();
 });
 

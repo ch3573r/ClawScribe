@@ -68,5 +68,7 @@ pub(crate) async fn read_ical_source(
 #[tauri::command]
 pub(crate) async fn remove_ical_source(app: AppHandle, id: String) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(|_| store::MISSING)?;
-    with_store(app, move |store, dir| store.remove(dir, id)).await
+    with_store(app.clone(), move |store, dir| store.remove(dir, id)).await?;
+    crate::teams_detection::monitor::join::cancel_ical_pending(&app, id);
+    Ok(())
 }

@@ -27,6 +27,7 @@ fn snapshot() -> DiagnosticSnapshot {
             flash_attn: false,
             label: private_note.into(),
             gpu_available_but_unused: false,
+            vulkan_runtime_missing: false,
             cpu_cores: 4,
             memory_gb: 8,
             performance_tier: private_note.into(),

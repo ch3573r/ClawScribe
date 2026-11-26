@@ -44,6 +44,7 @@ export function OllamaDownloadProvider({ children }: { children: React.ReactNode
   useEffect(() => {
     console.log('[OllamaDownloadContext] Setting up event listeners');
     const unsubscribers: (() => void)[] = [];
+    let disposed = false;
 
     const setupListeners = async () => {
       try {
@@ -51,6 +52,7 @@ export function OllamaDownloadProvider({ children }: { children: React.ReactNode
         const unlistenProgress = await listen<{ modelName: string; progress: number }>(
           'ollama-model-download-progress',
           (event) => {
+            if (disposed) return;
             const { modelName, progress } = event.payload;
             console.log(`🔵 [OllamaDownloadContext] Progress for ${modelName}: ${progress}%`);
 
@@ -69,12 +71,14 @@ export function OllamaDownloadProvider({ children }: { children: React.ReactNode
             });
           }
         );
+        if (disposed) return unlistenProgress();
         unsubscribers.push(unlistenProgress);
 
         // Download complete
         const unlistenComplete = await listen<{ modelName: string }>(
           'ollama-model-download-complete',
           (event) => {
+            if (disposed) return;
             const { modelName } = event.payload;
             console.log(`✅ [OllamaDownloadContext] Download complete for ${modelName}`);
 
@@ -97,12 +101,14 @@ export function OllamaDownloadProvider({ children }: { children: React.ReactNode
             });
           }
         );
+        if (disposed) return unlistenComplete();
         unsubscribers.push(unlistenComplete);
 
         // Download error
         const unlistenError = await listen<{ modelName: string; error: string }>(
           'ollama-model-download-error',
           (event) => {
+            if (disposed) return;
             const { modelName, error } = event.payload;
             console.error(`❌ [OllamaDownloadContext] Download error for ${modelName}:`, error);
 
@@ -125,6 +131,7 @@ export function OllamaDownloadProvider({ children }: { children: React.ReactNode
             });
           }
         );
+        if (disposed) return unlistenError();
         unsubscribers.push(unlistenError);
 
         console.log('[OllamaDownloadContext] Event listeners set up successfully');
@@ -136,6 +143,7 @@ export function OllamaDownloadProvider({ children }: { children: React.ReactNode
     setupListeners();
 
     return () => {
+      disposed = true;
       console.log('[OllamaDownloadContext] Cleaning up event listeners');
       unsubscribers.forEach(unsub => unsub());
     };

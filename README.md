@@ -12,12 +12,13 @@ and compact floating recording controls. The OpenClaw integration is removed.
 See the [release notes](docs/releases/0.67.0.md) and
 [download the latest stable Windows release](https://github.com/ch3573r/ClawScribe/releases/latest).
 
-**0.68.0-preview.1** replaces MAI-Transcribe with standard Azure Speech for
-optional cloud file transcription, preserving existing endpoints and protected
-keys. It is a prerelease for manual evaluation; the stable update stays on
-0.67.0. See the [preview notes](docs/releases/0.68.0-preview.1.md).
-Its installer filenames use numeric version `0.68.0`, as required by existing
-preview updaters. The original suffixed download aliases contain identical bytes.
+**0.68.1-preview.1** follows a full product and engineering review: startup
+without Vulkan, safer exit and automatic notes, faster recording and playback,
+and many workflow improvements. It also includes standard Azure Speech from
+0.68.0-preview.1. It is a prerelease for manual evaluation; the stable update
+stays on 0.67.0. See the [preview notes](docs/releases/0.68.1-preview.1.md).
+Its installer filenames use numeric version `0.68.1`, as required by existing
+preview updaters.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
@@ -179,7 +180,9 @@ source's language unchanged. See [live transcript behavior](docs/meeting-quality
 **Settings → Transcription → Custom vocabulary** stores up to 500 names or
 terms (64 characters each) and corrects similar spellings in new recordings,
 imports, and retranscription. A recording uses the list loaded when its live
-transcription starts. Matching supports Unicode names and terms, including
+transcription starts for spelling correction. Paste several terms at once by
+separating them with commas or line breaks. Move important terms to the front
+to prioritize them in Whisper. Matching supports Unicode names and terms, including
 German umlauts and ß. Short terms require an exact match apart from case and
 punctuation; single-letter keys such as C# and C++ are left unchanged.
 
@@ -197,12 +200,19 @@ why. See [hosted transcription verification](docs/hosted-transcription-smoke.md)
 
 ## Meeting Notes And Exports
 
+Press **Ctrl+K** to open the command palette. Search meetings, transcript
+passages, and open actions, or jump to a Settings page. The palette also
+offers recording controls, audio import, and Meeting memory.
+
 Search saved meeting titles, current transcripts, summaries, personal notes
 and bookmarks from the sidebar or **Meetings → Archive**. Search for several
 terms in any order or put an exact phrase in quotes. Results are grouped by
 meeting and highlight matches in the saved text. Open a source in its meeting
 or play a timed transcript result. The Archive keeps the current search,
-project, date and attention filters when you return.
+project, date and attention filters when you return. Choose **Hybrid** to add
+semantic transcript matches when the local semantic index is ready. Use
+**Select meetings** for bulk tagging, local export, deletion, or to scope a
+Meeting memory conversation.
 
 Read and correct the transcript while the speaker timeline loads. The text
 stays available when the recording is missing. Use **Find and replace** to
@@ -251,12 +261,11 @@ The **Conversation** readout estimates talk time, pace, questions and uninterrup
 speaking stretches during live transcription. It runs on this PC and can be hidden
 in **Settings → Recording**. See [conversation metrics](docs/meeting-quality.md#conversation-metrics).
 
-Source also includes a collapsible **Live assistance** panel above the Home
-transcript. Explicitly choose **Ask**, **Summarize the last 10 minutes**, or **List open
+During a recording with live transcription, choose **Live assistance** on Home
+to open a panel alongside the transcript. Explicitly choose **Ask**, **Summarize the last 10 minutes**, or **List open
 questions** using the configured summary provider; no provider request runs
 automatically. **Share live transcript with the provider** is off by default
-and remembered for future recordings. Switch it on in Memory settings; the panel
-shows during a recording only while it is on.
+and remembered for future recordings. Switch it on in the panel or in Summary settings before asking.
 Selected saved meetings can supplement the current recording. Document selection
 is explicit, and document sharing is independent and resets for each recording.
 The panel and each answer show finalized-through time and incomplete status;
@@ -415,8 +424,8 @@ for the saved server even while that server is offline.
 ## Library And Data
 
 **Meetings → Archive** shows recording source and measured duration when available.
-Filter to meetings that need attention to find incomplete recordings, missing
-transcripts, and failed summaries. Use
+Filter by recurring series or narrow to meetings that need attention to find
+incomplete recordings, missing transcripts, and failed summaries. Use
 **Storage** to measure the library or select meetings to review which saved
 audio copies can be removed while keeping their transcripts and notes.
 See [Archive review and storage](docs/local-library.md#archive-review-and-storage).
@@ -431,8 +440,9 @@ the saved meeting. Other live answers clear at Stop.
 
 **Settings → Assistant access** offers separate permissions for an MCP client.
 Follow-through access reads open reviewed actions and basic metadata for a
-meeting reference you provide. Library access supports broader searches and
-can read notes, transcripts, and recording paths. Both use local standard
+meeting reference you provide. Library access supports filtered meeting and
+passage searches, cross-meeting open actions, notes, bookmarks, attachment
+metadata, transcripts, and recording paths. Both permissions use local standard
 input and output and start off. [Local assistant access](docs/local-library.md#local-assistant-access)
 
 **Backup and restore** saves a portable archive of meeting data, transcript history,

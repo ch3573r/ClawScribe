@@ -2,6 +2,7 @@ use super::commands::ProcessTranscriptResponse;
 pub(crate) use super::request_config::AuthorizedRequest;
 use super::request_config::{AutomaticRequest, DestinationReview, DispatchCheck};
 use super::service::{SummaryProviderRequest, SummaryService};
+use super::summary_engine::client::is_exiting;
 use crate::{
     behavior_settings::{self, Backing},
     database::repositories::summary::{SummaryProcessesRepository, NO_TRANSCRIPT, RECOVERY_NEEDED},
@@ -26,6 +27,8 @@ pub(super) const DESTINATION_CHANGED: &str =
     "The summary destination changed. Review it and try again.";
 pub(crate) const PAUSED_FOR_INFERENCE: &str =
     "Automatic notes are paused while recording or transcription uses local inference.";
+pub(crate) const PAUSED_FOR_EXIT: &str =
+    "Automatic notes are paused because ClawScribe is closing.";
 pub(super) const PAUSE_ENDED: &str = "Automatic notes stopped. Generate a summary to try again.";
 pub(crate) const CHANGED_EVENT: &str = "summary-job-changed";
 pub(crate) static ROUTE_CHANGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -404,17 +407,26 @@ pub(crate) async fn start_import<R: Runtime>(
         Ok(request) => {
             launch(app, pool, meeting_id, Start::Import(request)).await?;
         }
-        Err(reason) => record_outcome(&app, &pool, &meeting_id, "import", &reason).await?,
+        Err(reason) => {
+            if let Some(_route) = lock_launch_route(is_exiting).await {
+                record_outcome(&app, &pool, &meeting_id, "import", &reason).await?;
+            }
+        }
     }
     Ok(())
 }
 
 pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: SqlitePool) {
+    if is_exiting() {
+        return;
+    }
     publication::resume(&app, &pool).await;
     if get_automatic_summary_preference(app.clone()).await != Ok(true) {
         return;
     }
-    let route_guard = ROUTE_CHANGE_LOCK.lock().await;
+    let Some(route_guard) = lock_launch_route(is_exiting).await else {
+        return;
+    };
     let Ok(request) = AutomaticRequest::resolve(&pool).await else {
         return;
     };
@@ -430,7 +442,7 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
     let profile = publication::stored_profile(&app).ok().flatten();
     let local = request.request.provider == super::llm_client::LLMProvider::BuiltInAI;
     let mut after = String::new();
-    loop {
+    while !is_exiting() {
         let Ok(candidates) = SummaryProcessesRepository::automatic_resume_candidates_after(
             &pool,
             &fingerprint,
@@ -447,6 +459,9 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
             return;
         }
         for (meeting, stored_fingerprint) in candidates {
+            if is_exiting() {
+                return;
+            }
             after.clone_from(&meeting);
             if stored_fingerprint != fingerprint
                 && recording_allowed(&app, &pool, &meeting).await != Ok(true)
@@ -464,6 +479,7 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
                 Ok(Launch::Started(worker)) => {
                     let _ = worker.await;
                 }
+                Ok(Launch::Exiting) => return,
                 Ok(_) => {}
                 Err(_) => log::warn!("Could not resume automatic notes"),
             }
@@ -484,7 +500,18 @@ enum Start {
 enum Launch {
     Handled,
     Busy,
+    Exiting,
     Started(tauri::async_runtime::JoinHandle<()>),
+}
+
+async fn lock_launch_route(
+    exiting: impl Fn() -> bool,
+) -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    if exiting() {
+        return None;
+    }
+    let route = ROUTE_CHANGE_LOCK.lock().await;
+    (!exiting()).then_some(route)
 }
 
 async fn launch<R: Runtime>(
@@ -493,6 +520,9 @@ async fn launch<R: Runtime>(
     meeting: String,
     start: Start,
 ) -> Result<Launch, String> {
+    if matches!(&start, Start::Resume(_, _)) && is_exiting() {
+        return Ok(Launch::Exiting);
+    }
     let (origin, resume, prepared) = match start {
         Start::Recording => ("recording", None, None),
         Start::Import(request) => ("import", None, Some(request)),
@@ -507,43 +537,54 @@ async fn launch<R: Runtime>(
     {
         return Ok(Launch::Handled);
     }
-    if origin != "import" && !get_automatic_summary_preference(app.clone()).await? {
-        record_outcome(&app, &pool, &meeting, origin, DISABLED).await?;
-        return Ok(Launch::Handled);
+    let skip = if origin != "import" && !get_automatic_summary_preference(app.clone()).await? {
+        Some(DISABLED)
+    } else {
+        transcript_unavailable(&pool, &meeting).await?
+    };
+
+    let route = lock_launch_route(is_exiting).await;
+    if route.is_none() && resume.is_some() {
+        return Ok(Launch::Exiting);
     }
-    if let Some(reason) = transcript_unavailable(&pool, &meeting).await? {
-        record_outcome(&app, &pool, &meeting, origin, reason).await?;
-        return Ok(Launch::Handled);
+    if let Some(reason) = skip {
+        return record_outcome(&app, &pool, &meeting, origin, reason).await;
     }
 
-    let _route = ROUTE_CHANGE_LOCK.lock().await;
     let authorized = if let Some(authorized) = prepared {
         authorized
     } else {
         let request = match AutomaticRequest::resolve(&pool).await {
             Ok(request) => request,
-            Err(reason) => {
-                record_outcome(&app, &pool, &meeting, origin, &reason).await?;
-                return Ok(Launch::Handled);
-            }
+            Err(reason) => return record_outcome(&app, &pool, &meeting, origin, &reason).await,
         };
         let check = dispatch_check(app.clone(), request.review());
         AuthorizedRequest { request, check }
     };
     if let Err(reason) = (authorized.check)() {
-        record_outcome(&app, &pool, &meeting, origin, &reason).await?;
-        return Ok(Launch::Handled);
+        return record_outcome(&app, &pool, &meeting, origin, &reason).await;
     }
     let request = &authorized.request;
     let fingerprint = request.review().fingerprint;
     let provider = super::llm_client::canonical_provider(&request.provider);
     let local = request.provider == super::llm_client::LLMProvider::BuiltInAI;
+    // Exit can set the flag without this lock if acquiring it timed out.
+    if route.is_none() || is_exiting() {
+        drop(route);
+        return Ok(defer_new_launch_for_exit(&pool, &meeting, origin, &fingerprint).await);
+    }
     let Some(mut job) = SummaryService::try_register_job(&meeting, provider, true)? else {
         return Ok(Launch::Busy);
     };
+    if is_exiting() {
+        drop(job);
+        drop(route);
+        return Ok(defer_new_launch_for_exit(&pool, &meeting, origin, &fingerprint).await);
+    }
 
     let claimed = if let Some(fingerprint) = resume {
-        SummaryProcessesRepository::claim_automatic_resume(&pool, &meeting, &fingerprint).await
+        SummaryProcessesRepository::claim_automatic_resume(&pool, &meeting, &fingerprint, local)
+            .await
     } else {
         SummaryProcessesRepository::create_automatic_process(&pool, &meeting, origin, &fingerprint)
             .await
@@ -553,7 +594,7 @@ async fn launch<R: Runtime>(
         return Ok(Launch::Handled);
     }
     let _ = app.emit(CHANGED_EVENT, &meeting);
-    drop(_route);
+    drop(route);
 
     Ok(Launch::Started(tauri::async_runtime::spawn(async move {
         loop {
@@ -651,9 +692,38 @@ async fn resume_after_preemption(
     else {
         return false;
     };
-    SummaryProcessesRepository::claim_automatic_resume(pool, meeting, &fingerprint)
+    // Serialize the claim with exit cancellation so a parked job cannot
+    // replace its resumable row with a new pending attempt during shutdown.
+    let _route = ROUTE_CHANGE_LOCK.lock().await;
+    if job.cancelled_for_exit() {
+        super::service::finish_provider_error(pool, meeting, job.token(), PAUSED_FOR_EXIT).await;
+        return false;
+    }
+    SummaryProcessesRepository::claim_automatic_resume(pool, meeting, &fingerprint, true)
         .await
         .unwrap_or(false)
+}
+
+/// Resume jobs keep their existing row and retry budget when exit wins admission.
+async fn defer_new_launch_for_exit(
+    pool: &SqlitePool,
+    meeting: &str,
+    origin: &str,
+    fingerprint: &str,
+) -> Launch {
+    if matches!(origin, "recording" | "import")
+        && SummaryProcessesRepository::defer_automatic_process_for_exit(
+            pool,
+            meeting,
+            origin,
+            fingerprint,
+        )
+        .await
+        .is_err()
+    {
+        log::warn!("Could not save automatic notes for the next startup during application exit");
+    }
+    Launch::Exiting
 }
 
 async fn record_outcome<R: Runtime>(
@@ -662,7 +732,10 @@ async fn record_outcome<R: Runtime>(
     meeting: &str,
     origin: &str,
     reason: &str,
-) -> Result<(), String> {
+) -> Result<Launch, String> {
+    if is_exiting() {
+        return Ok(Launch::Exiting);
+    }
     if !origin.is_empty() {
         SummaryProcessesRepository::record_automatic_outcome(
             pool, meeting, "skipped", reason, origin,
@@ -671,7 +744,7 @@ async fn record_outcome<R: Runtime>(
         .map_err(|_| "Could not save automatic notes status")?;
         let _ = app.emit(CHANGED_EVENT, meeting);
     }
-    Ok(())
+    Ok(Launch::Handled)
 }
 
 async fn transcript_unavailable(
@@ -771,6 +844,121 @@ async fn notify_ready<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool, meeting
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_launch_queued_behind_the_route_lock_observes_exit_before_claiming() {
+        let exit = std::cell::Cell::new(false);
+        let route = ROUTE_CHANGE_LOCK.lock().await;
+        let admission = lock_launch_route(|| exit.get());
+        tokio::pin!(admission);
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        exit.set(true);
+        drop(route);
+        assert!(admission.await.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_recording_and_import_launches_leave_resumable_intent_on_exit() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let mut expected = Vec::new();
+        for origin in ["import", "recording"] {
+            let meeting = format!("exit-deferred-{origin}");
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Synthetic', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+                .bind(&meeting).execute(&pool).await.unwrap();
+            assert!(matches!(
+                defer_new_launch_for_exit(&pool, &meeting, origin, "approved").await,
+                Launch::Exiting
+            ));
+            assert!(!SummaryService::is_running_for(&meeting));
+            assert!(matches!(
+                defer_new_launch_for_exit(&pool, &meeting, "", "different").await,
+                Launch::Exiting
+            ));
+            let row: (String, String, i64) = sqlx::query_as(
+                "SELECT status, error, automatic_resume_attempted FROM summary_processes WHERE meeting_id = ?",
+            )
+            .bind(&meeting)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(row, ("cancelled".into(), PAUSED_FOR_EXIT.into(), 0));
+            expected.push((meeting, "approved".into()));
+        }
+        for local in [true, false] {
+            assert_eq!(
+                SummaryProcessesRepository::automatic_resume_candidates_after(
+                    &pool, "approved", None, "", local,
+                )
+                .await
+                .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exit_cancels_a_parked_job_without_renewing_and_startup_can_claim_it() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        let foreground = crate::audio::inference::claim_job().unwrap();
+        let mut job = SummaryService::try_register_job(meeting, "builtin-ai", true)
+            .unwrap()
+            .unwrap();
+        SummaryProcessesRepository::create_automatic_process(
+            &pool,
+            meeting,
+            "recording",
+            "approved",
+        )
+        .await
+        .unwrap();
+        SummaryService::cancel_local_summaries_for_recording();
+        super::super::service::finish_provider_error(&pool, meeting, job.token(), "preempted")
+            .await;
+
+        let pause = tokio::sync::Notify::new();
+        let check: DispatchCheck = Arc::new(|| Ok(()));
+        let (resumed, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                resume_after_preemption(&pool, meeting, &mut job, &check, || pause.notify_one()),
+                async {
+                    pause.notified().await;
+                    let _route = ROUTE_CHANGE_LOCK.lock().await;
+                    SummaryService::cancel_local_summaries_for_exit();
+                    drop(foreground);
+                }
+            )
+        })
+        .await
+        .unwrap();
+        assert!(!resumed);
+        assert!(job.token().is_cancelled());
+        let row = SummaryProcessesRepository::get_summary_data(&pool, meeting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.error.as_deref(), Some(PAUSED_FOR_EXIT));
+        drop(job);
+        SummaryService::wait_for_exit_pauses().await;
+        let candidates = SummaryProcessesRepository::automatic_resume_candidates_after(
+            &pool, "approved", None, "", true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(candidates, vec![(meeting.into(), "approved".into())]);
+        assert!(SummaryProcessesRepository::claim_automatic_resume(
+            &pool, meeting, "approved", true
+        )
+        .await
+        .unwrap());
+        assert!(!SummaryProcessesRepository::claim_automatic_resume(
+            &pool, meeting, "approved", true
+        )
+        .await
+        .unwrap());
+    }
 
     #[tokio::test]
     async fn revoked_approval_ends_a_pause_while_transcription_still_holds_the_slot() {

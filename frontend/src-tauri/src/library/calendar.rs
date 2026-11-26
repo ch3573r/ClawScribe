@@ -511,12 +511,23 @@ pub(crate) async fn series_template(
     let Some((source, series)) = link.series_key() else {
         return Ok(None);
     };
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|_| "Could not load the series template.")?;
+    series_template_for(&mut conn, (source, series)).await
+}
+
+pub(super) async fn series_template_for(
+    conn: &mut sqlx::SqliteConnection,
+    (source, series): (&str, &str),
+) -> Result<Option<String>, String> {
     let template = sqlx::query_scalar::<_, String>(
         "SELECT template_id FROM calendar_series_templates WHERE source_id = ? AND series_id = ?",
     )
     .bind(source)
     .bind(series)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(|_| "Could not load the series template.".to_string())?;
     Ok(template.filter(|id| crate::summary::templates::get_template(id).is_ok()))
@@ -579,9 +590,21 @@ async fn save_series_template(
     let (source, series) = link
         .series_key()
         .ok_or("This event has no stable series ID.")?;
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|_| "Could not save the series template.")?;
+    save_series_template_for(&mut conn, (source, series), template_id.as_deref()).await
+}
+
+pub(super) async fn save_series_template_for(
+    conn: &mut sqlx::SqliteConnection,
+    (source, series): (&str, &str),
+    template_id: Option<&str>,
+) -> Result<(), String> {
     let result = match template_id {
         Some(id) => {
-            crate::summary::templates::get_template(&id)?;
+            crate::summary::templates::get_template(id)?;
             sqlx::query(
                 "INSERT INTO calendar_series_templates (source_id, series_id, template_id) VALUES (?, ?, ?)
                  ON CONFLICT (source_id, series_id) DO UPDATE SET template_id = excluded.template_id",
@@ -589,7 +612,7 @@ async fn save_series_template(
             .bind(source)
             .bind(series)
             .bind(id)
-            .execute(pool)
+            .execute(conn)
             .await
         }
         None => {
@@ -598,7 +621,7 @@ async fn save_series_template(
             )
             .bind(source)
             .bind(series)
-            .execute(pool)
+            .execute(conn)
             .await
         }
     };

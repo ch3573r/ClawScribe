@@ -1,6 +1,6 @@
 //! Explicitly selected recording notes. No requests or conversation owners are persisted here.
 use super::{
-    evidence::{self, EvidenceStatus},
+    evidence::{self, EvidenceNavigation, EvidenceStatus},
     live::{LiveEvidenceSegment, LiveReplyContext, LiveSnapshot},
     types::{AssistantReply, EvidenceLocator, EvidenceRef, Passage},
     KnowledgeState,
@@ -329,6 +329,43 @@ pub(crate) struct CitationExcerpt {
     text: String,
     start_seconds: Option<f64>,
     historical: bool,
+    navigation: Option<EvidenceNavigation>,
+    reference: Option<EvidenceRef>,
+}
+
+async fn matching_transcript_row(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    segment: &LiveEvidenceSegment,
+) -> Result<Option<EvidenceNavigation>, String> {
+    // Handoff assigns new transcript IDs. A unique exact match is required
+    // before linking the historical live excerpt to a current transcript row.
+    let (Some(start), Some(end)) = (segment.start_seconds, segment.end_seconds) else {
+        return Ok(None);
+    };
+    let matches: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT id, position FROM (
+            SELECT id, transcript, audio_start_time, audio_end_time,
+                   ROW_NUMBER() OVER (ORDER BY audio_start_time,id)-1 AS position
+            FROM transcripts WHERE meeting_id=?
+         ) WHERE audio_start_time=? AND audio_end_time=? AND transcript=? LIMIT 2",
+    )
+    .bind(meeting_id)
+    .bind(start)
+    .bind(end)
+    .bind(&segment.text)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| READ_ERROR)?;
+    Ok(match matches.as_slice() {
+        [(id, index)] => Some(EvidenceNavigation {
+            meeting_id: meeting_id.into(),
+            transcript_id: id.clone(),
+            transcript_index: *index,
+            start_seconds: Some(start),
+        }),
+        _ => None,
+    })
 }
 
 #[tauri::command]
@@ -347,14 +384,15 @@ async fn resolve(
     answer_id: &str,
     tag: usize,
 ) -> Result<Option<CitationExcerpt>, String> {
-    let raw: Option<String> =
-        sqlx::query_scalar("SELECT answer FROM saved_live_answers WHERE id = ? AND meeting_id = ?")
-            .bind(answer_id)
-            .bind(meeting_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| READ_ERROR)?;
-    let Some(raw) = raw else {
+    let raw: Option<(String, String)> = sqlx::query_as(
+        "SELECT answer,recording_id FROM saved_live_answers WHERE id = ? AND meeting_id = ?",
+    )
+    .bind(answer_id)
+    .bind(meeting_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| READ_ERROR)?;
+    let Some((raw, recording_id)) = raw else {
         return Ok(None);
     };
     let answer: SelectedAnswer = serde_json::from_str(&raw).map_err(|_| READ_ERROR)?;
@@ -366,10 +404,31 @@ async fn resolve(
         return Ok(None);
     };
     if let Some(segment) = citation.live_excerpt {
+        let original_recording = recording_id == meeting_id
+            && matches!(&citation.locator.locator,
+            EvidenceLocator::Live { session_id, sequence_ids }
+                if *session_id == answer.context.session_id && sequence_ids.as_slice() == [segment.sequence_id]);
+        let start_seconds = segment.start_seconds.filter(|start| {
+            original_recording
+                && start.is_finite()
+                && *start >= 0.
+                && segment.end_seconds.is_some_and(|end| {
+                    end.is_finite()
+                        && *start <= end
+                        && end <= answer.context.finalized_through_seconds
+                })
+        });
+        let navigation = if start_seconds.is_some() {
+            matching_transcript_row(pool, meeting_id, &segment).await?
+        } else {
+            None
+        };
         return Ok(Some(CitationExcerpt {
             text: segment.text,
-            start_seconds: segment.start_seconds,
+            start_seconds,
             historical: true,
+            navigation,
+            reference: None,
         }));
     }
     let resolved = evidence::resolve(pool, &citation.locator)
@@ -387,13 +446,21 @@ async fn resolve(
             return Ok(None);
         }
     }
+    let navigation = resolved.navigation;
+    let start_seconds = navigation
+        .as_ref()
+        .and_then(|target| target.start_seconds)
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.);
+    let reference = navigation.as_ref().map(|_| citation.locator);
     Ok(resolved
         .passage
         .filter(|_| resolved.status == EvidenceStatus::Current)
         .map(|passage| CitationExcerpt {
             text: passage.text,
-            start_seconds: None,
+            start_seconds,
             historical: false,
+            navigation,
+            reference,
         }))
 }
 
@@ -497,6 +564,24 @@ mod tests {
         assert_eq!(source.text, "Keep the staging plan.");
         assert_eq!(source.start_seconds, Some(28.));
         assert!(source.historical);
+        assert!(source.navigation.is_none());
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time) VALUES ('matched-live',?,'Keep the staging plan.','00:28',28,31)")
+            .bind(&id).execute(&pool).await.unwrap();
+        let source = resolve(&pool, &id, &note.id, 1).await.unwrap().unwrap();
+        let navigation = source.navigation.unwrap();
+        assert_eq!(navigation.transcript_id, "matched-live");
+        assert_eq!(navigation.transcript_index, 0);
+        assert!(
+            source.reference.is_none(),
+            "historical excerpts are never canonical references"
+        );
+        sqlx::query("UPDATE transcripts SET transcript='Edited text.' WHERE id='matched-live'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let source = resolve(&pool, &id, &note.id, 1).await.unwrap().unwrap();
+        assert!(source.navigation.is_none());
+        assert_eq!(source.start_seconds, Some(28.));
         assert!(resolve(&pool, &id, &note.id, 2).await.unwrap().is_none());
         assert!(resolve(&pool, "review-test", &note.id, 1)
             .await

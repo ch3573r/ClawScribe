@@ -1,7 +1,5 @@
 use crate::parakeet_engine::model::{ParakeetModel, TimestampedResult};
-use crate::parakeet_engine::worker::{
-    directml_session_disabled, transcription_timeout, LoadSpec, TranscriptionWorker,
-};
+use crate::parakeet_engine::worker::{transcription_timeout, LoadSpec, TranscriptionWorker};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,13 +9,119 @@ use std::time::Instant;
 use tokio::fs;
 use tokio::sync::RwLock;
 
-/// Whether to route Parakeet inference through the DirectML (Windows GPU)
-/// execution provider. Beta, opt-in: set via `set_parakeet_use_directml`, read
-/// when a model is (re)loaded. No effect unless the `directml` feature is built.
-pub static USE_PARAKEET_DIRECTML: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-/// Opt-in process isolation, sampled when a model is loaded.
+const DIRECTML_AUTOMATIC: u8 = 0;
+const DIRECTML_OFF: u8 = 1;
+const DIRECTML_ON: u8 = 2;
+static DIRECTML_PREFERENCE: AtomicU8 = AtomicU8::new(DIRECTML_AUTOMATIC);
+static LAST_DIRECTML_LOAD_FELL_BACK: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn last_directml_load_fell_back() -> bool {
+    LAST_DIRECTML_LOAD_FELL_BACK.load(Ordering::Acquire)
+}
+
+#[cfg(all(windows, feature = "directml"))]
+static DIRECTML_PROBE_DIRECTORY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(all(windows, feature = "directml"))]
+pub(crate) fn set_directml_probe_directory(directory: PathBuf) {
+    let _ = DIRECTML_PROBE_DIRECTORY.set(directory);
+}
+
+pub(crate) fn set_directml_preference(preference: Option<bool>) {
+    let value = match preference {
+        None => DIRECTML_AUTOMATIC,
+        Some(false) => DIRECTML_OFF,
+        Some(true) => DIRECTML_ON,
+    };
+    DIRECTML_PREFERENCE.store(value, Ordering::Release);
+    LAST_DIRECTML_LOAD_FELL_BACK.store(false, Ordering::Release);
+}
+
+pub(crate) fn resolve_directml_preference(
+    preference: Option<bool>,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    preference.unwrap_or_else(probe)
+}
+
+fn directml_preference() -> Option<bool> {
+    match DIRECTML_PREFERENCE.load(Ordering::Acquire) {
+        DIRECTML_OFF => Some(false),
+        DIRECTML_ON => Some(true),
+        _ => None,
+    }
+}
+
+fn automatic_directml_available() -> bool {
+    #[cfg(all(windows, feature = "directml"))]
+    {
+        DIRECTML_PROBE_DIRECTORY
+            .get()
+            .is_some_and(|directory| super::worker::automatic_directml_available(directory))
+    }
+    #[cfg(not(all(windows, feature = "directml")))]
+    false
+}
+
+/// Whether a loaded CPU session should be labeled as a GPU fallback.
+pub(crate) fn directml_expected() -> bool {
+    directml_preference().unwrap_or(cfg!(all(windows, feature = "directml")))
+}
+
+/// Read the requested setting for diagnostics without initializing DirectML.
+/// An unresolved automatic preference is reported as unknown.
+pub(crate) fn cached_directml_requested() -> Option<bool> {
+    directml_preference().or_else(|| {
+        #[cfg(all(windows, feature = "directml"))]
+        {
+            super::worker::cached_automatic_directml()
+        }
+        #[cfg(not(all(windows, feature = "directml")))]
+        Some(false)
+    })
+}
+
+pub(crate) fn resolved_directml() -> (bool, bool) {
+    let preference = directml_preference();
+    let requested = resolve_directml_preference(preference, automatic_directml_available);
+    // A setting changed while the probe was running takes precedence.
+    let preference = directml_preference();
+    (preference.unwrap_or(requested), preference.is_none())
+}
+
+pub(crate) fn directml_default_unavailable() -> bool {
+    cfg!(all(windows, feature = "directml"))
+        && directml_preference().is_none()
+        && !automatic_directml_available()
+        && directml_preference().is_none()
+}
+
+#[cfg(test)]
+#[test]
+fn parakeet_automatic_directml_requires_probe_success_and_preserves_explicit_choices() {
+    assert!(!resolve_directml_preference(None, || false));
+    assert!(resolve_directml_preference(None, || true));
+    assert!(!resolve_directml_preference(Some(false), || panic!(
+        "explicit CPU"
+    )));
+    assert!(resolve_directml_preference(Some(true), || panic!(
+        "explicit DirectML"
+    )));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn reapplying_the_preference_clears_the_previous_fallback() {
+    let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    let current = directml_preference();
+    LAST_DIRECTML_LOAD_FELL_BACK.store(true, Ordering::Release);
+    set_directml_preference(current);
+    assert!(!last_directml_load_fell_back());
+}
+
+/// Opt-in process isolation for CPU. DirectML always uses the worker.
 pub static USE_PARAKEET_WORKER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -191,6 +295,15 @@ fn parakeet_base_url(model_name: &str) -> &'static str {
 enum LoadedModel {
     InProcess(ParakeetModel),
     Worker(TranscriptionWorker),
+}
+
+impl LoadedModel {
+    fn session_status(&self) -> (bool, u64) {
+        match self {
+            Self::InProcess(model) => (model.directml_registered, 0),
+            Self::Worker(worker) => worker.session_status(),
+        }
+    }
 }
 
 pub struct ParakeetEngine {
@@ -513,13 +626,18 @@ impl ParakeetEngine {
 
                 // Load model based on precision/quantization type.
                 let precision_suffix = model_info.quantization.model_suffix();
-                // Beta opt-in: route inference through DirectML (Windows GPU) when enabled.
-                let use_directml = USE_PARAKEET_DIRECTML.load(std::sync::atomic::Ordering::Relaxed);
                 let use_worker = USE_PARAKEET_WORKER.load(std::sync::atomic::Ordering::Relaxed);
                 let path = model_info.path.clone();
                 let model = crate::audio::inference::run(move |cancelled| {
-                    if use_worker {
+                    let (use_directml, _automatic) = resolved_directml();
+                    let model = if use_worker || (use_directml && cfg!(feature = "directml")) {
                         let mut worker = TranscriptionWorker::new()?;
+                        #[cfg(all(windows, feature = "directml"))]
+                        if use_directml && _automatic {
+                            worker.set_automatic_directml_marker_dir(
+                                DIRECTML_PROBE_DIRECTORY.get().cloned(),
+                            );
+                        }
                         worker.load(
                             LoadSpec {
                                 model_dir: path,
@@ -528,16 +646,15 @@ impl ParakeetEngine {
                             },
                             &|| cancelled.load(std::sync::atomic::Ordering::Acquire),
                         )?;
-                        Ok(LoadedModel::Worker(worker))
+                        LoadedModel::Worker(worker)
                     } else {
-                        ParakeetModel::new(
-                            &path,
-                            precision_suffix,
-                            use_directml && !directml_session_disabled(),
-                        )
-                        .map(LoadedModel::InProcess)
-                        .map_err(anyhow::Error::from)
+                        LoadedModel::InProcess(ParakeetModel::new(&path, precision_suffix, false)?)
+                    };
+                    if use_directml {
+                        LAST_DIRECTML_LOAD_FELL_BACK
+                            .store(!model.session_status().0, Ordering::Release);
                     }
+                    Ok(model)
                 })
                 .await
                 .map_err(|e| anyhow!("Failed to load Parakeet model {}: {}", model_name, e))?;
@@ -626,10 +743,7 @@ impl ParakeetEngine {
             .read()
             .await
             .as_ref()
-            .map(|model| match model {
-                LoadedModel::InProcess(model) => (model.directml_registered, 0),
-                LoadedModel::Worker(worker) => worker.session_status(),
-            })
+            .map(LoadedModel::session_status)
     }
 
     /// Transcribe audio samples using the loaded Parakeet model

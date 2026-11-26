@@ -1,22 +1,35 @@
 import { useEffect, useRef, useState } from 'react';
 import { resolvePlaybackShortcut, type PlaybackShortcut, type ShortcutEvent } from '@/lib/playback-controls';
-import { loadPlayerBindings, PLAYER_BINDINGS_STORAGE } from '@/lib/player-bindings';
+import { loadPlayerBindings, PLAYER_BINDINGS_STORAGE, refreshPlayerBindings } from '@/lib/player-bindings';
 
-export function usePlayerBindings() {
+export function usePlayerBindingState() {
   const [bindings, setBindings] = useState(loadPlayerBindings);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
+    let active = true;
     const reload = () => setBindings(loadPlayerBindings());
+    const refresh = () => {
+      void refreshPlayerBindings().then(() => {
+        if (active) { reload(); setLoading(false); }
+      });
+    };
     const onStorage = (event: StorageEvent) => {
-      if (!event.key || event.key === PLAYER_BINDINGS_STORAGE) reload();
+      if (!event.key || event.key === PLAYER_BINDINGS_STORAGE) refresh();
     };
     window.addEventListener('storage', onStorage);
     window.addEventListener(PLAYER_BINDINGS_STORAGE, reload);
+    refresh();
     return () => {
+      active = false;
       window.removeEventListener('storage', onStorage);
       window.removeEventListener(PLAYER_BINDINGS_STORAGE, reload);
     };
   }, []);
-  return bindings;
+  return { bindings, loading };
+}
+
+export function usePlayerBindings() {
+  return usePlayerBindingState().bindings;
 }
 
 /**

@@ -38,20 +38,27 @@ async function settings(press, { initialGlobals = savedGlobals, onCapture, trans
   const hooks = createHookHarness();
   let globals = { ...initialGlobals };
   let captureChannel = null;
+  const core = { Channel: class {}, invoke: async (command, args) => {
+    if (command === 'get_shortcuts') return globals;
+    if (command === 'load_player_shortcuts') return args.legacyBindings ?? {};
+    if (command === 'set_player_shortcuts') return;
+    if (command === 'shortcut_key_characters') return args.keys.map(translate);
+    if (command === 'set_shortcut_capture') {
+      await onCapture?.(args.channel);
+      captureChannel = args.channel;
+      return 30_000;
+    }
+    assert.equal(command, 'set_shortcuts');
+    globals = args.bindings;
+    return { bindings: globals, conflicts: [] };
+  } };
+  // The app resolves these imports to a single module. The test loader uses
+  // a new VM per nested import unless it receives the existing module here.
+  const playerBindings = loadTsModule('src/lib/player-bindings.ts', { '@tauri-apps/api/core': core });
   const { KeyboardShortcutsSettings } = loadTsModule('src/components/KeyboardShortcutsSettings.tsx', {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
-    '@tauri-apps/api/core': { Channel: class {}, invoke: async (command, args) => {
-      if (command === 'get_shortcuts') return globals;
-      if (command === 'shortcut_key_characters') return args.keys.map(translate);
-      if (command === 'set_shortcut_capture') {
-        await onCapture?.(args.channel);
-        captureChannel = args.channel;
-        return 30_000;
-      }
-      assert.equal(command, 'set_shortcuts');
-      globals = args.bindings;
-      return { bindings: globals, conflicts: [] };
-    } },
+    '@tauri-apps/api/core': core,
+    '@/lib/player-bindings': playerBindings,
     '@/components/ui/button': { Button: 'button' },
     '@/components/ui/settings-layout': names('Kbd SettingsCard SettingsFooter SettingsRow SettingsStack'),
     '@/components/settings/settings-parts': { NoteRow: 'NoteRow' },
@@ -82,7 +89,7 @@ const actions = [
   ['Faster playback', '>', 'm', 'rate', 1],
   ['Follow playback in the transcript', 'f', 't', 'follow'],
   ['Add a bookmark at this moment', 'b', 'a', 'bookmark'],
-  ['Find in transcript', 'f', 'z', 'find', undefined, { ctrlKey: true }],
+  ['Find in the focused pane', 'f', 'z', 'find', undefined, { ctrlKey: true }],
 ];
 
 test('player bindings survive reopening, replace all ten defaults in the listener and help, and reset independently', async t => {
@@ -195,7 +202,7 @@ test('settings reject player, global and built-in command collisions in either d
     ['Play or pause', event('h', 'KeyH', { metaKey: true }), /replace/i],
     ['Play or pause', event('F4', 'F4', { altKey: true }), /reserved|Windows/i],
     ['Play or pause', event('S', 'KeyS', { metaKey: true, shiftKey: true }), /reserved|Windows/i],
-    ['Start or stop recording', event('f', 'KeyF', { ctrlKey: true }), /find in transcript/i],
+    ['Start or stop recording', event('f', 'KeyF', { ctrlKey: true }), /find in the focused pane/i],
   ]) {
     await ui.assign(entry, chord); assert.match(error(), owner);
   }

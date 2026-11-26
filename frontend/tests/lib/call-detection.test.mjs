@@ -35,7 +35,7 @@ function app(options = {}) {
   const handlers = new Map();
   const unlistened = [];
   const state = { isRecording: false, isStarting: false, isStopping: false, isProcessing: false, isSaving: false, setStatus: (...args) => statuses.push(args), ...options.state };
-  const statuses = [], starts = [], answers = [], toasts = [], dismissed = [], confirmed = [], failures = [], corePushed = [];
+  const statuses = [], starts = [], answers = [], toasts = [], dismissed = [], confirmed = [], declined = [], failures = [], corePushed = [];
   const navigation = [];
   // Navigation or a reload would go through these; the component must not touch them.
   window.sessionStorage = { setItem: (...args) => navigation.push(['sessionStorage', ...args]) };
@@ -47,6 +47,10 @@ function app(options = {}) {
   const { RecordingRequests } = loadTsModule(path('components/RecordingRequests.tsx'), {
     react: hooks.react,
     sonner: { toast },
+    '@tauri-apps/api/core': { invoke: async (command, { key }) => {
+      assert.equal(command, 'dismiss_call_detection_prompt');
+      declined.push(key);
+    } },
     '@tauri-apps/api/event': { listen: async (name, handler) => { handlers.set(name, handler); return () => unlistened.push(name); } },
     '@/lib/autoRecord': prefs,
     '@/contexts/RecordingStateContext': { useRecordingState: () => state, RecordingStatus: { ERROR: 'error' } },
@@ -72,8 +76,13 @@ function app(options = {}) {
   const render = () => hooks.render(() => RecordingRequests({ ready: options.ready ?? true }));
   render();
   return {
-    render, hooks, prefs, state, statuses, starts, answers, toasts, dismissed, confirmed, failures, corePushed, navigation,
-    emit: async (name, payload) => { await handlers.get(name)({ payload }); await flush(); },
+    render, hooks, prefs, state, statuses, starts, answers, toasts, dismissed, confirmed, declined, failures, corePushed, navigation,
+    emit: async (name, payload, fallback = payload) => {
+      if (name === 'call-detection-prompt') options.pendingPrompt = fallback ?? null;
+      if (name === 'call-detection-prompt-cleared') options.pendingPrompt = null;
+      await handlers.get(name)({ payload });
+      await flush();
+    },
     has: name => handlers.has(name), unlistened,
   };
 }
@@ -178,7 +187,7 @@ test('a call prompt asks first, goes through the core and goes away with the cal
   prompt.action.onClick();
   await flush();
   assert.deepEqual(window_.confirmed, ['room-a']);
-  await window_.emit('call-detection-prompt-cleared');
+  await window_.emit('call-detection-prompt-cleared', 'room-a');
   assert.equal(window_.dismissed.length >= 1, true);
   // An answer to a prompt that is no longer showing does nothing.
   prompt.action.onClick();
@@ -195,6 +204,32 @@ test('a failed automatic start offers to try again', async () => {
   assert.equal(prompt.title, 'Could not record the Microsoft Teams call');
   assert.equal(prompt.action.label, 'Try again');
   window_.hooks.unmount();
+});
+
+test('a native prompt produces no toast and a fallback prompt is only shown once', async t => {
+  const view = app();
+  t.after(view.hooks.unmount);
+  await flush();
+  // The native event is a change signal. The main window can only fetch toast fallbacks.
+  await view.emit('call-detection-prompt', { key: 'native', provider: 'teams', retry: false }, null);
+  assert.deepEqual(view.toasts, []);
+
+  const fallback = { key: 'fallback', provider: 'teams', retry: false };
+  await view.emit('call-detection-prompt', fallback);
+  await view.emit('call-detection-prompt', fallback);
+  assert.equal(view.toasts.length, 1);
+  assert.equal(view.toasts[0].duration, 20_000);
+});
+
+test('a delayed prompt snapshot cannot restore a dismissed toast', async t => {
+  const stale = deferred();
+  const view = app({ pendingPrompt: stale.promise });
+  t.after(view.hooks.unmount);
+  await flush();
+  await view.emit('call-detection-prompt-cleared', 'dismissed');
+  stale.resolve({ key: 'dismissed', provider: 'teams', retry: false });
+  await flush();
+  assert.deepEqual(view.toasts, []);
 });
 
 test('notices from the core say what happened to the call recording', async () => {
@@ -256,4 +291,20 @@ test('unmount removes the listeners while the claimed start remains native-owned
   pending.resolve('synthetic-session');
   await flush();
   assert.deepEqual(window_.answers, []);
+});
+
+test('a toast prompt can be declined explicitly and timing out leaves it pending', async t => {
+  const view = app();
+  t.after(() => view.hooks.unmount());
+  await flush();
+  const call = { key: 'decline-fixture', provider: 'teams' };
+  await view.emit('call-detection-prompt', call);
+  const prompt = view.toasts.at(-1);
+  prompt.onAutoClose?.();
+  assert.deepEqual(view.declined, []);
+  assert.equal(prompt.cancel.label, 'Not now');
+  prompt.cancel.onClick();
+  await flush();
+  assert.deepEqual(view.declined, [call.key]);
+  assert.deepEqual(view.confirmed, []);
 });

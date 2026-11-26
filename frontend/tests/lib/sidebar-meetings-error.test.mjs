@@ -5,7 +5,7 @@ import { loadTsModule } from './load-ts-module.mjs';
 
 const jsx = (type, props) => ({ type, props });
 
-function setup(t, meetingsReply) {
+function setup(t, meetingsReply, recording = { isRecording: false }, recordingMocks = {}) {
   const previousWindow = globalThis.window;
   globalThis.window = {
     innerWidth: 1600,
@@ -27,7 +27,14 @@ function setup(t, meetingsReply) {
       return [];
     } },
     '@tauri-apps/api/event': { listen: async () => noop },
-    '@/contexts/RecordingStateContext': { useRecordingState: () => ({ isRecording: false }) },
+    '@/contexts/RecordingStateContext': { useRecordingState: () => recording },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
+      audioDeviceInventory: { data: null, status: 'checking', refresh() {} },
+      selectedDevices: {}, transcriptModelConfig: {},
+    }) },
+    '@/hooks/useRecordingStart': { useStartRecordingSession: () => () => {} },
+    '@/hooks/useLiveTranscriptionReadiness': { useLiveTranscriptionReadiness: () => ({}) },
+    ...recordingMocks,
   });
   t.after(() => hooks.unmount());
   const value = async () => {
@@ -38,6 +45,44 @@ function setup(t, meetingsReply) {
   };
   return { value, render: () => hooks.render(() => SidebarProvider({ children: null })).props.value, hooks };
 }
+
+test('Sidebar starts on the current route and ignores a repeated or blocked Start', async t => {
+  const recording = { isRecording: false, recordingMode: 'audio_only' };
+  const attempts = [];
+  const pending = deferred();
+  const config = {
+    audioDeviceInventory: { data: null, status: 'checking', refresh() {} },
+    selectedDevices: { micDevice: null, systemDevice: null }, devicePreferencesStatus: 'ready', transcriptModelConfig: {},
+  };
+  const app = setup(t, () => [], recording, {
+    'next/navigation': { usePathname: () => '/meeting-details', useRouter() { throw new Error('Start must not use navigation'); } },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => config },
+    '@/hooks/useRecordingStart': { useStartRecordingSession: () => (...args) => {
+      attempts.push(args);
+      return pending.promise;
+    } },
+  });
+  let sidebar = await app.value();
+  assert.equal(sidebar.recordingActionReason, 'Checking audio devices');
+  sidebar.handleRecordingToggle();
+  config.audioDeviceInventory = {
+    status: 'ready', data: { devices: [], defaultMicrophone: 'Synthetic mic', defaultOutput: null }, refresh() {},
+  };
+  sidebar = app.render();
+  assert.equal(sidebar.recordingActionReason, null);
+  sidebar.setNextMeetingTitle('Next meeting');
+  sidebar = app.render();
+  sidebar.handleRecordingToggle();
+  sidebar.handleRecordingToggle();
+  assert.deepEqual(attempts, [['sidebar_direct', undefined, 'Next meeting']]);
+  recording.isStarting = true;
+  assert.equal(app.render().recordingActionReason, 'Starting recording…');
+  pending.resolve('native-session');
+  await flush();
+  recording.isStopping = true;
+  assert.equal(app.render().recordingActionReason, 'Saving recording…');
+  assert.equal(app.render().nextMeetingTitle, '');
+});
 
 test('a library that cannot be loaded is an error, not an empty library', async t => {
   const app = setup(t, () => { throw new Error('Synthetic failure'); });

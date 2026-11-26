@@ -43,6 +43,64 @@ const classes = {
   database_backup_bytes: "Local database backups",
 } as const;
 
+interface MeetingStoragePage {
+  rows: {
+    title: string;
+    audio_bytes: number;
+    recovery_bytes: number;
+    other_bytes: number;
+    no_folder: boolean;
+    unavailable: boolean;
+    partial: boolean;
+  }[];
+  next_cursor: string | null;
+}
+
+function MeetingStorageBreakdown() {
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const [result, setResult] = useState<MeetingStoragePage | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [error, setError] = useState(false);
+  const cursor = cursors[cursors.length - 1];
+  useEffect(() => {
+    let active = true;
+    setResult(null);
+    setError(false);
+    void invoke<MeetingStoragePage>("measure_meeting_storage_page", { cursor }).then(
+      page => { if (active) setResult(page); },
+      () => { if (active) setError(true); },
+    );
+    return () => { active = false; };
+  }, [cursor, revision]);
+  return <div className="space-y-2">
+    <p className="text-sm text-muted-foreground">Recording folders only. Shared database and reference files are listed above.</p>
+    {error ? <p role="alert" className="text-sm text-destructive">Could not measure this page.</p>
+      : !result ? <p role="status" className="text-sm text-muted-foreground">Measuring meeting folders…</p>
+        : result.rows.length === 0 ? <p className="text-sm text-muted-foreground">No meetings on this page.</p>
+          : <ul aria-label="Storage used by meeting" className="divide-y divide-border">
+            {result.rows.map((row, index) => <li key={index} className="py-2 text-sm">
+              <p className="break-words font-medium">{row.title || "Untitled meeting"}</p>
+              <p className="text-muted-foreground">
+                {row.no_folder ? "No recording folder" : row.unavailable ? "Folder unavailable" : [
+                  `Audio ${formatArchiveBytes(row.audio_bytes)}`,
+                  `Recovery ${formatArchiveBytes(row.recovery_bytes)}`,
+                  `Other files ${formatArchiveBytes(row.other_bytes)}`,
+                  row.partial && "Partial measurement",
+                ].filter(Boolean).join(" · ")}
+              </p>
+            </li>)}
+          </ul>}
+    <div className="flex items-center justify-between gap-2">
+      <Button type="button" variant="ghost" size="sm" disabled={cursors.length === 1} onClick={() => { setResult(null); setCursors(current => current.slice(0, -1)); }}>Previous</Button>
+      <span aria-live="polite" className="text-sm text-muted-foreground">Page {cursors.length}</span>
+      {error ? <Button type="button" size="sm" variant="outline" onClick={() => { setError(false); setRevision(value => value + 1); }}>Retry</Button>
+        : <Button type="button" variant="ghost" size="sm" disabled={!result?.next_cursor} onClick={() => {
+          if (result?.next_cursor) { const next = result.next_cursor; setResult(null); setCursors(current => [...current, next]); }
+        }}>Next</Button>}
+    </div>
+  </div>;
+}
+
 export function ArchiveStorageDialog() {
   const [open, setOpen] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -53,6 +111,7 @@ export function ArchiveStorageDialog() {
   const [review, setReview] = useState<PendingFileCleanup | null>(null);
   const [working, setWorking] = useState(false);
   const [status, setStatus] = useState("");
+  const [showBreakdown, setShowBreakdown] = useState(false);
   const [actionError, setActionError] = useState("");
   const mutation = useRef(false);
   const returnFocus = useRef<HTMLElement | null>(null);
@@ -88,7 +147,7 @@ export function ArchiveStorageDialog() {
   const changeOpen = (next: boolean) => {
     if (mutation.current) return;
     setOpen(next);
-    if (!next) { setReview(null); setActionError(""); setStatus(""); }
+    if (!next) { setReview(null); setActionError(""); setStatus(""); setShowBreakdown(false); }
   };
 
   const actOnCleanup = async (keep: boolean) => {
@@ -159,6 +218,15 @@ export function ArchiveStorageDialog() {
             </p>
           )}
           </> : <p role="status">Measuring library storage…</p>}
+          <section aria-label="Storage by meeting" className="space-y-2">
+            <Button type="button" variant="outline" size="sm" aria-expanded={showBreakdown} aria-controls="storage-by-meeting"
+              onClick={() => setShowBreakdown(value => !value)}>
+              {showBreakdown ? "Hide storage by meeting" : "Show storage by meeting"}
+            </Button>
+            <div id="storage-by-meeting" hidden={!showBreakdown}>
+              {showBreakdown && <MeetingStorageBreakdown key={revision} />}
+            </div>
+          </section>
           {status && <p role="status" className="text-sm">{status}</p>}
           {cleanupError ? <p role="alert">Could not load pending file cleanup.</p> : cleanup === null ? <p role="status">Checking for pending file cleanup…</p> : cleanup.length > 0 && (
             <section aria-label="Pending file cleanup" className="space-y-2">

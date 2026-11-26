@@ -52,12 +52,76 @@ function createView(delaySubscriptions = false, snapshotOverride) {
     ...harness, callbacks, requests, intervals, subscriptions,
     get unsubscribed() { return unsubscribed; },
     setBackendSession(id) { backendSessionId = id; },
+    renderProviders: () => harness.render(() => RecordingStateProvider({ children: null })),
     render: () => harness.render(() => RecordingStateProvider({ children: null })).value,
     tick() { for (const callback of intervals.values()) callback(); },
   };
 }
 
 const recording = { session_id: 'session-current', recording_generation: '2', is_recording: true, is_paused: false, is_active: true, recording_duration: 10, active_duration: 10, recording_mode: 'live' };
+
+test('a duplicate stop reconciles an idle backend without swallowing an actual failure', async t => {
+  const view = createView();
+  t.after(() => view.unmount());
+  view.render();
+  await flush();
+  view.requests[0].resolve(recording);
+  await flush();
+  view.render().setStatus('stopping');
+  const reconcile = view.render().reconcileNothingToStop;
+  assert.equal(await reconcile('The audio device is not responding'), false);
+  assert.equal(view.requests.length, 1);
+  const nativeNoOp = reconcile(false);
+  view.requests[1].resolve({ is_recording: false });
+  assert.equal(await nativeNoOp, true);
+  const state = view.render();
+  assert.equal(state.status, 'idle');
+  assert.equal(state.isRecording, false);
+  assert.equal(state.sessionId, null);
+  state.setStatus('stopping');
+  const staleProbe = reconcile(false);
+  state.setStatus('starting');
+  view.requests[2].resolve({ is_recording: false });
+  assert.equal(await staleProbe, true);
+  assert.equal(view.render().status, 'starting');
+});
+
+test('a native stop no-op returns to idle when the state read rejects', async t => {
+  const view = createView();
+  t.after(() => view.unmount());
+  view.render();
+  await flush();
+  view.requests[0].resolve(recording);
+  await flush();
+  view.render().setStatus('stopping');
+  const stop = view.render().reconcileNothingToStop(false);
+  view.requests[1].reject(new Error('Synthetic recording state failure'));
+  assert.equal(await stop, true);
+  const state = view.render();
+  assert.equal(state.status, 'idle');
+  assert.equal(state.isRecording, false);
+  assert.equal(state.sessionId, null);
+});
+
+test('elapsed ticks update the clock without changing the lifecycle context value', async () => {
+  const view = createView();
+  view.render();
+  await flush();
+  try {
+    view.requests[0].resolve(recording);
+    await flush();
+    const initial = view.renderProviders();
+    assert.equal(initial.children.value, 10);
+    view.tick();
+    view.requests[1].resolve({ ...recording, active_duration: 11.4, recording_duration: 13 });
+    await flush();
+    const tick = view.renderProviders();
+    assert.equal(tick.value, initial.value);
+    assert.equal(tick.children.value, 11);
+    view.callbacks.Stopped({ session_id: 'session-current', library_save_failed: false });
+    assert.equal(view.renderProviders().children.value, 0);
+  } finally { view.unmount(); }
+});
 
 test('a native stop shows progress until the matching library commit and ignores late progress', async () => {
   const view = createView();
@@ -67,20 +131,43 @@ test('a native stop shows progress until the matching library commit and ignores
     view.callbacks.Started('live', 'session-current');
     await flush();
     const progress = (stage, session_id = 'session-current', recording_generation = '2') =>
-      view.callbacks['recording-shutdown-progress']({ payload: { identity: { session_id, recording_generation }, stage, chunks_remaining: 3 } });
+      view.callbacks['recording-shutdown-progress']({ payload: {
+        identity: { session_id, recording_generation }, stage, chunks_remaining: 3, estimated_seconds_remaining: 64.1,
+      } });
     progress('processing_transcripts', 'old', '1');
     assert.equal(view.render().isStopping, false);
     progress('processing_transcripts');
     assert.equal(view.render().isStopping, true);
     assert.match(view.render().statusMessage, /3 segments/);
+    assert.match(view.render().statusMessage, /About 1 min 5 sec remaining/);
     progress('finalizing');
     assert.match(view.render().statusMessage, /Saving/);
+    assert.doesNotMatch(view.render().statusMessage, /remaining/);
     progress('complete');
     assert.equal(view.render().isStopping, true);
     view.callbacks.Stopped({ session_id: 'session-current', library_save_failed: false });
     progress('finalizing');
     assert.equal(view.render().status, 'idle');
     assert.equal(view.render().statusMessage, undefined);
+  } finally { view.unmount(); }
+});
+
+test('visibility events only switch the in-page controls for their bound native session', async () => {
+  const view = createView();
+  view.render();
+  try {
+    await flush();
+    view.callbacks.Started('live', 'session-current');
+    await flush();
+    view.render();
+    await flush();
+    const visibility = visible => view.callbacks['floating-controls-visibility-changed']({ payload: visible });
+    visibility(['previous-session', true]);
+    assert.equal(view.render().floatingControlsVisible, false);
+    visibility(['session-current', true]);
+    assert.equal(view.render().floatingControlsVisible, true);
+    visibility(['session-current', false]);
+    assert.equal(view.render().floatingControlsVisible, false);
   } finally { view.unmount(); }
 });
 

@@ -794,10 +794,10 @@ async fn transcribe_chunk_with_provider(
             {
                 Ok(result) => {
                     if let Some((directml, _)) = parakeet_engine.session_status().await {
-                        use crate::parakeet_engine::parakeet_engine::USE_PARAKEET_DIRECTML;
+                        use crate::parakeet_engine::parakeet_engine::directml_expected;
                         let backend = if directml {
                             "DirectML + CPU"
-                        } else if USE_PARAKEET_DIRECTML.load(Ordering::Relaxed) {
+                        } else if directml_expected() {
                             "CPU fallback"
                         } else {
                             "CPU"

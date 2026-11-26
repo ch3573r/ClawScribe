@@ -1,12 +1,12 @@
 [package]
 name = "clawscribe"
-version = "0.68.0-preview.1"
+version = "0.68.1-preview.1"
 description = "Local-first Windows meeting recorder"
 authors = ["OpenClaw"]
 license = "MIT"
 repository = "https://github.com/ch3573r/ClawScribe"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.89"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -148,7 +148,7 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "sync-s
 tempfile = "3.3.0"
 whatlang = "0.16.4"
 
-ffmpeg-sidecar = { git = "https://github.com/nathanbabcock/ffmpeg-sidecar", branch = "main" }
+ffmpeg-sidecar = { git = "https://github.com/nathanbabcock/ffmpeg-sidecar", rev = "b0f48a514235d1278d860f4a0af66aa9d6e1618d" }
 
 sqlx = { version = "=0.8.6", features = [ "runtime-tokio", "sqlite", "chrono"] }
 # SQLx's locked-handle API exposes this exact native ABI; no runtime upgrade.
@@ -196,7 +196,7 @@ futures-channel = "0.3.31"
 # DPAPI (CryptProtectData) for the Microsoft-token file fallback: refresh
 # tokens exceed the Credential Manager 2560-byte blob cap, so the fallback is
 # the steady state on Windows and must not be plaintext.
-windows = { version = "0.57", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_Power", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_TextServices", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.57", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Power", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_TextServices", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # Shared CPU build avoids MSVC static/dynamic runtime conflicts with existing native deps.
 # sherpa-onnx 1.13.3 exposes only static/shared Cargo features; DirectML is supplied by staged DLLs.
 sherpa-onnx = { version = "1.13.3", default-features = false, features = ["shared"] }

@@ -11,11 +11,13 @@ import { knowledgeProviderLabel } from '@/lib/knowledge-documents';
  */
 export function TranscriptSharingControl({ state, actions, row }: ReturnType<typeof useLiveAssistance> & { row?: boolean }) {
   const sharingId = useId();
-  const toggle = <Switch id={sharingId} checked={state.transcriptSharing} disabled={!state.sharingReady || state.sharingBusy}
+  const builtin = state.provider === 'builtin-ai';
+  const toggle = <Switch id={sharingId} checked={state.transcriptSharing} disabled={!state.sharingReady || state.sharingBusy || (builtin && !state.transcriptSharing)}
     onCheckedChange={enabled => void actions.setTranscriptSharing(enabled)} />;
   if (row) {
     return <SettingsRow title="Share the live transcript with the provider" htmlFor={sharingId}
-      description={`Text is sent to ${knowledgeProviderLabel(state.provider)} only when you ask a question`}>{toggle}</SettingsRow>;
+      description={builtin ? "Built-in AI is unavailable during recording. Choose another provider to enable live assistance, or use meeting chat after recording."
+        : `Text is sent to ${knowledgeProviderLabel(state.provider)} only when you ask a question`}>{toggle}</SettingsRow>;
   }
   return <div className="flex items-start justify-between gap-4">
     <div><label htmlFor={sharingId} className="text-sm font-medium">Share live transcript with the provider</label>

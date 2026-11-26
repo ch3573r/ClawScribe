@@ -182,9 +182,13 @@ pub(crate) fn task_scope(
     user_id: &str,
     destination: &PlannerDestination,
 ) -> String {
+    use super::ledger::graph_ledger_id;
     format!(
-        "planner:{tenant_id}:{user_id}:{}:{}",
-        destination.plan_id, destination.bucket_id
+        "planner:{}:{}:{}:{}",
+        graph_ledger_id(tenant_id),
+        graph_ledger_id(user_id),
+        graph_ledger_id(&destination.plan_id),
+        graph_ledger_id(&destination.bucket_id),
     )
 }
 
@@ -263,6 +267,7 @@ mod tests {
             action_items: vec![],
             transcript_excerpt: None,
             summary_html: None,
+            metadata: Default::default(),
         };
         let a = action("action-1", "Send proposal");
         let k1 = dedupe_key("tenant", "user", &dest(), &meeting, &a);

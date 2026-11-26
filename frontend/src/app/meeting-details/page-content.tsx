@@ -21,7 +21,7 @@ import { useSummaryGeneration } from '@/hooks/meeting-details/useSummaryGenerati
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useSummaryConfig } from '@/contexts/ConfigContext';
 import { useSourceAttribution } from '@/hooks/useSourceAttribution';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import type { TranscriptTextPatch } from '@/lib/meetingTranscripts';
@@ -29,13 +29,15 @@ import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
 import { stepPlaybackRate } from '@/lib/playback-controls';
 import type { MeetingBookmark } from '@/lib/library';
 import { shouldShowSpeakerAttribution } from '@/lib/speaker-attribution';
+import { getConfirmedAttendeeNames, speakerLabel } from '@/lib/speaker-labels';
 import { useSpeakerLabelVisibility } from '@/hooks/useSpeakerLabelVisibility';
 import { Button } from '@/components/ui/button';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
 import { SERIES_REVIEW_CHANGED, type SeriesPreferences } from '@/lib/meeting-follow-through';
-import { MEETING_SERIES_TEMPLATE_CHANGED } from '@/lib/meetingCalendarStore';
+import { getMeetingCalendar, MEETING_SERIES_TEMPLATE_CHANGED } from '@/lib/meetingCalendarStore';
+import { MICROSOFT_CALENDAR_CLEARED } from '@/lib/meetingCalendar';
 
 export default function PageContent({
   meeting,
@@ -148,13 +150,16 @@ export default function PageContent({
   const reviewRef = useRef<HTMLDivElement>(null);
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioStatus, setAudioStatus] = useState<'loading' | 'found' | 'missing'>('loading');
+  // Why saved audio cannot be opened, when the core reports a reason.
+  const [audioUnavailableReason, setAudioUnavailableReason] = useState<string | null>(null);
   const [audioCheck, setAudioCheck] = useState(0);
-  const audioPlayer = useAudioPlayer(audioPath);
+  const audioPlayer = useAudioPlayer(audioPath, meeting.id);
   const { seek, play, pause, isPlaying } = audioPlayer;
   // Review tools: follow-along, bookmarks on the timeline, and requests raised by keyboard shortcuts.
   const [followPlayback, setFollowPlayback] = useState(true);
   const [bookmarks, setBookmarks] = useState<MeetingBookmark[]>([]);
   const [findOpenRequest, setFindOpenRequest] = useState(0);
+  const [summaryFindRequest, setSummaryFindRequest] = useState(0);
   const [bookmarkRequest, setBookmarkRequest] = useState(0);
   const stopFollowing = useCallback(() => setFollowPlayback(false), []);
   const isAudioReady = Boolean(audioStatus === 'found' && audioPath && audioPlayer.duration > 0 && !audioPlayer.error);
@@ -179,12 +184,12 @@ export default function PageContent({
       setFocusedSource(source => source && { id: source.id, request });
     }
   }, [isAudioReady, revealTranscriptPane]);
-  const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean) => {
+  const revealEvidence = useCallback(async (id: string, index: number, current: () => boolean, focus = true) => {
     if (!onRevealTranscript || !current()) throw new Error('The transcript is not ready. Retry the citation.');
     await onRevealTranscript(id, index);
     if (!current()) return;
     setFocusedSource({ id, request: ++evidenceFocusRequest.current });
-    revealTranscriptPane();
+    if (focus) revealTranscriptPane();
   }, [onRevealTranscript, revealTranscriptPane]);
   const playEvidence = useCallback(async (seconds: number, current: () => boolean) => {
     if (!current()) return;
@@ -202,7 +207,7 @@ export default function PageContent({
   // Sidebar context
 
   // Get model config from ConfigContext
-  const { modelConfig, setModelConfig } = useConfig();
+  const { modelConfig, setModelConfig } = useSummaryConfig();
   const sourceAttributionEnabled = useSourceAttribution();
   // Audio actions operate on the recording folder. The player/timeline waits for
   // a resolved media file, which can lag behind freshly saved recordings.
@@ -223,6 +228,35 @@ export default function PageContent({
     sourceAttributionEnabled, hasRecordingFolder, timelineSegments, segments, meetingData.transcripts,
   );
   const showSpeakerAttribution = useSpeakerLabelVisibility(meeting.id, hasSpeakerAttribution);
+  const [highlightedSpeaker, setHighlightedSpeaker] = useState<string | null | undefined>(undefined);
+  const clearSpeakerHighlight = useCallback(() => setHighlightedSpeaker(undefined), []);
+  const renameSpeaker = useCallback(async (from: string | null | undefined, to: string | null) => {
+    const updated = await onApplySpeakerToMatching?.(from, to) ?? 0;
+    if (updated > 0) {
+      setHighlightedSpeaker(current => current === speakerLabel(from) ? speakerLabel(to) : current);
+    }
+    return updated;
+  }, [onApplySpeakerToMatching]);
+  const [savedAttendees, setSavedAttendees] = useState<{ meetingId: string; names: string[] }>();
+  const attendeeNames = savedAttendees?.meetingId === meeting.id ? savedAttendees.names : undefined;
+  useEffect(() => {
+    let revision = 0;
+    const load = () => {
+      const request = ++revision;
+      void getMeetingCalendar(meeting.id).then(link => {
+        if (request === revision) setSavedAttendees({ meetingId: meeting.id, names: getConfirmedAttendeeNames(link?.attendees ?? []) });
+      }).catch(() => { if (request === revision) setSavedAttendees(undefined); });
+    };
+    load();
+    // Saving or removing attendance emits the same event that refreshes the series preferences.
+    window.addEventListener(MEETING_SERIES_TEMPLATE_CHANGED, load);
+    window.addEventListener(MICROSOFT_CALENDAR_CLEARED, load);
+    return () => {
+      revision++;
+      window.removeEventListener(MEETING_SERIES_TEMPLATE_CHANGED, load);
+      window.removeEventListener(MICROSOFT_CALENDAR_CLEARED, load);
+    };
+  }, [meeting.id]);
   const templates = useTemplates(meeting.id);
 
   // Callback to register the modal open function
@@ -260,8 +294,9 @@ export default function PageContent({
 
       toast.success('Model settings saved successfully');
     } catch (error) {
-      console.error('Failed to save model config:', error);
+      console.error('Failed to save model config');
       toast.error('Failed to save model settings');
+      throw error;
     }
   };
 
@@ -315,10 +350,11 @@ export default function PageContent({
       return;
     }
 
-    invoke<string | null>('resolve_meeting_audio_file', { meetingFolder: folderPath })
+    invoke<string | null>('resolve_meeting_audio_file', { meetingId: meeting.id })
       .then((path) => {
         if (!cancelled) {
           setAudioPath(path);
+          setAudioUnavailableReason(null);
           setAudioStatus(path ? 'found' : 'missing');
         }
       })
@@ -326,6 +362,7 @@ export default function PageContent({
         console.warn('Could not resolve meeting audio file:', error);
         if (!cancelled) {
           setAudioPath(null);
+          setAudioUnavailableReason(typeof error === 'string' && error.trim() ? error : null);
           setAudioStatus('missing');
         }
       });
@@ -333,11 +370,8 @@ export default function PageContent({
     return () => {
       cancelled = true;
     };
-  }, [meeting.folder_path, audioCheck]);
+  }, [meeting.id, meeting.folder_path, audioCheck]);
 
-  // Depend on the individual player functions (stable identities from
-  // useAudioPlayer), not the whole player object, which changes identity on
-  // every clock tick during playback.
   const handleTimelineSeek = useCallback((seconds: number) => {
     void seek(seconds);
   }, [seek]);
@@ -365,7 +399,10 @@ export default function PageContent({
     rate: isAudioReady ? ({ direction }) => audioPlayer.setRate(stepPlaybackRate(audioPlayer.rate, direction)) : undefined,
     follow: isAudioReady ? () => setFollowPlayback(value => !value) : undefined,
     bookmark: isAudioReady ? () => setBookmarkRequest(value => value + 1) : undefined,
-    find: () => setFindOpenRequest(value => value + 1),
+    find: () => {
+      if (document.activeElement?.closest('#meeting-summary-panel')) setSummaryFindRequest(value => value + 1);
+      else setFindOpenRequest(value => value + 1);
+    },
   });
 
   // Track page view
@@ -401,26 +438,33 @@ export default function PageContent({
         initialActionId={archiveAction === 'actions' ? actionId : null}
         initialSeriesOpen={archiveAction === 'series'}
         seriesDestination={series?.destination}
+        emailDraft={meetingData.details?.email}
         onStartEditing={() => meetingData.setIsEditingTitle(true)} onFinishEditing={() => meetingData.setIsEditingTitle(false)} onChange={meetingData.handleTitleChange}
         duration={audioPlayer.duration || undefined} segmentCount={totalCount ?? meetingData.transcripts.length}
         disabled={summaryBusy}
         getMarkdown={getSummaryMarkdown} onOpenFolder={meetingOperations.handleOpenMeetingFolder}
         attendance={<SavedMeetingAttendance key={meeting.id} meetingId={meeting.id} createdAt={meeting.created_at}
-          durationSeconds={audioPlayer.duration || undefined} disabled={summaryBusy}
-          templates={templates.availableTemplates} remembered={templates.seriesTemplate} />} />
+          durationSeconds={audioPlayer.duration || undefined} disabled={summaryBusy} />} />
       {isAudioReady && (
         <SpeakerLaneTimeline
           bindings={playerBindings}
           segments={timelineSegments ?? []}
           showSpeakerAttribution={showSpeakerAttribution}
           totalCount={totalCount}
-          onApplySpeakerToMatching={onApplySpeakerToMatching}
-          currentTime={audioPlayer.currentTime}
+          onApplySpeakerToMatching={onApplySpeakerToMatching ? renameSpeaker : undefined}
+          highlightedSpeaker={highlightedSpeaker}
+          onHighlightSpeaker={setHighlightedSpeaker}
+          playbackClock={audioPlayer.clock}
           durationSeconds={audioPlayer.duration || undefined}
           isPlaying={isPlaying}
           isAudioReady={isAudioReady}
           onPlayPause={handleTimelinePlayPause}
           onSeek={isAudioReady ? handleTimelineSeek : undefined}
+          onSeekBy={audioPlayer.seekBy}
+          volume={audioPlayer.volume}
+          muted={audioPlayer.muted}
+          onVolumeChange={audioPlayer.setVolume}
+          onMuteToggle={audioPlayer.toggleMute}
           rate={audioPlayer.rate}
           onRateChange={audioPlayer.setRate}
           followPlayback={followPlayback}
@@ -438,9 +482,11 @@ export default function PageContent({
           speakerSegments={timelineSegments}
           timelineComplete={timelineComplete}
           sourceAttributionEnabled={sourceAttributionEnabled}
+          attendeeNames={attendeeNames}
+          highlightedSpeaker={highlightedSpeaker}
+          onClearSpeakerHighlight={clearSpeakerHighlight}
           transcripts={meetingData.transcripts}
           onCopyTranscript={copyOperations.handleCopyTranscript}
-          onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
           isRecording={isRecording}
           disableAutoScroll={true}
           // Pagination props for efficient loading
@@ -455,16 +501,18 @@ export default function PageContent({
           meetingId={meeting.id}
           meetingFolderPath={hasRecordingFolder ? meeting.folder_path : null}
           audioStatus={audioStatus}
+          audioUnavailableReason={audioUnavailableReason}
           audioError={audioPlayer.error}
           onRetryAudio={hasRecordingFolder ? () => setAudioCheck(check => check + 1) : undefined}
           isLoadingTranscript={isLoadingTranscript}
           showSpeakerAttribution={showSpeakerAttribution}
-          activeTime={isAudioReady ? audioPlayer.currentTime : undefined}
+          playbackClock={isAudioReady ? audioPlayer.clock : undefined}
+          recordingDuration={audioPlayer.duration || undefined}
           onSeekToTime={isAudioReady ? playPassage : undefined}
           onRefetchTranscripts={onRefetchTranscripts}
           onPatchTranscriptText={onPatchTranscriptText}
           onUpdateTranscriptSpeaker={onUpdateTranscriptSpeaker}
-          onApplySpeakerToMatching={onApplySpeakerToMatching}
+          onApplySpeakerToMatching={onApplySpeakerToMatching ? renameSpeaker : undefined}
           onRevealSegment={onRevealTranscript}
           followPlayback={isAudioReady && followPlayback && isPlaying}
           onFollowStop={stopFollowing}
@@ -473,14 +521,13 @@ export default function PageContent({
           onBookmarksChange={setBookmarks}
         />
         <SummaryPanel
+          bindings={playerBindings}
+          findOpenRequest={summaryFindRequest}
           seriesLanguage={series?.language}
           details={meetingData.details}
-          onRevealSource={async (source) => {
-            await onRevealTranscript?.(source.transcript_id, source.transcript_index);
-            setFocusedSource({ id: source.transcript_id, request: Date.now() });
-            revealTranscriptPane();
-          }}
-          onPlaySource={isAudioReady ? async seconds => { await seek(seconds); if (!isPlaying) await play(); } : undefined}
+          onRevealSource={onRevealTranscript ? (source, current) => revealEvidence(source.transcript_id, source.transcript_index, current, false) : undefined}
+          onPlaySource={isAudioReady ? playEvidence : undefined}
+          onNavigateSource={revealTranscriptPane}
           meeting={meeting}
           meetingTitle={meetingData.meetingTitle}
           isTitleDirty={meetingData.isTitleDirty}
@@ -488,9 +535,9 @@ export default function PageContent({
           isSaving={meetingData.isSaving}
           onSaveAll={meetingData.saveAllChanges}
           onCopySummary={copyOperations.handleCopySummary}
-          onOpenFolder={meetingOperations.handleOpenMeetingFolder}
           aiSummary={meetingData.aiSummary}
           summaryStatus={summaryGeneration.summaryStatus}
+          checkingModels={summaryGeneration.isCheckingModels}
           transcripts={meetingData.transcripts}
           modelConfig={modelConfig}
           setModelConfig={setModelConfig}

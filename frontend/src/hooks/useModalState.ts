@@ -103,94 +103,49 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
 
   // Set up chunk drop warning listener
   useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
-
-    const setupChunkDropListener = async () => {
-      try {
-        console.log('Setting up chunk-drop-warning listener...');
-        unlistenFn = await listen<string>('chunk-drop-warning', (event) => {
-          console.log('Chunk drop warning received:', event.payload);
-          showModal('chunkDropWarning', event.payload);
-        });
-        console.log('Chunk drop warning listener setup complete');
-      } catch (error) {
-        console.error('Failed to setup chunk drop warning listener:', error);
-      }
-    };
-
-    setupChunkDropListener();
-
+    let active = true;
+    const subscription = listen<string>('chunk-drop-warning', ({ payload }) => {
+      if (active) showModal('chunkDropWarning', payload);
+    });
+    void subscription.catch(() => { if (active) console.error('Could not subscribe to chunk drop warnings'); });
     return () => {
-      console.log('Cleaning up chunk drop warning listener...');
-      if (unlistenFn) {
-        unlistenFn();
-      }
+      active = false;
+      void subscription.then(unlisten => unlisten()).catch(() => {});
     };
   }, [showModal]);
 
   // Set up transcription error listener for model loading failures
   useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
-
-    const setupTranscriptionErrorListener = async () => {
-      try {
-        console.log('Setting up transcription-error listener...');
-        unlistenFn = await listen<{ error: string, userMessage: string, actionable: boolean }>('transcription-error', (event) => {
-          console.log('Transcription error received:', event.payload);
-          const { userMessage, actionable } = event.payload;
-
-          if (actionable) {
-            // This is a model-related error that requires user action
-            showModal('modelSelector', userMessage);
-          } else {
-            // Show toast instead of modal for non-actionable errors (consistent with sidebar)
-            toast.error('', {
-              description: userMessage,
-              duration: 5000,
-            });
-          }
-        });
-        console.log('Transcription error listener setup complete');
-      } catch (error) {
-        console.error('Failed to setup transcription error listener:', error);
-      }
-    };
-
-    setupTranscriptionErrorListener();
-
+    let active = true;
+    const subscription = listen<{ userMessage: string, actionable: boolean }>('transcription-error', ({ payload }) => {
+      if (!active) return;
+      if (payload.actionable) showModal('modelSelector', payload.userMessage);
+      else toast.error('', { description: payload.userMessage, duration: 5000 });
+    });
+    void subscription.catch(() => { if (active) console.error('Could not subscribe to transcription errors'); });
     return () => {
-      console.log('Cleaning up transcription error listener...');
-      if (unlistenFn) {
-        unlistenFn();
-      }
+      active = false;
+      void subscription.then(unlisten => unlisten()).catch(() => {});
     };
   }, [showModal]);
 
   // Listen for model download completion to auto-close modal
   useEffect(() => {
-    const setupDownloadListeners = async () => {
-      const unlisteners: (() => void)[] = [];
+    let disposed = false;
+    let closeTimer: ReturnType<typeof setTimeout> | undefined;
+    const subscription = listen<{ modelName: string }>('model-download-complete', ({ payload }) => {
+      if (disposed || transcriptModelConfig?.provider !== 'localWhisper' || transcriptModelConfig.model !== payload.modelName) return;
+      toast.success('Model ready, closing this window', { duration: 1500 });
+      clearTimeout(closeTimer);
+      closeTimer = setTimeout(() => hideModal('modelSelector'), 1500);
+    }).catch(() => undefined);
 
-      // Listen for Whisper model download complete
-      const unlistenWhisper = await listen<{ modelName: string }>('model-download-complete', (event) => {
-        const { modelName } = event.payload;
-        console.log('[useModalState] Whisper model download complete:', modelName);
-
-        // Auto-close modal if the downloaded model matches the selected one
-        if (transcriptModelConfig?.provider === 'localWhisper' && transcriptModelConfig?.model === modelName) {
-          toast.success('Model ready, closing this window', { duration: 1500 });
-          setTimeout(() => hideModal('modelSelector'), 1500);
-        }
-      });
-      unlisteners.push(unlistenWhisper);
-
-      return () => {
-        unlisteners.forEach(unsub => unsub());
-      };
+    return () => {
+      disposed = true;
+      clearTimeout(closeTimer);
+      void subscription.then(unlisten => unlisten?.());
     };
-
-    setupDownloadListeners();
-  }, [transcriptModelConfig, hideModal]);
+  }, [transcriptModelConfig?.provider, transcriptModelConfig?.model, hideModal]);
 
   return {
     modals,

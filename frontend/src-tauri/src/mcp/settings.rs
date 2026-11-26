@@ -3,6 +3,8 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
 };
 use tauri::{AppHandle, Manager};
 
@@ -118,6 +120,47 @@ pub(crate) async fn set_mcp_follow_through_access(
     tauri::async_runtime::spawn_blocking(move || access(app, Some((enabled, true))))
         .await
         .map_err(|_| "Could not save local assistant access.")?
+}
+
+#[tauri::command]
+pub(crate) async fn test_mcp_server(app: AppHandle) -> Result<(), String> {
+    let access = get_mcp_access(app).await?;
+    if !access.enabled && !access.follow_through {
+        return Err("Enable assistant access before testing the server.".into());
+    }
+    let mut command = tokio::process::Command::new(access.command);
+    command
+        .arg("--mcp-stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    const FAILED: &str = "The local MCP server did not respond as expected.";
+    let mut child = command.spawn().map_err(|_| FAILED)?;
+    let input = child.stdout.take().ok_or(FAILED)?;
+    let output = child.stdin.take().ok_or(FAILED)?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        super::probe_stdio(
+            tokio::io::BufReader::new(input),
+            output,
+            access.enabled,
+            access.follow_through,
+        )
+        .await
+        .map_err(|_| FAILED)?;
+        child
+            .wait()
+            .await
+            .map_err(|_| FAILED)?
+            .success()
+            .then_some(())
+            .ok_or(FAILED)
+    })
+    .await
+    .map_err(|_| "The local MCP server test timed out.")?
+    .map_err(str::to_owned)
 }
 
 #[cfg(test)]

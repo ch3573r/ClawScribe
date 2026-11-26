@@ -65,6 +65,8 @@ pub mod utils;
 mod webhook;
 pub mod whisper_engine;
 #[cfg(windows)]
+mod windows_job;
+#[cfg(windows)]
 mod windows_lifecycle;
 
 use audio::recording_commands::floating;
@@ -223,28 +225,17 @@ async fn get_transcription_status() -> audio::recording_commands::TranscriptionS
 async fn resolve_meeting_audio_file(
     app: tauri::AppHandle,
     state: tauri::State<'_, state::AppState>,
-    meeting_folder: String,
+    meeting_id: String,
 ) -> Result<Option<String>, String> {
-    // The trusted roots (a network recordings folder included) decide what may be looked at.
-    let _ = audio::recording_preferences::recording_roots(&app).await;
-    let Some(folder) = canonicalize_existing_dir(&meeting_folder)? else {
+    let roots = audio::recording_preferences::recording_roots(&app).await;
+    let Some(folder) = saved_audio_folder(state.db_manager.pool(), &meeting_id, &roots).await?
+    else {
         return Ok(None);
     };
-
-    let saved_meeting_folders = sqlx::query_scalar::<_, String>(
-        "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
-    )
-    .fetch_all(state.db_manager.pool())
-    .await
-    .map_err(|e| format!("Failed to verify meeting folder: {}", e))?;
-
-    if !canonical_folder_is_registered(&folder, saved_meeting_folders.iter().map(String::as_str)) {
-        log::warn!("Refusing to resolve audio from an unregistered meeting folder");
+    let Some(path) = audio::incremental_saver::resolve_audio_file_or_recover(&folder).await? else {
         return Ok(None);
-    }
-
-    let path = audio::incremental_saver::resolve_audio_file_or_recover(&folder).await?;
-    if let Some(path) = &path {
+    };
+    tokio::task::spawn_blocking(move || {
         let resolved = path
             .canonicalize()
             .map_err(|_| "Meeting audio could not be resolved")?;
@@ -256,8 +247,35 @@ async fn resolve_meeting_audio_file(
         app.asset_protocol_scope()
             .allow_file(&resolved)
             .map_err(|_| "Meeting audio access could not be granted")?;
-    }
-    Ok(path.map(|path| path.to_string_lossy().to_string()))
+        Ok(Some(resolved.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|_| "Meeting audio resolution was interrupted")?
+}
+
+const SAVED_AUDIO_FOLDER_QUERY: &str =
+    "SELECT folder_path FROM meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''";
+
+async fn saved_audio_folder(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    roots: &[PathBuf],
+) -> Result<Option<PathBuf>, String> {
+    let saved = sqlx::query_scalar::<_, String>(SAVED_AUDIO_FOLDER_QUERY)
+        .bind(meeting_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| "Failed to look up the saved meeting folder")?;
+    let Some(folder) = saved else {
+        return Ok(None);
+    };
+    let roots = roots.to_vec();
+    tokio::task::spawn_blocking(move || {
+        database::meeting_files::resolve_recording_folder_if_present(Path::new(&folder), &roots)
+            .map_err(|_| "This meeting's folder is not one of your recordings folders. Choose that folder again in Settings to play its audio.".into())
+    })
+    .await
+    .map_err(|_| "Meeting folder resolution was interrupted")?
 }
 
 fn canonicalize_existing_dir(path: impl AsRef<Path>) -> Result<Option<PathBuf>, String> {
@@ -338,6 +356,71 @@ mod tests {
             &requested,
             [temp_dir.path().join("Missing").to_string_lossy().as_ref()]
         ));
+    }
+
+    #[tokio::test]
+    async fn saved_audio_uses_the_meeting_id_index_and_requires_an_authorized_folder() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Recordings");
+        let saved = root.join("Saved meeting");
+        let outside = temp.path().join("Elsewhere");
+        let missing_remote = temp.path().join("Untrusted share");
+        local_path::mark_remote_for_tests(&missing_remote);
+        std::fs::create_dir_all(&saved).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        for (id, path) in [
+            ("saved", saved.as_path()),
+            ("outside", outside.as_path()),
+            ("remote", missing_remote.as_path()),
+            (
+                "cleanup",
+                root.join(".clawscribe-cleanup~missing").as_path(),
+            ),
+            ("root", root.as_path()),
+            ("blank", Path::new(" ")),
+        ] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 'Synthetic', '2026-01-01', '2026-01-01', ?)")
+                .bind(id)
+                .bind(path.to_str().unwrap())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let plan = format!("EXPLAIN QUERY PLAN {SAVED_AUDIO_FOLDER_QUERY}");
+        let (_, _, _, operation): (i64, i64, i64, String) = sqlx::query_as(&plan)
+            .bind("saved")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(operation.contains("SEARCH meetings") && operation.contains("(id=?)"));
+        let roots = [root];
+        assert_eq!(
+            saved_audio_folder(&pool, "saved", &roots).await.unwrap(),
+            Some(saved.canonicalize().unwrap())
+        );
+        for id in ["outside", "remote", "cleanup", "root"] {
+            assert_eq!(
+                saved_audio_folder(&pool, id, &roots).await.unwrap_err(),
+                "This meeting's folder is not one of your recordings folders. Choose that folder again in Settings to play its audio."
+            );
+        }
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES ('deleted', 'Synthetic', '2026-01-01', '2026-01-01', ?)")
+            .bind(roots[0].join("Deleted meeting").to_str().unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for id in ["blank", "missing", "deleted"] {
+            assert!(saved_audio_folder(&pool, id, &roots)
+                .await
+                .unwrap()
+                .is_none());
+        }
     }
 
     #[test]
@@ -427,6 +510,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     use_default_microphone: Option<bool>,
     calendar_link: Option<library::calendar::CalendarLink>,
     summary_language: Option<String>,
+    custom_title: Option<String>,
     request_id: Option<String>,
 ) -> Result<String, String> {
     let request = request_id
@@ -451,6 +535,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
                     .cloned()
                     .or(calendar_link),
                 summary_language,
+                custom_title,
                 request: request.as_ref(),
             },
         )
@@ -590,18 +675,12 @@ pub fn run() {
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-            log_info!(
-                "Second app instance requested with args: {:?}, cwd: {:?}",
-                args,
-                cwd
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            cli_control::dispatch_forwarded(
+                &args,
+                |action| cli_control::run_cli_action(app, action),
+                || tray::focus_main_window(app),
             );
-
-            if let Some(action) = cli_control::parse_cli_action(args.as_slice()) {
-                cli_control::run_cli_action(app, action);
-            } else {
-                tray::focus_main_window(app);
-            }
         }));
     }
 
@@ -828,6 +907,7 @@ pub fn run() {
             floating::floating_drag,
             floating::floating_resize,
             floating::floating_open_main,
+            floating::floating_controls_visible,
             library::context::get_meeting_context,
             library::context::set_meeting_context,
             library::calendar::get_meeting_calendar,
@@ -846,6 +926,7 @@ pub fn run() {
             library::recording_calendar::set_active_recording_calendar,
             library::list_meeting_tags,
             library::set_meeting_tags,
+            library::add_archive_project_tags,
             library::list_meeting_bookmarks,
             library::list_live_recording_bookmarks,
             library::set_live_summary_bookmarks,
@@ -858,6 +939,8 @@ pub fn run() {
             library::summary_bookmarks::set_meeting_summary_bookmarks,
             library::export_local_word,
             library::export_local_markdown,
+            exports::metadata::get_meeting_export_header,
+            exports::local_open::open_saved_meeting_export,
             library::backup::backup_library,
             library::backup::restore_library,
             library::backup_schedule::scheduled_backup_status,
@@ -867,6 +950,7 @@ pub fn run() {
             database::recovery::return_to_original_library,
             library::archive::list_archive_rows,
             library::archive::storage::measure_archive_storage,
+            library::archive::storage::measure_meeting_storage_page,
             library::file_cleanup::list_pending_meeting_file_cleanup,
             library::file_cleanup::retry_meeting_file_cleanup,
             library::file_cleanup::keep_pending_meeting_files,
@@ -915,7 +999,9 @@ pub fn run() {
             parakeet_engine::commands::open_parakeet_models_folder,
             parakeet_engine::commands::set_parakeet_use_directml,
             parakeet_engine::commands::get_parakeet_use_directml,
+            parakeet_engine::commands::get_parakeet_directml_status,
             parakeet_engine::commands::get_parakeet_directml_session_disabled,
+            parakeet_engine::commands::get_parakeet_directml_default_unavailable,
             parakeet_engine::commands::set_parakeet_use_worker,
             parakeet_engine::commands::get_parakeet_use_worker,
             // Nemotron (streaming RNN-T, Beta) commands
@@ -932,9 +1018,11 @@ pub fn run() {
             audio::transcription::worker::get_live_source_languages,
             start_recording_with_devices_and_meeting,
             start_audio_level_monitoring,
+            audio::simple_level_monitor::check_audio_signal,
             stop_audio_level_monitoring,
             // Global keyboard shortcuts
             shortcuts::get_shortcuts,
+            shortcuts::get_active_shortcuts,
             shortcuts::set_shortcuts,
             shortcuts::set_shortcut_capture,
             shortcuts::shortcut_key_characters,
@@ -942,6 +1030,8 @@ pub fn run() {
             audio::recording_commands::pause_recording,
             audio::recording_commands::resume_recording,
             audio::recording_commands::get_recording_state,
+            audio::recording_commands::get_active_recording_title,
+            audio::recording_commands::set_active_recording_title,
             audio::recording_commands::get_meeting_folder_path,
             // Source attribution (Beta, opt-in): Me/Participants labelling
             audio::recording_commands::set_source_attribution_enabled,
@@ -955,12 +1045,15 @@ pub fn run() {
             audio::recording_commands::attempt_device_reconnect,
             // Playback device detection (Bluetooth warning)
             diagnostics::get_diagnostics_snapshot,
+            diagnostics::open_diagnostics_logs_folder,
             diagnostics::save_diagnostics_report,
             audio::pc_test::run_transcription_pc_test,
             mcp::settings::get_mcp_access,
             mcp::settings::set_mcp_access,
             mcp::settings::set_mcp_follow_through_access,
+            mcp::settings::test_mcp_server,
             webhook::get_webhook_settings,
+            webhook::get_meeting_webhook_history,
             webhook::save_webhook_settings,
             webhook::remove_webhook_settings,
             webhook::send_webhook_test,
@@ -973,6 +1066,7 @@ pub fn run() {
             teams_detection::monitor::set_call_detection_settings,
             teams_detection::monitor::get_pending_call_prompt,
             teams_detection::monitor::confirm_call_detection_prompt,
+            teams_detection::monitor::dismiss_call_detection_prompt,
             teams_detection::monitor::join::join_and_record,
             teams_detection::monitor::join::cancel_join_recording,
             teams_detection::monitor::join::get_join_recording,
@@ -1109,12 +1203,17 @@ pub fn run() {
             audio::recording_preferences::get_default_recordings_folder_path,
             audio::recording_preferences::open_recordings_folder,
             audio::recording_preferences::select_recording_folder,
+            audio::recording_preferences::set_recording_save_folder,
             audio::recording_preferences::get_current_audio_backend,
             audio::recording_preferences::set_audio_backend,
             audio::recording_preferences::get_audio_backend_info,
             // Language preference commands
             set_language_preference,
             behavior_settings::get_behavior_settings,
+            behavior_settings::load_auto_update_preference,
+            behavior_settings::set_auto_update_preference,
+            behavior_settings::load_player_shortcuts,
+            behavior_settings::set_player_shortcuts,
             behavior_settings::migrate_legacy_behavior_settings,
             behavior_settings::set_recording_notification_preference,
             behavior_settings::set_conversation_metrics_preference,
@@ -1156,6 +1255,8 @@ pub fn run() {
             knowledge::live_notes::delete_saved_live_answer,
             knowledge::commands::knowledge_create_library_conversation,
             knowledge::commands::knowledge_list_library_conversations,
+            knowledge::commands::knowledge_rename_library_conversation,
+            knowledge::commands::knowledge_delete_library_conversation,
             knowledge::commands::knowledge_library_conversation_scope,
             knowledge::commands::knowledge_clear_history,
             knowledge::indexer::knowledge_index_status,
@@ -1232,6 +1333,9 @@ pub fn run() {
             exports::actions::suggest_meeting_actions,
             exports::actions::resolve_reviewed_action_source,
             exports::actions::get_reviewed_action_editor,
+            exports::actions::get_meeting_actions_overview,
+            exports::actions::edit_reviewed_meeting_actions,
+            exports::actions::save_previewed_summary_actions,
             exports::actions::save_reviewed_meeting_actions,
             exports::commands::export_selected_planner_tasks,
             exports::commands::preview_todo_tasks,
@@ -1274,24 +1378,24 @@ pub fn run() {
                     log::info!("Application exiting, cleaning up resources...");
                     power::release();
                     tauri::async_runtime::block_on(async {
-                        // Clean up database connection and checkpoint WAL
-                        if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
-                            log::info!("Starting database cleanup...");
-                            if let Err(e) = app_state.db_manager.cleanup().await {
-                                log::error!("Failed to cleanup database: {}", e);
-                            } else {
-                                log::info!("Database cleanup completed successfully");
-                            }
-                        } else {
-                            log::warn!(
-                                "AppState not available for database cleanup (likely first launch)"
-                            );
+                        // Close helper admission and cancel local summaries
+                        // before waiting for outstanding database connections.
+                        if let Err(error) =
+                            summary::summary_engine::client::shutdown_sidecars_for_exit().await
+                        {
+                            log::error!("Local summary helper shutdown failed: {error}");
                         }
-
-                        // Clean up sidecar
-                        log::info!("Cleaning up sidecar...");
-                        if let Err(e) = summary::summary_engine::force_shutdown_sidecar().await {
-                            log::error!("Failed to force shutdown sidecar: {}", e);
+                        if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
+                            let cleanup = tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                app_state.db_manager.cleanup(),
+                            )
+                            .await;
+                            match cleanup {
+                                Ok(Ok(())) => log::info!("Database cleanup completed"),
+                                Ok(Err(error)) => log::error!("Database cleanup failed: {error}"),
+                                Err(_) => log::warn!("Database cleanup exceeded the exit limit"),
+                            }
                         }
                     });
                     log::info!("Application cleanup complete");

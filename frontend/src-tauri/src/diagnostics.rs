@@ -7,9 +7,10 @@ use crate::audio::recording_commands;
 use crate::database::repositories::setting::SettingsRepository;
 use crate::nemotron_engine::commands::{nemotron_get_available_models, NEMOTRON_ENGINE};
 use crate::parakeet_engine::commands::{
-    get_parakeet_use_directml, parakeet_get_available_models, parakeet_get_current_model,
-    parakeet_get_models_directory, parakeet_init, parakeet_is_model_loaded,
+    parakeet_get_available_models, parakeet_get_current_model, parakeet_get_models_directory,
+    parakeet_init, parakeet_is_model_loaded,
 };
+use crate::parakeet_engine::parakeet_engine::cached_directml_requested;
 use crate::state::AppState;
 use crate::summary::codex_provider::{codex_check_installation, CodexInstallationStatus};
 use crate::teams_detection::{get_teams_detection_status, TeamsDetectionStatus};
@@ -55,6 +56,7 @@ pub struct TranscriptionDiagnostics {
     pub selected_provider: String,
     pub selected_model: String,
     pub api_key_configured: bool,
+    /// Null means the automatic preference has not been checked yet.
     pub parakeet_directml_enabled: Option<bool>,
     pub engines: Vec<ModelEngineDiagnostics>,
 }
@@ -90,6 +92,33 @@ pub struct IntegrationDiagnostics {
 }
 
 #[tauri::command]
+pub(crate) async fn open_diagnostics_logs_folder<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<(), String> {
+    let folder = app
+        .path()
+        .app_log_dir()
+        .map_err(|_| "Could not locate logs")?;
+    tokio::task::spawn_blocking(move || {
+        crate::local_path::require_unlinked_directory(&folder)?;
+        #[cfg(windows)]
+        return crate::local_path::open_in_explorer(&folder);
+        #[cfg(target_os = "macos")]
+        let program = "open";
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let program = "xdg-open";
+        #[cfg(unix)]
+        return std::process::Command::new(program)
+            .arg(folder)
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "Could not open the logs folder".into());
+    })
+    .await
+    .map_err(|_| "Could not open the logs folder".to_string())?
+}
+
+#[tauri::command]
 pub(crate) async fn get_diagnostics_snapshot<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
@@ -97,7 +126,7 @@ pub(crate) async fn get_diagnostics_snapshot<R: Runtime>(
 ) -> Result<DiagnosticSnapshot, String> {
     let mut errors = Vec::new();
     let app_data_dir = app.path().app_data_dir().ok();
-    let logs_dir = app_data_dir.as_ref().map(|dir| dir.join("logs"));
+    let logs_dir = app.path().app_log_dir().ok();
 
     let acceleration = match whisper_get_acceleration_status().await {
         Ok(status) => Some(status),
@@ -120,13 +149,7 @@ pub(crate) async fn get_diagnostics_snapshot<R: Runtime>(
         default_transcript_config()
     });
 
-    let parakeet_directml_enabled = match get_parakeet_use_directml().await {
-        Ok(enabled) => Some(enabled),
-        Err(error) => {
-            errors.push(format!("parakeet_directml: {error}"));
-            None
-        }
-    };
+    let parakeet_directml_enabled = cached_directml_requested();
 
     let audio = match audio_diagnostics().await {
         Ok(audio) => audio,
@@ -374,7 +397,11 @@ async fn nemotron_model_diagnostics<R: Runtime>(
         .ok()
         .map(|dir| path_to_string(dir.join("models").join("nemotron")));
     let (loaded, current_model) = {
-        let engine = NEMOTRON_ENGINE.lock().unwrap().as_ref().cloned();
+        let engine = NEMOTRON_ENGINE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .cloned();
         if let Some(engine) = engine {
             (
                 Some(engine.is_model_loaded().await),

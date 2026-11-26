@@ -65,6 +65,12 @@ test('sidebar provider restores width, shares offsets, reclamps on resize and cl
     'next/navigation': { usePathname: () => pathname, useRouter: () => ({}) },
     '@/lib/analytics': { trackBackendConnection() {} },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ isRecording: false }) },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
+      audioDeviceInventory: { data: null, status: 'checking', refresh() {} },
+      selectedDevices: {}, transcriptModelConfig: {},
+    }) },
+    '@/hooks/useRecordingStart': { useStartRecordingSession: () => () => {} },
+    '@/hooks/useLiveTranscriptionReadiness': { useLiveTranscriptionReadiness: () => ({}) },
     '@/hooks/useSummaryPolling': { useSummaryPolling: () => ({ activeSummaryPolls: new Map(), startSummaryPolling() {}, stopSummaryPolling() {} }) },
     '@tauri-apps/api/core': { invoke: async () => [] },
     '@tauri-apps/api/event': { listen: async () => () => {} },

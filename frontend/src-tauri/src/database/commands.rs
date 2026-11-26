@@ -55,7 +55,12 @@ pub async fn import_legacy_database_if_present(app: AppHandle) -> Result<bool, S
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-    let Some(legacy) = find_legacy_database(&legacy_database_candidates(&app_data_dir)) else {
+    let legacy = tokio::task::spawn_blocking(move || {
+        find_legacy_database(&legacy_database_candidates(&app_data_dir))
+    })
+    .await
+    .map_err(|_| "Legacy database detection was interrupted")?;
+    let Some(legacy) = legacy else {
         info!("No legacy database found");
         return Ok(false);
     };
@@ -69,6 +74,7 @@ pub async fn import_legacy_database_if_present(app: AppHandle) -> Result<bool, S
         })?;
 
     app.manage(AppState { db_manager });
+    crate::audio::recording_preferences::take_over_registered_folders(&app).await;
     crate::knowledge::indexer::start_installed_pool(&app);
     info!("Legacy database imported and initialized successfully");
     app.emit("database-initialized", ())

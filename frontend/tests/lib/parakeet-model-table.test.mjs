@@ -15,6 +15,7 @@ const text = root => typeof root === 'string' || typeof root === 'number' ? Stri
 
 const layout = names('Meta SettingsCard SettingsFooter SettingsRow SettingsTag');
 const common = {
+  react: { useRef: value => ({ current: value }) },
   'react/jsx-runtime': { jsx, jsxs: jsx },
   'lucide-react': names('Download MoreHorizontal'),
   '@/components/ui/button': names('Button'),
@@ -77,7 +78,8 @@ test('every state keeps the action that applies to it', () => {
   button(ready, 'Use Lightning').props.onClick();
   const more = nodes(ready).find(node => node.type === 'Button' && node.props['aria-label'] === 'More actions for Lightning');
   assert.ok(more, 'rare actions sit in an overflow menu');
-  nodes(ready).find(node => node.type === 'DropdownMenuItem').props.onSelect();
+  const menu = nodes(ready).find(node => node.type === 'DropdownMenu');
+  nodes(menu).find(node => node.type === 'DropdownMenuItem').props.onSelect();
 
   const missing = rowFor(rows, 'SmoothQuant');
   assert.match(text(missing), /Not downloaded/);
@@ -104,7 +106,7 @@ test('every state keeps the action that applies to it', () => {
 test('an incomplete download offers delete and download again', () => {
   const { rows, calls } = table({ models: [model('parakeet-tdt-0.6b-v3-int8', { Corrupted: { file_size: 1, expected_min_size: 2 } })] });
   assert.match(text(rows[0]), /Incomplete download/);
-  button(rows[0], 'Delete Lightning').props.onClick();
+  button(rows[0], 'Delete Lightning').props.onClick({ currentTarget: {} });
   button(rows[0], 'Download Lightning again').props.onClick();
   assert.deepEqual(calls.map(call => call[0]), ['delete', 'download']);
 });

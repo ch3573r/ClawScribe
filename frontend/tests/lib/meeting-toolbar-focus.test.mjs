@@ -1,23 +1,25 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
-import { createHookHarness } from './hook-harness.mjs';
+import { createHookHarness, flush } from './hook-harness.mjs';
 
 const jsx = (type, props) => ({ type, props });
 const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.props?.children)] : [];
 const text = node => Array.isArray(node) ? node.map(text).join('') : typeof node === 'string' || typeof node === 'number' ? String(node) : node ? text(node.props?.children) : '';
 const primitives = {
   'react/jsx-runtime': { jsx, jsxs: jsx },
+  'next/link': { __esModule: true, default: 'link' },
   'lucide-react': {},
   '@/components/ui/button': { Button: 'button' },
   '@/components/ui/input': { Input: 'input' },
   '@/components/ui/textarea': { Textarea: 'textarea' },
+  '@/components/ui/progress': { Progress: 'progress-indicator' },
   '@/components/ui/tooltip': { Tooltip: 'tooltip', TooltipTrigger: 'tooltip-trigger', TooltipContent: 'tooltip-content' },
   '@/components/ui/dropdown-menu': {
     DropdownMenu: 'menu', DropdownMenuTrigger: 'menu-trigger', DropdownMenuContent: 'menu-content', DropdownMenuItem: 'menu-item',
     DropdownMenuSub: 'menu-sub', DropdownMenuSubTrigger: 'menu-sub-trigger', DropdownMenuSubContent: 'menu-sub-content', DropdownMenuSeparator: 'separator',
   },
-  '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogTitle: 'dialog-title' },
+  '@/components/ui/dialog': { Dialog: 'dialog', DialogContent: 'dialog-content', DialogTitle: 'dialog-title', DialogHeader: 'dialog-header', DialogDescription: 'dialog-description', DialogFooter: 'dialog-footer' },
   '@/components/ui/visually-hidden': { VisuallyHidden: 'visually-hidden' },
   '@/components/ui/popover': { Popover: 'popover', PopoverTrigger: 'popover-trigger', PopoverContent: 'popover-content' },
   './ActionIcon': { ActionIcon: 'action-icon' },
@@ -42,6 +44,7 @@ const primitives = {
   '@/lib/utils': { isOllamaNotInstalledError: () => false },
   '@/lib/analytics': { default: { trackButtonClick() {} } },
   '@tauri-apps/api/core': { invoke: async () => {} },
+  '@tauri-apps/api/event': { listen: async () => () => {} },
   sonner: { toast: {} },
 };
 
@@ -80,30 +83,57 @@ test('Rename retains title focus after overflow closes and normal dismissal stil
   headerHooks.unmount(); titleHooks.unmount();
 });
 
-test('the saved header preserves attendance and returns focus after reviewing meeting actions', () => {
+test('the saved header shows counted actions, flags suggestions, and restores pill focus', async () => {
   const hooks = createHookHarness();
-  const { MeetingHeader } = loadTsModule('src/components/MeetingDetails/MeetingHeader.tsx', { ...primitives, react: hooks.react });
+  const listeners = new Map();
+  let status = { openCount: 2, hasSuggestions: true };
+  const { MeetingHeader } = loadTsModule('src/components/MeetingDetails/MeetingHeader.tsx', {
+    ...primitives,
+    react: hooks.react,
+    '@tauri-apps/api/event': { listen: async (name, callback) => {
+      listeners.set(name, callback);
+      return () => listeners.delete(name);
+    } },
+    '@/services/meetingActionsService': { getMeetingActionsOverview: async () => status },
+  });
   const attendance = jsx('attendance', {});
   const props = {
     meeting: { id: 'example', created_at: '2026-01-01T12:00:00Z' }, title: 'Review', segmentCount: 2, disabled: false,
     onStartEditing() {}, onFinishEditing() {}, onChange() {}, getMarkdown: async () => '', onOpenFolder: async () => {}, attendance,
+    emailDraft: { subject: 'AI subject', body: 'AI draft' },
   };
   const render = () => nodes(hooks.render(() => MeetingHeader(props)));
   let tree = render();
   assert.ok(tree.includes(attendance));
-  let focused = false;
-  tree.find(node => node.type === 'action-icon').props.ref.current = { focus() { focused = true; } };
-  tree.find(node => node.type === 'menu-item' && text(node) === 'Meeting actions').props.onSelect();
+  await flush();
   tree = render();
-  closeMenu(tree.find(node => node.type === 'menu-content'), () => assert.fail('menu steals dialog focus'));
+  const pill = tree.find(node => node.props?.['aria-haspopup'] === 'dialog');
+  assert.equal(text(pill), 'Actions (2)');
+  assert.equal(pill.props['aria-label'], 'Actions (2), new summary suggestions');
+  let focused = false;
+  pill.props.ref.current = { focus() { focused = true; } };
+  pill.props.onClick();
+  tree = render();
   const dialog = tree.find(node => node.type === 'reviewed-actions');
   assert.equal(dialog.props.open, true);
   dialog.props.onReturnFocus();
   assert.equal(focused, true);
+  status = { openCount: 3, hasSuggestions: false };
+  listeners.get('reviewed-actions-changed')({ payload: 'another-meeting' });
+  await flush();
+  assert.equal(render().find(node => node.props?.['aria-haspopup'] === 'dialog').props['aria-label'], 'Actions (2), new summary suggestions');
+  listeners.get('reviewed-actions-changed')({ payload: 'example' });
+  await flush();
+  assert.equal(render().find(node => node.props?.['aria-haspopup'] === 'dialog').props['aria-label'], 'Actions (3)');
+  tree.find(node => typeof node.props.onReviewEmail === 'function').props.onReviewEmail();
+  assert.equal(render().find(node => node.type === 'follow-up-email').props.initialDraft, props.emailDraft);
   hooks.unmount();
+  await flush();
+  assert.equal(listeners.size, 0);
 });
 
 const summaryProps = {
+  details: { transcriptChanged: false }, jobSnapshot: null,
   saveState: 'saved', hasPreviousSummary: false, summaryRevision: 0, onRestorePrevious: async () => {}, onSummaryDraft() {},
   meeting: { id: 'example', title: 'Review', created_at: '2026-01-01T12:00:00Z' }, meetingTitle: 'Review', isTitleDirty: false,
   summaryRef: { current: null }, isSaving: false, onSaveAll: async () => {}, onCopySummary: async () => {}, onOpenFolder: async () => {},
@@ -113,10 +143,27 @@ const summaryProps = {
   getSummaryStatusMessage: () => '', availableTemplates: [], selectedTemplate: '', onTemplateSelect() {},
 };
 
+test('the summary toolbar shows the selected template and links to its settings', () => {
+  const hooks = createHookHarness();
+  const { SummaryGeneratorButtonGroup } = loadTsModule('src/components/MeetingDetails/SummaryGeneratorButtonGroup.tsx', { ...primitives, react: hooks.react });
+  for (const compact of [false, true]) {
+    const toolbar = hooks.render(() => SummaryGeneratorButtonGroup({
+      ...summaryProps, compact,
+      availableTemplates: [{ id: 'executive_brief', name: 'Executive brief', description: 'Example' }],
+      selectedTemplate: 'executive_brief',
+    }));
+    const list = nodes(toolbar);
+    const trigger = list.find(node => node.type === (compact ? 'menu-sub-trigger' : 'button')
+      && node.props['aria-label'] === 'Template: Executive brief');
+    assert.equal(text(trigger), 'Executive brief');
+    const link = list.find(node => node.type === 'link');
+    assert.equal(text(link), 'Manage templates…');
+    assert.equal(link.props.href, '/settings?tab=summary&manageTemplates=1');
+  }
+  hooks.unmount();
+});
+
 test('Find retains input focus after summary overflow closes and resets the suppression', () => {
-  const previousWindow = globalThis.window;
-  const frames = [];
-  globalThis.window = { requestAnimationFrame: callback => frames.push(callback) };
   const panelHooks = createHookHarness(), generatorHooks = createHookHarness();
   try {
     const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', { ...primitives, react: panelHooks.react });
@@ -132,16 +179,52 @@ test('Find retains input focus after summary overflow closes and resets the supp
     assert.ok(input, 'Find must reveal the search input');
     let active = 'overflow';
     input.props.ref.current = { focus() { active = 'find'; }, select() {} };
-    frames.splice(0).forEach(callback => callback());
-    assert.equal(active, 'find');
     const content = nodes(toolbar).find(node => node.type === 'menu-content');
     closeMenu(content, () => { active = 'overflow'; });
     assert.equal(active, 'find', 'menu close must leave the revealed search input focused');
     closeMenu(content, () => { active = 'overflow'; });
     assert.equal(active, 'overflow', 'later menu dismissal must restore normal focus');
   } finally {
-    panelHooks.unmount(); generatorHooks.unmount(); globalThis.window = previousWindow;
+    panelHooks.unmount(); generatorHooks.unmount();
   }
+});
+
+test('summary Find refreshes highlights during edits without moving the viewport', t => {
+  const hooks = createHookHarness();
+  const previousWindow = globalThis.window;
+  const highlights = new Map();
+  let refresh;
+  globalThis.window = {
+    CSS: { highlights },
+    Highlight: class { constructor(...ranges) { this.ranges = ranges; } },
+    MutationObserver: class { constructor(callback) { refresh = callback; } observe() {} disconnect() {} },
+  };
+  t.after(() => { hooks.unmount(); globalThis.window = previousWindow; });
+  const scroll = { scrollTop: 0, getBoundingClientRect: () => ({ top: 0, bottom: 100, height: 100 }) };
+  let ranges;
+  const makeRange = top => ({ getBoundingClientRect: () => ({ top, bottom: top + 10, height: 10 }) });
+  ranges = [makeRange(250), makeRange(400)];
+  const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', {
+    ...primitives, react: hooks.react, '@/lib/summary-find': { collectSummaryRanges: () => ranges },
+  });
+  const render = () => nodes(hooks.render(() => SummaryPanel({ ...summaryProps, findOpenRequest: 1 })));
+  const input = () => render().find(node => node.props?.placeholder === 'Find in summary');
+  const tree = render();
+  tree.find(node => node.props?.className?.includes('::highlight')).props.ref.current = {};
+  tree.find(node => node.props?.className === 'min-h-0 min-w-0 flex-1 overflow-y-auto').props.ref.current = scroll;
+  input().props.onChange({ target: { value: 'notes' } });
+  render();
+  render();
+  assert.equal(scroll.scrollTop, 205);
+  scroll.scrollTop = 12;
+  ranges = [makeRange(300), makeRange(400)];
+  refresh();
+  render();
+  assert.equal(highlights.get('clawscribe-summary-find-current').ranges[0], ranges[0]);
+  assert.equal(scroll.scrollTop, 12);
+  input().props.onKeyDown({ key: 'Enter', nativeEvent: {}, preventDefault() {} });
+  render();
+  assert.equal(scroll.scrollTop, 367);
 });
 
 test('summary save status appears only when a summary exists', () => {
@@ -181,31 +264,30 @@ test('meeting title strips pasted line breaks without trimming ordinary spaces',
   hooks.unmount();
 });
 
-test('the empty summary view offers the one primary Generate action, and the toolbar steps back', () => {
+test('the empty summary view offers the only Generate action', () => {
   const hooks = createHookHarness();
   const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', { ...primitives, '@/lib/analytics': { __esModule: true, default: { trackButtonClick() {} } }, react: hooks.react });
   const render = props => hooks.render(() => SummaryPanel({ ...summaryProps, ...props }));
-  const group = tree => nodes(tree).find(node => node.props && 'secondaryGenerate' in node.props);
+  const group = tree => nodes(tree).find(node => node.props && 'showRegenerate' in node.props);
   const generate = tree => nodes(tree).find(node => node.type === 'button' && text(node) === 'Generate summary');
 
-  const empty = render({ aiSummary: null, summaryStatus: 'idle' });
+  const generated = [];
+  const empty = render({ aiSummary: null, summaryStatus: 'idle', customPrompt: 'Context', onGenerateSummary: async prompt => { generated.push(prompt); } });
   assert.ok(generate(empty), 'the empty view has the action');
-  assert.equal(group(empty).props.secondaryGenerate, true, 'so the toolbar one is secondary');
-  let started = 0;
-  group(empty).props.generateRef.current = () => { started++; };
+  assert.equal(group(empty).props.showRegenerate, false);
   generate(empty).props.onClick();
-  assert.equal(started, 1, 'it runs the same action as the toolbar');
+  assert.deepEqual(generated, ['Context']);
   assert.doesNotMatch(text(empty), /toolbar above/);
 
   const noTranscript = render({ aiSummary: null, summaryStatus: 'idle', transcripts: [] });
   assert.equal(generate(noTranscript), undefined, 'nothing to generate from');
-  assert.equal(group(noTranscript).props.secondaryGenerate, false);
+  assert.equal(group(noTranscript).props.showRegenerate, false);
 
   const generating = render({ aiSummary: null, summaryStatus: 'processing' });
   assert.equal(generate(generating), undefined, 'no Generate while one is running');
-  assert.equal(group(generating).props.secondaryGenerate, false);
+  assert.equal(group(generating).props.showRegenerate, false);
 
   const populated = render({});
-  assert.equal(group(populated).props.secondaryGenerate, false, 'with a summary the toolbar action is the only one');
+  assert.equal(group(populated).props.showRegenerate, true, 'with a summary the toolbar action is the only one');
   hooks.unmount();
 });

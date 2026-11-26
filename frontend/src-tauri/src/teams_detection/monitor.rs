@@ -25,7 +25,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Runtime, WebviewWindow};
 
 use super::calls::{CallScan, CallWindow, Provider};
 use crate::library::calendar::CalendarLink;
@@ -33,6 +33,8 @@ use crate::start_request::{self, StartOutcome, StartSource};
 
 /// How often the core looks for calls while detection is on.
 const POLL_INTERVAL: Duration = Duration::from_secs(12);
+const JOIN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+static JOIN_STATE_CHANGED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 /// Consecutive completed scans that must show a call gone before it has ended.
 const MISSES_TO_END: u8 = 3;
 
@@ -98,19 +100,22 @@ fn ended_on_scan(call: &CallWindow, scan: &CallScan) -> bool {
 }
 
 fn same_observed_call(call: &CallWindow, active: &CallWindow) -> bool {
-    active.key == call.key || (call.teams_room.is_some() && active.teams_room == call.teams_room)
+    active.key == call.key
+        || (call.room_identity.is_some() && active.room_identity == call.room_identity)
 }
 
 fn desktop_teams_continuation(call: &CallWindow, active: &CallWindow) -> bool {
     call.desktop_teams
         && active.desktop_teams
-        && call.teams_room.is_none()
-        && active.teams_room.is_none()
+        && call.room_identity.is_none()
+        && active.room_identity.is_none()
 }
 
 struct Observed {
     call: CallWindow,
     misses: u8,
+    seen_last_scan: bool,
+    dismissed: bool,
     /// Which observation this is. A call remembered again gets a new serial, so
     /// a start decided on the earlier observation can tell it is out of date.
     serial: u64,
@@ -146,6 +151,8 @@ impl ObservedCalls {
             Observed {
                 call: call.clone(),
                 misses: 0,
+                seen_last_scan: true,
+                dismissed: false,
                 serial,
             },
         );
@@ -159,14 +166,41 @@ impl ObservedCalls {
     fn interrupted(&mut self) {
         for observed in self.calls.values_mut() {
             observed.misses = 0;
+            observed.seen_last_scan = false;
         }
     }
 
     /// Counts the scan against every remembered call and returns the keys of the
     /// calls that have now ended.
     fn update(&mut self, scan: &CallScan) -> Vec<String> {
+        // Desktop Teams can replace its HWND without supplying a room ID.
+        // Follow the dismissed call so positive end evidence for the new HWND
+        // releases its suppression too.
+        if let [call] = scan.active.as_slice() {
+            if !self.calls.contains_key(&call.key) {
+                let mut previous = self.calls.values().filter(|seen| {
+                    seen.dismissed
+                        && seen.misses == 0
+                        && seen.seen_last_scan
+                        && desktop_teams_continuation(&seen.call, call)
+                        && !scan.ended.iter().any(|ended| ended.key == seen.call.key)
+                });
+                let previous = previous
+                    .next()
+                    .filter(|_| previous.next().is_none())
+                    .map(|seen| seen.call.key.clone());
+                if let Some(mut seen) = previous.and_then(|key| self.calls.remove(&key)) {
+                    seen.call = call.clone();
+                    self.calls.insert(call.key.clone(), seen);
+                }
+            }
+        }
         let mut ended = Vec::new();
         for (key, observed) in self.calls.iter_mut() {
+            observed.seen_last_scan = scan
+                .active
+                .iter()
+                .any(|active| same_observed_call(&observed.call, active));
             observed.misses = if ended_on_scan(&observed.call, scan) {
                 observed.misses + 1
             } else {
@@ -196,8 +230,15 @@ pub struct Prompt {
     pub call: CallWindow,
     serial: u64,
     key: String,
+    surface: Option<PromptSurface>,
     /// True when an automatic start failed and the user may try again.
     pub retry: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptSurface {
+    Native,
+    Toast,
 }
 
 /// What the rest of the app looks like to the monitor.
@@ -258,18 +299,26 @@ impl Tracker {
     }
 
     fn providers(&self) -> Vec<Provider> {
-        if self.join.is_none() {
+        let Some(join) = &self.join else {
             return self.settings.providers.clone();
-        }
+        };
         let mut providers = if self.settings.watching() {
             self.settings.providers.clone()
         } else {
             vec![]
         };
-        if !providers.contains(&Provider::Teams) {
-            providers.push(Provider::Teams);
+        if !providers.contains(&join.provider) {
+            providers.push(join.provider);
         }
         providers
+    }
+
+    fn poll_interval(&self) -> Duration {
+        if self.join.as_ref().is_some_and(join::Invitation::armed) {
+            JOIN_POLL_INTERVAL
+        } else {
+            POLL_INTERVAL
+        }
     }
 
     fn mode_for(&self, call: &CallWindow) -> Mode {
@@ -358,6 +407,11 @@ impl Tracker {
                 .seen
                 .serial(&call.key)
                 .is_some_and(|serial| serial > baseline)
+            || self.seen.calls.values().any(|observed| {
+                observed.dismissed
+                    && observed.serial > baseline
+                    && same_observed_call(&observed.call, call)
+            })
         {
             return Decision::Nothing;
         }
@@ -380,7 +434,8 @@ impl Tracker {
                 self.prompt = Some(Prompt {
                     call: call.clone(),
                     serial,
-                    key: self.prompt_key(call, serial),
+                    key: uuid::Uuid::new_v4().to_string(),
+                    surface: None,
                     retry: false,
                 });
                 Decision::Prompt
@@ -430,13 +485,6 @@ impl Tracker {
         }
     }
 
-    fn prompt_key(&self, call: &CallWindow, serial: u64) -> String {
-        self.join.as_ref().map_or_else(
-            || format!("{}-{serial}", call.key),
-            |join| format!("{}-{serial}", join.id),
-        )
-    }
-
     /// Whether a start decided earlier may still go ahead. An automatic start
     /// needs automatic mode; one the user confirmed needs only that detection is
     /// still on for the call's app.
@@ -460,6 +508,18 @@ impl Tracker {
     pub fn confirm(&mut self, key: &str) -> Option<(CallWindow, u64, u64)> {
         let prompt = self.prompt.take_if(|prompt| prompt.key == key)?;
         Some((prompt.call, prompt.serial, self.revision))
+    }
+
+    fn dismiss(&mut self, key: &str) -> bool {
+        let Some(prompt) = self.prompt.take_if(|prompt| prompt.key == key) else {
+            return false;
+        };
+        // Keep the observation until the call ends, including if Windows
+        // reports the same identified Teams room in a different window.
+        if let Some(observed) = self.seen.calls.get_mut(&prompt.call.key) {
+            observed.dismissed = true;
+        }
+        true
     }
 
     /// The recording this call started is running; remember it for stopping.
@@ -491,7 +551,8 @@ impl Tracker {
             self.prompt = Some(Prompt {
                 call: call.clone(),
                 serial,
-                key: self.prompt_key(call, serial),
+                key: uuid::Uuid::new_v4().to_string(),
+                surface: None,
                 retry: true,
             });
         }
@@ -565,6 +626,29 @@ impl Tracker {
                 .map(|join| join.link.subject().unwrap_or("Untitled event").into()),
         })
     }
+
+    fn select_prompt_surface(&mut self, key: &str, surface: PromptSurface) -> Option<PromptView> {
+        let prompt = self.prompt.as_mut()?;
+        if prompt.key != key || prompt.surface.is_some() {
+            return None;
+        }
+        prompt.surface = Some(surface);
+        self.prompt_view()
+    }
+
+    fn toast_prompt(&self) -> Option<PromptView> {
+        self.prompt()
+            .filter(|prompt| prompt.surface == Some(PromptSurface::Toast))?;
+        self.prompt_view()
+    }
+
+    fn native_prompt(&self, key: &str) -> Option<PromptView> {
+        let prompt = self.prompt()?;
+        if prompt.key != key || prompt.surface == Some(PromptSurface::Toast) {
+            return None;
+        }
+        self.prompt_view()
+    }
 }
 
 /// The prompt waiting for an answer, if any.
@@ -598,13 +682,8 @@ fn sync_prompt<R: Runtime>(
     {
         let _ = app.emit("join-recording-changed", ());
     }
-    match &after {
-        Some(view) => {
-            let _ = app.emit("call-detection-prompt", view.clone());
-        }
-        None => {
-            let _ = app.emit("call-detection-prompt-cleared", ());
-        }
+    if let Some(previous) = before {
+        let _ = app.emit("call-detection-prompt-cleared", previous.key);
     }
     crate::tray::update_tray_menu(app);
     prompt_window::refresh(app);
@@ -857,7 +936,17 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
                 Ok(false) => {}
                 Err(error) => log::error!("Call monitor: a scan failed unexpectedly: {error}"),
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            loop {
+                let interval = tracker().poll_interval();
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => break,
+                    _ = JOIN_STATE_CHANGED.notified() => {
+                        if tracker().poll_interval() == JOIN_POLL_INTERVAL {
+                            break; // Check immediately after the link opens.
+                        }
+                    }
+                }
+            }
         }
     });
 }
@@ -875,6 +964,19 @@ pub(crate) async fn confirm_prompt<R: Runtime>(app: &AppHandle<R>, key: &str) {
     };
     sync_prompt(app, before, None);
     begin(app, call, serial, revision, true).await;
+}
+
+fn dismiss_prompt<R: Runtime>(app: &AppHandle<R>, key: &str) -> bool {
+    let before = {
+        let mut tracker = tracker();
+        let before = tracker.prompt_view();
+        if !tracker.dismiss(key) {
+            return false;
+        }
+        before
+    };
+    sync_prompt(app, before, None);
+    true
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────
@@ -904,8 +1006,16 @@ pub fn set_call_detection_settings<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn get_pending_call_prompt() -> Option<PromptView> {
-    pending_prompt()
+pub fn get_pending_call_prompt<R: Runtime>(window: WebviewWindow<R>) -> Option<PromptView> {
+    if window.label() == prompt_window::LABEL {
+        let url = window.url().ok()?;
+        let key = url
+            .query_pairs()
+            .find_map(|(name, value)| (name == "key").then_some(value))?;
+        tracker().native_prompt(&key)
+    } else {
+        tracker().toast_prompt()
+    }
 }
 
 #[tauri::command]
@@ -917,6 +1027,11 @@ pub async fn confirm_call_detection_prompt<R: Runtime>(
     Ok(())
 }
 
+#[tauri::command]
+pub fn dismiss_call_detection_prompt<R: Runtime>(app: AppHandle<R>, key: String) -> bool {
+    dismiss_prompt(&app, &key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,7 +1041,7 @@ mod tests {
             provider,
             window: window.to_string(),
             key: key.to_string(),
-            teams_room: None,
+            room_identity: None,
             desktop_teams: false,
         }
     }
@@ -942,6 +1057,7 @@ mod tests {
             active: active.to_vec(),
             ended: ended.to_vec(),
             open_windows: open.iter().map(|window| window.to_string()).collect(),
+            ..Default::default()
         }
     }
 
@@ -957,6 +1073,205 @@ mod tests {
         idle: true,
         recording: false,
     };
+
+    #[test]
+    fn dismissing_a_prompt_keeps_the_call_suppressed_until_it_ends() {
+        let mut tracker = Tracker::new(settings(Mode::Prompt, false));
+        let call = meet();
+        let active = snapshot(std::slice::from_ref(&call), &[&call.window], &[]);
+        let revision = tracker.revision();
+        assert_eq!(
+            tracker.observe(revision, Some(&active), IDLE),
+            Decision::Prompt
+        );
+        let key = tracker.prompt_view().unwrap().key;
+
+        assert!(!tracker.dismiss("another-prompt"));
+        assert!(tracker.dismiss(&key));
+        assert!(tracker.prompt_view().is_none());
+        assert!(tracker.confirm(&key).is_none());
+        tracker.observe(revision, None, IDLE);
+        assert_eq!(
+            tracker.observe(revision, Some(&active), IDLE),
+            Decision::Nothing
+        );
+
+        let ended = snapshot(&[], &[], &[]);
+        for _ in 0..MISSES_TO_END {
+            tracker.observe(revision, Some(&ended), IDLE);
+        }
+        assert_eq!(
+            tracker.observe(revision, Some(&active), IDLE),
+            Decision::Prompt
+        );
+        assert!(!tracker.dismiss(&key));
+    }
+
+    #[test]
+    fn a_dismissed_teams_room_stays_suppressed_in_a_different_window() {
+        let mut tracker = Tracker::new(CallSettings {
+            mode: Mode::Prompt,
+            ..Default::default()
+        });
+        let first = CallWindow {
+            room_identity: Some([1; 32]),
+            ..call(Provider::Teams, "window-a", "key-a")
+        };
+        let moved = CallWindow {
+            room_identity: Some([1; 32]),
+            ..call(Provider::Teams, "window-b", "key-b")
+        };
+        let revision = tracker.revision();
+        let scan = snapshot(&[first], &["window-a"], &[]);
+        assert_eq!(
+            tracker.observe(revision, Some(&scan), IDLE),
+            Decision::Prompt
+        );
+        let key = tracker.prompt_view().unwrap().key;
+        assert!(tracker.dismiss(&key));
+        let scan = snapshot(&[moved], &["window-b"], &[]);
+        assert_eq!(
+            tracker.observe(revision, Some(&scan), IDLE),
+            Decision::Nothing
+        );
+    }
+
+    #[test]
+    fn dismissed_desktop_teams_call_follows_the_replacement_window() {
+        let mut tracker = Tracker::new(CallSettings {
+            mode: Mode::Prompt,
+            ..Default::default()
+        });
+        let first = CallWindow {
+            desktop_teams: true,
+            ..call(Provider::Teams, "window-a", "key-a")
+        };
+        let moved = CallWindow {
+            desktop_teams: true,
+            ..call(Provider::Teams, "window-b", "key-b")
+        };
+        let revision = tracker.revision();
+        let first_scan = snapshot(&[first], &["window-a"], &[]);
+        assert_eq!(
+            tracker.observe(revision, Some(&first_scan), IDLE),
+            Decision::Prompt
+        );
+        assert!(tracker.dismiss(&tracker.prompt_view().unwrap().key));
+        let moved_scan = snapshot(&[moved.clone()], &["window-a", "window-b"], &[]);
+        assert_eq!(
+            tracker.observe(revision, Some(&moved_scan), IDLE),
+            Decision::Nothing
+        );
+
+        let next = CallWindow {
+            desktop_teams: true,
+            ..call(Provider::Teams, "window-c", "key-c")
+        };
+        let next_scan = snapshot(&[next], &["window-a", "window-b", "window-c"], &[moved]);
+        assert_eq!(
+            tracker.observe(revision, Some(&next_scan), IDLE),
+            Decision::Prompt
+        );
+    }
+
+    #[test]
+    fn dismissed_desktop_teams_call_does_not_suppress_the_next_call_after_a_gap() {
+        for (open, explicitly_ended) in [(false, false), (true, false), (true, true)] {
+            let mut tracker = Tracker::new(CallSettings {
+                mode: Mode::Prompt,
+                providers: vec![Provider::Teams],
+                ..Default::default()
+            });
+            let revision = tracker.revision();
+            let first = CallWindow {
+                desktop_teams: true,
+                ..call(Provider::Teams, "window-a", "key-a")
+            };
+            let next = CallWindow {
+                desktop_teams: true,
+                ..call(Provider::Teams, "window-b", "key-b")
+            };
+            let first_scan = snapshot(std::slice::from_ref(&first), &["window-a"], &[]);
+            assert_eq!(
+                tracker.observe(revision, Some(&first_scan), IDLE),
+                Decision::Prompt
+            );
+            assert!(tracker.dismiss(&tracker.prompt_view().unwrap().key));
+
+            let windows: &[&str] = if open { &["window-a"] } else { &[] };
+            let ended = if explicitly_ended {
+                std::slice::from_ref(&first)
+            } else {
+                &[]
+            };
+            let gap = snapshot(&[], windows, ended);
+            assert_eq!(
+                tracker.observe(revision, Some(&gap), IDLE),
+                Decision::Nothing
+            );
+
+            let next_scan = snapshot(&[next], &["window-b"], &[]);
+            assert_eq!(
+                tracker.observe(revision, Some(&next_scan), IDLE),
+                Decision::Prompt
+            );
+        }
+    }
+
+    #[test]
+    fn only_one_presentation_is_selected_for_each_prompt() {
+        for (selected, other) in [
+            (PromptSurface::Native, PromptSurface::Toast),
+            (PromptSurface::Toast, PromptSurface::Native),
+        ] {
+            let mut tracker = Tracker::new(settings(Mode::Prompt, false));
+            let revision = tracker.revision();
+            let call = meet();
+            let scan = snapshot(std::slice::from_ref(&call), &[&call.window], &[]);
+            assert_eq!(
+                tracker.observe(revision, Some(&scan), IDLE),
+                Decision::Prompt
+            );
+            let key = tracker.prompt_view().unwrap().key;
+            assert!(tracker.toast_prompt().is_none());
+            assert!(tracker.native_prompt("stale-key").is_none());
+            assert!(tracker
+                .select_prompt_surface("stale-key", selected)
+                .is_none());
+            assert!(tracker.select_prompt_surface(&key, selected).is_some());
+            assert!(tracker.select_prompt_surface(&key, other).is_none());
+            assert_eq!(
+                tracker.toast_prompt().is_some(),
+                selected == PromptSurface::Toast
+            );
+            assert_eq!(
+                tracker.native_prompt(&key).is_some(),
+                selected == PromptSurface::Native
+            );
+            assert!(tracker.dismiss(&key));
+            assert!(tracker.select_prompt_surface(&key, other).is_none());
+        }
+    }
+
+    #[test]
+    fn closing_an_older_prompt_cannot_dismiss_a_retry() {
+        let mut tracker = Tracker::new(settings(Mode::Prompt, false));
+        let call = meet();
+        let revision = tracker.revision();
+        let scan = snapshot(std::slice::from_ref(&call), &[&call.window], &[]);
+        assert_eq!(
+            tracker.observe(revision, Some(&scan), IDLE),
+            Decision::Prompt
+        );
+        let first = tracker.prompt_view().unwrap().key;
+        let (call, serial, revision) = tracker.confirm(&first).unwrap();
+        tracker.start_failed(&call, serial, revision, true);
+        let retry = tracker.prompt_view().unwrap();
+        assert!(retry.retry);
+        assert_ne!(retry.key, first);
+        assert!(!tracker.dismiss(&first));
+        assert!(tracker.dismiss(&retry.key));
+    }
 
     #[test]
     fn settings_keep_the_listed_order_and_each_app_once() {
@@ -1240,9 +1555,9 @@ mod tests {
     #[test]
     fn a_known_teams_room_survives_moving_to_a_new_call_window() {
         let mut original = call(Provider::Teams, "first-window", "first-call");
-        original.teams_room = Some([3; 32]);
+        original.room_identity = Some([3; 32]);
         let mut moved = call(Provider::Teams, "second-window", "second-call");
-        moved.teams_room = original.teams_room;
+        moved.room_identity = original.room_identity;
         let scan = snapshot(&[moved], &["second-window"], &[]);
         assert!(!ended_on_scan(&original, &scan));
     }
@@ -1303,9 +1618,9 @@ mod tests {
         );
         assert!(ended_on_scan(&original, &transition));
         original.desktop_teams = false;
-        original.teams_room = Some([1; 32]);
+        original.room_identity = Some([1; 32]);
         next.desktop_teams = false;
-        next.teams_room = Some([2; 32]);
+        next.room_identity = Some([2; 32]);
         assert!(ended_on_scan(
             &original,
             &snapshot(&[next], &["new-window"], &[])

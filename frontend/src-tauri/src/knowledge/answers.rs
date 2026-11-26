@@ -851,6 +851,9 @@ fn prompt_row(passage: &Passage, tag: usize) -> serde_json::Value {
         "text":passage.text,"preceding_question_tag":null})
 }
 
+pub(super) const PROMPT_BUDGET_EXCEEDED: &str =
+    "Question and history exceed the model context budget";
+
 pub fn build_prompt(
     question: &str,
     passages: &[Passage],
@@ -875,7 +878,7 @@ pub fn build_prompt(
     };
     let mut used = envelope(&rows, true).len();
     if used > budget {
-        return Err("Question and history exceed the model context budget".into());
+        return Err(PROMPT_BUDGET_EXCEEDED.into());
     }
     for passage in passages {
         let row = prompt_row(passage, selected.len() + 1);

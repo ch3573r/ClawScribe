@@ -1,4 +1,4 @@
-use super::super::model::TimestampedResult;
+use super::super::model::{warn_encoder_length_clamped, TimestampedResult};
 use super::protocol::{read_frame, write_frame, Request, Response};
 use std::ffi::OsString;
 #[cfg(windows)]
@@ -74,7 +74,7 @@ struct RunningChild {
 
 impl RunningChild {
     fn spawn(program: &PathBuf, args: &[OsString]) -> Result<Self, WorkerError> {
-        let job = job::Job::new()?;
+        let job = job::Job::new().map_err(|_| WorkerError::Spawn)?;
         let mut command = Command::new(program);
         command
             .args(args)
@@ -94,11 +94,16 @@ impl RunningChild {
             requests: None,
             io_thread: None,
         };
-        let assigned = running
-            .job
-            .as_ref()
-            .ok_or(WorkerError::Spawn)?
-            .assign(running.process.id());
+        #[cfg(windows)]
+        let assigned = {
+            use std::os::windows::io::AsHandle;
+            running
+                .job
+                .as_ref()
+                .ok_or(WorkerError::Spawn)?
+                .assign(running.process.as_handle())
+        };
+        #[cfg(windows)]
         if assigned.is_err() {
             return Err(if matches!(running.process.try_wait(), Ok(Some(_))) {
                 WorkerError::Crashed
@@ -147,23 +152,33 @@ impl RunningChild {
         Ok(running)
     }
 
-    /// Kill and wait before releasing inference admission. Closing the job also
-    /// terminates any Windows descendants that inherited a pipe handle.
+    /// Kill the worker and give it a bounded time to exit. A driver can delay
+    /// Windows process termination. Closing the job also terminates descendants.
     fn stop(&mut self) -> bool {
         self.requests.take();
+        let Some(job) = self.job.take() else {
+            return false;
+        };
         let _ = self.process.kill();
-        self.job.take();
-        let reaped = self.process.wait().is_ok();
+        drop(job);
+        let until = Instant::now() + SHUTDOWN_GRACE;
+        let reaped = loop {
+            match self.process.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) if Instant::now() < until => thread::sleep(Duration::from_millis(2)),
+                _ => break false,
+            }
+        };
         if let Some(thread) = self.io_thread.take() {
-            // Usually the killed child's pipes wake immediately. Do not turn an
-            // inherited pipe on another platform into an unbounded join.
-            let until = Instant::now() + SHUTDOWN_GRACE;
             while !thread.is_finished() && Instant::now() < until {
                 thread::sleep(Duration::from_millis(2));
             }
             if thread.is_finished() {
                 let _ = thread.join();
             }
+        }
+        if !reaped {
+            log::warn!("Parakeet worker did not exit within the cleanup deadline");
         }
         reaped
     }
@@ -192,6 +207,7 @@ pub struct TranscriptionWorker {
     directml_registered: bool,
     successful_loads: u64,
     directml_disabled: Arc<AtomicBool>,
+    automatic_directml_marker_dir: Option<PathBuf>,
     load_timeout: Duration,
     #[cfg(test)]
     spawned: usize,
@@ -219,11 +235,37 @@ impl TranscriptionWorker {
             directml_disabled: DIRECTML_DISABLED
                 .get_or_init(|| Arc::new(AtomicBool::new(false)))
                 .clone(),
+            automatic_directml_marker_dir: None,
             load_timeout: LOAD_TIMEOUT,
             #[cfg(test)]
             spawned: 0,
             #[cfg(test)]
             reaped: 0,
+        }
+    }
+
+    #[cfg(all(windows, feature = "directml"))]
+    pub(crate) fn set_automatic_directml_marker_dir(&mut self, directory: Option<PathBuf>) {
+        self.automatic_directml_marker_dir = directory;
+    }
+
+    #[cfg(any(test, all(windows, feature = "directml")))]
+    pub(super) fn probe_directml(&mut self, timeout: Duration) -> Result<bool, WorkerError> {
+        let response = self.exchange(Request::ProbeDirectml, Arc::new(vec![]), timeout, &|| false);
+        self.stop_child();
+        match response? {
+            Response::DirectmlProbe { available } => Ok(available),
+            _ => Err(WorkerError::Protocol),
+        }
+    }
+
+    #[cfg(all(windows, any(test, feature = "vulkan")))]
+    pub(super) fn probe_vulkan(&mut self, timeout: Duration) -> Result<bool, WorkerError> {
+        let response = self.exchange(Request::ProbeVulkan, Arc::new(vec![]), timeout, &|| false);
+        self.stop_child();
+        match response? {
+            Response::VulkanProbe { available } => Ok(available),
+            _ => Err(WorkerError::Protocol),
         }
     }
 
@@ -236,11 +278,10 @@ impl TranscriptionWorker {
         let first = self.load_once(spec.clone(), self.load_timeout, is_cancelled);
         match first {
             Err(WorkerError::Crashed | WorkerError::TimedOut) if using_directml => {
-                self.disable_directml();
                 if is_cancelled() {
                     return Err(WorkerError::Cancelled);
                 }
-                // One CPU retry for an explicit GPU load, never nested inside
+                // One CPU retry for a GPU load, never nested inside
                 // the transcribe retry's reload budget.
                 self.load_once(spec, self.load_timeout, is_cancelled)
             }
@@ -251,6 +292,14 @@ impl TranscriptionWorker {
     fn disable_directml(&self) {
         if !self.directml_disabled.swap(true, Ordering::AcqRel) {
             log::warn!("Parakeet GPU path disabled for this session after a worker failure");
+        }
+        if let Some(directory) = &self.automatic_directml_marker_dir {
+            if let Err(error) = super::directml_probe::record_runtime_failure(directory) {
+                log::warn!(
+                    "Could not persist the Parakeet automatic DirectML failure ({:?})",
+                    error.kind()
+                );
+            }
         }
     }
 
@@ -272,8 +321,14 @@ impl TranscriptionWorker {
             Arc::new(vec![]),
             timeout,
             is_cancelled,
-        )?;
-        match response {
+        );
+        if spec.use_directml
+            && !timeout.is_zero()
+            && matches!(response, Err(WorkerError::Crashed | WorkerError::TimedOut))
+        {
+            self.disable_directml();
+        }
+        match response? {
             Response::Loaded {
                 directml_registered,
             } => {
@@ -310,18 +365,11 @@ impl TranscriptionWorker {
         let first = self.transcribe_once(samples.clone(), timeout, is_cancelled);
         match first {
             Err(WorkerError::Crashed | WorkerError::TimedOut) => {
-                if self
-                    .last_load
-                    .as_ref()
-                    .is_some_and(|spec| spec.use_directml)
-                {
-                    self.disable_directml();
-                }
                 if is_cancelled() {
                     return Err(WorkerError::Cancelled);
                 }
-                // The failed exchange already killed/reaped the process. An
-                // absent child is reloaded by transcribe_once, with CPU forced
+                // The failed exchange already stopped the child. A new
+                // child is loaded by transcribe_once, with CPU forced
                 // for this and all later loads after a DirectML worker failure.
                 self.transcribe_once(samples, timeout, is_cancelled)
             }
@@ -356,16 +404,30 @@ impl TranscriptionWorker {
             }
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        match self.exchange(Request::Transcribe, samples, remaining, is_cancelled)? {
+        let using_directml = self.directml_registered;
+        let response = self.exchange(Request::Transcribe, samples, remaining, is_cancelled);
+        if using_directml
+            && !remaining.is_zero()
+            && matches!(response, Err(WorkerError::Crashed | WorkerError::TimedOut))
+        {
+            self.disable_directml();
+        }
+        match response? {
             Response::Transcript {
                 text,
                 timestamps,
                 tokens,
-            } => Ok(TimestampedResult {
-                text,
-                timestamps,
-                tokens,
-            }),
+                encoder_length_clamped,
+            } => {
+                if encoder_length_clamped {
+                    warn_encoder_length_clamped();
+                }
+                Ok(TimestampedResult {
+                    text,
+                    timestamps,
+                    tokens,
+                })
+            }
             Response::Error(message) => Err(WorkerError::Engine(message)),
             _ => {
                 self.stop_child();
@@ -490,68 +552,7 @@ impl Drop for TranscriptionWorker {
 
 #[cfg(windows)]
 mod job {
-    use super::WorkerError;
-    use windows::{
-        core::PCWSTR,
-        Win32::{
-            Foundation::{CloseHandle, HANDLE},
-            System::{
-                JobObjects::{
-                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                    SetInformationJobObject, JOBOBJECT_BASIC_LIMIT_INFORMATION,
-                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                },
-                Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
-            },
-        },
-    };
-
-    pub struct Job(HANDLE);
-    // Owned, thread-independent kernel handle. Assignment is thread-safe;
-    // destruction requires exclusive ownership through the engine model lock.
-    unsafe impl Send for Job {}
-    unsafe impl Sync for Job {}
-
-    impl Job {
-        pub fn new() -> Result<Self, WorkerError> {
-            let job = Self(
-                unsafe { CreateJobObjectW(None, PCWSTR::null()) }
-                    .map_err(|_| WorkerError::Spawn)?,
-            );
-            let limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-                BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
-                    LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                    ..Default::default()
-                },
-                // No model memory cap: Parakeet can legitimately exceed 1 GiB.
-                ..Default::default()
-            };
-            unsafe {
-                SetInformationJobObject(
-                    job.0,
-                    JobObjectExtendedLimitInformation,
-                    &limits as *const _ as _,
-                    std::mem::size_of_val(&limits) as u32,
-                )
-            }
-            .map_err(|_| WorkerError::Spawn)?;
-            Ok(job)
-        }
-
-        pub fn assign(&self, pid: u32) -> Result<(), WorkerError> {
-            let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) }
-                .map_err(|_| WorkerError::Spawn)?;
-            let assigned = unsafe { AssignProcessToJobObject(self.0, process) };
-            let _ = unsafe { CloseHandle(process) };
-            assigned.map_err(|_| WorkerError::Spawn)
-        }
-    }
-
-    impl Drop for Job {
-        fn drop(&mut self) {
-            let _ = unsafe { CloseHandle(self.0) };
-        }
-    }
+    pub(super) use crate::windows_job::Job;
 }
 
 #[cfg(not(windows))]
@@ -562,15 +563,17 @@ mod job {
         pub fn new() -> Result<Self, WorkerError> {
             Ok(Self)
         }
-        pub fn assign(&self, _: u32) -> Result<(), WorkerError> {
-            Ok(())
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn automatic_probe_can_run(app_data: &std::path::Path) -> bool {
+        super::super::directml_probe::resolve(&OnceLock::new(), app_data, || Ok(true))
+    }
 
     fn spec(use_directml: bool) -> LoadSpec {
         LoadSpec {
@@ -725,7 +728,13 @@ while ($true) {{
     $pcmLength = $reader.ReadUInt32()
     $pcm = $reader.ReadBytes($pcmLength)
     if ($request -eq 'Shutdown') {{ exit 0 }}
-    if ($null -ne $request.Load) {{
+    if ($request -eq 'ProbeVulkan') {{
+        if ($mode -eq 'probe-stall') {{ Start-Sleep -Seconds 60 }}
+        if ($mode -eq 'probe-crash') {{ exit 91 }}
+        $response = ConvertTo-Json -Compress -InputObject @{{ VulkanProbe = @{{ available = ($mode -eq 'probe-available') }} }}
+    }} elseif ($request -eq 'ProbeDirectml') {{
+        $response = ConvertTo-Json -Compress -InputObject @{{ DirectmlProbe = @{{ available = ($mode -eq 'probe-available') }} }}
+    }} elseif ($null -ne $request.Load) {{
         Add-Content -LiteralPath ($state + '.loads') -Value ([string]$request.Load.use_directml)
         if ($request.Load.use_directml) {{
             if ($mode -eq 'load-timeout') {{ Start-Sleep -Seconds 60 }}
@@ -761,11 +770,61 @@ while ($true) {{
 
     #[test]
     #[cfg(windows)]
+    fn vulkan_probe_fails_closed_and_reaps_unusable_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        for (mode, expected) in [
+            ("probe-available", Ok(true)),
+            ("probe-unavailable", Ok(false)),
+            ("probe-crash", Err(WorkerError::Crashed)),
+        ] {
+            let mut worker = fake(mode, &state);
+            assert_eq!(worker.probe_vulkan(Duration::from_secs(10)), expected);
+            assert!(worker.child.is_none());
+            assert_eq!(worker.reaped, 1);
+        }
+        let mut worker = fake("probe-stall", &state);
+        assert_eq!(
+            worker.probe_vulkan(Duration::from_secs(2)),
+            Err(WorkerError::TimedOut)
+        );
+        assert!(worker.child.is_none());
+        assert_eq!(worker.reaped, 1);
+    }
+
+    #[test]
+    #[cfg(any(windows, unix))]
+    fn directml_probe_has_a_hard_timeout_and_stops_the_child() {
+        let mut worker = stalled();
+        let started = Instant::now();
+        assert_eq!(
+            worker.probe_directml(Duration::from_millis(250)),
+            Err(WorkerError::TimedOut)
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(worker.reaped, 1);
+        assert!(worker.child.is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn directml_probe_reads_the_child_result_and_stops_the_child() {
+        let directory = tempfile::tempdir().unwrap();
+        for (mode, available) in [("probe-available", true), ("probe-unavailable", false)] {
+            let mut worker = fake(mode, &directory.path().join("state"));
+            assert_eq!(worker.probe_directml(Duration::from_secs(5)), Ok(available));
+            assert_eq!(worker.reaped, 1);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn crash_or_timeout_retries_identical_pcm_once_and_disables_directml_for_session() {
         for mode in ["crash-once", "timeout-once"] {
             let directory = tempfile::tempdir().unwrap();
             let state = directory.path().join("state");
             let mut worker = fake(mode, &state);
+            worker.automatic_directml_marker_dir = Some(directory.path().into());
             worker.load(spec(true), &|| false).unwrap();
             assert_eq!(worker.session_status(), (true, 1));
             let result = worker
@@ -781,6 +840,7 @@ while ($true) {{
             assert_eq!(attempts[0], attempts[1]);
             assert!(!worker.last_load.as_ref().unwrap().use_directml);
             assert_eq!(worker.session_status(), (false, 2));
+            assert!(!automatic_probe_can_run(directory.path()));
             worker.load(spec(true), &|| false).unwrap();
             worker.shutdown();
             let loads = std::fs::read_to_string(state.with_extension("loads")).unwrap();
@@ -826,10 +886,12 @@ while ($true) {{
             let directory = tempfile::tempdir().unwrap();
             let state = directory.path().join("state");
             let mut worker = fake(mode, &state);
+            worker.automatic_directml_marker_dir = Some(directory.path().into());
             worker.load_timeout = Duration::from_secs(8);
             worker.load(spec(true), &|| false).unwrap();
             assert!(worker.directml_disabled.load(Ordering::Acquire));
             assert!(!worker.last_load.as_ref().unwrap().use_directml);
+            assert!(!automatic_probe_can_run(directory.path()));
             assert_eq!(worker.spawned, 2);
             assert_eq!(worker.reaped, 1);
             worker.shutdown();
@@ -889,6 +951,7 @@ while ($true) {{
         assert_eq!(worker.spawned, 2);
         assert_eq!(worker.reaped, 2);
         assert!(worker.child.is_none());
+        assert!(automatic_probe_can_run(directory.path()));
     }
 
     #[test]
@@ -925,7 +988,8 @@ while ($true) {{
         ] {
             let directory = tempfile::tempdir().unwrap();
             let mut worker = fake(mode, &directory.path().join("state"));
-            worker.load(spec(false), &|| false).unwrap();
+            worker.automatic_directml_marker_dir = Some(directory.path().into());
+            worker.load(spec(true), &|| false).unwrap();
             assert_eq!(
                 worker
                     .transcribe(vec![], Duration::from_secs(10), &|| false)
@@ -933,6 +997,7 @@ while ($true) {{
                 expected
             );
             assert_eq!(worker.spawned, 1);
+            assert!(automatic_probe_can_run(directory.path()));
             if mode == "protocol" {
                 assert_eq!(worker.reaped, 1);
                 assert!(worker.child.is_none());

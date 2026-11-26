@@ -41,7 +41,11 @@ struct Schedule {
     parent: PathBuf,
     namespace: Uuid,
     enabled: bool,
+    #[serde(default)]
+    exclude_audio: bool,
     last_success: Option<i64>,
+    #[serde(default)]
+    last_backup_audio_excluded: bool,
     last_failure: Option<i64>,
     last_error: Option<String>,
     incomplete_meetings: usize,
@@ -63,9 +67,11 @@ struct OwnedArchive {
 #[derive(Serialize)]
 pub(crate) struct ScheduleStatus {
     enabled: bool,
+    exclude_audio: bool,
     running: bool,
     destination: Option<PathBuf>,
     last_success: Option<i64>,
+    last_backup_audio_excluded: bool,
     last_error: Option<String>,
     incomplete_meetings: usize,
     skipped_template_items: usize,
@@ -78,7 +84,9 @@ impl Schedule {
             parent,
             namespace: Uuid::new_v4(),
             enabled: true,
+            exclude_audio: false,
             last_success: None,
+            last_backup_audio_excluded: false,
             last_failure: None,
             last_error: None,
             incomplete_meetings: 0,
@@ -235,9 +243,15 @@ pub(crate) async fn scheduled_backup_status(app: AppHandle) -> Result<ScheduleSt
         let schedule = read(&path)?;
         Ok(ScheduleStatus {
             enabled: schedule.as_ref().is_some_and(|schedule| schedule.enabled),
+            exclude_audio: schedule
+                .as_ref()
+                .is_some_and(|schedule| schedule.exclude_audio),
             running: RUNNING.load(Ordering::Acquire),
             destination: schedule.as_ref().map(Schedule::folder),
             last_success: schedule.as_ref().and_then(|schedule| schedule.last_success),
+            last_backup_audio_excluded: schedule
+                .as_ref()
+                .is_some_and(|schedule| schedule.last_backup_audio_excluded),
             last_error: schedule
                 .as_ref()
                 .and_then(|schedule| schedule.last_error.clone()),
@@ -257,7 +271,10 @@ pub(crate) async fn scheduled_backup_status(app: AppHandle) -> Result<ScheduleSt
 }
 
 #[tauri::command]
-pub(crate) async fn choose_scheduled_backup_folder(app: AppHandle) -> Result<(), String> {
+pub(crate) async fn choose_scheduled_backup_folder(
+    app: AppHandle,
+    exclude_audio: Option<bool>,
+) -> Result<(), String> {
     if app.try_state::<AppState>().is_none() {
         return Err("Open the meeting library first.".into());
     }
@@ -285,7 +302,11 @@ pub(crate) async fn choose_scheduled_backup_folder(app: AppHandle) -> Result<(),
         let mut schedule = Schedule::new(parent);
         if let Ok(Some(mut previous)) = read(&settings) {
             schedule.enabled = previous.enabled;
+            schedule.exclude_audio = previous.exclude_audio;
             let _ = previous.clean_staging();
+        }
+        if let Some(exclude_audio) = exclude_audio {
+            schedule.exclude_audio = exclude_audio;
         }
         let folder = schedule.folder();
         fs::create_dir(&folder).map_err(|_| "Could not create the scheduled backups folder.")?;
@@ -302,7 +323,11 @@ pub(crate) async fn choose_scheduled_backup_folder(app: AppHandle) -> Result<(),
 }
 
 #[tauri::command]
-pub(crate) async fn set_scheduled_backups(app: AppHandle, enabled: bool) -> Result<(), String> {
+pub(crate) async fn set_scheduled_backups(
+    app: AppHandle,
+    enabled: Option<bool>,
+    exclude_audio: Option<bool>,
+) -> Result<(), String> {
     if app.try_state::<AppState>().is_none() {
         return Err("Open the meeting library first.".into());
     }
@@ -312,17 +337,29 @@ pub(crate) async fn set_scheduled_backups(app: AppHandle, enabled: bool) -> Resu
     let settings = settings_path(&app)?;
     tokio::task::spawn_blocking(move || {
         let _job = job;
-        let mut schedule =
-            read(&settings)?.ok_or("Choose a folder for scheduled backups first.")?;
-        schedule.enabled = enabled;
-        schedule.last_failure = None;
-        schedule.last_error = None;
-        save(&settings, &schedule)
+        update_schedule(&settings, enabled, exclude_audio)
     })
     .await
     .map_err(|_| SETTINGS_ERROR)??;
     let _ = app.emit(CHANGED, ());
     Ok(())
+}
+
+fn update_schedule(
+    settings: &Path,
+    enabled: Option<bool>,
+    exclude_audio: Option<bool>,
+) -> Result<(), String> {
+    let mut schedule = read(settings)?.ok_or("Choose a folder for scheduled backups first.")?;
+    if let Some(enabled) = enabled {
+        schedule.enabled = enabled;
+        schedule.last_failure = None;
+        schedule.last_error = None;
+    }
+    if let Some(exclude_audio) = exclude_audio {
+        schedule.exclude_audio = exclude_audio;
+    }
+    save(settings, &schedule)
 }
 
 pub(crate) fn start(app: AppHandle) {
@@ -422,8 +459,14 @@ async fn run_backup(
     .await
     .map_err(|_| "Could not prepare the scheduled backup.")??;
     schedule.staging = stage.clone();
-    let result =
-        backup::try_scheduled_backup(app.clone(), destination.clone(), output, control).await;
+    let result = backup::try_scheduled_backup(
+        app.clone(),
+        destination.clone(),
+        output,
+        control,
+        schedule.exclude_audio,
+    )
+    .await;
     let mut cleanup = schedule.clone();
     let (cleanup, pins) = tokio::task::spawn_blocking(move || {
         cleanup.clean_staging()?;
@@ -448,6 +491,7 @@ async fn run_backup(
 
     schedule.files.push(OwnedArchive { id, identity });
     schedule.last_success = Some(chrono::Utc::now().timestamp());
+    schedule.last_backup_audio_excluded = report.audio_excluded;
     schedule.last_failure = None;
     schedule.last_error = None;
     schedule.incomplete_meetings = report.incomplete_meetings.len();
@@ -474,6 +518,18 @@ async fn run_backup(
 mod tests {
     use super::*;
     use crate::library::archive::storage::backup_identity;
+
+    #[test]
+    fn older_schedules_include_audio() {
+        let schedule = Schedule::new(PathBuf::new());
+        let mut old = serde_json::to_value(schedule).unwrap();
+        old.as_object_mut().unwrap().remove("exclude_audio");
+        assert!(
+            !serde_json::from_value::<Schedule>(old)
+                .unwrap()
+                .exclude_audio
+        );
+    }
 
     #[test]
     fn retention_only_removes_identified_old_files() {
@@ -513,6 +569,29 @@ mod tests {
         assert!(schedule.due(87400));
         schedule.enabled = false;
         assert!(!schedule.due(87400));
+    }
+
+    #[test]
+    fn changing_audio_exclusion_preserves_failure_until_enabled_is_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("schedule.json");
+        let mut schedule = Schedule::new(temp.path().to_owned());
+        schedule.last_failure = Some(100);
+        schedule.last_error = Some("Backup failed".into());
+        save(&settings, &schedule).unwrap();
+
+        update_schedule(&settings, None, Some(true)).unwrap();
+        let updated = read(&settings).unwrap().unwrap();
+        assert!(updated.enabled && updated.exclude_audio);
+        assert_eq!(updated.last_failure, Some(100));
+        assert_eq!(updated.last_error.as_deref(), Some("Backup failed"));
+        assert!(!updated.due(999));
+
+        update_schedule(&settings, Some(false), None).unwrap();
+        let updated = read(&settings).unwrap().unwrap();
+        assert!(!updated.enabled && updated.exclude_audio);
+        assert_eq!(updated.last_failure, None);
+        assert_eq!(updated.last_error, None);
     }
 
     #[test]

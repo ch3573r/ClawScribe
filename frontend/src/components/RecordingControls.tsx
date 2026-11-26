@@ -13,14 +13,17 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import Analytics from '@/lib/analytics';
-import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateContext';
+import { RecordingStatus, useRecordingElapsedSeconds, useRecordingState } from '@/contexts/RecordingStateContext';
 import { LiveBookmarkButton } from '@/components/MeetingDetails/MeetingBookmarks';
 import { LiveRecordingNotes } from '@/components/LiveRecordingNotes';
 import { Button } from '@/components/ui/button';
 import { RecordingLevelMeter } from '@/components/RecordingLevelMeter';
 import { describeStartError } from '@/lib/start-error';
-import { STOP_FAILED_TITLE, isNothingToStop, stopFailureMessage } from '@/lib/stop-error';
+import { STOP_FAILED_TITLE, stopFailureMessage } from '@/lib/stop-error';
+import { recordingService } from '@/services/recordingService';
 import { toast } from 'sonner';
+import { useActiveGlobalShortcuts } from '@/hooks/useActiveGlobalShortcuts';
+import { shortcutHint } from '@/lib/shortcuts';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -28,6 +31,7 @@ interface RecordingControlsProps {
   onTranscriptionError?: (message: string) => void;
   onStopInitiated?: () => void; // Called immediately when stop button is clicked
   isRecordingDisabled: boolean;
+  startDisabledReason?: string | null;
   isParentProcessing: boolean;
   selectedDevices?: {
     micDevice: string | null;
@@ -37,18 +41,33 @@ interface RecordingControlsProps {
   variant?: 'floating' | 'dashboard';
 }
 
+function RecordingElapsedTime() {
+  const elapsed = useRecordingElapsedSeconds();
+  const hours = Math.floor(elapsed / 3600);
+  const minutes = Math.floor(elapsed / 60) % 60;
+  const seconds = String(elapsed % 60).padStart(2, '0');
+  const time = hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`;
+  return (
+    <span className="font-mono text-sm tabular-nums text-foreground min-w-[3.25rem] text-center">
+      {time}
+    </span>
+  );
+}
+
 export const RecordingControls: React.FC<RecordingControlsProps> = ({
   isRecording,
   onRecordingStart,
   onTranscriptionError,
   onStopInitiated,
   isRecordingDisabled,
+  startDisabledReason,
   isParentProcessing,
   variant = 'floating',
 }) => {
   // Use global recording state context for pause state (syncs with tray operations)
   const recordingState = useRecordingState();
   const isPaused = recordingState.isPaused;
+  const shortcuts = useActiveGlobalShortcuts();
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
@@ -64,19 +83,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     isStarting ||
     recordingState.status === RecordingStatus.STARTING;
 
-  // The only elapsed clock on screen. It shows the backend's active recording
-  // time (pauses excluded), so it stays correct after leaving and reopening Home.
-  const elapsed = Math.floor(recordingState.activeDuration ?? 0);
-
-  const formatTime = (time: number) => {
-    const h = Math.floor(time / 3600);
-    const m = Math.floor((time % 3600) / 60);
-    const s = Math.floor(time % 60);
-    const mm = m.toString().padStart(2, '0');
-    const ss = s.toString().padStart(2, '0');
-    return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
-  };
-
   useEffect(() => {
     const checkTauri = async () => {
       try {
@@ -90,7 +96,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   }, []);
 
   const handleStartRecording = useCallback(async () => {
-    if (isStartPending) return;
+    if (isStartPending || isRecordingDisabled) return;
 
     setIsStarting(true);
 
@@ -107,7 +113,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     } finally {
       setIsStarting(false);
     }
-  }, [onRecordingStart, isStartPending]);
+  }, [onRecordingStart, isStartPending, isRecordingDisabled]);
 
   const stopRecordingAction = useCallback(async () => {
     try {
@@ -115,31 +121,28 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       const dataDir = await appDataDir();
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const savePath = `${dataDir}/recording-${timestamp}.wav`;
-      await invoke('stop_recording', {
-        args: {
-          save_path: savePath,
-        },
-      });
-      setIsProcessing(false);
+      const stopped = await recordingService.stopRecording(savePath);
+      if (stopped === false) {
+        if (await recordingState.reconcileNothingToStop(stopped)) return;
+        throw new Error('Could not verify whether the recording stopped. Try again.');
+      }
       // Track successful transcription
       Analytics.trackTranscriptionSuccess();
     } catch (error) {
-      console.error("Failed to stop recording:");
-      if (isNothingToStop(error)) {
-        return;
-      }
+      if (await recordingState.reconcileNothingToStop(error)) return;
+      console.error('Failed to stop recording');
       // The recording is still running: say why, skip the save flow, and go
       // back to the recording state at once instead of waiting for a poll.
       toast.error(STOP_FAILED_TITLE, { description: stopFailureMessage(error) });
-      setIsProcessing(false);
       recordingState.setStatus(RecordingStatus.RECORDING);
     } finally {
+      setIsProcessing(false);
       setIsStopping(false);
     }
   }, [recordingState]);
 
   const handleStopRecording = useCallback(async () => {
-    if (!isRecording || isStarting || isStopping) {
+    if (!isRecording || isStarting || isStopping || isRecordingDisabled) {
       return;
     }
 
@@ -155,12 +158,13 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     isRecording,
     isStarting,
     isStopping,
+    isRecordingDisabled,
     stopRecordingAction,
     onStopInitiated,
   ]);
 
   const handlePauseRecording = useCallback(async () => {
-    if (!isRecording || isPaused || isPausing) return;
+    if (!isRecording || isPaused || isPausing || isRecordingDisabled) return;
 
     setIsPausing(true);
 
@@ -173,10 +177,10 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     } finally {
       setIsPausing(false);
     }
-  }, [isRecording, isPaused, isPausing]);
+  }, [isRecording, isPaused, isPausing, isRecordingDisabled]);
 
   const handleResumeRecording = useCallback(async () => {
-    if (!isRecording || !isPaused || isResuming) return;
+    if (!isRecording || !isPaused || isResuming || isRecordingDisabled) return;
 
     setIsResuming(true);
 
@@ -189,10 +193,11 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     } finally {
       setIsResuming(false);
     }
-  }, [isRecording, isPaused, isResuming]);
+  }, [isRecording, isPaused, isResuming, isRecordingDisabled]);
 
   useEffect(() => {
-    let unsubscribes: (() => void)[] = [];
+    const unsubscribes: (() => void)[] = [];
+    let disposed = false;
 
     const setupListeners = async () => {
       try {
@@ -200,6 +205,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         const transcriptErrorUnsubscribe = await listen(
           'transcript-error',
           (event) => {
+            if (disposed) return;
             console.error("Transcription error received:");
             const errorMessage = event.payload as string;
 
@@ -211,11 +217,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             }
           },
         );
+        if (disposed) return transcriptErrorUnsubscribe();
+        unsubscribes.push(transcriptErrorUnsubscribe);
 
         // Transcription error listener - handles structured error objects with actionable flag
         const transcriptionErrorUnsubscribe = await listen(
           'transcription-error',
           (event) => {
+            if (disposed) return;
             console.error("Transcription error received:");
 
             let errorMessage: string;
@@ -240,10 +249,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           },
         );
 
-        unsubscribes = [
-          transcriptErrorUnsubscribe,
-          transcriptionErrorUnsubscribe,
-        ];
+        if (disposed) return transcriptionErrorUnsubscribe();
+        unsubscribes.push(transcriptionErrorUnsubscribe);
       } catch {
         console.error("Failed to set up recording event listeners:");
       }
@@ -252,11 +259,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     setupListeners();
 
     return () => {
-      unsubscribes.forEach((unsubscribe) => {
-        if (unsubscribe && typeof unsubscribe === 'function') {
-          unsubscribe();
-        }
-      });
+      disposed = true;
+      unsubscribes.forEach(unsubscribe => unsubscribe());
     };
   }, [onTranscriptionError]);
 
@@ -306,32 +310,27 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                 // Start recording button
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="ghost" size="icon"
-                      aria-label={isStartPending ? 'Starting recording' : 'Start recording'}
-                      onClick={() => {
-                        Analytics.trackButtonClick(
-                          'start_recording',
-                          'recording_controls',
-                        );
-                        handleStartRecording();
-                      }}
-                      disabled={
-                        isStarting ||
-                        isProcessing ||
-                        isRecordingDisabled ||
-                        isStartPending
-                      }
-                      className={startButtonClassName}
-                    >
-                      {isStartPending ? (
-                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-foreground"></div>
-                      ) : (
-                        <Mic size={isDashboard ? 26 : 20} />
-                      )}
-                    </Button>
+                    <span className="inline-flex rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      tabIndex={isRecordingDisabled || isStartPending ? 0 : undefined} aria-label={startDisabledReason ?? undefined}>
+                      <Button variant="ghost" size="icon"
+                        aria-label={isStartPending ? 'Starting recording' : 'Start recording'}
+                        onClick={() => {
+                          Analytics.trackButtonClick('start_recording', 'recording_controls');
+                          void handleStartRecording();
+                        }}
+                        disabled={isProcessing || isRecordingDisabled || isStartPending}
+                        className={startButtonClassName}
+                      >
+                        {isStartPending ? (
+                          <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-foreground"></div>
+                        ) : (
+                          <Mic size={isDashboard ? 26 : 20} />
+                        )}
+                      </Button>
+                    </span>
                   </TooltipTrigger>
                   <TooltipContent>
-                    <p>{isStartPending ? 'Starting recording...' : 'Start recording'}</p>
+                    <p>{startDisabledReason ?? (isStartPending ? 'Starting recording…' : shortcutHint('Start recording', shortcuts.startStop))}</p>
                   </TooltipContent>
                 </Tooltip>
               ) : (
@@ -340,7 +339,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button variant="ghost" size="icon" className={secondaryButtonClassName}
-                        aria-label="Open floating controls" disabled={!recordingState.sessionId || openingControls || isStopping}
+                        aria-label="Open floating controls" disabled={!recordingState.sessionId || openingControls || isRecordingDisabled || isStopping}
                         onClick={async () => {
                           setOpeningControls(true);
                           try {
@@ -359,17 +358,17 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="inline-flex">
-                        <LiveBookmarkButton sessionId={recordingState.sessionId} className={secondaryButtonClassName} disabled={isStopping || isPausing || isResuming} />
+                        <LiveBookmarkButton sessionId={recordingState.sessionId} className={secondaryButtonClassName} disabled={isRecordingDisabled || isStopping || isPausing || isResuming} />
                       </span>
                     </TooltipTrigger>
                     <TooltipContent>
-                      <p>Bookmark this moment</p>
+                      <p>{shortcutHint('Bookmark this moment', shortcuts.bookmarkRecording)}</p>
                     </TooltipContent>
                   </Tooltip>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="inline-flex">
-                        <LiveRecordingNotes key={recordingState.sessionId} sessionId={recordingState.sessionId} className={secondaryButtonClassName} disabled={isStopping || isPausing || isResuming} />
+                        <LiveRecordingNotes key={recordingState.sessionId} sessionId={recordingState.sessionId} className={secondaryButtonClassName} disabled={isRecordingDisabled || isStopping || isPausing || isResuming} />
                       </span>
                     </TooltipTrigger>
                     <TooltipContent><p>Add timestamped note</p></TooltipContent>
@@ -393,7 +392,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                             handlePauseRecording();
                           }
                         }}
-                        disabled={isPausing || isResuming || isStopping}
+                        disabled={isRecordingDisabled || isPausing || isResuming || isStopping}
                         className={secondaryButtonClassName}
                       >
                         {isPaused ? (
@@ -410,7 +409,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                     </TooltipTrigger>
                     <TooltipContent>
                       <p>
-                        {isPaused ? 'Resume recording' : 'Pause recording'}
+                        {shortcutHint(isPaused ? 'Resume recording' : 'Pause recording', shortcuts.pauseResume)}
                       </p>
                     </TooltipContent>
                   </Tooltip>
@@ -418,6 +417,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button variant="ghost" size="icon"
+                        aria-label="Stop recording"
                         onClick={() => {
                           Analytics.trackButtonClick(
                             'stop_recording',
@@ -425,7 +425,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                           );
                           handleStopRecording();
                         }}
-                        disabled={isStopping || isPausing || isResuming}
+                        disabled={isRecordingDisabled || isStopping || isPausing || isResuming}
                         className={stopButtonClassName}
                       >
                         <Square size={16} />
@@ -437,17 +437,13 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent>
-                      <p>Stop recording</p>
+                      <p>{shortcutHint('Stop recording', shortcuts.startStop)}</p>
                     </TooltipContent>
                   </Tooltip>
                 </>
               )}
 
-              {isRecording && (
-                <span className="font-mono text-sm tabular-nums text-foreground min-w-[3.25rem] text-center">
-                  {formatTime(elapsed)}
-                </span>
-              )}
+              {isRecording && <RecordingElapsedTime />}
 
               {/* Real levels while recording. Idle, three flat bars. */}
               {isRecording ? (

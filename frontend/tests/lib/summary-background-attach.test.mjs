@@ -78,7 +78,7 @@ test('a native summary stays active when the page leaves and is reattached on re
   app.page().attachToRunningSummary(false);
   assert.equal(app.page().summaryStatus, 'processing');
   assert.equal(app.timers.size, 1);
-  app.pageHooks.unmount();
+  app.pageHooks.reset();
   assert.equal(app.timers.size, 0);
   assert.deepEqual(app.aiSummary, []);
 

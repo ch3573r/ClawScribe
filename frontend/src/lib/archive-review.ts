@@ -1,5 +1,11 @@
 import type { RecordingOutcome } from './recording-outcome';
 
+interface ArchiveSeries {
+  id: string;
+  label: string;
+  date?: string;
+}
+
 export interface ArchiveRow extends RecordingOutcome {
   id: string;
   has_folder: boolean;
@@ -11,6 +17,15 @@ export interface ArchiveRow extends RecordingOutcome {
   recording_source: 'recording' | 'import' | null;
   /** Measured duration in seconds, when available. */
   duration_seconds: number | null;
+  series?: ArchiveSeries | null;
+}
+
+export function archiveSeriesChoices(rows: Iterable<ArchiveRow>): ArchiveSeries[] {
+  const choices = new Map<string, ArchiveSeries>();
+  for (const { series } of rows) {
+    if (series && !choices.has(series.id)) choices.set(series.id, series);
+  }
+  return [...choices.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
 export type ArchiveAction = 'review' | 'summary' | 'transcribe' | 'files';

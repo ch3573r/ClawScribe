@@ -21,7 +21,6 @@ import { migrateLegacyMeetingContexts } from '@/lib/meetingContext'
 import { migrateLegacyMeetingCalendars } from '@/lib/meetingCalendarStore'
 import { flushMeetingDrafts, flushSummaryEditsBeforeExit } from '@/lib/meetingDrafts'
 import { AppTitlebar } from '@/components/AppTitlebar'
-import AnalyticsProvider from '@/components/AnalyticsProvider'
 import { toast } from 'sonner'
 import { AppToaster } from '@/components/AppToaster'
 import { useState, useEffect, useCallback } from 'react'
@@ -47,6 +46,7 @@ import { ThemeInitializer } from '@/components/ThemeSettings'
 import { AppShortcuts } from '@/components/AppShortcuts'
 import { RecordingRequests } from '@/components/RecordingRequests'
 import { ArchiveStorageDialog } from '@/components/Archive/ArchiveStorageDialog'
+import { CommandPalette } from '@/components/CommandPalette'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -132,6 +132,7 @@ export default function RootLayout({
 }) {
   const router = useRouter()
   const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null)
+  const [setupCompletedHere, setSetupCompletedHere] = useState(false)
   const [recoveryLibrary, setRecoveryLibrary] = useState(false)
 
   useEffect(() => {
@@ -354,21 +355,19 @@ export default function RootLayout({
   }, []);
 
   const handleOnboardingComplete = () => {
-    console.log('[Layout] Onboarding completed, reloading app')
-    // Optionally reload the window to ensure all state is fresh
-    window.location.reload()
+    setSetupCompletedHere(true)
+    setShowOnboarding(false)
   }
 
   return (
     <html lang="en" className={fontVariables}>
       <body className="font-sans antialiased">
         <ThemeInitializer />
-        <AppShortcuts />
+        {showOnboarding === false && <AppShortcuts />}
         <AppTitlebar />
-        <AnalyticsProvider>
           <RecordingStateProvider>
             <TranscriptProvider>
-              <ConfigProvider>
+              <ConfigProvider key={setupCompletedHere ? 'completed-setup' : 'startup'}>
                 <LiveAssistanceProvider>
                 <OllamaDownloadProvider>
                   <OnboardingProvider>
@@ -380,6 +379,7 @@ export default function RootLayout({
                               {/* Download progress toast provider - listens for background downloads */}
                               <DownloadProgressToastProvider />
                               <ArchiveStorageDialog />
+                              {showOnboarding === false && <CommandPalette />}
 
                               <RecordingRequests ready={showOnboarding === false} />
 
@@ -413,7 +413,6 @@ export default function RootLayout({
               </ConfigProvider>
             </TranscriptProvider>
           </RecordingStateProvider>
-        </AnalyticsProvider>
 
         <AppToaster />
       </body>

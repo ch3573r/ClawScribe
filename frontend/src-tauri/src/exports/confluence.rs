@@ -9,7 +9,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Runtime};
 
 use super::exporter::now_rfc3339;
-use super::ledger::{artifact_key_hash, valid_remote_id, ConfluenceBinding, ExportLedger};
+use super::ledger::{artifact_key_hash, ConfluenceBinding, ExportLedger};
 use super::model::ExportStatus;
 
 const SERVICE_NAME: &str = "net.rismondo.openclaw.clawscribe.confluence";
@@ -604,8 +604,8 @@ fn page_url(base_url: &str, id: &str) -> Option<String> {
         })
 }
 
-fn valid_page_id(id: &str) -> bool {
-    valid_remote_id(id) && id.bytes().all(|byte| byte.is_ascii_digit())
+pub(super) fn valid_page_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 512 && id.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn page_id_from_reference(base: &str, reference: &str) -> Result<String, String> {

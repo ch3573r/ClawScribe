@@ -27,6 +27,10 @@ doing in ClawScribe.
 - Stopping from the tray menu, a shortcut or the command line saves the
   recording through the same flow as the Stop button. If the stop fails, the
   window is brought forward and says why.
+- `--pause-recording` pauses or resumes the current recording through the same
+  path as the tray menu. `--bookmark` adds a bookmark at the current position,
+  like the bookmark shortcut. Both act on the running instance without
+  bringing its window forward.
 
 ## Floating recording controls
 
@@ -43,10 +47,16 @@ the recording bar or tray.
   **System audio** show levels from the running capture.
 - **Pause** and **Resume** control the current session. Capture warnings stay
   visible in the panel. Retry a disconnected audio source from its warning.
-- Drag the bar from an area without a button. The panel remembers where you
-  moved it. If that display is disconnected,
-  the next panel opens on a connected display. Turn off **Remember floating
-  controls position** in **Settings → Recording** to use the default placement.
+- The panel first opens in the bottom-right corner of the current display's
+  work area. Drag the bar from an area without a button. The panel remembers
+  where you moved it. If that display is disconnected, the next panel opens on
+  a connected display. Turn off **Remember floating controls position** in
+  **Settings → Recording** to use the default placement.
+- **Open main window** brings the ClawScribe window forward during a
+  recording. The panel shows whether the recording is **Live** or
+  **Audio only**. At the start of a recording or after resuming, the panel
+  warns if the microphone has no audible signal for 10 seconds.
+  While the panel is open, the recording bar inside the main window is hidden.
 - Choose **Add note** or press N while the panel has focus. Type a note or leave
   the field empty to bookmark the current time, then press Enter. Escape closes
   the field. Find both in the saved meeting. Tab moves between the controls.
@@ -78,8 +88,9 @@ The window shows the current Stop stage during capture shutdown, transcription
 drain and the library save. Separate capture warnings stay visible until each
 condition clears or the recording ends. If microphone samples stop arriving
 for 15 seconds after previously arriving, check the microphone connection.
-Quiet samples still count as a working stream. A newly started or resumed
-meter continues to flag a microphone with no audible signal after 10 seconds.
+Quiet samples still count as a working stream. The silent microphone warning
+applies at the start of a recording and after resuming, until the first
+audible microphone signal.
 
 Call detection shows an actionable panel above other windows. You can also
 answer it from the tray. Recording problems can show a Windows notification

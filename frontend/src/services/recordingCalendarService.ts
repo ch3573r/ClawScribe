@@ -1,4 +1,4 @@
-import { getICalendarSnapshot, refreshICalendars } from "@/services/icalService";
+import { getICalendarSnapshot, readICalendarsBetween, refreshICalendars, type ICalendarEvent } from "@/services/icalService";
 import { microsoftExportService, type CalendarEvent } from "@/services/microsoftExportService";
 import {
   EARLY_JOIN_WINDOW_MS, getActiveRecordingCalendar, matchOngoingCalendar, microsoftCalendarRevision, overlappingCalendarLinks, setActiveRecordingCalendar,
@@ -44,10 +44,13 @@ export async function resolveRecordingCalendar(
 }
 
 /** Reads every connected calendar once and names the sources that could not be read. */
-async function readCalendars(from: number, to: number, budgetMs: number) {
+async function readCalendars(from: number, to: number, budgetMs: number, savedDate = false) {
   let graph: CalendarEvent[] = [];
   let graphComplete = false;
   let icalComplete = false;
+  const rangeEvents: ICalendarEvent[] = [];
+  let rangeCurrent = () => true;
+  const controller = new AbortController();
   const microsoftRevision = microsoftCalendarRevision;
   const graphWork = (async () => {
     const connection = await microsoftExportService.connectionStatus();
@@ -60,7 +63,12 @@ async function readCalendars(from: number, to: number, budgetMs: number) {
       graphComplete = connection.state === "not_connected";
     }
   })();
-  const icalWork = refreshICalendars().then(() => { icalComplete = true; });
+  const icalWork = savedDate
+    ? readICalendarsBetween(new Date(from), new Date(to), controller.signal, (events, isCurrent) => {
+      rangeEvents.push(...events);
+      rangeCurrent = isCurrent;
+    }).then(complete => { icalComplete = complete; })
+    : refreshICalendars().then(() => { icalComplete = true; });
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
@@ -69,14 +77,16 @@ async function readCalendars(from: number, to: number, budgetMs: number) {
     ]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    controller.abort();
   }
   const ical = getICalendarSnapshot();
   const signedOut = microsoftRevision !== microsoftCalendarRevision;
   const unavailable = [
     ...(!graphComplete || signedOut ? ["Microsoft 365"] : []),
-    ...(!icalComplete || ical.loading || ical.error || Object.keys(ical.issues).length > 0 ? ["iCalendar"] : []),
+    ...(!icalComplete || (savedDate ? !rangeCurrent() : ical.loading || ical.error || Object.keys(ical.issues).length > 0) ? ["iCalendar"] : []),
   ];
-  return { events: [...ical.events, ...(signedOut ? [] : graph)], unavailable };
+  const icalEvents = savedDate ? rangeCurrent() ? rangeEvents : [] : ical.events;
+  return { events: [...icalEvents, ...(signedOut ? [] : graph)], unavailable };
 }
 
 export async function findOngoingRecordingCalendar(now: number): Promise<OngoingCalendarMatch> {
@@ -85,10 +95,10 @@ export async function findOngoingRecordingCalendar(now: number): Promise<Ongoing
 }
 
 /** Events from the connected calendars that overlap a saved recording, for linking it afterwards. */
-export async function findCalendarEventsBetween(from: number, to: number): Promise<{
+export async function findCalendarEventsBetween(from: number, to: number, savedDate = false): Promise<{
   matches: MeetingCalendarLink[];
   unavailable: string[];
 }> {
-  const { events, unavailable } = await readCalendars(from, to, CALENDAR_REVIEW_BUDGET_MS);
+  const { events, unavailable } = await readCalendars(from, to, CALENDAR_REVIEW_BUDGET_MS, savedDate);
   return { matches: overlappingCalendarLinks(events, from, to), unavailable };
 }

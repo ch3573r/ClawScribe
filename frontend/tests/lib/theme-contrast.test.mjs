@@ -50,6 +50,27 @@ function rgb(value,variables) {
 const luminance=color=>color.map(value=>value<=0.04045?value/12.92:((value+0.055)/1.055)**2.4).reduce((sum,value,i)=>sum+value*[0.2126,0.7152,0.0722][i],0);
 const contrast=(a,b)=>(Math.max(luminance(a),luminance(b))+0.05)/(Math.min(luminance(a),luminance(b))+0.05);
 
+test('every selected accent colors hover and menu surfaces in both themes, and the default restores CSS', t => {
+  const overrides = {};
+  const previous = globalThis.document;
+  globalThis.document = { documentElement: { style: {
+    setProperty(name, value) { overrides[name] = value; },
+    removeProperty(name) { delete overrides[name]; },
+  } } };
+  t.after(() => { globalThis.document = previous; });
+  const { applyAccent, DEFAULT_ACCENT_ID } = loadTsModule('src/lib/theme.ts');
+  for (const accent of accentColors.filter(accent => accent.id !== DEFAULT_ACCENT_ID)) {
+    applyAccent(accent.id);
+    assert.equal(overrides['--accent'].split(' ')[0], accent.primary.split(' ')[0]);
+    for (const dark of [false, true]) {
+      const vars = { ...tokens(dark), ...overrides };
+      assert.ok(contrast(rgb(vars['--accent'], vars), rgb(vars['--accent-foreground'], vars)) >= 4.5, accent.id);
+    }
+  }
+  applyAccent(DEFAULT_ACCENT_ID);
+  assert.deepEqual(overrides, {});
+});
+
 test('destructive text and button labels meet WCAG AA on both application surfaces',()=>{
   const textColor=config.theme.extend.textColor?.destructive?.DEFAULT??config.theme.extend.colors.destructive.DEFAULT;
   for(const dark of [false,true]) {

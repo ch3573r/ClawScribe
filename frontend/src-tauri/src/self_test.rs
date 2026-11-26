@@ -72,7 +72,27 @@ const LEGACY_SCHEMA_VERSION: i64 = 20251006000000;
 const RECENT_SCHEMA_VERSION: i64 = 20261010000000;
 /// Templates the installer places in `templates/` beside the executable. A unit
 /// test keeps this list equal to the files in the source folder.
-const BUNDLED_TEMPLATES: [(&str, &str); 6] = [
+const BUNDLED_TEMPLATES: [(&str, &str); 11] = [
+    (
+        "customer_discovery.json",
+        include_str!("../templates/customer_discovery.json"),
+    ),
+    (
+        "executive_brief.json",
+        include_str!("../templates/executive_brief.json"),
+    ),
+    (
+        "interview.json",
+        include_str!("../templates/interview.json"),
+    ),
+    (
+        "one_on_one.json",
+        include_str!("../templates/one_on_one.json"),
+    ),
+    (
+        "technical_design_review.json",
+        include_str!("../templates/technical_design_review.json"),
+    ),
     (
         "daily_standup.json",
         include_str!("../templates/daily_standup.json"),

@@ -1,4 +1,4 @@
-use ndarray::{Array, Array1, Array2, Array3, ArrayD, ArrayViewD, IxDyn};
+use ndarray::{Array, Array1, Array2, Array3, ArrayD, ArrayView2, ArrayViewD};
 use once_cell::sync::Lazy;
 use ort::execution_providers::CPUExecutionProvider;
 #[cfg(feature = "directml")]
@@ -20,8 +20,93 @@ const MAX_TOKENS_PER_STEP: usize = 3;
 const TDT_DURATIONS: [usize; 5] = [0, 1, 2, 3, 4];
 const SAMPLE_RATE: usize = 16_000;
 
+pub(super) fn directml_available() -> bool {
+    #[cfg(all(windows, feature = "directml"))]
+    {
+        Session::builder().is_ok_and(|mut builder| {
+            DirectMLExecutionProvider::default()
+                .register(&mut builder)
+                .is_ok()
+        })
+    }
+    #[cfg(not(all(windows, feature = "directml")))]
+    false
+}
+
+fn load_transcription_sessions<S, E>(
+    use_directml: bool,
+    decoder_use_directml: bool,
+    mut load: impl FnMut(&str, bool) -> Result<(S, bool), E>,
+) -> Result<(S, S, bool), E> {
+    let (encoder, encoder_directml) = load("encoder-model", use_directml)?;
+    let decoder_requested = encoder_directml && decoder_use_directml;
+    let (decoder, decoder_directml) = load("decoder_joint-model", decoder_requested)?;
+    if decoder_requested && !decoder_directml {
+        drop(encoder);
+        let (cpu_encoder, _) = load("encoder-model", false)?;
+        return Ok((cpu_encoder, decoder, false));
+    }
+    Ok((encoder, decoder, encoder_directml))
+}
+
+#[cfg(test)]
+#[test]
+fn an_encoder_cpu_fallback_keeps_the_decoder_on_cpu_and_reports_cpu() {
+    let mut loads = Vec::new();
+    let (_, _, directml) = load_transcription_sessions(true, true, |name, use_directml| {
+        loads.push((name.to_owned(), use_directml));
+        Ok::<_, ()>(((), name == "decoder_joint-model" && use_directml))
+    })
+    .unwrap();
+    assert_eq!(
+        loads,
+        [
+            ("encoder-model".into(), true),
+            ("decoder_joint-model".into(), false)
+        ]
+    );
+    assert!(!directml);
+}
+
 static DECODE_SPACE_RE: Lazy<Result<Regex, regex::Error>> =
     Lazy::new(|| Regex::new(r"\A\s|\s\B|(\s)\b"));
+
+fn bounded_encoder_frames(
+    encodings: ArrayViewD<'_, f32>,
+    reported_len: i64,
+) -> Result<(ArrayView2<'_, f32>, bool), ParakeetError> {
+    let encodings = encodings.into_dimensionality::<ndarray::Ix2>()?;
+    let time_steps = encodings.nrows();
+    let reported_len = usize::try_from(reported_len.max(0)).unwrap_or(usize::MAX);
+    let bounded_len = reported_len.min(time_steps);
+    Ok((
+        encodings.slice_move(ndarray::s![..bounded_len, ..]),
+        reported_len > time_steps,
+    ))
+}
+
+pub(super) fn warn_encoder_length_clamped() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        log::warn!(
+            "Parakeet encoder reported more frames than it returned; decoding available frames"
+        );
+    });
+}
+
+#[cfg(test)]
+#[test]
+fn decoder_bounds_reported_length_to_the_encoder_frames() {
+    let output = Array::from_shape_vec((1, 2, 1), vec![1.0, 2.0])
+        .unwrap()
+        .into_dyn();
+    let item = output.index_axis(ndarray::Axis(0), 0);
+    for (reported, expected) in [(3, vec![1.0, 2.0]), (0, vec![]), (-1, vec![])] {
+        let (frames, clamped) = bounded_encoder_frames(item.view(), reported).unwrap();
+        assert_eq!(frames.iter().copied().collect::<Vec<_>>(), expected);
+        assert_eq!(clamped, reported == 3);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TimestampedResult {
@@ -178,6 +263,7 @@ pub struct ParakeetModel {
     blank_idx: i32,
     vocab_size: usize,
     pub(crate) directml_registered: bool,
+    pub(super) encoder_length_clamped: bool,
 }
 
 impl Drop for ParakeetModel {
@@ -197,20 +283,10 @@ impl ParakeetModel {
     ) -> Result<Self, ParakeetError> {
         let decoder_use_directml = Self::decoder_directml_enabled(precision_suffix, use_directml);
 
-        let (encoder, encoder_directml) = Self::init_session(
-            &model_dir,
-            "encoder-model",
-            None,
-            precision_suffix,
-            use_directml,
-        )?;
-        let (decoder_joint, decoder_directml) = Self::init_session(
-            &model_dir,
-            "decoder_joint-model",
-            None,
-            precision_suffix,
-            decoder_use_directml,
-        )?;
+        let (encoder, decoder_joint, directml_registered) =
+            load_transcription_sessions(use_directml, decoder_use_directml, |name, directml| {
+                Self::init_session(&model_dir, name, None, precision_suffix, directml)
+            })?;
         // Preprocessor is tiny — keep it on CPU to avoid DirectML transfer overhead.
         let (preprocessor, _) = Self::init_session(&model_dir, "nemo128", None, None, false)?;
 
@@ -230,7 +306,8 @@ impl ParakeetModel {
             vocab,
             blank_idx,
             vocab_size,
-            directml_registered: encoder_directml || decoder_directml,
+            directml_registered,
+            encoder_length_clamped: false,
         })
     }
 
@@ -330,7 +407,20 @@ impl ParakeetModel {
                 .with_inter_threads(threads)?;
         }
 
-        let session = builder.commit_from_file(model_dir.as_ref().join(&model_filename))?;
+        let session = match builder.commit_from_file(model_dir.as_ref().join(&model_filename)) {
+            Ok(session) => session,
+            Err(_) if using_directml => {
+                log::warn!("Parakeet: could not load {model_name} with DirectML; retrying on CPU");
+                return Self::init_session(
+                    model_dir,
+                    model_name,
+                    intra_threads,
+                    precision_suffix,
+                    false,
+                );
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         for input in &session.inputs {
             log::info!(
@@ -427,9 +517,14 @@ impl ParakeetModel {
             .ok_or_else(|| ParakeetError::OutputNotFound("encoded_lengths".to_string()))?
             .try_extract_array()?;
 
-        let encoder_output = encoder_output.permuted_axes(IxDyn(&[0, 2, 1]));
+        let encoder_output = encoder_output
+            .into_dimensionality::<ndarray::Ix3>()?
+            .permuted_axes([0, 2, 1]);
 
-        Ok((encoder_output.to_owned(), encoded_lengths.to_owned()))
+        Ok((
+            encoder_output.to_owned().into_dyn(),
+            encoded_lengths.to_owned(),
+        ))
     }
 
     pub fn create_decoder_state(&self) -> Result<DecoderState, ParakeetError> {
@@ -539,8 +634,7 @@ impl ParakeetModel {
         // Decode for each batch item
         let mut results = Vec::new();
         for (encodings, &encodings_len) in encoder_out.outer_iter().zip(encoder_out_lens.iter()) {
-            let (tokens, timestamps) =
-                self.decode_sequence(&encodings.view(), encodings_len as usize)?;
+            let (tokens, timestamps) = self.decode_sequence(encodings, encodings_len)?;
             let result = self.decode_tokens(tokens, timestamps);
             results.push(result);
         }
@@ -550,9 +644,18 @@ impl ParakeetModel {
 
     fn decode_sequence(
         &mut self,
-        encodings: &ArrayViewD<f32>, // [time_steps, 1024]
-        encodings_len: usize,
+        encodings: ArrayViewD<'_, f32>, // [time_steps, 1024]
+        reported_len: i64,
     ) -> Result<(Vec<i32>, Vec<usize>), ParakeetError> {
+        let (encodings, clamped) = bounded_encoder_frames(encodings, reported_len)?;
+        if clamped {
+            self.encoder_length_clamped = true;
+            warn_encoder_length_clamped();
+        }
+        let encodings_len = encodings.nrows();
+        if encodings_len == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
         let mut prev_state = self.create_decoder_state()?;
         let mut tokens = Vec::new();
         let mut timestamps = Vec::new();

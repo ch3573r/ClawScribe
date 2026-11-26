@@ -43,6 +43,8 @@ export function useImportQueue(open: boolean) {
     let active = true;
     let fetching = false;
     let refreshRequested = false;
+    let watchingProgress = false;
+    let eventsReady = false;
     const refresh = async () => {
       if (!active) return;
       if (fetching) {
@@ -53,6 +55,7 @@ export function useImportQueue(open: boolean) {
       try {
         const snapshot = await invoke<{ items: ImportQueueItem[]; recovery_notice: string | null }>('import_queue_snapshot');
         if (active) {
+          watchingProgress = snapshot.items.some(item => item.status === 'queued' || item.status === 'running' || item.status === 'cancelling');
           setItems(snapshot.items);
           setRecoveryNotice(snapshot.recovery_notice);
           setError(null);
@@ -69,9 +72,12 @@ export function useImportQueue(open: boolean) {
       }
     };
     const subscriptions = ['import-queue-changed', 'transcript-files-synchronized'].map(event => listen(event, refresh));
-    void Promise.allSettled(subscriptions).then(refresh);
+    void Promise.allSettled(subscriptions).then(results => {
+      eventsReady = results.every(result => result.status === 'fulfilled');
+      void refresh();
+    });
     void refresh();
-    const timer = window.setInterval(refresh, 1000);
+    const timer = window.setInterval(() => { if (watchingProgress || !eventsReady) void refresh(); }, 1000);
     return () => {
       active = false;
       window.clearInterval(timer);

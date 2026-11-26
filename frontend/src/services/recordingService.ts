@@ -90,6 +90,7 @@ export class RecordingService {
     calendarLink?: MeetingCalendarLink | null,
     requestId?: string,
     summaryLanguage?: string | null,
+    customTitle?: string,
   ): Promise<string> {
     return invoke('start_recording_with_devices_and_meeting', {
       micDeviceName,
@@ -99,6 +100,7 @@ export class RecordingService {
       calendarLink,
       requestId,
       summaryLanguage,
+      customTitle,
     });
   }
 
@@ -109,10 +111,10 @@ export class RecordingService {
   /**
    * Stop recording and save to file
    * @param savePath - Path to save audio file
-   * @returns Promise<void>
+   * @returns Whether this call stopped a recording
    */
-  async stopRecording(savePath: string): Promise<void> {
-    return invoke('stop_recording', {
+  async stopRecording(savePath: string): Promise<boolean> {
+    return invoke<boolean>('stop_recording', {
       args: { save_path: savePath }
     });
   }

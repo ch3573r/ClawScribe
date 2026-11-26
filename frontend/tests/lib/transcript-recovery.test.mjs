@@ -49,6 +49,7 @@ for (const status of ['success', 'partial']) {
     assert.equal(result.success, true);
     assert.equal(result.transcriptCount, 0);
     assert.equal(result.meetingId, 'saved-audio');
+    assert.equal(result.remainingCount, 0);
     assert.equal(h.saves.length, 1);
     assert.equal(h.saves[0][1].length, 0);
     assert.equal(h.saves[0][2], 'synthetic-recording');

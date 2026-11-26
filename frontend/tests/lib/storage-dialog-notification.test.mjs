@@ -112,7 +112,7 @@ function setupStartFailure(t) {
   const { reportStartFailure } = loadTsModule('src/hooks/useRecordingStart.ts', {
     'react': { useCallback: (fn) => fn, useEffect: () => {} },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({}) },
-    '@/contexts/ConfigContext': { useConfig: () => ({ selectedDevices: {}, devicePreferencesStatus: 'ready' }) },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({ selectedDevices: {}, devicePreferencesStatus: 'ready' }) },
     '@/contexts/RecordingStateContext': {
       useRecordingState: () => ({ setStatus: () => {}, isRecording: false, isStopping: false, isProcessing: false, isSaving: false }),
       RecordingStatus: { STARTING: 'STARTING', ERROR: 'ERROR' },

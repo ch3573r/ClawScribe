@@ -19,7 +19,7 @@ export async function finishRecordingSetup(
   }
   await invoke('complete_onboarding', { mode, localNotesModel, ...(localNotesModel ? { automaticNotes } : {}) }).catch((cause: unknown) => {
     if (String(cause).includes('No speech model is available')) {
-      throw new Error('The speech model is unavailable. Set up live transcription again or choose Record audio now.');
+      throw new Error('The speech model is unavailable. Set up live transcription again or finish with audio only.');
     }
     if (String(cause).includes('The local notes model is unavailable')) {
       throw new Error('The local notes model is unavailable. Prepare it again or continue without local notes.');

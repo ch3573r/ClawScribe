@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { Download, MoreHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -30,7 +30,23 @@ interface ParakeetModelTableProps {
 
 const COLUMNS = ["Model", "Best for", "Speed on this PC", "Download", "Status", ""];
 
-function statusOf(status: ParakeetModelInfo["status"]) {
+export interface TranscriptionModelRow {
+  name: string;
+  label: string;
+  bestFor: string;
+  sizeMb: number;
+  status: ParakeetModelInfo["status"];
+  recommendation?: string;
+  badge?: string;
+}
+
+interface TranscriptionModelTableProps extends Pick<ParakeetModelTableProps, "selectedModel" | "results" | "onSelect" | "onDownload" | "onCancel"> {
+  label: string;
+  models: TranscriptionModelRow[];
+  onDelete?: (modelName: string, trigger: HTMLButtonElement | null) => void;
+}
+
+function statusOf(status: TranscriptionModelRow["status"]) {
   if (status === "Available") return { kind: "available" as const };
   if (status === "Missing") return { kind: "missing" as const };
   if (typeof status === "object" && "Downloading" in status) return { kind: "downloading" as const, progress: status.Downloading };
@@ -63,25 +79,26 @@ function SpeedCell({ record, fastest, current }: { record: PcTestRecord | undefi
 }
 
 function RowActions({ model, inUse, onSelect, onDownload, onCancel, onDelete }: {
-  model: ParakeetModelInfo; inUse: boolean;
-} & Pick<ParakeetModelTableProps, "onSelect" | "onDownload" | "onCancel" | "onDelete">) {
-  const name = getModelDisplayInfo(model.name)?.friendlyName || model.name;
+  model: TranscriptionModelRow; inUse: boolean;
+} & Pick<TranscriptionModelTableProps, "onSelect" | "onDownload" | "onCancel" | "onDelete">) {
+  const name = model.label;
   const status = statusOf(model.status);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
   switch (status.kind) {
     case "available":
       return (
         <div className="flex items-center justify-end gap-1">
           {!inUse && onSelect && <Button variant="outline" size="sm" aria-label={`Use ${name}`} onClick={() => onSelect(model.name)}>Use</Button>}
-          <DropdownMenu>
+          {onDelete && <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`More actions for ${name}`}>
+              <Button ref={menuTrigger} variant="ghost" size="icon" className="h-8 w-8" aria-label={`More actions for ${name}`}>
                 <MoreHorizontal aria-hidden="true" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={() => onDelete(model.name)}>Delete model to free up space</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => onDelete(model.name, menuTrigger.current)}>Delete model to free up space</DropdownMenuItem>
             </DropdownMenuContent>
-          </DropdownMenu>
+          </DropdownMenu>}
         </div>
       );
     case "missing":
@@ -97,14 +114,14 @@ function RowActions({ model, inUse, onSelect, onDownload, onCancel, onDelete }: 
     case "corrupted":
       return (
         <div className="flex items-center justify-end gap-1">
-          <Button variant="ghost" size="sm" aria-label={`Delete ${name}`} onClick={() => onDelete(model.name)}>Delete</Button>
+          {onDelete && <Button variant="ghost" size="sm" aria-label={`Delete ${name}`} onClick={event => onDelete(model.name, event.currentTarget)}>Delete</Button>}
           <Button variant="outline" size="sm" aria-label={`Download ${name} again`} onClick={() => onDownload(model.name)}>Re-download</Button>
         </div>
       );
   }
 }
 
-function StatusCell({ model, inUse }: { model: ParakeetModelInfo; inUse: boolean }) {
+function StatusCell({ model, inUse }: { model: TranscriptionModelRow; inUse: boolean }) {
   const status = statusOf(model.status);
   switch (status.kind) {
     case "available":
@@ -130,6 +147,62 @@ function StatusCell({ model, inUse }: { model: ParakeetModelInfo; inUse: boolean
   }
 }
 
+export function TranscriptionModelTable({ label, models, selectedModel, results, onSelect, onDownload, onCancel, onDelete }: TranscriptionModelTableProps) {
+  const fastest = fastestSpeed(models.flatMap(model => (results[model.name] ? [results[model.name]] : [])));
+  return (
+    <div className="overflow-x-auto">
+      <table aria-label={label} className="w-full border-collapse text-sm">
+        <thead>
+          <tr className="border-b border-border">
+            {COLUMNS.map((column, index) => (
+              <th
+                key={index}
+                scope="col"
+                className={`px-4 py-2.5 text-left text-xs font-normal text-muted-foreground first:pl-5 last:pr-5 ${column === "Best for" || column === "Download" ? "max-[1499px]:hidden" : ""}`}
+              >
+                {column || <span className="sr-only">Action</span>}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {models.map(model => {
+            const inUse = selectedModel === model.name && model.status === "Available";
+            const status = statusOf(model.status);
+            const size = status.kind === "downloading" && model.sizeMb
+              ? `${formatFileSize(Math.round(model.sizeMb * status.progress / 100))} / ${formatFileSize(model.sizeMb)}`
+              : formatModelSize(model.sizeMb);
+            return (
+              <tr key={model.name} className={`border-t border-border/60 first:border-t-0 ${inUse ? "bg-primary/10" : ""}`}>
+                <td className="relative px-4 py-3.5 pl-5">
+                  {inUse && <span aria-hidden="true" className="absolute inset-y-0 left-0 w-[3px] bg-primary" />}
+                  <span className="text-foreground">{model.label}</span>
+                  {model.recommendation && <SettingsTag>{model.recommendation}</SettingsTag>}
+                  {model.badge && <SettingsTag>{model.badge}</SettingsTag>}
+                  <span className="block text-[13px] text-muted-foreground min-[1500px]:hidden">
+                    {model.bestFor && `${model.bestFor} · `}{formatModelSize(model.sizeMb)}
+                  </span>
+                </td>
+                <td className="px-4 py-3.5 text-muted-foreground max-[1499px]:hidden">{model.bestFor}</td>
+                <td className="px-4 py-3.5">
+                  <SpeedCell record={results[model.name]} fastest={fastest} current={inUse} />
+                </td>
+                <td className="px-4 py-3.5 max-[1499px]:hidden">
+                  <Meta>{size}</Meta>
+                </td>
+                <td className="px-4 py-3.5"><StatusCell model={model} inUse={inUse} /></td>
+                <td className="px-4 py-3.5 pr-5 text-right">
+                  <RowActions model={model} inUse={inUse} onSelect={onSelect} onDownload={onDownload} onCancel={onCancel} onDelete={onDelete} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /** Every Parakeet model in one table: speed on this PC, size, state and the action that applies. */
 export function ParakeetModelTable({
   models, loading, error, selectedModel, results, testAction, testReport,
@@ -137,9 +210,20 @@ export function ParakeetModelTable({
 }: ParakeetModelTableProps) {
   const recommended = models.filter(model => getModelDisplayInfo(model.name)?.recommended);
   const ordered = [...recommended, ...models.filter(model => !recommended.includes(model))];
-  const fastest = fastestSpeed(ordered.flatMap(model => (results[model.name] ? [results[model.name]] : [])));
   const speedRecommendations = recommendedForSpeed(models, results);
   const selectedSupported = !selectedModel || models.some(model => model.name === selectedModel);
+  const rows = ordered.map(model => {
+    const info = getModelDisplayInfo(model.name);
+    return {
+      name: model.name,
+      label: info?.friendlyName || model.name,
+      bestFor: info?.bestFor || model.description || "",
+      sizeMb: model.size_mb,
+      status: model.status,
+      recommendation: speedRecommendations.get(model.name),
+      badge: info?.badge,
+    };
+  });
 
   return (
     <SettingsCard
@@ -154,59 +238,10 @@ export function ParakeetModelTable({
         <SettingsRow title="Models unavailable" description={error}>
           <Button variant="outline" size="sm" onClick={onRetryLoad}>Try again</Button>
         </SettingsRow>
-      ) : ordered.length === 0 ? (
+      ) : rows.length === 0 ? (
         <SettingsRow title="No models available" description="This build offers no Parakeet models" />
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-border">
-                {COLUMNS.map((column, index) => (
-                  <th
-                    key={index}
-                    scope="col"
-                    className={`px-4 py-2.5 text-left text-xs font-normal text-muted-foreground first:pl-5 last:pr-5 ${column === "Best for" || column === "Download" ? "max-[1499px]:hidden" : ""}`}
-                  >
-                    {column || <span className="sr-only">Action</span>}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {ordered.map(model => {
-                const info = getModelDisplayInfo(model.name);
-                const name = info?.friendlyName || model.name;
-                const bestFor = info?.bestFor || model.description || "";
-                const inUse = selectedModel === model.name && model.status === "Available";
-                const status = statusOf(model.status);
-                return (
-                  <tr key={model.name} className={`border-t border-border/60 first:border-t-0 ${inUse ? "bg-primary/10" : ""}`}>
-                    <td className="relative px-4 py-3.5 pl-5">
-                      {inUse && <span aria-hidden="true" className="absolute inset-y-0 left-0 w-[3px] bg-primary" />}
-                      <span className="whitespace-nowrap text-foreground">{name}</span>
-                      {speedRecommendations.has(model.name) && <SettingsTag>{speedRecommendations.get(model.name)}</SettingsTag>}
-                      {info?.badge && <SettingsTag>{info.badge}</SettingsTag>}
-                      <span className="block text-[13px] text-muted-foreground min-[1500px]:hidden">{bestFor} · {formatModelSize(model.size_mb)}</span>
-                    </td>
-                    <td className="px-4 py-3.5 text-muted-foreground max-[1499px]:hidden">{bestFor}</td>
-                    <td className="px-4 py-3.5">
-                      <SpeedCell record={results[model.name]} fastest={fastest} current={inUse} />
-                    </td>
-                    <td className="px-4 py-3.5 max-[1499px]:hidden">
-                      {status.kind === "downloading" && model.size_mb
-                        ? <Meta>{formatFileSize(Math.round(model.size_mb * status.progress / 100))} / {formatFileSize(model.size_mb)}</Meta>
-                        : <Meta>{formatModelSize(model.size_mb)}</Meta>}
-                    </td>
-                    <td className="px-4 py-3.5"><StatusCell model={model} inUse={inUse} /></td>
-                    <td className="px-4 py-3.5 pr-5 text-right">
-                      <RowActions model={model} inUse={inUse} onSelect={onSelect} onDownload={onDownload} onCancel={onCancel} onDelete={onDelete} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <TranscriptionModelTable label="Parakeet models" models={rows} selectedModel={selectedModel} results={results} onSelect={onSelect} onDownload={onDownload} onCancel={onCancel} onDelete={onDelete} />
       )}
       {!loading && !error && !selectedSupported && (
         <SettingsFooter>

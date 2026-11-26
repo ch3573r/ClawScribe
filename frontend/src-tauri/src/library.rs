@@ -12,6 +12,7 @@ pub(crate) mod recording_calendar;
 pub(crate) mod saved_text;
 pub mod summary_bookmarks;
 
+use crate::exports::metadata::{export_timestamp, Header};
 use crate::state::AppState;
 use serde::Serialize;
 use sqlx::{Sqlite, SqlitePool, Transaction};
@@ -33,11 +34,25 @@ pub struct Bookmark {
 }
 
 fn clean_label(value: &str, max: usize) -> Result<String, String> {
-    let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let stripped: String = value
+        .chars()
+        .filter(|&c| matches!(c, '\t' | '\n' | '\r') || !c.is_control())
+        .collect();
+    let clean = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
     if clean.is_empty() || clean.chars().count() > max {
         return Err(format!("Enter between 1 and {max} characters."));
     }
     Ok(clean)
+}
+
+#[cfg(test)]
+#[test]
+fn bookmark_labels_strip_controls_and_normalize_tabs_and_newlines() {
+    assert_eq!(
+        clean_label("  Rés\u{0}umé\tand\n\u{85}review\u{7f}\u{1f}\u{9f}", 30).unwrap(),
+        "Résumé and review"
+    );
+    assert!(clean_label("\u{0}\t\u{85}", 30).is_err());
 }
 
 pub(crate) async fn attach_bookmarks(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -121,6 +136,72 @@ pub async fn set_meeting_tags(
     tx.commit().await.map_err(|_| "Could not save tags.")?;
     let _ = app.emit("library-changed", ());
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn add_archive_project_tags(
+    app: AppHandle,
+    ids: Vec<String>,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    add_tags_to_meetings(app.state::<AppState>().db_manager.pool(), ids, tags).await?;
+    let _ = app.emit("library-changed", ());
+    Ok(())
+}
+
+async fn add_tags_to_meetings(
+    pool: &SqlitePool,
+    ids: Vec<String>,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    use std::collections::HashSet;
+    const SAVE: &str = "Could not save project tags.";
+    archive::storage::validate_selection(ids.iter().map(String::as_str))?;
+    if tags.is_empty() || tags.len() > 20 {
+        return Err("Enter between 1 and 20 project tags.".into());
+    }
+    let tags = tags
+        .iter()
+        .map(|tag| clean_label(tag, 60))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(|_| SAVE)?;
+    for id in ids {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?)")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| SAVE)?;
+        if !exists {
+            return Err(
+                "A selected meeting is no longer in the library. Select the meetings again.".into(),
+            );
+        }
+        let existing: Vec<String> =
+            sqlx::query_scalar("SELECT tag FROM meeting_tags WHERE meeting_id = ?")
+                .bind(&id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|_| SAVE)?;
+        let mut seen: HashSet<_> = existing.iter().map(|tag| tag.to_lowercase()).collect();
+        let added: Vec<_> = tags
+            .iter()
+            .filter(|tag| seen.insert(tag.to_lowercase()))
+            .collect();
+        if existing.len() + added.len() > 20 {
+            return Err(
+                "Adding these tags would exceed the 20-tag limit for a selected meeting.".into(),
+            );
+        }
+        for tag in added {
+            sqlx::query("INSERT INTO meeting_tags (meeting_id, tag) VALUES (?, ?)")
+                .bind(&id)
+                .bind(tag)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| SAVE)?;
+        }
+    }
+    tx.commit().await.map_err(|_| SAVE.into())
 }
 
 #[tauri::command]
@@ -288,6 +369,10 @@ pub(crate) async fn discard_recording_drafts(
         .bind(recording_id)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM recording_title_drafts WHERE recording_id = ?")
+        .bind(recording_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM saved_live_answers WHERE recording_id = ? AND meeting_id IS NULL")
         .bind(recording_id)
         .execute(&mut *tx)
@@ -380,8 +465,9 @@ pub async fn export_local_word(
     include_transcript: bool,
     include_speakers: bool,
     include_timestamps: bool,
+    include_bookmarks: Option<bool>,
     path: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     // Only a path the user chose in the save dialog the core opened
     // (`pick_word_save_path`), once.
     let granted = crate::file_grants::take(crate::file_grants::Purpose::WordSave, &path)?;
@@ -393,13 +479,19 @@ pub async fn export_local_word(
         include_transcript,
         include_speakers,
         include_timestamps,
+        include_bookmarks.unwrap_or(false),
         granted.path.to_string_lossy().into_owned(),
     )
     .await;
     if result.is_err() {
         crate::file_grants::give_back(crate::file_grants::Purpose::WordSave, &granted);
     }
-    result
+    result?;
+    Ok(tokio::task::spawn_blocking(move || {
+        crate::exports::local_open::allow_saved_file(&granted.path)
+    })
+    .await
+    .unwrap_or(false))
 }
 
 async fn export_local_word_to(
@@ -410,6 +502,7 @@ async fn export_local_word_to(
     include_transcript: bool,
     include_speakers: bool,
     include_timestamps: bool,
+    include_bookmarks: bool,
     path: String,
 ) -> Result<(), String> {
     crate::file_grants::save_target_parent_exists(Path::new(&path))?;
@@ -420,7 +513,7 @@ async fn export_local_word_to(
         return Err("Choose a .docx file.".into());
     }
     let state = app.state::<AppState>();
-    let created = read_export_date(state.db_manager.pool(), &meeting_id).await?;
+    let header = Header::load(state.db_manager.pool(), &meeting_id, include_bookmarks).await?;
     // Fetch the full saved transcript, independently of the UI's current page.
     let transcript = if include_transcript {
         Some(
@@ -435,13 +528,16 @@ async fn export_local_word_to(
     } else {
         None
     };
-    if markdown.trim().is_empty() && transcript.as_deref().unwrap_or_default().trim().is_empty() {
+    if markdown.trim().is_empty()
+        && header.bookmarks.is_empty()
+        && transcript.as_deref().unwrap_or_default().trim().is_empty()
+    {
         return Err("There are no notes or transcripts to export.".into());
     }
     tokio::task::spawn_blocking(move || {
         let bytes = crate::exports::document::build_meeting_docx(
             &title,
-            &format!("Date: {}\n\n{markdown}", export_meeting_date(&created)),
+            &format!("{}\n{markdown}", header.markdown(include_timestamps)),
             transcript.as_deref(),
         )?;
         atomic_write(Path::new(&path), &bytes)
@@ -459,8 +555,9 @@ pub async fn export_local_markdown(
     include_transcript: bool,
     include_speakers: bool,
     include_timestamps: bool,
+    include_bookmarks: Option<bool>,
     path: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let purpose = crate::file_grants::Purpose::MarkdownSave;
     let granted = crate::file_grants::take(purpose, &path)?;
     let state = app.state::<AppState>();
@@ -473,6 +570,7 @@ pub async fn export_local_markdown(
             include_transcript,
             include_speakers,
             include_timestamps,
+            include_bookmarks: include_bookmarks.unwrap_or(true),
         },
         granted.path.clone(),
     )
@@ -480,13 +578,19 @@ pub async fn export_local_markdown(
     if result.is_err() {
         crate::file_grants::give_back(purpose, &granted);
     }
-    result
+    result?;
+    Ok(tokio::task::spawn_blocking(move || {
+        crate::exports::local_open::allow_saved_file(&granted.path)
+    })
+    .await
+    .unwrap_or(false))
 }
 
 struct MarkdownOptions {
     include_transcript: bool,
     include_speakers: bool,
     include_timestamps: bool,
+    include_bookmarks: bool,
 }
 
 async fn export_local_markdown_to(
@@ -505,39 +609,7 @@ async fn export_local_markdown_to(
         return Err("Choose a .md file.".into());
     }
 
-    let created = read_export_date(pool, meeting_id).await?;
-    let (duration, calendar_link): (Option<f64>, Option<String>) =
-        sqlx::query_as("SELECT recording_duration_s, calendar_link FROM meetings WHERE id = ?")
-            .bind(meeting_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|_| "Could not read meeting details.")?;
-    let attendees = calendar_link
-        .as_deref()
-        .and_then(|raw| calendar::decode(raw).ok().flatten())
-        .map(|link| {
-            link.confirmed_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    let tags = sqlx::query_scalar("SELECT tag FROM meeting_tags WHERE meeting_id = ? ORDER BY tag")
-        .bind(meeting_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| "Could not read project tags.")?;
-    let bookmarks = read_bookmarks(pool, meeting_id)
-        .await?
-        .into_iter()
-        .map(|bookmark| (bookmark.seconds, bookmark.label))
-        .collect();
-    let metadata = markdown::Metadata {
-        duration,
-        attendees,
-        tags,
-        bookmarks,
-    };
+    let metadata = Header::load(pool, meeting_id, options.include_bookmarks).await?;
     let passages = if options.include_transcript {
         read_export_transcript(pool, meeting_id).await?
     } else {
@@ -554,7 +626,6 @@ async fn export_local_markdown_to(
     tokio::task::spawn_blocking(move || {
         let rendered = markdown::render(
             &title,
-            &export_meeting_date(&created),
             &metadata,
             &summary,
             &passages,
@@ -565,46 +636,6 @@ async fn export_local_markdown_to(
     })
     .await
     .map_err(|_| "Markdown export was interrupted.")?
-}
-
-async fn read_export_date(pool: &SqlitePool, meeting_id: &str) -> Result<String, String> {
-    sqlx::query_scalar("SELECT created_at FROM meetings WHERE id = ?")
-        .bind(meeting_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| "Meeting no longer exists.".into())
-}
-
-fn export_timestamp(timestamp: &str, audio_start_time: Option<f64>) -> String {
-    match audio_start_time.filter(|time| time.is_finite() && *time >= 0.0) {
-        Some(time) => {
-            let seconds = time.floor() as u64;
-            format!(
-                "{:02}:{:02}:{:02}",
-                seconds / 3600,
-                seconds / 60 % 60,
-                seconds % 60
-            )
-        }
-        None => timestamp.trim().to_string(),
-    }
-}
-
-fn export_meeting_date(created: &str) -> String {
-    let date = chrono::DateTime::parse_from_rfc3339(created)
-        .map(|date| date.with_timezone(&chrono::Utc))
-        .ok()
-        .or_else(|| {
-            chrono::NaiveDateTime::parse_from_str(created, "%Y-%m-%d %H:%M:%S%.f")
-                .ok()
-                .map(|date| date.and_utc())
-        });
-    date.map(|date| {
-        date.with_timezone(&chrono::Local)
-            .format("%Y-%m-%d %H:%M")
-            .to_string()
-    })
-    .unwrap_or_else(|| created.to_string())
 }
 
 #[derive(sqlx::FromRow)]
@@ -679,6 +710,41 @@ async fn read_word_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exports::metadata::export_meeting_date;
+
+    #[tokio::test]
+    async fn archive_tags_are_additive_and_a_full_meeting_rolls_back_the_batch() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        for id in ["bulk-a", "bulk-b"] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+                .bind(id).bind(id).execute(&pool).await.unwrap();
+        }
+        let ids = || vec!["bulk-a".to_owned(), "bulk-b".to_owned()];
+        add_tags_to_meetings(&pool, ids(), vec!["Müller".into(), "Roadmap".into()])
+            .await
+            .unwrap();
+        add_tags_to_meetings(&pool, ids(), vec!["MÜLLER".into()])
+            .await
+            .unwrap();
+        add_tags_to_meetings(
+            &pool,
+            vec!["bulk-b".into()],
+            (1..=18).map(|index| format!("Tag {index}")).collect(),
+        )
+        .await
+        .unwrap();
+        assert!(add_tags_to_meetings(&pool, ids(), vec!["New tag".into()])
+            .await
+            .is_err());
+        let tags: Vec<String> = sqlx::query_scalar(
+            "SELECT tag FROM meeting_tags WHERE meeting_id = 'bulk-a' ORDER BY tag",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(tags, ["Müller", "Roadmap"]);
+    }
+
     #[test]
     fn export_times_prefer_recording_offsets_and_keep_legacy_fallback() {
         for (start, expected) in [
@@ -778,6 +844,7 @@ mod tests {
                 include_transcript: true,
                 include_speakers: true,
                 include_timestamps: true,
+                include_bookmarks: true,
             },
             path.clone(),
         )

@@ -143,6 +143,14 @@ export async function fetchRecoveryCandidates(
   return { candidates, scan, scanFailed: false, keptCount };
 }
 
+interface RecoveredMeeting {
+  success: boolean;
+  audioRecoveryStatus?: AudioRecoveryStatus | null;
+  meetingId?: string;
+  transcriptCount?: number;
+  remainingCount: number;
+}
+
 export interface UseTranscriptRecoveryReturn {
   recoverableMeetings: RecoveryCandidate[];
   isLoading: boolean;
@@ -154,7 +162,7 @@ export interface UseTranscriptRecoveryReturn {
   checkForRecoverableTranscripts: (options?: { includeKept?: boolean }) => Promise<RecoveryCandidate[]>;
   /** "Keep, do not ask again": the recording stays on disk and is not offered unasked. */
   keepRecoverableMeeting: (meetingId: string) => Promise<void>;
-  recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount?: number }>;
+  recoverMeeting: (meetingId: string) => Promise<RecoveredMeeting>;
   loadMeetingTranscripts: (meetingId: string) => Promise<TranscriptPreview[]>;
   saveOfflineTranscript: (meetingId: string, fileCopy?: boolean) => Promise<OfflineTranscriptSaveResult>;
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
@@ -348,7 +356,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   /**
    * Recover a meeting from IndexedDB
    */
-  const recoverMeeting = useCallback(async (meetingId: string): Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount?: number }> => {
+  const recoverMeeting = useCallback(async (meetingId: string): Promise<RecoveredMeeting> => {
     setIsRecovering(true);
     try {
       const candidate = currentCandidate(meetingId);
@@ -356,7 +364,8 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         throw new Error('Retry the scan to verify the recordings folder before recovering the meeting.');
       }
       if (candidate.disk && (candidate.source === 'disk' || candidate.disk.registeredMeetingId)) {
-        return await recoverDiskMeeting(candidate);
+        const recovered = await recoverDiskMeeting(candidate);
+        return { ...recovered, remainingCount: candidatesRef.current.length };
       }
       // 1. Load meeting metadata
       const metadata = await indexedDBService.getMeetingMetadata(meetingId);
@@ -458,6 +467,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         audioRecoveryStatus,
         meetingId: savedMeetingId,
         transcriptCount: transcripts.length,
+        remainingCount: candidatesRef.current.length,
       };
     } catch (error) {
       console.error('Failed to recover meeting:', error);

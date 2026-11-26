@@ -11,6 +11,7 @@ import { Switch } from '@/components/ui/switch';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { cn } from '@/lib/utils';
 import { bookmarkTime, MeetingBookmark } from '@/lib/library';
+import { parseBookmarkTime } from '@/lib/bookmark-time';
 
 interface LiveBookmarkProps {
   sessionId: string | null;
@@ -36,9 +37,13 @@ export function LiveBookmarkButton({ sessionId, disabled, className }: LiveBookm
   }}>{busy ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" /> : <BookmarkPlus size={16} />}</Button>;
 }
 
-export function MeetingBookmarks({ meetingId, focusedBookmark, currentTime, onSeek, addOpen = false, onAddOpenChange, onBookmarksChange }: { focusedBookmark?: string | null; addOpen?: boolean; onAddOpenChange?: (open: boolean) => void; onBookmarksChange?: (bookmarks: MeetingBookmark[]) => void; meetingId: string; currentTime?: number; onSeek?: (time: number) => void }) {
+export function MeetingBookmarks({ meetingId, focusedBookmark, currentTime, initialTime, duration, onSeek, addOpen = false, onAddOpenChange, onBookmarksChange, onReturnFocus }: { focusedBookmark?: string | null; addOpen?: boolean; onAddOpenChange?: (open: boolean) => void; onBookmarksChange?: (bookmarks: MeetingBookmark[]) => void; meetingId: string; currentTime?: number; initialTime?: number; duration?: number; onSeek?: (time: number) => void; onReturnFocus?: () => void }) {
   const [bookmarks, setBookmarks] = useState<MeetingBookmark[]>([]);
-  const [section, setSection] = useState('');
+  const [section, setSection] = useState('bookmarks');
+  const hasBookmarks = bookmarks.length > 0;
+  // Notes made during recording arrive through the same saved list. Open the
+  // section on its first populated load and respect collapses during refreshes.
+  useEffect(() => { if (hasBookmarks) setSection('bookmarks'); }, [hasBookmarks]);
   const hasFocusTarget = !!focusedBookmark && bookmarks.some(mark => mark.id === focusedBookmark);
   useEffect(() => {
     if (!hasFocusTarget || !focusedBookmark) return;
@@ -47,7 +52,7 @@ export function MeetingBookmarks({ meetingId, focusedBookmark, currentTime, onSe
     return () => cancelAnimationFrame(frame);
   }, [focusedBookmark, hasFocusTarget]);
   const [label, setLabel] = useState('');
-  const [seconds, setSeconds] = useState('0');
+  const [time, setTime] = useState('0');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
@@ -73,7 +78,10 @@ export function MeetingBookmarks({ meetingId, focusedBookmark, currentTime, onSe
   // A new note starts at the playback position and is ready to type into.
   const wasOpen = useRef(false);
   useEffect(() => {
-    if (addOpen && !wasOpen.current) { setLabel(''); setSeconds(currentTime !== undefined ? currentTime.toFixed(1) : '0'); }
+    if (addOpen && !wasOpen.current) {
+      setLabel('');
+      setTime(initialTime !== undefined ? String(initialTime) : currentTime?.toFixed(1) ?? '0');
+    }
     wasOpen.current = addOpen;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addOpen]);
@@ -114,15 +122,31 @@ export function MeetingBookmarks({ meetingId, focusedBookmark, currentTime, onSe
       setBusy(false);
     }
   };
-  const canAdd = !busy && Boolean(seconds.trim()) && Number.isFinite(Number(seconds)) && Number(seconds) >= 0;
-  const addForm = (<form className="mt-2 flex flex-wrap gap-2" onSubmit={event => { event.preventDefault(); if (canAdd) void change('add_meeting_bookmark', { meetingId, seconds: Number(seconds), label: label.trim() || 'Review this' }); }}>
-      <label className="grid min-w-0 flex-1 gap-1">Note<Input autoFocus placeholder="Review this" className="h-auto shadow-none text-sm md:text-sm w-full rounded border border-input bg-background p-1" maxLength={160} value={label} onChange={e => setLabel(e.target.value)} /></label>
-      <label className="grid gap-1">Time in seconds<Input className="h-auto shadow-none text-sm md:text-sm w-24 rounded border border-input bg-background p-1" type="number" min={0} max={604800} step="0.1" value={seconds} onChange={e => setSeconds(e.target.value)} /></label>
-      {currentTime !== undefined && <Button type="button" size="sm" variant="outline" onClick={() => setSeconds(currentTime.toFixed(1))}>Use playback time</Button>}
-      <Button type="submit" size="sm" disabled={!canAdd}>Add bookmark</Button>
-    </form>);
+  const seconds = parseBookmarkTime(time, duration);
+  const invalidTime = time.trim().length > 0 && seconds === null;
+  const addForm = (
+    <form className="mt-2 grid gap-3" onSubmit={event => {
+      event.preventDefault();
+      if (!busy && seconds !== null) void change('add_meeting_bookmark', { meetingId, seconds, label: label.trim() || 'Review this' });
+    }}>
+      <label className="grid gap-1 text-sm">Note<Input autoFocus placeholder="Review this" maxLength={160} value={label} onChange={event => setLabel(event.target.value)} disabled={busy} /></label>
+      <div className="grid gap-1 text-sm">
+        <label htmlFor="bookmark-time">Time</label>
+        <Input id="bookmark-time" autoComplete="off" placeholder="MM:SS" value={time} disabled={busy} aria-invalid={invalidTime} aria-describedby="bookmark-time-help" onChange={event => setTime(event.target.value)} />
+        <span id="bookmark-time-help" className={invalidTime ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}>
+          {invalidTime ? 'Enter a time within seven days as MM:SS, HH:MM:SS, or seconds.' : 'Enter MM:SS, HH:MM:SS, or seconds. Times past the end use the recording duration.'}
+        </span>
+      </div>
+      <div className="flex flex-wrap justify-end gap-2">
+        {currentTime !== undefined && <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => setTime(currentTime.toFixed(1))}>Use playback time</Button>}
+        <Button type="submit" size="sm" disabled={busy || seconds === null}>{busy ? 'Saving…' : 'Add bookmark'}</Button>
+      </div>
+    </form>
+  );
   return <>
-    <Dialog open={addOpen} onOpenChange={onAddOpenChange}><DialogContent><DialogHeader><DialogTitle>Add bookmark</DialogTitle><DialogDescription>Save a moment and an optional note to this meeting. Notes are private by default.</DialogDescription></DialogHeader>{addForm}</DialogContent></Dialog>
+    <Dialog open={addOpen} onOpenChange={open => { if (!busy) onAddOpenChange?.(open); }}><DialogContent onCloseAutoFocus={event => {
+      if (onReturnFocus) { event.preventDefault(); onReturnFocus(); }
+    }}><DialogHeader><DialogTitle>Add bookmark</DialogTitle><DialogDescription>Save a moment and an optional note to this meeting. Notes are private by default.</DialogDescription></DialogHeader>{addForm}</DialogContent></Dialog>
     {error && <p role="alert" className="mt-2 text-destructive">{error} <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-sm font-normal underline hover:bg-transparent hover:text-current" onClick={() => setRevision(r => r + 1)}>Retry</Button></p>}
     {bookmarks.length > 0 && <Accordion type="single" collapsible value={section} onValueChange={setSection} className="border-b border-border px-3 py-2 text-sm"><AccordionItem value="bookmarks" className="group/details border-0">
     <AccordionTrigger className="cursor-pointer rounded-none py-0 font-medium hover:no-underline">Bookmarks ({bookmarks.length})</AccordionTrigger><AccordionContent forceMount className="p-0 group-data-[state=closed]/details:hidden">

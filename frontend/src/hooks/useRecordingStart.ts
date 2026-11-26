@@ -1,6 +1,5 @@
-import { useCallback, useEffect } from 'react';
-import { useSidebar } from '@/components/Sidebar/SidebarProvider';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useCallback } from 'react';
+import { useTranscriptionConfig } from '@/contexts/ConfigContext';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
 import Analytics from '@/lib/analytics';
@@ -19,7 +18,7 @@ import {
 } from '@/lib/start-error';
 import { openStorageDialog } from '@/lib/storage-dialog-controller';
 
-type StartSource = 'home_page' | 'sidebar_auto' | 'sidebar_direct' | 'detected_call' | 'calendar_call' | 'remote_request';
+type StartSource = 'home_page' | 'sidebar_direct' | 'detected_call' | 'calendar_call' | 'remote_request';
 let startInProgress = false;
 
 export const DEVICE_PREFERENCES_UNAVAILABLE = 'recording_device_preferences_unavailable';
@@ -71,13 +70,12 @@ function meetingTitleAt(timestamp: number): string {
   return `Meeting ${day}_${month}_${String(now.getFullYear()).slice(-2)}_${hour}_${minute}_${second}`;
 }
 
-export function useStartRecordingSession() {
-  const { setIsMeetingActive } = useSidebar();
-  const { selectedDevices, devicePreferencesStatus, isSavingDevicePreferences } = useConfig();
-  const { setStatus, isRecording, isStopping, isProcessing, isSaving } = useRecordingState();
+export function useStartRecordingSession(setIsMeetingActive?: (active: boolean) => void) {
+  const { selectedDevices, devicePreferencesStatus, isSavingDevicePreferences } = useTranscriptionConfig();
+  const { setStatus, isRecording, isStarting, isStopping, isProcessing, isSaving } = useRecordingState();
 
-  const start = useCallback(async (source: StartSource, requestId?: string): Promise<string> => {
-    if (startInProgress || isRecording || isStopping || isProcessing || isSaving) throw START_BUSY;
+  const start = useCallback(async (source: StartSource, requestId?: string, title?: string): Promise<string> => {
+    if (startInProgress || isRecording || isStarting || isStopping || isProcessing || isSaving) throw START_BUSY;
     if (devicePreferencesStatus !== 'ready' || isSavingDevicePreferences) throw DEVICE_PREFERENCES_UNAVAILABLE;
     startInProgress = true;
     const now = Date.now();
@@ -88,10 +86,10 @@ export function useStartRecordingSession() {
     try {
       const sessionId = await recordingService.startRecordingWithDevices(
         selectedDevices.micDevice, selectedDevices.systemDevice, meetingTitleAt(now), choice?.link, requestId,
-        readPinnedSummaryLanguageDefault(),
+        readPinnedSummaryLanguageDefault(), title?.trim() || undefined,
       );
       if (choice) consumeNextCalendarChoice(choice);
-      setIsMeetingActive(true);
+      setIsMeetingActive?.(true);
       Analytics.trackButtonClick('start_recording', source);
       void showRecordingNotification();
       // Calendar I/O begins only once native capture is running. The write is
@@ -111,37 +109,25 @@ export function useStartRecordingSession() {
       setStatus(RecordingStatus.ERROR, 'Could not start the recording.');
       Analytics.trackButtonClick('start_recording_error', source);
       // A delayed retry requires a new native request and fresh call evidence.
-      if (!requestId) await offerSpeakerDetectionCancellation(error, () => start(source)).catch(() => {});
+      if (!requestId) await offerSpeakerDetectionCancellation(error, () => start(source, undefined, title)).catch(() => {});
       throw error;
     } finally {
       startInProgress = false;
     }
-  }, [devicePreferencesStatus, isSavingDevicePreferences, selectedDevices, setIsMeetingActive, setStatus, isRecording, isStopping, isProcessing, isSaving]);
+  }, [devicePreferencesStatus, isSavingDevicePreferences, selectedDevices, setIsMeetingActive, setStatus, isRecording, isStarting, isStopping, isProcessing, isSaving]);
   return start;
 }
 
-export function useRecordingStart() {
-  const start = useStartRecordingSession();
+export function useRecordingStart(setIsMeetingActive: (active: boolean) => void) {
+  const start = useStartRecordingSession(setIsMeetingActive);
 
-  const handleRecordingStart = useCallback(async () => {
+  const handleRecordingStart = useCallback(async (title?: string) => {
     try {
-      await start('home_page');
+      return await start('home_page', undefined, title);
     } catch (error) {
       if (error === START_BUSY) reportStartFailure(error);
       if (!liveModelStartFailure(error) && error !== START_BUSY) throw error;
     }
-  }, [start]);
-
-  useEffect(() => {
-    if (sessionStorage.getItem('autoStartRecording') !== 'true') return;
-    sessionStorage.removeItem('autoStartRecording');
-    void start('sidebar_auto').catch(reportStartFailure);
-  }, [start]);
-
-  useEffect(() => {
-    const onStart = () => { void start('sidebar_direct').catch(reportStartFailure); };
-    window.addEventListener('start-recording-from-sidebar', onStart);
-    return () => window.removeEventListener('start-recording-from-sidebar', onStart);
   }, [start]);
 
   return { handleRecordingStart };

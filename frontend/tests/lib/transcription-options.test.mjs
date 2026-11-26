@@ -28,7 +28,7 @@ function setup(t, options = {}) {
     '@/components/ui/dialog': names('Dialog DialogContent DialogDescription DialogFooter DialogHeader DialogTitle'),
     '@/components/ui/settings-layout': names('SettingsCard SettingsRow SettingsTag'),
     '@/lib/parakeetAccel': {
-      getParakeetBackendSettings: async () => ({ ...state.backend }),
+      getParakeetBackendSettings: async () => state.backendRead ?? { ...state.backend },
       getParakeetDirectml: () => state.storedDirectml,
       getParakeetWorker: () => state.storedWorker,
       setParakeetDirectml: async enabled => { calls.push(['directml', enabled]); if (state.directmlFails) throw new Error('not saved'); state.backend.directml = enabled; state.storedDirectml = enabled; },
@@ -66,7 +66,7 @@ test('the card has the four beta options, each tagged Beta', async t => {
   assert.equal(nodes(tree).find(node => node.type === 'SettingsCard').props.title, 'Options');
   const rows = nodes(tree).filter(node => node.type === 'SettingsRow');
   assert.deepEqual(rows.map(row => text(row.props.title)), [
-    'Run on the GPU with DirectMLBeta', 'Run transcription in a separate processBeta',
+    'Run Parakeet on the GPU with DirectMLBeta', 'Run transcription in a separate processBeta',
     'Label lines as Me or ParticipantsBeta', 'Cloud transcriptionBeta',
   ]);
   assert.equal(nodes(tree).filter(node => node.type === 'SettingsTag').length, 4);
@@ -92,6 +92,20 @@ test('GPU and separate-process switches follow backend truth and report an unapp
   assert.match(text(ui.row('parakeet-directml')), /Not active yet/);
 });
 
+test('the DirectML switch explains why it is disabled while the status resolves', async t => {
+  const pending = deferred();
+  const ui = setup(t, { backendRead: pending.promise });
+  ui.render();
+  const row = () => ui.row('parakeet-directml');
+  assert.equal(ui.control('parakeet-directml').props.disabled, true);
+  assert.ok(nodes(row()).some(node => node.props.role === 'status' && text(node) === 'Checking DirectML…'));
+  pending.resolve({ directml: true, directmlAutomatic: true, worker: false });
+  await flush();
+  assert.equal(ui.control('parakeet-directml').props.checked, true);
+  assert.equal(ui.control('parakeet-directml').props.disabled, false);
+  assert.doesNotMatch(text(row()), /Checking DirectML/);
+});
+
 test('a refused separate-process change is explained and the switch keeps backend state', async t => {
   const ui = setup(t, { workerBusy: true });
   ui.render();
@@ -106,6 +120,29 @@ test('a session GPU downgrade is shown on the GPU option', async t => {
   ui.render();
   await flush();
   assert.match(text(ui.row('parakeet-directml')), /turned off for this session/);
+});
+
+test('an unavailable automatic DirectML default explains CPU use', async t => {
+  const ui = setup(t, { backend: { directml: false, worker: false, directmlDefaultUnavailable: true } });
+  ui.render();
+  await flush();
+  assert.equal(ui.control('parakeet-directml').props.checked, false);
+  assert.match(text(ui.row('parakeet-directml')), /DirectML is unavailable in automatic mode.*Parakeet will use the CPU/);
+});
+
+test('a successful automatic DirectML default is active without a stored choice', async t => {
+  const ui = setup(t, { backend: { directml: true, directmlAutomatic: true, worker: false } });
+  ui.render();
+  await flush();
+  assert.equal(ui.control('parakeet-directml').props.checked, true);
+  assert.doesNotMatch(text(ui.row('parakeet-directml')), /Not active yet/);
+});
+
+test('a model that fell back to the CPU explains its backend on the GPU option', async t => {
+  const ui = setup(t, { backend: { directml: true, worker: false, directmlLastLoadFellBack: true } });
+  ui.render();
+  await flush();
+  assert.match(text(ui.row('parakeet-directml')), /could not load with DirectML and used the CPU/);
 });
 
 test('source attribution needs saved audio and says so', async t => {

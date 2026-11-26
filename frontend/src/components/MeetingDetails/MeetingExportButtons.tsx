@@ -3,6 +3,7 @@
 import { openExternal } from '@/lib/openExternal';
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { FileText, Loader2, Upload, ChevronDown, Webhook } from "lucide-react";
 import {
@@ -45,8 +46,7 @@ import {
   type NotebookInfo,
 } from "@/services/microsoftExportService";
 import {
-  buildConfluenceDraftMarkdown,
-  markdownToConfluenceHtml,
+  buildConfluenceDraft,
   writeConfluenceDraftToClipboard,
 } from "@/lib/confluenceDraft";
 import {
@@ -57,14 +57,15 @@ import {
 } from "@/lib/exportDestinations";
 import { confluenceExportService } from "@/services/confluenceExportService";
 import { PlannerExportPreview } from "./PlannerExportPreview";
-import type { FollowUpDestination } from "@/lib/meeting-follow-through";
+import { MICROSOFT_EXPORT_SETTINGS, type FollowUpDestination } from "@/lib/meeting-follow-through";
 import { ToDoExportPreview } from "./ToDoExportPreview";
 import { ExportContentOptions } from "./ExportContentOptions";
-import { defaultExportOptions, prepareMeetingExport, readExportSummary } from "@/lib/meetingExportContent";
+import { defaultExportOptions, prepareMeetingExport, readExportSummary, type MeetingExportHeader } from "@/lib/meetingExportContent";
 import { safeDocumentName } from "@/lib/library";
 import { archiveDateKey } from "@/lib/archive-review";
 import { useWebhookSettings } from "@/hooks/useWebhookSettings";
 import { canSendWebhook, webhookCommandError, webhookDeliveryMessage, type WebhookDelivery } from "@/lib/webhook";
+import { WebhookExportHistory } from "./WebhookExportHistory";
 
 interface MeetingExportButtonsProps {
   meetingId: string;
@@ -164,6 +165,7 @@ export function MeetingExportButtons({
   onReviewEmail,
   seriesDestination,
 }: MeetingExportButtonsProps) {
+  const router = useRouter();
   const webhook = useWebhookSettings();
   const webhookConfig = webhook.status === "ready" ? webhook.value : null;
   const [connected, setConnected] = useState(false);
@@ -184,7 +186,10 @@ export function MeetingExportButtons({
   const [exportOptions, setExportOptions] = useState(() => defaultExportOptions());
 
   const openDocumentExport = (destination: DocumentDestination) => {
-    setExportOptions(defaultExportOptions(destination === "word" || destination === "markdown" ? "both" : "summary"));
+    setExportOptions({
+      ...defaultExportOptions(destination === "word" || destination === "markdown" ? "both" : "summary"),
+      bookmarks: destination === "markdown",
+    });
     setDocumentDestination(destination);
   };
 
@@ -450,27 +455,23 @@ export function MeetingExportButtons({
   const selectedNotebookMissing =
     !!oneNoteNotebookId && !oneNoteNotebooks.some((n) => n.id === oneNoteNotebookId);
 
-  // Planner export opens a review dialog (pick/edit/route action items) rather
-  // than creating tasks immediately.
+  const plannerReady = connected && hasPlannerDestination();
+  const toDoReady = connected && hasToDoDestination();
   const openPlanner = useCallback(() => {
-    if (!hasPlannerDestination(getExportDestinations())) {
-      toast.info("Pick a Planner plan and default bucket first", {
-        description: "Settings → Microsoft 365 → Planner.",
-      });
+    if (!connected || !hasPlannerDestination()) {
+      router.push(MICROSOFT_EXPORT_SETTINGS);
       return;
     }
     setPlannerOpen(true);
-  }, []);
+  }, [connected, router]);
 
   const openToDo = useCallback(() => {
-    if (!hasToDoDestination(getExportDestinations())) {
-      toast.info("Pick a Microsoft To Do list first", {
-        description: "Settings → Microsoft 365 → To Do.",
-      });
+    if (!connected || !hasToDoDestination()) {
+      router.push(MICROSOFT_EXPORT_SETTINGS);
       return;
     }
     setToDoOpen(true);
-  }, []);
+  }, [connected, router]);
 
   const exportConfluence = useCallback(async () => {
     if (pending.current) return;
@@ -479,11 +480,13 @@ export function MeetingExportButtons({
     try {
       const { markdown: md } = await prepareMeetingExport(meetingId, getMarkdown, exportOptions);
 
-      const draft = buildConfluenceDraftMarkdown({
-        meetingTitle,
-        meetingCreatedAt,
-        summaryMarkdown: md,
+      const header = await invoke<MeetingExportHeader>("get_meeting_export_header", {
+        meetingId,
+        title: meetingTitle,
+        includeBookmarks: exportOptions.bookmarks ?? false,
+        timestamps: exportOptions.timestamps,
       });
+      const draft = buildConfluenceDraft(header, md);
       const destinations = getExportDestinations();
       const {
         confluenceMode = "draft",
@@ -512,7 +515,7 @@ export function MeetingExportButtons({
             spaceKey,
             parentId: confluenceParentId?.trim() || null,
             title: defaultConfluencePageTitle(meetingTitle, meetingCreatedAt),
-            bodyStorage: markdownToConfluenceHtml(draft),
+            bodyStorage: draft.html,
           });
 
           setDocumentDestination(null);
@@ -599,7 +602,7 @@ export function MeetingExportButtons({
         destination: destinations.oneDriveDestination ?? null,
         includePdf: destinations.oneDriveIncludePdf ?? true,
         createOrganizationLink: destinations.oneDriveCreateOrganizationLink ?? false,
-      });
+      }, exportOptions);
 
       const openUrl =
         response.files.find((file) => file.sharingLink)?.sharingLink ??
@@ -646,13 +649,22 @@ export function MeetingExportButtons({
         suggestedName: isMarkdown ? safeDocumentName(meetingTitle, "md", archiveDateKey(meetingCreatedAt)) : safeDocumentName(meetingTitle),
       });
       if (!path) return;
-      await invoke(isMarkdown ? "export_local_markdown" : "export_local_word", {
+      const canOpen = await invoke<boolean>(isMarkdown ? "export_local_markdown" : "export_local_word", {
         meetingId, title: meetingTitle, markdown, path,
         includeTranscript: exportOptions.content !== "summary",
         includeSpeakers: exportOptions.speakers,
         includeTimestamps: exportOptions.timestamps,
+        includeBookmarks: exportOptions.bookmarks ?? false,
       });
-      toast.success(isMarkdown ? "Markdown file saved" : "Word document saved");
+      const openSavedExport = (showInFolder: boolean) => {
+        void invoke("open_saved_meeting_export", { path, showInFolder }).catch(error => {
+          toast.error("Could not open the saved export", { description: errorText(error) });
+        });
+      };
+      toast.success(isMarkdown ? "Markdown file saved" : "Word document saved", canOpen ? {
+        action: { label: "Open file", onClick: () => openSavedExport(false) },
+        cancel: { label: "Show in folder", onClick: () => openSavedExport(true) },
+      } : undefined);
       setDocumentDestination(null);
     } catch (error) {
       toast.error(isMarkdown ? "Markdown export failed" : "Word export failed", { description: errorText(error) });
@@ -717,18 +729,16 @@ export function MeetingExportButtons({
               OneDrive DOCX/PDF
             </DropdownMenuItem>
           )}
-          {connected && (
-            <DropdownMenuItem onClick={openPlanner}>
-              <PlannerIcon className="mr-2 h-4 w-4" />
-              Planner action items{seriesDestination === "planner" && " · Series preference"}
-            </DropdownMenuItem>
-          )}
-          {connected && (
-            <DropdownMenuItem onClick={openToDo}>
-              <ToDoIcon className="mr-2 h-4 w-4" />
-              Microsoft To Do tasks{seriesDestination === "todo" && " · Series preference"}
-            </DropdownMenuItem>
-          )}
+          <DropdownMenuItem onSelect={openPlanner}>
+            <PlannerIcon className="mr-2 h-4 w-4" />
+            {plannerReady ? "Planner action items" : "Set up Planner"}
+            {plannerReady && seriesDestination === "planner" && " · Series preference"}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={openToDo}>
+            <ToDoIcon className="mr-2 h-4 w-4" />
+            {toDoReady ? "Microsoft To Do tasks" : "Set up Microsoft To Do"}
+            {toDoReady && seriesDestination === "todo" && " · Series preference"}
+          </DropdownMenuItem>
           <DropdownMenuItem onClick={() => openDocumentExport("confluence")}>
             <ConfluenceIcon className="mr-2 h-4 w-4" />
             Confluence
@@ -771,7 +781,7 @@ export function MeetingExportButtons({
             <Button type="button" variant="outline" onClick={() => void openHistory()}>Retry loading</Button>
           </div>}
           {!history && !historyError && <p role="status" className="text-sm text-muted-foreground">Loading export history…</p>}
-          {history?.length === 0 && <p className="text-sm text-muted-foreground">No remote exports recorded for this meeting.</p>}
+          {!reviewItem && history?.length === 0 && <p className="text-sm text-muted-foreground">No document or task deliveries recorded.</p>}
           {reviewItem && <form className="space-y-3" onSubmit={event => { event.preventDefault(); void reconcileExport(); }}>
             <p className="text-sm">Check {reviewItem.destination} for {reviewItem.displayName ? `“${reviewItem.displayName}”` : "the exported item"}, then record what you found.</p>
             {reviewItem.destination === "Confluence" && !reviewItem.displayName && (
@@ -831,6 +841,7 @@ export function MeetingExportButtons({
               {item.canResolve && <Button type="button" variant="outline" size="sm" onClick={() => selectReview(item)}>{item.status === "unknown_after_submit" ? "Resolve outcome" : "Review link"}</Button>}
             </li>)}
           </ul>}
+          {historyOpen && !reviewItem && <WebhookExportHistory key={meetingId} meetingId={meetingId} />}
         </DialogContent>
       </Dialog>
 

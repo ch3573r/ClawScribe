@@ -3,14 +3,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Copy, RefreshCw } from "lucide-react";
+import { Check, Copy, FolderOpen, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import {
   Meta, SettingsCard, SettingsColumns, SettingsFooter, SettingsRow, StatusText,
 } from "@/components/ui/settings-layout";
-import { IconAction, NoteRow } from "@/components/settings/settings-parts";
+import { NoteRow } from "@/components/settings/settings-parts";
 import { clockTime, describeCallCheck, useCallDetectionCheck } from "@/components/settings/call-detection-check";
 import { cn } from "@/lib/utils";
 import { getModelDisplayName } from "@/lib/parakeet";
@@ -36,6 +36,7 @@ interface AccelerationDiagnosticStatus {
   flashAttn: boolean;
   label: string;
   gpuAvailableButUnused: boolean;
+  vulkanRuntimeMissing?: boolean;
   cpuCores: number;
   memoryGb: number;
   performanceTier: string;
@@ -258,7 +259,7 @@ export function sanitizeDiagnosticsForCopy(snapshot: DiagnosticsSnapshot) {
   return redactDiagnosticsValue(copyPayload);
 }
 
-type HealthTone = "ok" | "warning" | "error";
+type HealthTone = "ok" | "warning" | "error" | "neutral";
 
 interface HealthItem {
   id: string;
@@ -270,7 +271,7 @@ interface HealthItem {
   action?: ReactNode;
 }
 
-const toneOrder: Record<HealthTone, number> = { error: 0, warning: 1, ok: 2 };
+const toneOrder: Record<HealthTone, number> = { error: 0, warning: 1, ok: 2, neutral: 3 };
 
 /** Problems first; rows with the same tone keep their natural order. */
 export function sortHealthItems<T extends { tone: HealthTone }>(items: T[]): T[] {
@@ -298,25 +299,6 @@ function HealthRow({ item }: { item: HealthItem }) {
       </div>
     </div>
   );
-}
-
-function useCodexStatus() {
-  const [status, setStatus] = useState<CodexStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setStatus(await invoke<CodexStatus>("codex_check_installation"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-  useEffect(() => { void load(); }, [load]);
-  return { status, error, loading, load };
 }
 
 function DetailBlock({ title, children }: { title: string; children: ReactNode }) {
@@ -427,7 +409,6 @@ export function DiagnosticsSettings() {
   const [loading, setLoading] = useState(false);
   const [savingReport, setSavingReport] = useState(false);
   const saveInProgress = useRef(false);
-  const codex = useCodexStatus();
   const calendars = useSyncExternalStore(subscribeToICalendars, getICalendarSnapshot, getICalendarServerSnapshot);
 
   const loadSnapshot = useCallback(async () => {
@@ -446,9 +427,12 @@ export function DiagnosticsSettings() {
     void loadSnapshot();
   }, [loadSnapshot]);
 
-  const refreshAll = () => {
-    void loadSnapshot();
-    void codex.load();
+  const [openingLogs, setOpeningLogs] = useState(false);
+  const openLogs = async () => {
+    setOpeningLogs(true);
+    try { await invoke("open_diagnostics_logs_folder"); }
+    catch { toast.error("Could not open the logs folder."); }
+    finally { setOpeningLogs(false); }
   };
 
   const copyDiagnostics = async () => {
@@ -510,10 +494,12 @@ export function DiagnosticsSettings() {
     if (snapshot) {
       const acceleration = snapshot.acceleration;
       list.push({
-        id: "backend", name: "Transcription backend",
+        id: "backend", name: "Whisper backend",
         value: acceleration ? acceleration.label : "Unknown",
-        tone: acceleration?.gpuAvailableButUnused ? "warning" : "ok",
-        status: acceleration?.gpuAvailableButUnused ? "GPU not used" : "OK",
+        tone: acceleration?.vulkanRuntimeMissing || acceleration?.gpuAvailableButUnused ? "warning" : "ok",
+        status: acceleration?.vulkanRuntimeMissing
+          ? "Vulkan unavailable"
+          : acceleration?.gpuAvailableButUnused ? "GPU not used" : "OK",
       });
       if (acceleration?.gpuAvailableButUnused) {
         list[list.length - 1].value = `${acceleration.runtimeDetectedGpu} GPU is visible, but this build uses CPU transcription`;
@@ -557,18 +543,17 @@ export function DiagnosticsSettings() {
       }
     }
 
-    const cx = codex.status;
+    const cx = snapshot?.integrations.codex;
     list.push({
       id: "codex", name: "Codex app-server",
-      value: codex.error ? "Status unavailable" : cx ? (cx.accountEmail ?? cx.message) : "Loading status…",
-      tone: codex.error ? "warning" : "ok",
-      status: codex.error ? "Unavailable" : !cx ? "Checking"
+      value: cx ? (cx.accountEmail ?? cx.message) : snapshot ? "Status unavailable" : undefined,
+      tone: !snapshot ? "neutral" : !cx ? "warning" : cx.authStatus === "authenticated" ? "ok" : "neutral",
+      status: !cx ? snapshot || error ? "Unavailable" : "Checking"
         : cx.authStatus === "authenticated" ? "Ready" : cx.found ? "Not signed in" : "Not available",
-      action: <IconAction label="Refresh Codex status" onClick={codex.load} loading={codex.loading} />,
     });
 
     return sortHealthItems(list);
-  }, [snapshot, calendars, codex.status, codex.error, codex.loading, codex.load]);
+  }, [snapshot, calendars, error]);
 
   const buildLine = snapshot
     ? `ClawScribe ${snapshot.app.version} · ${snapshot.app.os} ${snapshot.app.arch} · ${snapshot.app.buildProfile}`
@@ -580,7 +565,7 @@ export function DiagnosticsSettings() {
       description={<Meta className="whitespace-normal">{buildLine}</Meta>}
       actions={
         <div className="flex items-center gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={refreshAll} disabled={loading}>
+          <Button type="button" variant="outline" size="sm" onClick={() => void loadSnapshot()} disabled={loading}>
             <RefreshCw aria-hidden="true" className={loading ? "animate-spin" : ""} />Refresh
           </Button>
           <Button type="button" variant="outline" size="sm" onClick={copyDiagnostics} disabled={!snapshot}>
@@ -592,6 +577,11 @@ export function DiagnosticsSettings() {
       {error && <NoteRow tone="error">{error}</NoteRow>}
       {items.map((item) => <HealthRow key={item.id} item={item} />)}
       <DiagnosticsDetails snapshot={snapshot} />
+      <SettingsRow title="Logs" description="Open the folder containing ClawScribe logs.">
+        <Button type="button" variant="outline" size="sm" disabled={openingLogs} onClick={() => void openLogs()}>
+          <FolderOpen aria-hidden="true" />{openingLogs ? "Opening…" : "Open logs folder"}
+        </Button>
+      </SettingsRow>
       <SettingsFooter
         actions={
           <Button type="button" variant="outline" size="sm" onClick={saveDiagnosticsReport} disabled={!snapshot || loading || savingReport}>

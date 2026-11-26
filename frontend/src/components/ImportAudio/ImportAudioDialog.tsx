@@ -6,7 +6,8 @@ import { useRouter } from 'next/navigation';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useTranscriptionModels } from '@/hooks/useTranscriptionModels';
 import { importSummarySelection, useSummaryDestination, type ImportSummaryChoice } from '@/hooks/useSummaryDestination';
-import { useImportQueue, type AudioFileInfo, type ImportQueueItem } from '@/hooks/useImportAudio';
+import type { AudioFileInfo, ImportQueueItem } from '@/hooks/useImportAudio';
+import { useBackgroundImportQueue } from '@/contexts/ImportDialogContext';
 import { errorText } from '@/lib/errorText';
 import { readPinnedSummaryLanguageDefault } from '@/lib/summary-language-preferences';
 import { fileLanguageOptions } from '@/lib/transcription-language';
@@ -17,6 +18,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '../ui/input';
 import { Progress } from '../ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
+import { ImportSpeakerDetectionButton } from './ImportSpeakerDetectionButton';
 
 interface ImportAudioDialogProps {
   open: boolean;
@@ -41,7 +43,7 @@ const statusLabels: Record<ImportQueueItem['status'], string> = {
 export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: ImportAudioDialogProps) {
   const router = useRouter();
   const { selectedLanguage, transcriptModelConfig, modelConfig, isAutoSummary } = useConfig();
-  const { items, error: queueError, recoveryNotice, loading } = useImportQueue(open);
+  const { items, error: queueError, recoveryNotice, loading } = useBackgroundImportQueue();
   const { availableModels, selectedModelKey, setSelectedModelKey, loadingModels, fetchModels } = useTranscriptionModels(transcriptModelConfig);
   const model = availableModels.find(option => `${option.provider}:${option.name}` === selectedModelKey);
   const cloudProvider = isCloud(model?.provider) ? model?.provider : undefined;
@@ -192,6 +194,7 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
                     onOpenChange(false);
                     router.push(`/meeting-details?id=${encodeURIComponent(item.result!.meeting_id)}`);
                   }}>Open meeting</Button>}
+                  {item.status === 'saved' && item.result && <ImportSpeakerDetectionButton result={item.result} />}
                   {['queued', 'running', 'needs_source'].includes(item.status) &&
                     <Button variant="ghost" size="sm" disabled={busy !== null} aria-label={`Cancel import of ${item.title}`} onClick={() => void perform(item.id, () => invoke('cancel_import_item', { id: item.id }))}>Cancel</Button>}
                   {['failed', 'cancelled', 'needs_source'].includes(item.status) && retryDraft?.id !== item.id &&

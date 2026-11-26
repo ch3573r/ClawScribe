@@ -278,24 +278,27 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            !SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "different")
-                .await
-                .unwrap()
-        );
-        assert!(
-            SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "approved")
-                .await
-                .unwrap()
-        );
+        assert!(!SummaryProcessesRepository::claim_automatic_resume(
+            &pool,
+            meeting,
+            "different",
+            false
+        )
+        .await
+        .unwrap());
+        assert!(SummaryProcessesRepository::claim_automatic_resume(
+            &pool, meeting, "approved", false
+        )
+        .await
+        .unwrap());
         SummaryProcessesRepository::fail_interrupted_processes(&pool)
             .await
             .unwrap();
-        assert!(
-            !SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, "approved")
-                .await
-                .unwrap()
-        );
+        assert!(!SummaryProcessesRepository::claim_automatic_resume(
+            &pool, meeting, "approved", false
+        )
+        .await
+        .unwrap());
         assert!(
             SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved", None)
                 .await
@@ -308,6 +311,43 @@ mod tests {
             .unwrap();
         assert_eq!(row.result.as_deref(), Some("previous"));
         assert_eq!(row.metadata.as_deref(), Some("partial"));
+    }
+
+    #[tokio::test]
+    async fn exit_paused_intent_is_a_startup_candidate_for_non_builtin_notes() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        assert!(
+            SummaryProcessesRepository::defer_automatic_process_for_exit(
+                &pool, meeting, "import", "approved",
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            SummaryProcessesRepository::automatic_resume_candidates_after(
+                &pool, "approved", None, "", false,
+            )
+            .await
+            .unwrap(),
+            vec![(meeting.into(), "approved".into())],
+        );
+        assert!(SummaryProcessesRepository::claim_automatic_resume(
+            &pool, meeting, "approved", false
+        )
+        .await
+        .unwrap());
+        SummaryProcessesRepository::fail_interrupted_processes(&pool)
+            .await
+            .unwrap();
+        assert!(
+            SummaryProcessesRepository::automatic_resume_candidates_after(
+                &pool, "approved", None, "", false,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -346,18 +386,21 @@ mod tests {
             );
         }
         let (first, second) = tokio::join!(
-            SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, fingerprint),
-            SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, fingerprint),
+            SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, fingerprint, true),
+            SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, fingerprint, true),
         );
         assert_ne!(first.unwrap(), second.unwrap());
         SummaryProcessesRepository::update_process_cancelled(&pool, meeting)
             .await
             .unwrap();
-        assert!(
-            !SummaryProcessesRepository::claim_automatic_resume(&pool, meeting, fingerprint,)
-                .await
-                .unwrap()
-        );
+        assert!(!SummaryProcessesRepository::claim_automatic_resume(
+            &pool,
+            meeting,
+            fingerprint,
+            true
+        )
+        .await
+        .unwrap());
     }
 
     #[tokio::test]
@@ -735,19 +778,52 @@ impl SummaryProcessesRepository {
         origin: &str,
         fingerprint: &str,
     ) -> Result<bool, sqlx::Error> {
+        Self::write_automatic_process(pool, meeting, origin, fingerprint, "pending", None).await
+    }
+
+    pub(crate) async fn defer_automatic_process_for_exit(
+        pool: &SqlitePool,
+        meeting: &str,
+        origin: &str,
+        fingerprint: &str,
+    ) -> Result<bool, sqlx::Error> {
+        Self::write_automatic_process(
+            pool,
+            meeting,
+            origin,
+            fingerprint,
+            "cancelled",
+            Some(crate::summary::automatic::PAUSED_FOR_EXIT),
+        )
+        .await
+    }
+
+    async fn write_automatic_process(
+        pool: &SqlitePool,
+        meeting: &str,
+        origin: &str,
+        fingerprint: &str,
+        status: &str,
+        reason: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
         Ok(sqlx::query(r#"
-            INSERT INTO summary_processes (meeting_id, status, created_at, updated_at, start_time, automatic_origin, automatic_request_fingerprint)
-            SELECT id, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?,
-                COALESCE((SELECT profile || ':' FROM retranscription_notes_retry WHERE meeting_id = meetings.id), '') || ?
-            FROM meetings WHERE id = ?
-            ON CONFLICT(meeting_id) DO UPDATE SET status = excluded.status, error = NULL,
-                start_time = excluded.start_time, updated_at = excluded.updated_at, end_time = NULL,
-                automatic_origin = excluded.automatic_origin, automatic_request_fingerprint = excluded.automatic_request_fingerprint
+            INSERT INTO summary_processes (meeting_id, status, error, created_at, updated_at, start_time, end_time,
+                automatic_origin, automatic_request_fingerprint)
+            SELECT id, ?1, ?2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                CASE WHEN ?2 IS NULL THEN CURRENT_TIMESTAMP END,
+                CASE WHEN ?2 IS NOT NULL THEN CURRENT_TIMESTAMP END, ?3,
+                COALESCE((SELECT profile || ':' FROM retranscription_notes_retry WHERE meeting_id = meetings.id), '') || ?4
+            FROM meetings WHERE id = ?5
+            ON CONFLICT(meeting_id) DO UPDATE SET status = excluded.status, error = excluded.error,
+                start_time = excluded.start_time, updated_at = excluded.updated_at, end_time = excluded.end_time,
+                automatic_origin = excluded.automatic_origin, automatic_request_fingerprint = excluded.automatic_request_fingerprint,
+                automatic_resume_attempted = 0
             WHERE excluded.automatic_origin = 'recording' AND summary_processes.status = 'skipped'
-              AND summary_processes.error IN (?, ?) AND (summary_processes.automatic_origin = 'recording' OR summary_processes.automatic_origin IS NULL)
+              AND summary_processes.error IN (?6, ?7) AND (summary_processes.automatic_origin = 'recording' OR summary_processes.automatic_origin IS NULL)
               AND summary_processes.result IS NULL AND summary_processes.result_backup IS NULL
               AND summary_processes.previous_result IS NULL AND summary_processes.metadata IS NULL
-        "#).bind(origin).bind(fingerprint).bind(meeting).bind(RECOVERY_NEEDED).bind(NO_TRANSCRIPT).execute(pool).await?.rows_affected() == 1)
+        "#).bind(status).bind(reason).bind(origin).bind(fingerprint).bind(meeting)
+            .bind(RECOVERY_NEEDED).bind(NO_TRANSCRIPT).execute(pool).await?.rows_affected() == 1)
     }
 
     #[cfg(test)]
@@ -770,11 +846,14 @@ impl SummaryProcessesRepository {
             WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint IN (?1, ?2 || ':' || ?1)
             AND meeting_id > ?3 AND (
                 (status = 'failed' AND automatic_resume_attempted = 0 AND error = ?4)
-                OR (?5 AND status = 'cancelled' AND result IS NULL AND error IN (?6, ?7))
+                OR (status = 'cancelled' AND result IS NULL AND (
+                    (?5 AND error IN (?6, ?7, ?8)) OR (automatic_resume_attempted = 0 AND error = ?8)
+                ))
             ) ORDER BY meeting_id LIMIT 3")
             .bind(fingerprint).bind(profile).bind(after).bind(INTERRUPTED).bind(local)
             .bind(crate::summary::automatic::PAUSED_FOR_INFERENCE)
             .bind(crate::summary::service::RECORDING_INTERRUPTED_SUMMARY)
+            .bind(crate::summary::automatic::PAUSED_FOR_EXIT)
             .fetch_all(pool).await
     }
 
@@ -782,16 +861,21 @@ impl SummaryProcessesRepository {
         pool: &SqlitePool,
         meeting: &str,
         fingerprint: &str,
+        local: bool,
     ) -> Result<bool, sqlx::Error> {
         Ok(sqlx::query("UPDATE summary_processes SET
-            automatic_resume_attempted = CASE WHEN status = 'failed' THEN 1 ELSE automatic_resume_attempted END,
+            automatic_resume_attempted = CASE WHEN status = 'failed' OR (NOT ?7 AND error = ?6) THEN 1 ELSE automatic_resume_attempted END,
             status = 'pending', error = NULL, start_time = CURRENT_TIMESTAMP, end_time = NULL, updated_at = CURRENT_TIMESTAMP
             WHERE meeting_id = ?1 AND automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ?2
             AND ((status = 'failed' AND automatic_resume_attempted = 0 AND error = ?3)
-                OR (status = 'cancelled' AND result IS NULL AND error IN (?4, ?5)))")
+                OR (status = 'cancelled' AND result IS NULL AND (
+                    (?7 AND error IN (?4, ?5, ?6)) OR (automatic_resume_attempted = 0 AND error = ?6)
+                )))")
             .bind(meeting).bind(fingerprint).bind(INTERRUPTED)
             .bind(crate::summary::automatic::PAUSED_FOR_INFERENCE)
             .bind(crate::summary::service::RECORDING_INTERRUPTED_SUMMARY)
+            .bind(crate::summary::automatic::PAUSED_FOR_EXIT)
+            .bind(local)
             .execute(pool).await?.rows_affected() == 1)
     }
 

@@ -32,7 +32,7 @@ async function setup(hasTranscript, editStateFails = false, cancelAccepted = tru
     } },
     '@tauri-apps/api/event': { listen: async (event, callback) => { listeners.set(event, callback); return () => listeners.delete(event); } },
     sonner: { toast: { success: message => messages.push(message), info() {} } },
-    '@/contexts/ConfigContext': { useConfig: () => ({ selectedLanguage: 'auto', transcriptModelConfig: null }) },
+    '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({ selectedLanguage: 'auto', transcriptModelConfig: null }) },
     '@/hooks/useTranscriptionModels': { useTranscriptionModels: () => ({ availableModels: [], fetchModels() {}, resetSelection() {} }) },
     '@/lib/analytics': { track: async () => {}, trackError: async () => {} },
     'lucide-react': stubs(['RefreshCw', 'Globe', 'Loader2', 'AlertCircle', 'CheckCircle2', 'X', 'Cpu', 'Clock', 'Gauge', 'Zap', 'Hash']),

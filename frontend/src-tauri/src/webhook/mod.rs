@@ -185,6 +185,14 @@ pub(crate) struct SettingsView {
 }
 
 #[tauri::command]
+pub(crate) async fn get_meeting_webhook_history(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> Result<Vec<Delivery>, String> {
+    history::for_meeting(state.db_manager.pool(), &meeting_id).await
+}
+
+#[tauri::command]
 pub(crate) async fn get_webhook_settings<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,

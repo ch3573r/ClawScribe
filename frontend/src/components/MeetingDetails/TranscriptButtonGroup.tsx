@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ActionIcon } from './ActionIcon';
 import {
   DropdownMenu,
@@ -39,11 +39,12 @@ interface TranscriptButtonGroupProps {
   onFindReplace?: () => void; onAddBookmark?: () => void;
   correctionActions?: { busy: boolean; canUndo: boolean; canRestore: boolean; undo: () => void; restore: () => void };
   transcriptCount: number;
+  hasSpeakerLabels?: boolean;
+  speakerLabelsComplete?: boolean;
   transcribeOpen: boolean;
   onTranscribeOpenChange: (open: boolean) => void;
   onCopyTranscript: () => void;
   onFind?: () => void;
-  onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
   meetingFolderPath?: string | null;
   audioAvailable?: boolean;
@@ -54,16 +55,20 @@ export function TranscriptButtonGroup({
   bindings = DEFAULT_PLAYER_BINDINGS,
   onFindReplace, onAddBookmark, correctionActions,
   transcriptCount,
+  hasSpeakerLabels = false,
+  speakerLabelsComplete = true,
   transcribeOpen,
   onTranscribeOpenChange,
   onCopyTranscript,
   onFind,
-  onOpenMeetingFolder,
   meetingId,
   meetingFolderPath,
   audioAvailable = true,
   onRefetchTranscripts,
 }: TranscriptButtonGroupProps) {
+  const [detectionRequest, setDetectionRequest] = useState<{ numSpeakers: number | null } | null>(null);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
+  const startingDetection = useRef(false);
   const [showDiarizationDialog, setShowDiarizationDialog] = useState(false);
   const [isDiarizing, setIsDiarizing] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -206,8 +211,10 @@ export function TranscriptButtonGroup({
     }
   }, [meetingId, isCancelling]);
 
-  const handleRunSpeakerDiarization = useCallback(async (numSpeakers: number | null = null) => {
-    if (!meetingId || !meetingFolderPath) return;
+  const handleRunSpeakerDiarization = async (numSpeakers: number | null, preserveExistingLabels: boolean) => {
+    if (!meetingId || !meetingFolderPath || isDiarizing || startingDetection.current) return;
+    startingDetection.current = true;
+    setDetectionRequest(null);
     lastCompletionKeyRef.current = null;
     handledErrorRef.current = false;
     const speakerMode = numSpeakers ? `${numSpeakers} speakers` : 'Auto speaker detection';
@@ -233,32 +240,30 @@ export function TranscriptButtonGroup({
         embeddingModelPath: null,
         embeddingModelId: null,
         numSpeakers,
-        preserveExistingLabels: false,
+        preserveExistingLabels,
       });
       showDiarizationComplete(complete);
     } catch (error) {
       showDiarizationError(String(error));
+    } finally {
+      startingDetection.current = false;
     }
-  }, [meetingFolderPath, meetingId, showDiarizationComplete, showDiarizationError]);
+  };
+
+  const requestSpeakerDetection = (numSpeakers: number | null) => {
+    if (hasSpeakerLabels || !speakerLabelsComplete) setDetectionRequest({ numSpeakers });
+    else void handleRunSpeakerDiarization(numSpeakers, true);
+  };
 
   const speakerDetectionDisabled = transcriptCount === 0 || isDiarizing;
   const hasRecordingFolder = Boolean(meetingFolderPath?.trim());
-  const recordingFolderAction = (
-    <DropdownMenuItem disabled={!hasRecordingFolder} onSelect={() => { if (hasRecordingFolder) void onOpenMeetingFolder(); }}>
-      Open recording folder
-    </DropdownMenuItem>
-  );
 
   return (
     <div className="flex shrink-0 items-center justify-end gap-1">
       {onFindReplace && <Button variant="ghost" size="sm" className="px-1 text-xs" disabled={correctionActions?.busy || transcriptCount === 0} onClick={onFindReplace}>Find and replace</Button>}
       <Button variant="ghost" size="sm" className="px-1 text-xs" disabled={transcriptCount === 0} onClick={() => { Analytics.trackButtonClick('copy_transcript', 'meeting_details'); onCopyTranscript(); }}>Copy</Button>
-      <DropdownMenu><DropdownMenuTrigger asChild><ActionIcon label="More transcript actions" className="h-8 w-8"><MoreHorizontal /></ActionIcon></DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          {hasRecordingFolder ? recordingFolderAction : <Tooltip>
-            <TooltipTrigger asChild><span className="block" tabIndex={0}>{recordingFolderAction}</span></TooltipTrigger>
-            <TooltipContent>No recording folder is attached to this meeting.</TooltipContent>
-          </Tooltip>}
+      <DropdownMenu><DropdownMenuTrigger asChild><ActionIcon ref={menuTrigger} label="More transcript actions" className="h-8 w-8"><MoreHorizontal /></ActionIcon></DropdownMenuTrigger>
+        <DropdownMenuContent align="end" onCloseAutoFocus={event => { if (detectionRequest) event.preventDefault(); }}>
           {meetingId && meetingFolderPath && audioAvailable && <DropdownMenuItem title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'} onClick={() => { Analytics.trackButtonClick('enhance_transcript', 'meeting_details'); onTranscribeOpenChange(true); }}>{transcriptCount === 0 ? 'Transcribe saved audio' : 'Enhance or retranscribe'}</DropdownMenuItem>}
           {onFind && <DropdownMenuItem disabled={transcriptCount === 0} onSelect={onFind}>Find in transcript<DropdownMenuShortcut>{playerKeycaps(bindings.find).join('+')}</DropdownMenuShortcut></DropdownMenuItem>}
           {onAddBookmark && <DropdownMenuItem onSelect={onAddBookmark}>Add bookmark<DropdownMenuShortcut>{playerKeycaps(bindings.bookmark).join('+')}</DropdownMenuShortcut></DropdownMenuItem>}
@@ -266,8 +271,8 @@ export function TranscriptButtonGroup({
           {correctionActions?.canRestore && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.restore}>Restore previous transcript</DropdownMenuItem>}
           {meetingId && audioAvailable && canDetectSpeakers(hasRecordingFolder, transcriptCount) && <>
             <DropdownMenuSeparator /><DropdownMenuLabel>{isDiarizing ? diarizationMessage ?? 'Detecting speakers…' : 'Detect speakers'}</DropdownMenuLabel>
-            <DropdownMenuItem disabled={speakerDetectionDisabled} onSelect={() => void handleRunSpeakerDiarization(null)}>Auto detect</DropdownMenuItem>
-            {[2, 3, 4, 5, 6].map(count => <DropdownMenuItem key={count} disabled={speakerDetectionDisabled} onSelect={() => void handleRunSpeakerDiarization(count)}>{count} speakers</DropdownMenuItem>)}
+            <DropdownMenuItem disabled={speakerDetectionDisabled} onSelect={() => requestSpeakerDetection(null)}>Auto detect</DropdownMenuItem>
+            {[2, 3, 4, 5, 6].map(count => <DropdownMenuItem key={count} disabled={speakerDetectionDisabled} onSelect={() => requestSpeakerDetection(count)}>{count} speakers</DropdownMenuItem>)}
           </>}
           {isDiarizing && <DropdownMenuItem disabled={isCancelling} onSelect={() => void handleCancelDiarization()}>{isCancelling ? 'Cancelling…' : 'Cancel speaker detection'}</DropdownMenuItem>}
         </DropdownMenuContent>
@@ -284,6 +289,30 @@ export function TranscriptButtonGroup({
           onComplete={handleRetranscribeComplete}
         />
       )}
+
+      <Dialog open={detectionRequest !== null} onOpenChange={open => { if (!open) setDetectionRequest(null); }}>
+        <DialogContent onCloseAutoFocus={event => {
+          event.preventDefault();
+          if (!startingDetection.current) menuTrigger.current?.focus();
+        }}>
+          <DialogHeader>
+            <DialogTitle>Detect speakers</DialogTitle>
+            <DialogDescription>
+              {hasSpeakerLabels ? 'This transcript already has speaker labels.' : 'Some transcript segments have yet to load and may have speaker labels.'}
+              {' '}Keep existing labels and fill unlabeled segments, or replace all labels with detection results.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setDetectionRequest(null)}>Cancel</Button>
+            <Button type="button" onClick={() => {
+              if (detectionRequest) void handleRunSpeakerDiarization(detectionRequest.numSpeakers, true);
+            }}>Keep my labels</Button>
+            <Button type="button" variant="outline" onClick={() => {
+              if (detectionRequest) void handleRunSpeakerDiarization(detectionRequest.numSpeakers, false);
+            }}>Replace</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <SpeakerDiarizationDialog
         open={showDiarizationDialog}

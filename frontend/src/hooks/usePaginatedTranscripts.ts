@@ -275,7 +275,6 @@ export function usePaginatedTranscripts({
         } catch (err) {
             if (generation !== generationRef.current) throw err;
             console.error('Failed to update transcript speaker:', err);
-            setError('Failed to update speaker label');
             await refetch();
             throw err;
         }
@@ -308,7 +307,6 @@ export function usePaginatedTranscripts({
         } catch (err) {
             if (generation !== generationRef.current) throw err;
             console.error('Failed to update matching transcript speakers:', err);
-            setError('Failed to update matching speaker labels');
             await refetch();
             throw err;
         }

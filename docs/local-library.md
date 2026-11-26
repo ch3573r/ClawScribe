@@ -11,8 +11,8 @@ uses its save time. Imports keep the date selected during import.
 Older meetings may have no duration or source. **Meetings that need attention** puts saved
 meetings with recording warnings, missing transcripts, or failed or cancelled
 summary jobs before the rest of the archive. Select **Needs attention** to show
-only those meetings. The title and project filters
-apply to both groups. Use the row action to open transcription, review the
+only those meetings. The title, project, date and recurring series filters
+apply to both groups and to Archive search. Use the row action to open transcription, review the
 recording, retry a recording-folder copy, or return to the summary. Starting transcription or generation
 still requires a choice in the existing meeting tools. A missing summary
 alone is optional. Recovery files from another computer must be recovered there.
@@ -23,6 +23,12 @@ originals, and local database snapshots. Sizes use filesystem metadata and
 count each shared recording folder once. Unavailable recording folders and
 skipped files are reported. Unattached interrupted recordings, user-created
 backup ZIPs, and model downloads are outside these totals.
+
+**Settings → General → Storage** also opens **Library storage** and **Backup and
+restore**. Use **Show storage by meeting** for a paginated breakdown of audio,
+recovery files, and other files in each meeting's recording folder. Folders
+that exceed the file scan limit show a partial measurement. **Choose folder**
+changes where future recordings are saved.
 
 To free space, choose **Review saved audio** in a meeting row's menu, or use
 **Select meetings → Review selected audio**. Selection applies to the currently
@@ -40,6 +46,13 @@ recording-folder support files, and existing backups remain available.
 Imported originals outside the meeting folder remain where they were.
 ClawScribe only removes audio after confirmation.
 
+Use **Bulk actions** to add project tags to the selection, export a Markdown
+or Word file per meeting, start a Meeting memory conversation with those
+meetings selected, or delete them. Export asks where to save each file. Cancel
+a save dialog to stop the batch. Deleting requires confirmation and keeps
+recording files on disk unless you also select their removal. Opening a scoped
+Meeting memory conversation leaves the question and sending under your control.
+
 ## Open actions and saved live answers
 
 In **Meetings → Open actions**, filter unfinished reviewed actions by owner
@@ -54,7 +67,11 @@ During live assistance, choose **Save answer to meeting notes** on a completed
 reply. **Saved live answers** in the saved meeting shows the provider, the
 finalized-through time, and the original excerpts from the recording. Citations
 to other saved meetings or documents display only while the original references
-still verify. Deleting a source meeting or reference document also removes any
+still verify. Use **Show in transcript** to open a uniquely matched passage or
+**Play from here** when the cited recording and its offset are available.
+Use **Copy** to copy the answer as Markdown or **Insert into summary** to append
+it to an existing summary. Source numbers refer to the original saved answer.
+Deleting a source meeting or reference document also removes any
 saved live answer that used it, including answers without a citation. Detaching
 a shared document from a meeting removes answers that used it through that meeting.
 Early development builds saved answers without a complete record of their
@@ -76,16 +93,19 @@ read-only access**. Choose your client format. For Claude Desktop, add the
 add the displayed table to `config.toml`. Keep other server entries and
 reconnect your client. For clients with separate fields, use the
 ClawScribe executable as the command and `--mcp-stdio` as the sole argument.
+Choose **Test MCP server** to check that the local process responds and lists
+the tools for your enabled permissions.
 The client starts its own local process, including when the desktop window
 is closed. See the [Claude Desktop setup guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
 and [Codex MCP configuration](https://developers.openai.com/codex/mcp).
 
 | Tool | Result |
 | --- | --- |
-| `list_meetings` | Saved meeting IDs, titles and dates, newest first. |
+| `list_meetings` | Saved meeting IDs, titles and dates, newest first. Accepts inclusive `from` and `to` dates, `tags`, `tag_mode` (`any` or `all`), and `untagged`. |
+| `list_open_actions` | Open reviewed actions across saved meetings, newest meeting first. Follow `next_offset` for more. |
 | `search_meetings` | Meetings matching literal text in their title or current transcript. |
-| `search_passages` | Up to 25 literal matches in current transcripts, with meeting and segment IDs, speaker and available recording time. Accepts inclusive `from` and `to` dates, `tags`, `tag_mode` (`any` or `all`), and `untagged`. |
-| `get_meeting` | Saved meeting details, summary and notes. |
+| `search_passages` | Up to 25 current transcript passages containing all search terms, ignoring letter case. Use double quotes for a phrase. Accepts the same date and tag filters as `list_meetings`. Set `semantic` to `true` to request related passages when the local index and model are ready. |
+| `get_meeting` | Saved meeting summary, notes, tags, bookmarks and attachment names, formats and sizes. Use `next_metadata_offset` to continue the metadata lists. |
 | `get_transcript` | Current transcript text in recording order with available speaker labels and timestamps. |
 | `get_audio` | A local path for a verified saved audio file, or null when unavailable. |
 
@@ -104,8 +124,9 @@ transcripts, recordings, notes, citations, and export history.
 Use the meeting ID from a list or search result. For passage matches, use
 the segment ID when reading the transcript. If passage search reports
 `limited`, narrow the query or date and project filters. Follow the returned
-offsets for long transcripts and notes. Calendar invitations stored in the desktop
-calendar picker and attached reference documents are outside this interface.
+offsets for long transcripts and notes. Attachment results contain metadata
+only. Calendar invitations and the contents of reference documents stay in
+the desktop library.
 
 Each permission grants its scope to local clients running under your user
 account. A client may send retrieved content to its own provider. Turning a
@@ -142,6 +163,9 @@ result or time limit display a notice. Browse or narrow the query and filters to
 a smaller set. Literal search uses a local substring index to find candidates,
 then checks the saved text and its exact offset. Short searches and terms without
 an indexable substring use a bounded scan. No download or answer provider is required.
+Select **Hybrid** beside Archive search to also find passages with similar
+meaning. This option requires a ready local semantic index in **Settings →
+Meeting memory**.
 
 **Ask about these results** opens a fresh Meeting memory conversation scoped
 to the displayed matching meetings, including when results are limited.
@@ -183,8 +207,9 @@ in place. A verified citation to an unchanged passage can still open it.
 
 Switch to **Meeting memory** for ranked source search and cited questions. Its
 searchable picker lets you select meetings and remove selected chips, or check
-**Search all saved meetings**. Project filters and inclusive dates constrain
-that conversation's sources. All-meetings mode searches every meeting eligible under those filters;
+**Search all saved meetings**. A project or inclusive date filter is enough to
+start asking about matching meetings. When meetings are selected, filters
+constrain that selection. All-meetings mode searches every meeting eligible under those filters;
 turning it off restores your previous meeting selection. Empty constrained meeting selections never broaden into a library
 search. You can draft a question before choosing its sources. Leaving Meetings
 and returning in the same window restores the selected meetings and filters.
@@ -192,8 +217,9 @@ Ranked results show the canonical excerpt, original title/date/speaker,
 and actual keyword or semantic + keyword mode. Keyword search stays usable
 without enabling or downloading an embedding model.
 
-The first question creates a saved library conversation automatically. You can
-also create a new conversation or choose an existing one. Opening an existing
+The first question creates a saved library conversation automatically. The
+conversations menu lists them newest first and lets you start, rename or
+delete a saved conversation. Opening an existing
 conversation restores its last submitted meeting scope, including the project
 and date filters. Changes made since the last question are remembered while the
 app is open. Select reference files for the current conversation before asking
@@ -201,8 +227,9 @@ with them. Use **Copy answer** to copy an assistant response as Markdown.
 Questions use the summary provider configured in Settings. That provider may
 be local or cloud; retrieval and embedding inference remain local. Answers
 show the executed provider/model and retrieval mode. Cancel and scope changes
-invalidate pending work; retries reuse the pending request identity. Clear
-removes the selected conversation's history. Existing saved meeting chat,
+invalidate pending work; retries reuse the pending request identity. Clearing
+a library conversation removes it from the list. Clearing meeting chat removes
+its history. Existing saved meeting chat,
 including legacy messages, remains readable. In a meeting, chat defaults to
 only that meeting. Open **Context** and choose **Other saved meetings** to expand
 the scope with a searchable meeting picker and project filters. **Search mode**
@@ -257,7 +284,8 @@ Use **Meetings → Meeting memory → Attach file** to choose a PDF, DOCX, TXT o
 Markdown file. A single selected meeting is used automatically; otherwise pick
 the destination meeting in the searchable dialog. The destination respects the
 current project/date filters and joins the selected sources after attachment.
-With no meetings available, save a meeting or adjust those filters first.
+With no meetings available, save a meeting or adjust those filters first. An
+attached file is selected for the current question once its scope is verified.
 You can also use the paperclip beside the compact chat's question field, or
 **Context → Add file**. Selected references appear above the question field;
 remove a chip to exclude that file from the question. Suggested questions fill
@@ -268,10 +296,10 @@ A file near the text limit may need splitting because anchor metadata also count
 toward the bounded extraction response.
 
 Preview references locally and select the ones a question may use. Library chat
-lists references attached to the currently selected meetings. Adding an attachment
-does not select it automatically. **Use selected references for answers** is off by default
-and applies to the current saved conversation. Enable it before a non-Built-in AI
-provider receives document excerpts. Disabling it cancels active answers that use
+lists references attached to the meetings in scope. **Allow reference sharing**
+above the question enables reference excerpts for non-Built-in AI providers
+in the current conversation. This permission is off by default and can be
+revoked in the reference controls. Disabling it cancels active answers that use
 references. Keyword search and previews work offline without that permission.
 
 Document citation chips open the extracted page or paragraph. They describe

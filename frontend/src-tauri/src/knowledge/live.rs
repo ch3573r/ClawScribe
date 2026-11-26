@@ -600,15 +600,28 @@ impl LiveState {
                 reply: result,
             });
         }
-        while session.history.len() > 32
-            || serde_json::to_vec(&session.history)
-                .map_or(MAX_HISTORY_BYTES + 1, |bytes| bytes.len())
-                > MAX_HISTORY_BYTES
-        {
-            session.history.pop_front();
-            session.history.pop_front();
-        }
+        trim_history(&mut session.history);
         Ok(())
+    }
+}
+/// Bound live history to 32 messages and `MAX_HISTORY_BYTES` in total.
+/// An exchange that exceeds the byte bound on its own (such as a window recap
+/// with hundreds of evidence entries) is left out of the display history by
+/// itself; it stays selectable as a note, and earlier exchanges are kept.
+fn trim_history(history: &mut VecDeque<HistoryMessage>) {
+    let bytes = |messages: &[&HistoryMessage]| {
+        serde_json::to_vec(messages).map_or(usize::MAX, |encoded| encoded.len())
+    };
+    if history.len() >= 2 {
+        let newest: Vec<&HistoryMessage> = history.iter().skip(history.len() - 2).collect();
+        if bytes(&newest) > MAX_HISTORY_BYTES {
+            history.pop_back();
+            history.pop_back();
+        }
+    }
+    while history.len() > 32 || bytes(&history.iter().collect::<Vec<_>>()) > MAX_HISTORY_BYTES {
+        history.pop_front();
+        history.pop_front();
     }
 }
 fn validate_in(inner: &Inner, lease: &LiveLease, documents: bool) -> Result<(), String> {
@@ -665,18 +678,47 @@ where
             return Err("No finalized live transcript is available yet".into());
         }
         let (saved_scope, saved) = super::live_context::saved(pool, &request).await?;
-        let live_limit = if saved.is_empty() { 12 } else { 6 };
-        let live = super::live_context::lexical(&snapshot, &request.search.query, live_limit);
-        let mut passages: Vec<_> = live.iter().take(live_limit).cloned().collect();
-        passages.extend(saved.into_iter().take(12 - passages.len()));
-        for passage in live {
-            if passages.len() == 12 {
-                break;
+        let intent = super::live_context::intent(&request.search.query);
+        let mut window_coverage = None;
+        let passages = if intent.uses_window() {
+            // Recaps and open-question sweeps need the whole rolling window,
+            // not a dozen keyword hits. Keep the newest speech that fits;
+            // saved references fill any remaining budget.
+            let window = super::live_context::window(&snapshot);
+            let prompt_budget = budget.saturating_sub(512);
+            let mut passages =
+                super::live_context::fit_newest(&request.search.query, &window, prompt_budget)?;
+            window_coverage = Some(
+                if passages.len() == snapshot.segments.len() && !snapshot.transcription_incomplete {
+                    "complete_window"
+                } else {
+                    "partial_window"
+                },
+            );
+            // Saved references join only while the whole set still fits, so
+            // the final prompt is built in one linear pass.
+            for reference in saved.into_iter().take(12) {
+                passages.push(reference);
+                if !super::live_context::fits(&request.search.query, &passages, prompt_budget)? {
+                    passages.pop();
+                }
             }
-            if !passages.iter().any(|p| p.evidence == passage.evidence) {
-                passages.push(passage);
+            passages
+        } else {
+            let live_limit = if saved.is_empty() { 12 } else { 6 };
+            let live = super::live_context::lexical(&snapshot, &request.search.query, live_limit);
+            let mut passages: Vec<_> = live.iter().take(live_limit).cloned().collect();
+            passages.extend(saved.into_iter().take(12 - passages.len()));
+            for passage in live {
+                if passages.len() == 12 {
+                    break;
+                }
+                if !passages.iter().any(|p| p.evidence == passage.evidence) {
+                    passages.push(passage);
+                }
             }
-        }
+            passages
+        };
         let (prompt, selected, contexts) = super::live_context::build_prompt(
             &snapshot,
             &request.search.query,
@@ -687,6 +729,7 @@ where
             serde_json::from_str(&prompt).map_err(|_| "Invalid live evidence prompt")?;
         envelope["live_context"] = serde_json::json!({"session_id":snapshot.session_id,"finalized_through_seconds":snapshot.finalized_through_seconds,
             "transcription_incomplete":snapshot.transcription_incomplete,"context_window_seconds":600,
+            "evidence_selection":window_coverage.unwrap_or("relevant_excerpts"),
             "notice":"Evidence is finalized transcript through the stated recording time, not a real-time description of the current moment."});
         let prompt = envelope.to_string();
         if prompt.len() > budget {
@@ -949,6 +992,44 @@ pub(crate) async fn save_sharing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history_message(content: String) -> HistoryMessage {
+        HistoryMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            request_id: None,
+            role: "assistant".into(),
+            content,
+            created_at: String::new(),
+            status: "completed".into(),
+            legacy: false,
+            reply: None,
+        }
+    }
+
+    #[test]
+    fn an_oversized_exchange_does_not_wipe_earlier_history() {
+        let mut history: VecDeque<_> = (0..6)
+            .map(|i| history_message(format!("small {i}")))
+            .collect();
+        history.push_back(history_message("question".into()));
+        history.push_back(history_message("x".repeat(MAX_HISTORY_BYTES * 2)));
+        trim_history(&mut history);
+        assert_eq!(history.len(), 6, "earlier exchanges survive a large recap");
+        assert_eq!(history.back().unwrap().content, "small 5");
+
+        history.push_back(history_message("next".into()));
+        history.push_back(history_message("y".repeat(MAX_HISTORY_BYTES / 2)));
+        history.push_back(history_message("again".into()));
+        history.push_back(history_message("z".repeat(MAX_HISTORY_BYTES / 2)));
+        trim_history(&mut history);
+        let total = serde_json::to_vec(&history).unwrap().len();
+        assert!(total <= MAX_HISTORY_BYTES);
+        assert_eq!(history.back().unwrap().content.len(), MAX_HISTORY_BYTES / 2);
+
+        let mut long: VecDeque<_> = (0..40).map(|i| history_message(i.to_string())).collect();
+        trim_history(&mut long);
+        assert_eq!(long.len(), 32);
+    }
 
     fn snapshot_wire(generation: serde_json::Value) -> serde_json::Value {
         serde_json::json!({

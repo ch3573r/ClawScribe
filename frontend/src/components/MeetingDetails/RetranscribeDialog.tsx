@@ -31,7 +31,7 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useTranscriptionConfig } from '@/contexts/ConfigContext';
 import { fileLanguageOptions } from '@/lib/transcription-language';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import Analytics from '@/lib/analytics';
@@ -84,7 +84,7 @@ export function RetranscribeDialog({
   hasTranscript,
   onComplete,
 }: RetranscribeDialogProps) {
-  const { selectedLanguage, transcriptModelConfig } = useConfig();
+  const { selectedLanguage, transcriptModelConfig } = useTranscriptionConfig();
   // Keep completion wording tied to this run when the parent refreshes its transcript count.
   const [startedWithTranscript, setStartedWithTranscript] = useState<boolean | null>(null);
   const isRetranscription = startedWithTranscript ?? hasTranscript;

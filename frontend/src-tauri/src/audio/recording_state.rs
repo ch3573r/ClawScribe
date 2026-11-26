@@ -2,11 +2,41 @@ use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::buffer_pool::AudioBufferPool;
 use super::devices::AudioDevice;
+use super::recording_levels::RecordingLevels;
+
+#[derive(Default)]
+struct LiveLevels {
+    latest: Option<(Instant, RecordingLevels)>,
+    quiet_mic_since: Option<Instant>,
+    mic_heard: bool,
+}
+
+impl LiveLevels {
+    fn observe(&mut self, levels: RecordingLevels, now: Instant) {
+        self.latest = Some((now, levels));
+        // Match the in-app meter's -60 dB floor. Once we hear any input,
+        // subsequent silence is normal until a pause/resume resets the meter.
+        if levels.mic.is_some_and(|mic| mic.rms.max(mic.peak) >= 0.001) {
+            self.mic_heard = true;
+        }
+        if levels.mic.is_some() && !self.mic_heard {
+            self.quiet_mic_since.get_or_insert(now);
+        } else {
+            self.quiet_mic_since = None;
+        }
+    }
+
+    fn mic_no_signal(&self, now: Instant) -> bool {
+        self.quiet_mic_since.is_some_and(|started| {
+            now.saturating_duration_since(started) >= Duration::from_secs(10)
+        })
+    }
+}
 
 /// Device type for audio chunks
 #[derive(Debug, Clone, PartialEq)]
@@ -135,7 +165,7 @@ pub struct RecordingState {
     warning_cleared_callback: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
     // Called once per recording when the recordings volume runs low.
     disk_space_callback: Mutex<Option<Box<dyn Fn(u64, &std::path::Path) + Send + Sync>>>,
-    latest_levels: Mutex<Option<(Instant, super::recording_levels::RecordingLevels)>>,
+    latest_levels: Mutex<LiveLevels>,
     // Called about ten times a second with the live input levels.
     levels_callback:
         Mutex<Option<Box<dyn Fn(&super::recording_levels::RecordingLevels) + Send + Sync>>>,
@@ -158,7 +188,7 @@ impl RecordingState {
 
     // Recording control
     pub fn start_recording(&self) -> Result<()> {
-        *self.latest_levels.lock().unwrap() = None;
+        *self.latest_levels.lock().unwrap() = LiveLevels::default();
         self.capture_incomplete.store(false, Ordering::Release);
         self.is_recording.store(true, Ordering::SeqCst);
         *self.recording_start.lock().unwrap() = Some(Instant::now());
@@ -225,6 +255,7 @@ impl RecordingState {
             );
         }
 
+        *self.latest_levels.lock().unwrap() = LiveLevels::default();
         self.is_paused.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -435,22 +466,30 @@ impl RecordingState {
     pub fn report_levels(&self, levels: &super::recording_levels::RecordingLevels) {
         // Sampled by the optional controls window. Metering must never delay the pipeline.
         if let Ok(mut latest) = self.latest_levels.try_lock() {
-            *latest = Some((Instant::now(), *levels));
+            if !self.is_paused() {
+                latest.observe(*levels, Instant::now());
+            }
         }
         if let Some(callback) = self.levels_callback.lock().unwrap().as_ref() {
             callback(levels);
         }
     }
 
-    pub(crate) fn latest_levels(&self) -> Option<super::recording_levels::RecordingLevels> {
-        let (at, mut levels) = (*self.latest_levels.lock().ok()?)?;
-        if at.elapsed() >= std::time::Duration::from_millis(500) {
-            for source in [&mut levels.mic, &mut levels.system].into_iter().flatten() {
-                source.rms = 0.0;
-                source.peak = 0.0;
+    pub(crate) fn live_levels(&self) -> (Option<RecordingLevels>, bool) {
+        let Ok(readings) = self.latest_levels.lock() else {
+            return (None, false);
+        };
+        let now = Instant::now();
+        let levels = readings.latest.map(|(at, mut levels)| {
+            if now.duration_since(at) >= Duration::from_millis(500) {
+                for source in [&mut levels.mic, &mut levels.system].into_iter().flatten() {
+                    source.rms = 0.0;
+                    source.peak = 0.0;
+                }
             }
-        }
-        Some(levels)
+            levels
+        });
+        (levels, !self.is_paused() && readings.mic_no_signal(now))
     }
 
     /// Tell the UI the recordings volume is running low. Does not affect
@@ -679,7 +718,7 @@ impl Default for RecordingState {
             warning_cleared_callback: Mutex::new(None),
             disk_space_callback: Mutex::new(None),
             levels_callback: Mutex::new(None),
-            latest_levels: Mutex::new(None),
+            latest_levels: Mutex::new(LiveLevels::default()),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
             recording_end: Mutex::new(None),
@@ -727,12 +766,12 @@ mod tests {
             }),
             system: None,
         };
-        assert_eq!(state.latest_levels(), None);
+        assert_eq!(state.live_levels().0, None);
         state.report_levels(&levels);
-        assert_eq!(state.latest_levels(), Some(levels));
-        *state.latest_levels.lock().unwrap() =
-            Some((Instant::now() - std::time::Duration::from_secs(1), levels));
-        let stale = state.latest_levels().unwrap();
+        assert_eq!(state.live_levels().0, Some(levels));
+        state.latest_levels.lock().unwrap().latest =
+            Some((Instant::now() - Duration::from_secs(1), levels));
+        let stale = state.live_levels().0.unwrap();
         assert_eq!(
             stale.mic,
             Some(SourceLevel {
@@ -742,7 +781,47 @@ mod tests {
         );
         assert_eq!(stale.system, None);
         state.start_recording().unwrap();
-        assert_eq!(state.latest_levels(), None);
+        assert_eq!(state.live_levels().0, None);
+    }
+
+    #[test]
+    fn floating_microphone_warning_follows_capture_even_before_the_window_opens() {
+        use crate::audio::recording_levels::SourceLevel;
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        let now = Instant::now();
+        let quiet = RecordingLevels {
+            mic: Some(SourceLevel {
+                rms: 0.0,
+                peak: 0.0,
+            }),
+            system: None,
+        };
+        {
+            let mut readings = state.latest_levels.lock().unwrap();
+            readings.observe(quiet, now);
+            assert!(!readings.mic_no_signal(now + Duration::from_millis(9_999)));
+            assert!(readings.mic_no_signal(now + Duration::from_secs(10)));
+            readings.observe(
+                RecordingLevels {
+                    mic: Some(SourceLevel {
+                        rms: 0.0,
+                        peak: 0.1,
+                    }),
+                    system: None,
+                },
+                now + Duration::from_secs(11),
+            );
+            readings.observe(quiet, now + Duration::from_secs(12));
+            assert!(!readings.mic_no_signal(now + Duration::from_secs(30)));
+        }
+        state.pause_recording().unwrap();
+        assert!(!state.live_levels().1);
+        state.resume_recording().unwrap();
+        let mut readings = state.latest_levels.lock().unwrap();
+        readings.observe(quiet, now + Duration::from_secs(40));
+        assert!(!readings.mic_no_signal(now + Duration::from_millis(49_999)));
+        assert!(readings.mic_no_signal(now + Duration::from_secs(50)));
     }
 
     #[tokio::test]

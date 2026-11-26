@@ -4,10 +4,8 @@ import { createContext, useContext, useState, type ReactNode } from 'react';
 import type { PermissionStatus, OnboardingPermissions } from '@/types/onboarding';
 
 interface OnboardingContextType {
-  currentStep: number;
-  goToStep: (step: number) => void;
+  currentStep: 1 | 2;
   goNext: () => void;
-  goPrevious: () => void;
   permissions: OnboardingPermissions;
   setPermissionStatus: (permission: keyof OnboardingPermissions, status: PermissionStatus) => void;
 }
@@ -15,7 +13,7 @@ interface OnboardingContextType {
 const OnboardingContext = createContext<OnboardingContextType | null>(null);
 
 export function OnboardingProvider({ children }: { children: ReactNode }) {
-  const [currentStep, goToStep] = useState(1);
+  const [currentStep, setCurrentStep] = useState<1 | 2>(1);
   const [permissions, setPermissions] = useState<OnboardingPermissions>({
     microphone: 'not_determined',
     systemAudio: 'not_determined',
@@ -24,9 +22,7 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
   return (
     <OnboardingContext.Provider value={{
       currentStep,
-      goToStep,
-      goNext: () => goToStep(currentStep + 1),
-      goPrevious: () => goToStep(currentStep - 1),
+      goNext: () => setCurrentStep(2),
       permissions,
       setPermissionStatus: (permission, status) => {
         setPermissions(previous => ({ ...previous, [permission]: status }));

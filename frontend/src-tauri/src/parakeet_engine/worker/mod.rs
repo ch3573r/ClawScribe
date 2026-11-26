@@ -1,5 +1,6 @@
 //! Opt-in supervised Parakeet inference, independent of Tauri.
 mod child;
+mod directml_probe;
 pub mod protocol;
 mod supervisor;
 
@@ -8,6 +9,32 @@ pub use supervisor::{
 };
 
 pub const WORKER_FLAG: &str = "--clawscribe-transcription-worker";
+
+#[cfg(any(test, all(windows, feature = "directml")))]
+static AUTOMATIC_DIRECTML: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(any(test, all(windows, feature = "directml")))]
+pub(super) fn cached_automatic_directml() -> Option<bool> {
+    AUTOMATIC_DIRECTML.get().copied()
+}
+
+#[cfg(test)]
+#[test]
+fn directml_cache_read_leaves_an_unchecked_status_unknown() {
+    assert_eq!(cached_automatic_directml(), None);
+}
+
+#[cfg(all(windows, feature = "directml"))]
+pub(super) fn automatic_directml_available(app_data: &std::path::Path) -> bool {
+    directml_probe::resolve(&AUTOMATIC_DIRECTML, app_data, || {
+        TranscriptionWorker::new()?.probe_directml(std::time::Duration::from_secs(5))
+    })
+}
+
+#[cfg(all(windows, feature = "vulkan"))]
+pub(crate) fn vulkan_device_available(timeout: std::time::Duration) -> Result<bool, WorkerError> {
+    TranscriptionWorker::new().and_then(|mut worker| worker.probe_vulkan(timeout))
+}
 
 /// Dispatch before initializing logging or the desktop runtime.
 pub fn dispatch() -> Option<i32> {

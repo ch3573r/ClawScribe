@@ -18,6 +18,68 @@ import { readMeetingSummaryLanguage } from '@/lib/summary-language-preferences';
 
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
+async function checkSummaryModel(config: ModelConfig, isMounted: () => boolean, openSettings?: () => void): Promise<boolean> {
+  if (config.provider === 'ollama') {
+    try {
+      const models = await invokeTauri<OllamaModel[]>('get_ollama_models', { endpoint: config.ollamaEndpoint || null });
+      if (!isMounted()) return false;
+      if (models?.length) return true;
+      toast.error('No Ollama models found. Please download gemma3:1b from Model Settings.', { duration: 5000 });
+    } catch (error) {
+      if (!isMounted()) return false;
+      const message = error instanceof Error ? error.message : String(error);
+      if (isOllamaNotInstalledError(message)) {
+        toast.error('Ollama is not installed', {
+          description: 'Please download and install Ollama to use local models.',
+          duration: 7000,
+          action: { label: 'Download', onClick: () => openExternal('https://ollama.com/download') },
+        });
+      } else {
+        toast.error('Failed to check Ollama models. Please ensure Ollama is running and download a model from Settings.', { duration: 5000 });
+      }
+    }
+    openSettings?.();
+    return false;
+  }
+
+  const modelName = config.model;
+  if (!modelName) {
+    toast.error('No built-in AI model selected', { description: 'Please select a model in settings', duration: 5000 });
+    openSettings?.();
+    return false;
+  }
+  try {
+    const ready = await invokeTauri<boolean>('builtin_ai_is_model_ready', { modelName, refresh: true });
+    if (!isMounted()) return false;
+    if (ready) return true;
+    const model = await invokeTauri<BuiltInModelInfo | null>('builtin_ai_get_model_info', { modelName });
+    if (!isMounted()) return false;
+    const status = model?.status;
+    if (status?.type === 'downloading') {
+      toast.info('Model download in progress', {
+        description: `${modelName} is downloading (${status.progress}%). Please wait until download completes.`,
+        duration: 5000,
+      });
+      return false;
+    }
+    if (status?.type === 'not_downloaded') {
+      toast.error('Built-in AI model not downloaded', {
+        description: `${modelName} needs to be downloaded. Please download it in model settings.`, duration: 7000,
+      });
+    } else if (status?.type === 'corrupted' || status?.type === 'error') {
+      const description = status.type === 'error' ? status.Error || 'The model file has an error' : 'The model file is corrupted';
+      toast.error('Built-in AI model not available', { description: `${description}. Please check model settings.`, duration: 7000 });
+    } else {
+      toast.error('Built-in AI model not ready', { description: 'Please ensure the model is downloaded in settings', duration: 5000 });
+    }
+    openSettings?.();
+  } catch (error) {
+    if (!isMounted()) return false;
+    toast.error('Failed to validate built-in AI model', { description: error instanceof Error ? error.message : String(error), duration: 5000 });
+  }
+  return false;
+}
+
 interface UseSummaryGenerationProps {
   beforeGeneration?: () => Promise<void>;
   hasExistingSummary?: boolean;
@@ -47,14 +109,23 @@ export function useSummaryGeneration({
 }: UseSummaryGenerationProps) {
   const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>('idle');
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [isCheckingModels, setIsCheckingModels] = useState(false);
 
-  const { startSummaryPolling, attachSummaryPolling } = useSidebar();
+  const { attachSummaryPolling, stopSummaryPolling } = useSidebar();
   const [jobUpdate, setJobUpdate] = useState<SummaryJobSnapshot | null>(null);
   const starting = useRef(false);
+  const mounted = useRef(false);
   // Lets go of a run this page attached to when the page goes away. A background
   // poll (the automatic summary) then carries on and finishes on its own.
   const detachSummary = useRef<(() => void) | null>(null);
-  useEffect(() => () => { detachSummary.current?.(); detachSummary.current = null; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      detachSummary.current?.();
+      detachSummary.current = null;
+    };
+  }, []);
 
   // Helper to get status message
   const getSummaryStatusMessage = useCallback((status: SummaryStatus) => {
@@ -77,6 +148,7 @@ export function useSummaryGeneration({
   // What to do with each poll result: restore, error or completion. Shared by a
   // run this page started and a run it attached to.
   const handleSummaryUpdate = useCallback(async (pollingResult: SummaryJobSnapshot, isRegeneration: boolean) => {
+    if (!mounted.current) return;
     setJobUpdate(pollingResult);
     if (pollingResult.status === 'skipped') {
       setSummaryStatus('idle');
@@ -93,6 +165,7 @@ export function useSummaryGeneration({
         const existingSummary = await invokeTauri<SummaryJobSnapshot>('api_get_summary', {
           meetingId: meeting.id
         });
+        if (!mounted.current) return;
 
         const restored = readMeetingSummary(existingSummary?.data).summary;
         if (restored) {
@@ -103,6 +176,7 @@ export function useSummaryGeneration({
           setSummaryStatus('idle');
         }
       } catch (error) {
+        if (!mounted.current) return;
         console.error('Failed to reload summary after cancellation:', error);
         setSummaryStatus('idle');
       }
@@ -122,6 +196,7 @@ export function useSummaryGeneration({
           const existingSummary = await invokeTauri<SummaryJobSnapshot>('api_get_summary', {
             meetingId: meeting.id
           });
+          if (!mounted.current) return;
 
           const restored = readMeetingSummary(existingSummary?.data).summary;
           if (restored) {
@@ -145,6 +220,7 @@ export function useSummaryGeneration({
             return;
           }
         } catch (error) {
+          if (!mounted.current) return;
           console.error('Failed to reload summary after error:', error);
         }
       }
@@ -224,7 +300,7 @@ export function useSummaryGeneration({
         true
       );
 
-      if (meetingName && onMeetingUpdated) {
+      if (mounted.current && meetingName && onMeetingUpdated) {
         await onMeetingUpdated();
       }
     }
@@ -237,6 +313,14 @@ export function useSummaryGeneration({
     onMeetingUpdated,
     onOpenModelSettings,
   ]);
+
+  const watchSummary = useCallback((isRegeneration: boolean, newRun = false) => {
+    if (!mounted.current) return;
+    detachSummary.current?.();
+    // A response already in flight from an earlier run belongs to that run.
+    if (newRun) stopSummaryPolling(meeting.id);
+    detachSummary.current = attachSummaryPolling(meeting.id, result => handleSummaryUpdate(result, isRegeneration));
+  }, [attachSummaryPolling, handleSummaryUpdate, meeting.id, stopSummaryPolling]);
 
   // Unified summary processing logic
   const startSummary = useCallback(async ({
@@ -252,11 +336,11 @@ export function useSummaryGeneration({
       const accepted = await confirmSummaryRegeneration(
         beforeGeneration ?? (async () => {}),
         () => invokeTauri<{ data?: { user_edited_at?: unknown } }>('api_get_summary', { meetingId: meeting.id }),
-        message => confirm(message, { title: 'Regenerate summary', kind: 'warning' }),
+        message => mounted.current ? confirm(message, { title: 'Regenerate summary', kind: 'warning' }) : Promise.resolve(false),
       );
-      if (!accepted) return;
+      if (!mounted.current || !accepted) return;
     } catch {
-      toast.error('Save your pending edits before generating a summary.');
+      if (mounted.current) toast.error('Save your pending edits before generating a summary.');
       return;
     }
     setSummaryStatus(isRegeneration ? 'regenerating' : 'processing');
@@ -281,6 +365,7 @@ export function useSummaryGeneration({
       if (customPrompt.trim().length > 0) {
         await Analytics.trackCustomPromptUsed(customPrompt.trim().length);
       }
+      if (!mounted.current) return;
 
       // Show toast notification for generation start
       toast.info(`${isRegeneration ? 'Regenerating' : 'Generating'} summary...`, {
@@ -291,8 +376,9 @@ export function useSummaryGeneration({
       const summaryLanguage = translationTarget ?? await readMeetingSummaryLanguage(meeting.id)
         .then(preference => preference.language)
         .catch(() => null);
+      if (!mounted.current) return;
 
-      const result = await invokeTauri<{ process_id: string }>('api_generate_meeting_summary', {
+      await invokeTauri('api_generate_meeting_summary', {
         model: modelConfig.provider,
         modelName: modelConfig.model,
         meetingId: meeting.id,
@@ -303,18 +389,12 @@ export function useSummaryGeneration({
         ...(translationTarget ? { retryTranslation: true } : {}),
       });
 
-      const process_id = result.process_id;
-      console.log('Process ID:', process_id);
-
-      // Start global polling via context
-      // The poll reports to this handler; a later visit to the page can attach to
-      // the same run (see attachToRunningSummary).
-      startSummaryPolling(meeting.id, process_id, pollingResult => handleSummaryUpdate(pollingResult, isRegeneration));
+      watchSummary(isRegeneration, true);
     } catch (error) {
+      if (!mounted.current) return;
       const errorMessage = typeof error === 'string' ? error : error instanceof Error ? error.message : 'Could not start summary generation';
       if (errorMessage.includes('already has a summary in progress')) {
-        detachSummary.current?.();
-        detachSummary.current = attachSummaryPolling(meeting.id, result => handleSummaryUpdate(result, isRegeneration));
+        watchSummary(isRegeneration);
         return;
       }
       console.error(`Failed to ${isRegeneration ? 'regenerate' : 'generate'} summary:`, error);
@@ -335,199 +415,64 @@ export function useSummaryGeneration({
       );
     }
   }, [
-    attachSummaryPolling,
     beforeGeneration,
     meeting.id,
     meeting.created_at,
     modelConfig,
     selectedTemplate,
     includeSpeakerLabels,
-    startSummaryPolling,
-    handleSummaryUpdate,
+    watchSummary,
   ]);
 
   const processSummary = useCallback(async (request: Parameters<typeof startSummary>[0]) => {
-    if (starting.current || isActiveSummary(summaryStatus)) return;
-    starting.current = true;
-    try {
-      await startSummary(request);
-    } finally {
-      starting.current = false;
-    }
-  }, [startSummary, summaryStatus]);
-
-  // Public API: Generate summary from transcripts
-  const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
-    // Fall back to the meeting's persisted "Add context" if no context was
-    // passed, so every entry point uses it consistently.
-    try {
-      customPrompt = customPrompt.trim() ? customPrompt : await getMeetingContext(meeting.id);
-    } catch {
-      toast.error('Could not load meeting context. Try generating again.');
-      return;
-    }
-    // Check if model config is still loading
+    if (!mounted.current || starting.current || isActiveSummary(summaryStatus)) return;
     if (isModelConfigLoading) {
-      console.log('⏳ Model configuration is still loading, please wait...');
       toast.info('Loading model configuration, please wait...');
       return;
     }
-
-    // Check if Ollama provider has models available
-    if (modelConfig.provider === 'ollama') {
-      try {
-        const endpoint = modelConfig.ollamaEndpoint || null;
-        const models = await invokeTauri<OllamaModel[]>('get_ollama_models', { endpoint });
-
-        if (!models || models.length === 0) {
-          toast.error(
-            'No Ollama models found. Please download gemma3:1b from Model Settings.',
-            { duration: 5000 }
-          );
-          return;
-        }
-      } catch (error) {
-        console.error('Error checking Ollama models:', error);
-        const errorMessage = error instanceof Error ? error.message : String(error);
-
-        if (isOllamaNotInstalledError(errorMessage)) {
-          // Ollama is not installed - show specific message with download link
-          toast.error(
-            'Ollama is not installed',
-            {
-              description: 'Please download and install Ollama to use local models.',
-              duration: 7000,
-              action: {
-                label: 'Download',
-                onClick: () => openExternal('https://ollama.com/download')
-              }
-            }
-          );
-        } else {
-          // Other error - generic message
-          toast.error(
-            'Failed to check Ollama models. Please ensure Ollama is running and download a model from Settings.',
-            { duration: 5000 }
-          );
-        }
-        return;
-      }
-    }
-
-    // Check if built-in AI provider has models available
-    if (modelConfig.provider === 'builtin-ai') {
-      try {
-        const selectedModel = modelConfig.model;
-
-        if (!selectedModel) {
-          toast.error('No built-in AI model selected', {
-            description: 'Please select a model in settings',
-            duration: 5000,
-          });
-          if (onOpenModelSettings) {
-            onOpenModelSettings();
-          }
-          return;
-        }
-
-        // Check model readiness with filesystem refresh
-        const isReady = await invokeTauri<boolean>('builtin_ai_is_model_ready', {
-          modelName: selectedModel,
-          refresh: true,
-        });
-
-        if (!isReady) {
-          // Get detailed model status
-          const modelInfo = await invokeTauri<BuiltInModelInfo | null>('builtin_ai_get_model_info', {
-            modelName: selectedModel,
-          });
-
-          if (modelInfo) {
-            const status = modelInfo.status;
-
-            if (status.type === 'downloading') {
-              toast.info('Model download in progress', {
-                description: `${selectedModel} is downloading (${status.progress}%). Please wait until download completes.`,
-                duration: 5000,
-              });
-              return;
-            }
-
-            if (status.type === 'not_downloaded') {
-              toast.error('Built-in AI model not downloaded', {
-                description: `${selectedModel} needs to be downloaded. Please download it in model settings.`,
-                duration: 7000,
-              });
-              if (onOpenModelSettings) {
-                onOpenModelSettings();
-              }
-              return;
-            }
-
-            if (status.type === 'corrupted' || status.type === 'error') {
-              const errorDesc = status.type === 'error'
-                ? status.Error || 'The model file has an error'
-                : 'The model file is corrupted';
-              toast.error('Built-in AI model not available', {
-                description: `${errorDesc}. Please check model settings.`,
-                duration: 7000,
-              });
-              if (onOpenModelSettings) {
-                onOpenModelSettings();
-              }
-              return;
-            }
-          }
-
-          // Fallback if we couldn't get model info
-          toast.error('Built-in AI model not ready', {
-            description: 'Please ensure the model is downloaded in settings',
-            duration: 5000,
-          });
-          if (onOpenModelSettings) {
-            onOpenModelSettings();
-          }
-          return;
-        }
-
-        // Model is ready, continue to backend call
-      } catch (error) {
-        console.error('Error validating built-in AI model:', error);
-        toast.error('Failed to validate built-in AI model', {
-          description: error instanceof Error ? error.message : String(error),
-          duration: 5000,
-        });
-        return;
-      }
-    }
-
-    await processSummary({ customPrompt, isRegeneration: hasExistingSummary });
-  }, [meeting.id, processSummary, hasExistingSummary, modelConfig, isModelConfigLoading, onOpenModelSettings]);
-
-  // Public API: Regenerate summary from the current saved transcript
-  const handleRegenerateSummary = useCallback(async (customPrompt: string = '') => {
-    // Same fallback as generation: use the persisted per-meeting context when a
-    // caller (e.g. a regenerate button) doesn't pass one.
+    starting.current = true;
     try {
-      customPrompt = customPrompt.trim() ? customPrompt : await getMeetingContext(meeting.id);
-    } catch {
-      toast.error('Could not load meeting context. Try generating again.');
-      return;
+      let customPrompt = request.customPrompt ?? '';
+      if (!request.translationTarget && !customPrompt.trim()) {
+        try {
+          customPrompt = await getMeetingContext(meeting.id);
+        } catch {
+          if (mounted.current) toast.error('Could not load meeting context. Try generating again.');
+          return;
+        }
+      }
+      if (!mounted.current) return;
+      if (modelConfig.provider === 'ollama' || modelConfig.provider === 'builtin-ai') {
+        setIsCheckingModels(true);
+        try {
+          if (!await checkSummaryModel(modelConfig, () => mounted.current, onOpenModelSettings)) return;
+        } finally {
+          if (mounted.current) setIsCheckingModels(false);
+        }
+      }
+      if (mounted.current) await startSummary({ ...request, customPrompt });
+    } finally {
+      starting.current = false;
     }
-    await processSummary({ customPrompt, isRegeneration: true });
-  }, [meeting.id, processSummary]);
+  }, [startSummary, summaryStatus, isModelConfigLoading, modelConfig, meeting.id, onOpenModelSettings]);
+
+  const handleGenerateSummary = useCallback((customPrompt = '') =>
+    processSummary({ customPrompt, isRegeneration: hasExistingSummary }), [processSummary, hasExistingSummary]);
+
+  const handleRegenerateSummary = useCallback((customPrompt = '') =>
+    processSummary({ customPrompt, isRegeneration: true }), [processSummary]);
 
   // A summary for this meeting is already running in the core (started by the
   // automatic summary after a recording, or by this page before the user left and
   // came back). Show it as generating and take its result when it finishes.
   const attachToRunningSummary = useCallback((hasExistingSummary = false) => {
+    if (!mounted.current) return;
     const isRegeneration = hasExistingSummary;
     setSummaryStatus(isRegeneration ? 'regenerating' : 'processing');
     setSummaryError(null);
     setJobUpdate(null);
-    detachSummary.current?.();
-    detachSummary.current = attachSummaryPolling(meeting.id, pollingResult => handleSummaryUpdate(pollingResult, isRegeneration));
-  }, [meeting.id, attachSummaryPolling, handleSummaryUpdate]);
+    watchSummary(isRegeneration);
+  }, [watchSummary]);
 
   const handleRetryTranslation = useCallback(async (target: string, customPrompt: string) => {
     await processSummary({ customPrompt, isRegeneration: true, translationTarget: target });
@@ -544,6 +489,7 @@ export function useSummaryGeneration({
   return {
     summaryStatus,
     summaryError,
+    isCheckingModels,
     jobUpdate,
     handleGenerateSummary,
     handleRegenerateSummary,
