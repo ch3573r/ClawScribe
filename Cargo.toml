@@ -28,9 +28,16 @@ cpal = { git = "https://github.com/RustAudio/cpal", rev = "51c3b43" }
 # manifest was never active; enabling a replacement now would be a separate
 # dependency behavior change that needs its own review and Windows validation.
 
-# Smaller, faster release binaries; applies to every workspace member.
-# This lengthens release builds.
+# Release builds for every workspace member. ThinLTO runs across the default
+# 16 codegen units in parallel; forcing codegen-units = 1 serialised LLVM over
+# the whole app crate for little runtime gain, since the speech, ONNX and ggml
+# hot paths are native C/C++ libraries this profile does not compile.
 [profile.release]
 lto = "thin"
-codegen-units = 1
 strip = true
+
+# Dependencies keep line tables (readable backtraces) but no full debug info,
+# which keeps the debug target folder and link times smaller. Workspace crates
+# keep full debug info for stepping through ClawScribe code.
+[profile.dev.package."*"]
+debug = "line-tables-only"
