@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.68.2-preview.1
+
+- Codex and OpenAI-compatible summaries list every explicit commitment as an action, including short first-person ones, name the speaker as owner only when the transcript identifies them, and keep each action's source tag so it links to its transcript passage.
+- Faster release and development builds: parallel release code generation, no unused library outputs, no duplicate frontend build, and smaller dependency debug info.
+- Windows GPU prerelease for manual evaluation. Stable updates remain on 0.67.0. Runtime/updater version: 0.68.2. Real-hardware testing listed for 0.68.1-preview.1 is still pending. See the [preview notes](docs/releases/0.68.2-preview.1.md).
+
 ## 0.68.1-preview.1
 
 - The GPU build starts on PCs without a Vulkan runtime; Whisper checks Vulkan in a separate process first. Parakeet uses DirectML automatically after a safe startup check and falls back to CPU.

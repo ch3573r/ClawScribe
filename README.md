@@ -12,13 +12,12 @@ and compact floating recording controls. The OpenClaw integration is removed.
 See the [release notes](docs/releases/0.67.0.md) and
 [download the latest stable Windows release](https://github.com/ch3573r/ClawScribe/releases/latest).
 
-**0.68.1-preview.1** follows a full product and engineering review: startup
-without Vulkan, safer exit and automatic notes, faster recording and playback,
-and many workflow improvements. It also includes standard Azure Speech from
-0.68.0-preview.1. It is a prerelease for manual evaluation; the stable update
-stays on 0.67.0. See the [preview notes](docs/releases/0.68.1-preview.1.md).
-Its installer filenames use numeric version `0.68.1`, as required by existing
-preview updaters.
+**0.68.2-preview.1** builds on 0.68.1-preview.1: action items catch short
+commitments such as "I will send the draft" and link back to their transcript
+passage, and release builds are faster. It is a prerelease for manual
+evaluation; the stable update stays on 0.67.0. See the
+[preview notes](docs/releases/0.68.2-preview.1.md). Its installer filenames use
+numeric version `0.68.2`, as required by existing preview updaters.
 
 ClawScribe is based on Meetily Community Edition **0.4.0**. Attribution and
 license details are in [UPSTREAM.md](UPSTREAM.md), [NOTICE.md](NOTICE.md),
