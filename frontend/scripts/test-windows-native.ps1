@@ -1,5 +1,9 @@
 param(
-    [string]$Features = "windows-gpu"
+    [string]$Features = "windows-gpu",
+    # Compile the test executables without running them. The release workflow
+    # runs this while the installers are packaged, so the later full run finds
+    # the same build already up to date.
+    [switch]$CompileOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,8 +51,13 @@ try {
     # Match the DLL set shipped beside the installed application. A bare cargo
     # test executable lives in target/release/deps, outside Tauri's bundle layout.
     $env:PATH = "$runtime;$previousPath"
-    & cargo test -p llama-helper --release --locked --target x86_64-pc-windows-msvc -- --test-threads=1
-    if ($LASTEXITCODE -ne 0) { throw "Local summary helper regression tests failed." }
+    if ($CompileOnly) {
+        & cargo test -p llama-helper --release --locked --target x86_64-pc-windows-msvc --no-run
+        if ($LASTEXITCODE -ne 0) { throw "Local summary helper test compilation failed." }
+    } else {
+        & cargo test -p llama-helper --release --locked --target x86_64-pc-windows-msvc -- --test-threads=1
+        if ($LASTEXITCODE -ne 0) { throw "Local summary helper regression tests failed." }
+    }
 
     $metadataText = & cargo metadata --locked --format-version 1 --no-deps --manifest-path $manifest
     if ($LASTEXITCODE -ne 0) { throw "Cargo metadata failed." }
@@ -66,6 +75,10 @@ try {
         }
     } | Select-Object -Unique)
     if ($executables.Count -ne 1) { throw "Expected exactly one native library test executable." }
+    if ($CompileOnly) {
+        Write-Host "Compiled the native test executables; tests run in a later step."
+        return
+    }
     $testExecutable = (Resolve-Path -LiteralPath $executables[0]).Path
     $targetPrefix = (Resolve-Path -LiteralPath $metadata.target_directory).Path.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
     if (-not $testExecutable.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {

@@ -24,6 +24,10 @@ on:
       capture-smoke-confirmed:
         type: boolean
         default: false
+      frontend-validated:
+        description: The caller already typechecked and tested the frontend at build-ref.
+        type: boolean
+        default: false
     secrets:
       TAURI_SIGNING_PRIVATE_KEY:
         required: false
@@ -381,17 +385,41 @@ jobs:
           Remove-Item -LiteralPath "frontend\src-tauri\target\release\bundle\nsis" -Recurse -Force -ErrorAction SilentlyContinue
           cd frontend
           pnpm install --frozen-lockfile
-          pnpm typecheck
-          pnpm test
+          # A caller that already typechecked and tested this exact commit, such
+          # as the release candidate workflow's validate job, skips the repeat.
+          if ("${{ inputs['frontend-validated'] }}" -ne "true") {
+            pnpm typecheck
+            pnpm test
+          }
           $releaseConfig = (Resolve-Path -LiteralPath "src-tauri/tauri.windows-release.conf.json").Path
           if ($features) {
-            pnpm exec tauri build --config $releaseConfig -- --locked --features $features
+            pnpm exec tauri build --config $releaseConfig --no-bundle -- --locked --features $features
           } else {
-            pnpm exec tauri build --config $releaseConfig -- --locked
+            pnpm exec tauri build --config $releaseConfig --no-bundle -- --locked
+          }
+          # Packaging is mostly single-threaded compression, so compile the native
+          # test executables alongside it. The next step runs them; its cargo
+          # invocations then find the build up to date.
+          $nativeTestLog = Join-Path $env:RUNNER_TEMP "native-test-compile.log"
+          $nativeTestErr = Join-Path $env:RUNNER_TEMP "native-test-compile.err.log"
+          # One quoted string keeps an empty CPU feature list as an empty argument.
+          $nativeTestScript = (Resolve-Path -LiteralPath "scripts/test-windows-native.ps1").Path
+          $nativeTestArgs = "-NoProfile -File `"$nativeTestScript`" -CompileOnly -Features `"$features`""
+          $nativeTestCompile = Start-Process -FilePath "pwsh" -NoNewWindow -PassThru `
+            -RedirectStandardOutput $nativeTestLog -RedirectStandardError $nativeTestErr `
+            -ArgumentList $nativeTestArgs
+          $null = $nativeTestCompile.Handle
+          if ($features) {
+            pnpm exec tauri bundle --config $releaseConfig --features $features
+          } else {
+            pnpm exec tauri bundle --config $releaseConfig
           }
           $buildElapsedSeconds = [Math]::Round(((Get-Date) - $buildStartedAt).TotalSeconds, 3)
           $buildElapsedSecondsText = $buildElapsedSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
           "build_elapsed_seconds=$buildElapsedSecondsText" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $nativeTestCompile.WaitForExit()
+          Get-Content -LiteralPath $nativeTestLog, $nativeTestErr -ErrorAction SilentlyContinue
+          if ($nativeTestCompile.ExitCode -ne 0) { throw "Native test compilation failed." }
 
       - name: Run native summary and resource regression tests
         if: ${{ !inputs['check-only'] }}
