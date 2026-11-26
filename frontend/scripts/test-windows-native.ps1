@@ -1,9 +1,13 @@
 param(
     [string]$Features = "windows-gpu",
     # Compile the test executables without running them. The release workflow
-    # runs this while the installers are packaged, so the later full run finds
-    # the same build already up to date.
-    [switch]$CompileOnly
+    # runs this while the installers are packaged.
+    [switch]$CompileOnly,
+    # With -CompileOnly, write the library test executable path to this file.
+    # Without it, run that recorded executable instead of compiling again:
+    # packaging can touch files the Tauri build script watches, which would
+    # make cargo rebuild the same tests.
+    [string]$ExecutableRecord = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,18 +68,28 @@ try {
     $metadata = ($metadataText -join "`n") | ConvertFrom-Json
     if (-not $metadata.target_directory) { throw "Cargo returned no target directory." }
 
-    $buildOutput = & cargo test --release --locked --manifest-path $manifest @featureArgs --lib --no-run --message-format=json-render-diagnostics
-    if ($LASTEXITCODE -ne 0) { throw "Native release-profile test compilation failed." }
-    $executables = @($buildOutput | ForEach-Object {
-        if ($_ -match '^\s*\{') {
-            $message = $_ | ConvertFrom-Json
-            if ($message.reason -eq 'compiler-artifact' -and $message.profile.test -and $message.executable) {
-                $message.executable
-            }
+    if (-not $CompileOnly -and $ExecutableRecord) {
+        if (-not (Test-Path -LiteralPath $ExecutableRecord -PathType Leaf)) { throw "The recorded native test executable is missing." }
+        $executables = @(Get-Content -LiteralPath $ExecutableRecord | Where-Object { $_.Trim() })
+        if ($executables.Count -ne 1 -or -not (Test-Path -LiteralPath $executables[0] -PathType Leaf)) {
+            throw "The recorded native test executable is missing."
         }
-    } | Select-Object -Unique)
-    if ($executables.Count -ne 1) { throw "Expected exactly one native library test executable." }
+        Write-Host "Using the native test executable compiled during packaging: $($executables[0])"
+    } else {
+        $buildOutput = & cargo test --release --locked --manifest-path $manifest @featureArgs --lib --no-run --message-format=json-render-diagnostics
+        if ($LASTEXITCODE -ne 0) { throw "Native release-profile test compilation failed." }
+        $executables = @($buildOutput | ForEach-Object {
+            if ($_ -match '^\s*\{') {
+                $message = $_ | ConvertFrom-Json
+                if ($message.reason -eq 'compiler-artifact' -and $message.profile.test -and $message.executable) {
+                    $message.executable
+                }
+            }
+        } | Select-Object -Unique)
+        if ($executables.Count -ne 1) { throw "Expected exactly one native library test executable." }
+    }
     if ($CompileOnly) {
+        if ($ExecutableRecord) { Set-Content -LiteralPath $ExecutableRecord -Value $executables[0] -Encoding utf8 }
         Write-Host "Compiled the native test executables; tests run in a later step."
         return
     }

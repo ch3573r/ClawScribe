@@ -404,7 +404,7 @@ jobs:
           $nativeTestErr = Join-Path $env:RUNNER_TEMP "native-test-compile.err.log"
           # One quoted string keeps an empty CPU feature list as an empty argument.
           $nativeTestScript = (Resolve-Path -LiteralPath "scripts/test-windows-native.ps1").Path
-          $nativeTestArgs = "-NoProfile -File `"$nativeTestScript`" -CompileOnly -Features `"$features`""
+          $nativeTestArgs = "-NoProfile -File `"$nativeTestScript`" -CompileOnly -Features `"$features`" -ExecutableRecord `"$(Join-Path $env:RUNNER_TEMP "native-test-executable.txt")`""
           $nativeTestCompile = Start-Process -FilePath "pwsh" -NoNewWindow -PassThru `
             -RedirectStandardOutput $nativeTestLog -RedirectStandardError $nativeTestErr `
             -ArgumentList $nativeTestArgs
@@ -432,7 +432,8 @@ jobs:
           if ("${{ inputs.directml }}" -eq "true" -and "${{ inputs.feature }}" -notin @("windows-gpu", "directml")) { $featureList += "directml" }
           $featureArgs = @()
           if ($featureList.Count -gt 0) { $featureArgs = @("--features", ($featureList -join ",")) }
-          .\frontend\scripts\test-windows-native.ps1 -Features ($featureList -join ",")
+          # The build step compiled these tests while packaging and recorded the executable.
+          .\frontend\scripts\test-windows-native.ps1 -Features ($featureList -join ",") -ExecutableRecord (Join-Path $env:RUNNER_TEMP "native-test-executable.txt")
 
       # Unpacks both installers (nothing is installed), audits their VC++
       # dependencies, and runs the NSIS executable's self-test in two
