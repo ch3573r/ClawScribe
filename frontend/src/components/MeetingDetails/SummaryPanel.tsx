@@ -310,7 +310,7 @@ export function SummaryPanel({
   const recoveredNotes = jobState === 'failed' ? jobSnapshot?.partial_notes : null;
   const canUseRecovery = !isSummaryLoading && !checkingModels && !isSaving && Boolean(recoveredNotes);
 
-  const useRecoveredNotes = async () => {
+  const applyRecoveredNotes = async () => {
     if (!canUseRecovery || !recoveryCandidate || recoveryCandidate !== recoveredNotes || recoveryPending.current) return;
     recoveryPending.current = true;
     setSavingRecovery(true);
@@ -643,7 +643,7 @@ export function SummaryPanel({
           <DialogFooter>
             <Button type="button" variant="outline" disabled={savingRecovery} onClick={() => setRecoveryCandidate(null)}>Cancel</Button>
             <Button type="button" disabled={!canUseRecovery || savingRecovery || recoveryCandidate !== recoveredNotes}
-              onClick={() => void useRecoveredNotes()}>{savingRecovery ? 'Saving…' : 'Use as summary'}</Button>
+              onClick={() => void applyRecoveredNotes()}>{savingRecovery ? 'Saving…' : 'Use as summary'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
