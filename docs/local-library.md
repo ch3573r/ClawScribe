@@ -430,6 +430,8 @@ backup schedules, and unfinished recording recovery spools stay with the source
 profile. Missing recording folders are reported by meeting title without
 blocking the backup. The archive includes their meeting data, and restore
 leaves their recording folder unset.
+Speaker profiles, pending voice matches, and their settings stay on the source
+device. Applied speaker names travel with the transcript.
 Unreadable folders and folder links still stop backup with a named error.
 Nonempty `.audio-spool` and `.checkpoints` directories
 remain on the source computer. They do not block backup: available saved audio,
@@ -619,3 +621,11 @@ meetings. Each new snapshot keeps the newest two, and startup cleanup removes
 snapshots older than 14 days. Retention can last longer while the app is closed
 or cleanup fails. Portable backups are separate, unencrypted archives. Meeting
 deletion does not remove these archives or copies exported elsewhere.
+ClawScribe syncs each pre-migration snapshot in a staging file and renames it
+into place before removing speaker profiles and pending voice matches. If the
+sync or rename fails, ClawScribe discards the staging file, logs a warning,
+and continues startup and migration. If a scrub fails, ClawScribe keeps the
+rollback copy and retries at startup and when deleting a profile or turning
+off speaker profiles.
+Scrubbing preserves the snapshot's original expiration date. Startup removes
+abandoned snapshot staging files.

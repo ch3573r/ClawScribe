@@ -125,6 +125,9 @@ closing the window. If a recording is active, the window stays open so you can s
 - Detect speakers in a saved recording and cancel from the dialog or meeting
   toolbar. Cancellation waits for the current native step before another recording
   can start.
+- Optionally remember a speaker’s voice on this device after naming them. Later
+  speaker detection can suggest their name, or apply it if you enable automatic
+  matching in **Settings → Transcription**.
 - Import support for MP4, M4A, WAV, MP3, FLAC, OGG, AAC, MKV, WebM, and WMA.
   Review and queue multiple files from the picker or by dropping them on the
   app. Cancel or retry an individual import from the queue. Open a saved meeting

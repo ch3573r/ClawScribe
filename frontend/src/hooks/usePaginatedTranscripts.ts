@@ -33,7 +33,7 @@ interface UsePaginatedTranscriptsReturn {
     patchTranscriptText: (patches: TranscriptTextPatch[]) => void;
     revealSource: (id: string, index: number) => Promise<void>;
     updateSpeaker: (transcriptId: string, speaker: string | null) => Promise<void>;
-    applySpeakerToMatching: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
+    applySpeakerToMatching: (fromSpeaker: string | null | undefined, speaker: string | null, rememberVoice?: boolean) => Promise<number>;
 }
 
 /**
@@ -283,6 +283,7 @@ export function usePaginatedTranscripts({
     const applySpeakerToMatching = useCallback(async (
         fromSpeaker: string | null | undefined,
         speaker: string | null,
+        rememberVoice = false,
     ): Promise<number> => {
         if (!meetingId) return 0;
         const currentSpeaker = normalizeSpeaker(fromSpeaker);
@@ -302,6 +303,7 @@ export function usePaginatedTranscripts({
                 meetingId,
                 fromSpeaker: currentSpeaker,
                 speaker: nextSpeaker,
+                rememberVoice,
             });
             return response.updated;
         } catch (err) {

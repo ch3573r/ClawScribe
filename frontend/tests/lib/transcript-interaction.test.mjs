@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { loadTsModule } from './load-ts-module.mjs';
 
 // Test production control handlers with deterministic hooks, not a browser.
-function createView(overrides = {}) {
+function createView(overrides = {}, voiceOption) {
   const slots = [];
   let cursor = 0;
   const errors = [];
@@ -38,10 +38,12 @@ function createView(overrides = {}) {
     './RecordingStatusBar': { RecordingStatusBar: 'RecordingStatusBar' },
     './ui/button': { Button: 'button' },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/checkbox': { Checkbox: 'checkbox' },
     '@/components/ui/input': { Input: 'input' },
     '@/components/ui/separator': { Separator: 'separator' },
     '@/components/ui/popover': Object.fromEntries(['Popover', 'PopoverContent', 'PopoverTrigger'].map(name => [name, name])),
     './ui/tooltip': Object.fromEntries(['Tooltip', 'TooltipTrigger', 'TooltipContent'].map(name => [name, name])),
+    './SpeakerVoiceOptions': { useSpeakerVoiceOption: speaker => voiceOption?.speaker === speaker ? voiceOption : undefined },
   };
   const modulePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/components/VirtualizedTranscriptView.tsx');
   const { VirtualizedTranscriptView } = loadTsModule(modulePath, mocks);
@@ -189,8 +191,29 @@ test('row rename uses full timeline count, detects merge and saves matching labe
   assert.ok(nodes.some(node => node.type === 'button' && node.props.children === 'Merge'));
   find(nodes, node => node.type === 'form').props.onSubmit({ preventDefault() {} });
   await new Promise(setImmediate);
-  assert.deepEqual(calls, [['Me', 'Alex']]);
+  assert.deepEqual(calls, [['Me', 'Alex', false]]);
   assert.equal(find(view.render(), node => node.type === 'Popover').props.open, false);
+});
+
+test('a voice suggestion is a draft and remembering the voice requires an explicit choice', async () => {
+  const calls = [];
+  const view = createView({
+    segments: [{ id: 'one', timestamp: 12, text: 'Synthetic speech.', speaker: 'Speaker 1' }],
+    onApplySpeakerToMatching: async (...args) => calls.push(args),
+  }, { speaker: 'Speaker 1', canRemember: true, suggestedName: 'Ada' });
+  find(view.render(), node => node.type === 'Popover').props.onOpenChange(true);
+  find(view.render(), node => node.type === 'button' && node.props.children?.[0] === 'Rename ').props.onClick();
+
+  const suggestion = find(view.render(), node => node.type === 'button' && node.props.children?.[0] === 'Use suggested name ');
+  suggestion.props.onClick();
+  assert.deepEqual(calls, []);
+  assert.equal(find(view.render(), node => node.type === 'input').props.value, 'Ada');
+  const choice = find(view.render(), node => node.type === 'checkbox');
+  assert.equal(choice.props.checked, false);
+  choice.props.onCheckedChange(true);
+  find(view.render(), node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [['Speaker 1', 'Ada', true]]);
 });
 
 test('visible speakers remain available when the timeline has not loaded', () => {
