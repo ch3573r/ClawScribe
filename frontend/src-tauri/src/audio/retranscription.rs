@@ -15,8 +15,9 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// Global flag to track if retranscription is in progress
@@ -150,6 +151,62 @@ pub struct RetranscriptionError {
     pub error: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RetranscriptionStatus {
+    run_id: u64,
+    revision: u64,
+    meeting_id: String,
+    started_at_ms: i64,
+    replaces_transcript: bool,
+    #[serde(flatten)]
+    state: RetranscriptionState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum RetranscriptionState {
+    Running {
+        progress: RetranscriptionProgress,
+    },
+    Complete {
+        result: RetranscriptionResult,
+        processing_seconds: f64,
+    },
+    Failed {
+        error: String,
+    },
+    Cancelled,
+}
+
+#[derive(Clone, Serialize)]
+struct RetranscriptionEvent<T> {
+    #[serde(flatten)]
+    payload: T,
+    status: RetranscriptionStatus,
+}
+
+// Retain the latest run for a recreated webview. Its revision lets subscribers
+// ignore a query reply that arrived after a more recent event.
+static RETRANSCRIPTION_STATUS: Mutex<Option<RetranscriptionStatus>> = Mutex::new(None);
+static NEXT_STATUS_REVISION: AtomicU64 = AtomicU64::new(1);
+
+fn status_lock() -> std::sync::MutexGuard<'static, Option<RetranscriptionStatus>> {
+    RETRANSCRIPTION_STATUS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+fn update_status(meeting_id: &str, state: RetranscriptionState) -> Option<RetranscriptionStatus> {
+    let mut current = status_lock();
+    let status = current.as_mut().filter(|status| {
+        status.meeting_id == meeting_id
+            && matches!(status.state, RetranscriptionState::Running { .. })
+    })?;
+    status.revision = NEXT_STATUS_REVISION.fetch_add(1, Ordering::Relaxed);
+    status.state = state;
+    Some(status.clone())
+}
+
 async fn claim_retranscription() -> Result<
     (
         super::inference::BatchPermit,
@@ -172,11 +229,54 @@ async fn claim_retranscription() -> Result<
     Ok((job, guard, phase))
 }
 
-fn verify_cloud_approval(approved: Option<&str>, current: &str) -> Result<(), String> {
-    if approved != Some(current) {
-        return Err("Review and approve the current cloud upload destination".into());
+enum RetranscriptionRoute {
+    Local(Option<String>),
+    Cloud(ApprovedCloudUpload),
+}
+
+impl RetranscriptionRoute {
+    fn provider(&self) -> Option<&str> {
+        match self {
+            Self::Local(provider) => provider.as_deref(),
+            Self::Cloud(approved) => Some(&approved.provider),
+        }
     }
-    Ok(())
+}
+
+struct ApprovedCloudUpload {
+    provider: String,
+    fingerprint: String,
+}
+
+impl ApprovedCloudUpload {
+    fn verify(provider: &str, approved: Option<&str>, current: &str) -> Result<Self, String> {
+        let fingerprint = approved
+            .filter(|approved| !approved.is_empty() && *approved == current)
+            .ok_or("Review and approve the current cloud upload destination")?;
+        Ok(Self {
+            provider: provider.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+        })
+    }
+
+    async fn transcribe<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        model: Option<&str>,
+        audio_path: &Path,
+        language: Option<&str>,
+    ) -> Result<cloud::CloudTranscriptionOutcome, cloud::CloudTranscriptionError> {
+        cloud::transcribe_whole_file(
+            app,
+            &self.provider,
+            model,
+            audio_path,
+            language,
+            &RETRANSCRIPTION_CANCELLED,
+            Some(&self.fingerprint),
+        )
+        .await
+    }
 }
 
 fn cloud_fallback_message(error: &cloud::CloudTranscriptionError) -> &'static str {
@@ -204,8 +304,7 @@ async fn run_retranscription<R: Runtime>(
     meeting_folder_path: String,
     language: Option<String>,
     mut model: Option<String>,
-    provider: &mut Option<String>,
-    cloud_destination: Option<&str>,
+    route: &mut RetranscriptionRoute,
 ) -> Result<RetranscriptionResult> {
     // The folder is the one the core saved for this meeting; the path the
     // webview sends is not trusted.
@@ -227,16 +326,17 @@ async fn run_retranscription<R: Runtime>(
 
     info!(
         "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
-        meeting_id, language, model, provider
+        meeting_id,
+        language,
+        model,
+        route.provider()
     );
 
     let mut cloud_fallback_error = None;
     let mut fallback_reason = None;
-    if cloud::is_cloud_provider(provider.as_deref()) {
-        let approved = cloud_destination
-            .ok_or_else(|| anyhow!("Review and approve the current cloud upload destination"))?;
+    if let RetranscriptionRoute::Cloud(approved) = route {
         if super::recording_commands::cloud_transcription_enabled() {
-            let provider_id = provider.as_deref().unwrap_or_default().to_string();
+            let provider_id = &approved.provider;
             emit_progress(
                 &app,
                 &meeting_id,
@@ -244,16 +344,9 @@ async fn run_retranscription<R: Runtime>(
                 5,
                 "Uploading audio for cloud transcription...",
             );
-            let outcome = cloud::transcribe_whole_file(
-                &app,
-                &provider_id,
-                model.as_deref(),
-                &audio_path,
-                language.as_deref(),
-                &RETRANSCRIPTION_CANCELLED,
-                Some(approved),
-            )
-            .await;
+            let outcome = approved
+                .transcribe(&app, model.as_deref(), &audio_path, language.as_deref())
+                .await;
             if RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire) {
                 return Err(anyhow!("Retranscription cancelled"));
             }
@@ -302,7 +395,7 @@ async fn run_retranscription<R: Runtime>(
                 }
                 Err(error) => {
                     fallback_reason = Some(cloud_fallback_message(&error).to_owned());
-                    cloud::emit_fallback_event(&app, Some(&meeting_id), &provider_id, &error);
+                    cloud::emit_fallback_event(&app, Some(&meeting_id), provider_id, &error);
                     cloud_fallback_error = Some(error);
                 }
             }
@@ -310,14 +403,14 @@ async fn run_retranscription<R: Runtime>(
             fallback_reason = Some("Cloud transcription was disabled before upload.".to_owned());
         }
         let local = resolve_local_fallback(&app, cloud_fallback_error.as_ref()).await?;
-        *provider = Some(local.0.to_owned());
+        *route = RetranscriptionRoute::Local(Some(local.0.to_owned()));
         model = Some(local.1);
     }
 
     // Determine which local provider to use after any cloud fallback.
-    let use_parakeet = provider.as_deref() == Some("parakeet");
-    let use_nemotron = provider.as_deref() == Some("nemotron");
-    let language = local_batch_language(provider.as_deref(), language);
+    let use_parakeet = route.provider() == Some("parakeet");
+    let use_nemotron = route.provider() == Some("nemotron");
+    let language = local_batch_language(route.provider(), language);
 
     // Emit progress: decoding
     emit_progress(&app, &meeting_id, "decoding", 5, "Decoding audio file...");
@@ -865,15 +958,21 @@ fn emit_progress<R: Runtime>(
     progress: u32,
     message: &str,
 ) {
-    let _ = app.emit(
-        "retranscription-progress",
-        RetranscriptionProgress {
-            meeting_id: meeting_id.to_string(),
-            stage: stage.to_string(),
-            progress_percentage: progress,
-            message: message.to_string(),
-        },
-    );
+    let payload = RetranscriptionProgress {
+        meeting_id: meeting_id.to_string(),
+        stage: stage.to_string(),
+        progress_percentage: progress,
+        message: message.to_string(),
+    };
+    let state = RetranscriptionState::Running {
+        progress: payload.clone(),
+    };
+    if let Some(status) = update_status(meeting_id, state) {
+        let _ = app.emit(
+            "retranscription-progress",
+            RetranscriptionEvent { payload, status },
+        );
+    }
 }
 
 /// Get or initialize the Whisper engine, auto-loading the model if needed
@@ -1122,13 +1221,6 @@ async fn get_configured_parakeet_model<R: Runtime>(app: &AppHandle<R>) -> Result
 
 // Tauri commands
 
-/// Response when retranscription is started
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RetranscriptionStarted {
-    pub meeting_id: String,
-    pub message: String,
-}
-
 // Start retranscription.
 #[tauri::command]
 pub async fn start_retranscription_command<R: Runtime>(
@@ -1137,69 +1229,132 @@ pub async fn start_retranscription_command<R: Runtime>(
     meeting_folder_path: String,
     language: Option<String>,
     model: Option<String>,
-    mut provider: Option<String>,
+    provider: Option<String>,
     cloud_destination: Option<String>,
-) -> Result<RetranscriptionStarted, String> {
-    if let Some(provider) = provider
+    replaces_transcript: bool,
+) -> Result<RetranscriptionStatus, String> {
+    let mut route = if let Some(provider) = provider
         .as_deref()
         .filter(|id| cloud::is_cloud_provider(Some(id)))
     {
         let destination =
             super::import::queue::import_cloud_destination(app.clone(), provider.to_owned())
                 .await?;
-        verify_cloud_approval(cloud_destination.as_deref(), &destination.fingerprint)?;
-    }
+        RetranscriptionRoute::Cloud(ApprovedCloudUpload::verify(
+            provider,
+            cloud_destination.as_deref(),
+            &destination.fingerprint,
+        )?)
+    } else {
+        RetranscriptionRoute::Local(provider)
+    };
 
     // Admission errors go directly to the caller. Accepted jobs always publish
     // their terminal result, even after the dialog has closed.
     let (job, guard, phase) = claim_retranscription().await?;
-    let job_meeting_id = meeting_id.clone();
+    let started_at = Instant::now();
+    let run_id = NEXT_STATUS_REVISION.fetch_add(1, Ordering::Relaxed);
+    let progress = RetranscriptionProgress {
+        meeting_id: meeting_id.clone(),
+        stage: "starting".into(),
+        progress_percentage: 0,
+        message: "Starting transcription…".into(),
+    };
+    let started = RetranscriptionStatus {
+        run_id,
+        revision: run_id,
+        meeting_id: meeting_id.clone(),
+        started_at_ms: chrono::Utc::now().timestamp_millis(),
+        replaces_transcript,
+        state: RetranscriptionState::Running {
+            progress: progress.clone(),
+        },
+    };
+    *status_lock() = Some(started.clone());
+    let _ = app.emit(
+        "retranscription-progress",
+        RetranscriptionEvent {
+            payload: progress,
+            status: started.clone(),
+        },
+    );
     tauri::async_runtime::spawn(async move {
         let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
         let result = run_retranscription(
             app.clone(),
-            job_meeting_id.clone(),
+            meeting_id.clone(),
             meeting_folder_path,
             language,
             model,
-            &mut provider,
-            cloud_destination.as_deref(),
+            &mut route,
         )
         .await;
 
-        unload_local_batch_engine(provider.as_deref()).await;
+        unload_local_batch_engine(route.provider()).await;
         drop(phase);
-        drop(guard);
-        drop(job);
 
-        match result {
+        let published = match result {
             Ok(result) => {
-                let _ = app.emit("retranscription-complete", &result);
-                if result.published_retranscription {
-                    crate::summary::automatic::publication::wake(&app, job_meeting_id);
+                let published = result.published_retranscription;
+                let state = RetranscriptionState::Complete {
+                    result: result.clone(),
+                    processing_seconds: started_at.elapsed().as_secs_f64(),
+                };
+                if let Some(status) = update_status(&meeting_id, state) {
+                    let _ = app.emit(
+                        "retranscription-complete",
+                        RetranscriptionEvent {
+                            payload: result,
+                            status,
+                        },
+                    );
                 }
+                published
             }
             Err(error) => {
-                let _ = app.emit(
-                    "retranscription-error",
-                    RetranscriptionError {
-                        meeting_id: job_meeting_id,
-                        error: error.to_string(),
-                    },
-                );
+                let error = error.to_string();
+                let state = if error.to_lowercase().contains("cancelled") {
+                    RetranscriptionState::Cancelled
+                } else {
+                    RetranscriptionState::Failed {
+                        error: error.clone(),
+                    }
+                };
+                if let Some(status) = update_status(&meeting_id, state) {
+                    let payload = RetranscriptionError {
+                        meeting_id: meeting_id.clone(),
+                        error,
+                    };
+                    let _ = app.emit(
+                        "retranscription-error",
+                        RetranscriptionEvent { payload, status },
+                    );
+                }
+                false
             }
+        };
+        drop(guard);
+        drop(job);
+        if published {
+            crate::summary::automatic::publication::wake(&app, meeting_id);
         }
     });
 
-    Ok(RetranscriptionStarted {
-        meeting_id,
-        message: "Retranscription started".to_string(),
-    })
+    Ok(started)
 }
 
 #[tauri::command]
-pub async fn cancel_retranscription_command() -> bool {
-    cancel_retranscription_if_possible()
+pub fn get_retranscription_status() -> Option<RetranscriptionStatus> {
+    status_lock().clone()
+}
+
+#[tauri::command]
+pub fn cancel_retranscription_command(run_id: u64) -> bool {
+    status_lock().as_ref().is_some_and(|status| {
+        status.run_id == run_id
+            && matches!(status.state, RetranscriptionState::Running { .. })
+            && cancel_retranscription_if_possible()
+    })
 }
 
 #[cfg(test)]
@@ -1233,9 +1388,46 @@ mod tests {
 
     #[test]
     fn cloud_upload_requires_the_reviewed_fingerprint() {
-        assert!(verify_cloud_approval(None, "current").is_err());
-        assert!(verify_cloud_approval(Some("previous"), "current").is_err());
-        assert!(verify_cloud_approval(Some("current"), "current").is_ok());
+        let provider = cloud::PROVIDER_CLOUD_WHISPER;
+        assert!(ApprovedCloudUpload::verify(provider, None, "current").is_err());
+        assert!(ApprovedCloudUpload::verify(provider, Some("previous"), "current").is_err());
+        assert!(ApprovedCloudUpload::verify(provider, Some(""), "").is_err());
+        let approved = ApprovedCloudUpload::verify(provider, Some("current"), "current").unwrap();
+        assert_eq!(approved.provider, provider);
+        assert_eq!(approved.fingerprint, "current");
+    }
+
+    #[tokio::test]
+    async fn status_can_reattach_to_a_run_and_rejects_stale_cancellation() {
+        let _test = super::super::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let (_job, _guard, _phase) = claim_retranscription().await.unwrap();
+        let id = NEXT_STATUS_REVISION.fetch_add(1, Ordering::Relaxed);
+        let progress = RetranscriptionProgress {
+            meeting_id: "test-meeting".into(),
+            stage: "decoding".into(),
+            progress_percentage: 5,
+            message: "Decoding saved audio".into(),
+        };
+        let previous = status_lock().replace(RetranscriptionStatus {
+            run_id: id,
+            revision: id,
+            meeting_id: progress.meeting_id.clone(),
+            started_at_ms: 100,
+            replaces_transcript: true,
+            state: RetranscriptionState::Running { progress },
+        });
+        let running = get_retranscription_status().unwrap();
+        assert_eq!(running.run_id, id);
+        assert!(!cancel_retranscription_command(id - 1));
+        assert!(cancel_retranscription_command(id));
+        let ended = update_status(&running.meeting_id, RetranscriptionState::Cancelled).unwrap();
+        assert!(ended.revision > running.revision);
+        assert!(matches!(
+            get_retranscription_status().unwrap().state,
+            RetranscriptionState::Cancelled
+        ));
+        assert!(!cancel_retranscription_command(id));
+        *status_lock() = previous;
     }
 
     #[tokio::test]

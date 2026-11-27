@@ -565,6 +565,9 @@ cloud transcription falls back locally, both paths prefer the configured
 installed model, then the default Parakeet model, then another installed model.
 Retranscription acknowledges a job after it owns the inference slot and returns
 the provider and model used for the saved transcript in the completion event.
+The core retains the latest run status, and an app-wide listener reports results
+across meeting navigation. A recreated window reads the status to restore
+progress and cancellation controls for an active run.
 
 ## Microsoft Export Persistence
 

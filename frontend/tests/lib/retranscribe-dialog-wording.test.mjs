@@ -25,15 +25,32 @@ function findElement(node, type) {
 
 async function setup(hasTranscript, editStateFails = false, cancelAccepted = true, options = {}) {
   const hooks = createHookHarness();
+  const providerHooks = createHookHarness();
+  let contextValue;
   const calls = [];
   const listeners = new Map();
   const messages = [];
+  const cancellations = [];
+  let activeRun;
+  let revision = 0;
   const invoke = async (command, args) => {
     calls.push(command);
-    if (command === 'start_retranscription_command') return options.start?.(args);
+    if (command === 'get_retranscription_status') return options.snapshot ?? null;
+    if (command === 'start_retranscription_command') {
+      await options.start?.(args);
+      revision += 1;
+      activeRun = {
+        run_id: revision, revision, meeting_id: args.meetingId, replaces_transcript: args.replacesTranscript,
+        started_at_ms: 1000, state: 'running', progress: { stage: 'starting', progress_percentage: 0, message: 'Starting transcription…' },
+      };
+      return activeRun;
+    }
     if (command === 'import_cloud_destination') return options.preview?.(args.provider);
     if (editStateFails && command === 'api_get_transcript_edit_state') throw new Error('Synthetic edit state failure');
-    if (command === 'cancel_retranscription_command') return cancelAccepted;
+    if (command === 'cancel_retranscription_command') {
+      cancellations.push(args.runId);
+      return cancelAccepted;
+    }
     return { has_edits: true };
   };
   const modelHelpers = loadTsModule('src/hooks/useTranscriptionModels.ts', {
@@ -41,15 +58,21 @@ async function setup(hasTranscript, editStateFails = false, cancelAccepted = tru
     '@tauri-apps/api/core': { invoke },
     '@/hooks/useCloudTranscription': {},
   });
-  const { RetranscribeDialog } = loadTsModule(fileURLToPath(new URL('../../src/components/MeetingDetails/RetranscribeDialog.tsx', import.meta.url)), {
-    react: hooks.react,
+  const retranscription = loadTsModule('src/contexts/RetranscriptionProvider.tsx', {
+    react: { ...providerHooks.react, useContext: () => contextValue },
     '@tauri-apps/api/core': { invoke },
     '@tauri-apps/api/event': { listen: async (event, callback) => {
       await options.listenersReady;
       listeners.set(event, callback);
       return () => listeners.delete(event);
     } },
-    sonner: { toast: { success: message => messages.push(message), info() {}, error() {} } },
+    sonner: { toast: { success: message => messages.push(message), info() {}, error: message => messages.push(message) } },
+    '@/lib/analytics': { track: async () => {}, trackError: async () => {} },
+  });
+  const { RetranscribeDialog } = loadTsModule(fileURLToPath(new URL('../../src/components/MeetingDetails/RetranscribeDialog.tsx', import.meta.url)), {
+    react: hooks.react,
+    '@tauri-apps/api/core': { invoke },
+    '@/contexts/RetranscriptionProvider': retranscription,
     '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({ selectedLanguage: options.language ?? 'auto', transcriptModelConfig: null }) },
     '@/hooks/useTranscriptionModels': {
       ...modelHelpers,
@@ -61,7 +84,6 @@ async function setup(hasTranscript, editStateFails = false, cancelAccepted = tru
         resetSelection() {},
       }),
     },
-    '@/lib/analytics': { track: async () => {}, trackError: async () => {} },
     'lucide-react': stubs(['RefreshCw', 'Globe', 'Loader2', 'AlertCircle', 'CheckCircle2', 'X', 'Cpu', 'Clock', 'Gauge', 'Zap', 'Hash']),
     '../ui/dialog': stubs(['Dialog', 'DialogContent', 'DialogDescription', 'DialogFooter', 'DialogHeader', 'DialogTitle']),
     '../ui/button': { Button: 'button' },
@@ -71,10 +93,27 @@ async function setup(hasTranscript, editStateFails = false, cancelAccepted = tru
     '../ui/select': stubs(['Select', 'SelectContent', 'SelectItem', 'SelectTrigger', 'SelectValue']),
   });
   const props = { open: true, hasTranscript, meetingId: 'synthetic-meeting', meetingFolderPath: 'synthetic-recording', onOpenChange() {} };
-  const render = () => hooks.render(() => RetranscribeDialog(props));
+  const render = () => {
+    contextValue = providerHooks.render(() => retranscription.RetranscriptionProvider({ children: null })).props.value;
+    return hooks.render(() => RetranscribeDialog(props));
+  };
+  const emit = (event, { payload }) => {
+    let status = payload.status;
+    if (!status) {
+      status = { ...activeRun, revision: ++revision, meeting_id: payload.meeting_id };
+      if (event === 'retranscription-progress') Object.assign(status, { state: 'running', progress: payload });
+      if (event === 'retranscription-complete') Object.assign(status, { state: 'complete', result: payload, processing_seconds: 3 });
+      if (event === 'retranscription-error') Object.assign(status, { state: 'failed', error: payload.error });
+    }
+    listeners.get(event)?.({ payload: { ...payload, status } });
+  };
   render();
   await flush();
-  return { hooks, props, calls, listeners, messages, render };
+  return {
+    props, calls, emit, messages, render, cancellations,
+    remountDialog() { hooks.reset(); return render(); },
+    hooks: { unmount() { hooks.unmount(); providerHooks.unmount(); } },
+  };
 }
 
 test('first transcription offers creation without replacement or edit-state lookup', async () => {
@@ -84,7 +123,7 @@ test('first transcription offers creation without replacement or edit-state look
   assert.match(content, /Create a transcript from the saved audio/);
   assert.match(content, /Start transcription/);
   assert.doesNotMatch(content, /replace|corrections/i);
-  assert.deepEqual(view.calls, []);
+  assert.deepEqual(view.calls, ['get_retranscription_status']);
   view.hooks.unmount();
 });
 
@@ -96,7 +135,7 @@ test('existing transcript keeps replacement wording and correction warnings', as
   assert.match(content, /Replace transcript/);
   assert.match(content, /Retranscription replaces the current transcript\./);
   assert.match(content, /Your corrections will be replaced/);
-  assert.deepEqual(view.calls, ['api_get_transcript_edit_state']);
+  assert.deepEqual(view.calls, ['api_get_transcript_edit_state', 'get_retranscription_status']);
   view.hooks.unmount();
 });
 
@@ -109,14 +148,14 @@ test('edit-state warnings disappear when opening a meeting without a transcript'
   view.props.open = true;
   view.render();
   assert.doesNotMatch(text(view.render()), /replace|corrections/i);
-  assert.equal(view.calls.length, 1);
+  assert.equal(view.calls.filter(command => command === 'api_get_transcript_edit_state').length, 1);
   view.hooks.unmount();
 });
 
 test('a saved transcript with pending folder files is shown as a successful transcription', async () => {
   const view = await setup(true);
   await findButton(view.render(), 'Replace transcript').props.onClick();
-  await view.listeners.get('retranscription-complete')({ payload: {
+  await view.emit('retranscription-complete', { payload: {
     meeting_id: 'synthetic-meeting', segments_count: 3, duration_seconds: 10,
     language: 'de', file_warning: true, provider: 'parakeet', model: 'parakeet-test',
   } });
@@ -156,7 +195,7 @@ test('cloud retranscription requires separate approval for each destination and 
   await findButton(view.render(), 'Replace transcript').props.onClick();
   assert.equal(starts[0].cloudDestination, 'mai-transcribe-reviewed');
   assert.equal(starts[0].language, null);
-  view.listeners.get('retranscription-complete')({ payload: {
+  view.emit('retranscription-complete', { payload: {
     meeting_id: 'synthetic-meeting', segments_count: 3, duration_seconds: 10,
     provider: 'localWhisper', model: 'small', fallback_reason: 'The cloud provider could not complete transcription.',
   } });
@@ -199,7 +238,7 @@ test('closing during retranscription keeps progress and never requests cancellat
   findButton(view.render(), 'Run in background').props.onClick();
   assert.equal(view.props.open, false);
   view.render();
-  view.listeners.get('retranscription-progress')({ payload: {
+  view.emit('retranscription-progress', { payload: {
     meeting_id: 'synthetic-meeting', stage: 'decoding', progress_percentage: 10, message: 'Decoding synthetic audio',
   } });
   view.props.open = true;
@@ -208,18 +247,68 @@ test('closing during retranscription keeps progress and never requests cancellat
   view.hooks.unmount();
 });
 
+test('a background failure is announced after the user opens a different meeting', async () => {
+  const view = await setup(true);
+  view.props.onOpenChange = open => { view.props.open = open; };
+  await findButton(view.render(), 'Replace transcript').props.onClick();
+  findButton(view.render(), 'Run in background').props.onClick();
+  view.render();
+  view.props.meetingId = 'another-meeting';
+  view.render();
+  await flush();
+
+  view.emit('retranscription-error', { payload: { meeting_id: 'synthetic-meeting', error: 'Synthetic background failure' } });
+  assert.deepEqual(view.messages, ['Retranscription failed']);
+  view.props.open = true;
+  assert.doesNotMatch(text(view.remountDialog()), /Synthetic background failure/);
+  view.props.meetingId = 'synthetic-meeting';
+  assert.match(text(view.remountDialog()), /Synthetic background failure/);
+  view.hooks.unmount();
+});
+
+test('a reopened or reloaded dialog restores progress and cancels the native run it shows', async () => {
+  const snapshot = {
+    run_id: 7, revision: 8, meeting_id: 'synthetic-meeting', replaces_transcript: true,
+    started_at_ms: 1000, state: 'running',
+    progress: { stage: 'decoding', progress_percentage: 10, message: 'Decoding saved audio' },
+  };
+  const view = await setup(true, false, true, { snapshot });
+  view.props.meetingId = 'another-meeting';
+  assert.equal(findButton(view.remountDialog(), 'Replace transcript').props.disabled, true);
+  view.props.meetingId = 'synthetic-meeting';
+  const reopened = view.remountDialog();
+  assert.match(text(reopened), /Decoding saved audio/);
+  findButton(reopened, 'Cancel').props.onClick();
+  await flush();
+  assert.deepEqual(view.cancellations, [7]);
+  view.hooks.unmount();
+});
+
+test('a stale status query cannot overwrite a terminal event delivered during reload', async () => {
+  const pending = deferred();
+  const run = { run_id: 12, revision: 14, meeting_id: 'synthetic-meeting', replaces_transcript: true, started_at_ms: 1000 };
+  const view = await setup(true, false, true, { snapshot: pending.promise });
+  view.emit('retranscription-error', { payload: { status: { ...run, state: 'failed', error: 'Audio unavailable' } } });
+  pending.resolve({ ...run, revision: 13, state: 'running', progress: { stage: 'starting', message: 'Starting transcription…' } });
+  await flush();
+  assert.match(text(view.render()), /Audio unavailable/);
+  assert.deepEqual(view.messages, ['Retranscription failed']);
+  view.hooks.unmount();
+});
+
 test('late cancellation keeps the save active until completion', async () => {
   const view = await setup(true, false, false);
   await findButton(view.render(), 'Replace transcript').props.onClick();
-  await findButton(view.render(), 'Cancel').props.onClick();
+  findButton(view.render(), 'Cancel').props.onClick();
+  await flush();
   assert.doesNotMatch(text(view.render()), /Cancelling|Retranscription failed/);
 
-  view.listeners.get('retranscription-progress')({ payload: {
+  view.emit('retranscription-progress', { payload: {
     meeting_id: 'synthetic-meeting', stage: 'saving', progress_percentage: 90,
     message: 'Updating recording files...',
   } });
   assert.equal(findButton(view.render(), 'Cancel').props.disabled, true);
-  await view.listeners.get('retranscription-complete')({ payload: {
+  await view.emit('retranscription-complete', { payload: {
     meeting_id: 'synthetic-meeting', segments_count: 3, duration_seconds: 10, language: 'de', provider: 'whisper', model: 'small',
   } });
   assert.match(text(view.render()), /Retranscription complete/);
@@ -230,7 +319,7 @@ for (const hasTranscript of [false, true]) {
   test(`${hasTranscript ? 'replacement' : 'first'} transcription uses the matching completion toast and title`, async () => {
     const view = await setup(hasTranscript);
     await findButton(view.render(), hasTranscript ? 'Replace transcript' : 'Start transcription').props.onClick();
-    await view.listeners.get('retranscription-complete')({ payload: {
+    await view.emit('retranscription-complete', { payload: {
       meeting_id: 'synthetic-meeting', segments_count: 3, duration_seconds: 10, language: 'de', provider: 'whisper', model: 'small',
     } });
     const name = hasTranscript ? 'Retranscription' : 'Transcription';
@@ -242,7 +331,7 @@ for (const hasTranscript of [false, true]) {
   test(`${hasTranscript ? 'replacement' : 'first'} transcription uses the matching failure title`, async () => {
     const view = await setup(hasTranscript);
     await findButton(view.render(), hasTranscript ? 'Replace transcript' : 'Start transcription').props.onClick();
-    await view.listeners.get('retranscription-error')({ payload: { meeting_id: 'synthetic-meeting', error: 'Synthetic failure' } });
+    await view.emit('retranscription-error', { payload: { meeting_id: 'synthetic-meeting', error: 'Synthetic failure' } });
     assert.match(text(view.render()), new RegExp(`${hasTranscript ? 'Retranscription' : 'Transcription'} failed`));
     view.hooks.unmount();
   });
