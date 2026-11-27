@@ -349,8 +349,8 @@ async fn mixed_capture_clock_survives_mismatched_callbacks_and_stop() -> Result<
         InputDeviceKind::Unknown,
         "Fixture system".into(),
         InputDeviceKind::Unknown,
-        false,
-    );
+        Ok(None),
+    )?;
     pipeline.recording_sender_for_mixed =
         Some(BufferedSpool::new(capture_writer, state.clone(), true));
     let pipeline_task = tokio::spawn(pipeline.run());
@@ -456,8 +456,8 @@ async fn capture_fixture(
         InputDeviceKind::Unknown,
         "Fixture system".into(),
         InputDeviceKind::Unknown,
-        false,
-    );
+        Ok(None),
+    )?;
     let mut vad = ContinuousVadProcessor::new_with_max_segment_duration(
         RATE as u32,
         LIVE_VAD_REDEMPTION_MS,

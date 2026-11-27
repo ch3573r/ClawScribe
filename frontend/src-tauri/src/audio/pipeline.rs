@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
@@ -939,8 +939,8 @@ impl AudioPipeline {
         mic_device_kind: super::device_detection::InputDeviceKind,
         system_device_name: String,
         system_device_kind: super::device_detection::InputDeviceKind,
-        transcribe: bool,
-    ) -> Self {
+        vad_processor: Result<Option<ContinuousVadProcessor>>,
+    ) -> Result<Self> {
         // Log device characteristics for adaptive buffering
         info!("🎛️ AudioPipeline initializing with device characteristics:");
         info!(
@@ -965,37 +965,8 @@ impl AudioPipeline {
             system_device_kind,
         );
 
-        // Create VAD processor with balanced redemption time for speech accumulation
-        // The VAD processor now handles 48kHz->16kHz resampling internally
-        // This bridges natural pauses without excessive fragmentation
-        // For mac os core audio, 900ms, for windows 400ms seems good
-
-        // Per-provider live cap, set at recording start (shorter for Nemotron).
-        let live_max_segment_ms = LIVE_MAX_SEGMENT_MS.load(std::sync::atomic::Ordering::Relaxed);
-
-        let vad_processor = if transcribe {
-            Some(
-                match ContinuousVadProcessor::new_with_max_segment_duration(
-                    sample_rate,
-                    LIVE_VAD_REDEMPTION_MS,
-                    Some(live_max_segment_ms),
-                ) {
-                    Ok(processor) => {
-                        info!(
-                            "VAD-driven pipeline: live speech segments capped at {}ms for lower latency",
-                            live_max_segment_ms
-                        );
-                        processor
-                    }
-                    Err(e) => {
-                        error!("Failed to create VAD processor: {}", e);
-                        panic!("VAD processor creation failed: {}", e);
-                    }
-                },
-            )
-        } else {
-            None
-        };
+        let vad_processor = vad_processor
+            .context("Could not start speech detection. Try an audio-only recording.")?;
 
         // Initialize professional audio mixing components
         let ring_buffer = AudioMixerRingBuffer::new(sample_rate);
@@ -1004,7 +975,7 @@ impl AudioPipeline {
         // Note: target_chunk_duration_ms is ignored - VAD controls segmentation now
         let _ = target_chunk_duration_ms;
 
-        Self {
+        Ok(Self {
             receiver,
             transcription_sender: BufferedSpool::new(transcription_sender, state.clone(), false),
             state,
@@ -1025,7 +996,7 @@ impl AudioPipeline {
             recording_sender_for_mixed: None, // Will be set by manager
             queue_write_failures: QueueWriteFailureTracker::default(),
             levels: super::recording_levels::LevelMeter::new(std::time::Instant::now()),
-        }
+        })
     }
 
     async fn enqueue_transcription_chunk(&mut self, chunk: AudioChunk) -> bool {
@@ -1488,8 +1459,15 @@ impl AudioPipelineManager {
         // Create audio processing channel
         let (audio_sender, audio_receiver) = mpsc::channel::<AudioChunk>(2048);
 
-        // Set sender in state for audio captures to use
-        state.set_audio_sender(audio_sender.clone());
+        let vad_processor = transcribe
+            .then(|| {
+                ContinuousVadProcessor::new_with_max_segment_duration(
+                    sample_rate,
+                    LIVE_VAD_REDEMPTION_MS,
+                    Some(LIVE_MAX_SEGMENT_MS.load(std::sync::atomic::Ordering::Relaxed)),
+                )
+            })
+            .transpose();
 
         // Create and start pipeline with device information for adaptive mixing
         let mut pipeline = AudioPipeline::new(
@@ -1502,8 +1480,9 @@ impl AudioPipelineManager {
             mic_device_kind,
             system_device_name,
             system_device_kind,
-            transcribe,
-        );
+            vad_processor,
+        )?;
+        state.set_audio_sender(audio_sender.clone());
 
         // CRITICAL FIX: Connect recording sender to receive pre-mixed audio
         // This ensures both mic AND system audio are captured in recordings
@@ -1718,7 +1697,10 @@ mod system_audio_silence_tests {
         let mut watch = super::MicrophoneStreamWatch::default();
         let start = std::time::Instant::now();
         assert_eq!(watch.update(start, false, false), None);
-        assert_eq!(watch.update(start + Duration::from_secs(30), false, false), None);
+        assert_eq!(
+            watch.update(start + Duration::from_secs(30), false, false),
+            None
+        );
     }
 
     #[test]
@@ -1758,6 +1740,29 @@ mod system_audio_silence_tests {
 #[cfg(test)]
 mod queue_failure_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_vad_initialization_is_returned_to_recording_start() {
+        let (_capture, receiver) = mpsc::channel(1);
+        let (sender, mut transcripts, _) =
+            super::super::transcription::queue::transcription_queue().unwrap();
+        let kind = super::super::device_detection::InputDeviceKind::Unknown;
+        let result = AudioPipeline::new(
+            receiver,
+            sender,
+            RecordingState::new(),
+            0,
+            48000,
+            "Microphone".into(),
+            kind,
+            "System audio".into(),
+            kind,
+            Err(anyhow::anyhow!("test VAD initialization failure")),
+        );
+        let error = result.err().expect("expected VAD initialization error");
+        assert!(error.to_string().contains("speech detection"));
+        assert!(transcripts.recv().await.unwrap().is_none());
+    }
 
     #[test]
     fn mixer_continues_when_only_one_source_delivers() {
@@ -1800,8 +1805,9 @@ mod queue_failure_tests {
             kind,
             "System audio".into(),
             kind,
-            false,
-        );
+            Ok(None),
+        )
+        .unwrap();
         assert!(pipeline.vad_processor.is_none());
         pipeline.recording_sender_for_mixed =
             Some(BufferedSpool::new(recording, pipeline.state.clone(), true));
