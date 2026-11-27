@@ -1,7 +1,12 @@
-use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
 // Removed unused import
+
+// The desktop binary gets this resource from tauri-build. Link it into the
+// MSVC library tests too so the mock runtime can load Common Controls v6.
+#[cfg(all(test, windows, target_env = "msvc"))]
+#[link(name = "resource", kind = "static", modifiers = "-bundle")]
+extern "C" {}
 
 // Performance optimization: Conditional logging macros for hot paths
 #[cfg(debug_assertions)]
@@ -30,6 +35,8 @@ pub mod audio;
 pub mod behavior_settings;
 pub mod cli_control;
 pub mod config;
+#[doc(hidden)]
+pub mod crash_report;
 pub(crate) mod credentials;
 pub mod database;
 pub mod diagnostics;
@@ -54,6 +61,7 @@ pub mod parakeet_engine;
 pub mod power;
 pub mod self_test;
 pub mod shortcuts;
+mod speaker_profiles;
 pub mod start_request;
 pub mod state;
 pub mod summary;
@@ -85,105 +93,15 @@ static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
     std::sync::LazyLock::new(|| StdMutex::new("auto".to_string()));
 
-#[derive(Debug, Deserialize)]
-struct RecordingArgs {
-    save_path: String,
-}
-
 #[tauri::command]
-async fn start_recording<R: Runtime>(
-    app: AppHandle<R>,
-    mic_device_name: Option<String>,
-    system_device_name: Option<String>,
-    meeting_name: Option<String>,
-) -> Result<(), String> {
-    log_info!("Recording start requested");
-
-    if !tray::check_can_record(&app).await {
-        return Err("recording_setup_incomplete".into());
-    }
-    if is_recording().await {
-        return Err("Recording already in progress".to_string());
-    }
-
-    // Call the actual audio recording system with meeting name
-    match audio::recording_commands::start_recording_with_devices_and_meeting(
-        app.clone(),
-        mic_device_name,
-        system_device_name,
-        meeting_name.clone(),
-    )
-    .await
-    {
-        Ok(_) => {
-            RECORDING_FLAG.store(true, Ordering::SeqCst);
-            tray::update_tray_menu(&app);
-
-            log_info!("Recording started successfully");
-
-            // Notification work must not hold up the command response; capture
-            // is already running at this point.
-            let app_for_notification = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let notification_manager_state =
-                    app_for_notification.state::<NotificationManagerState<R>>();
-                if let Err(e) = notifications::commands::show_recording_started_notification(
-                    &app_for_notification,
-                    &notification_manager_state,
-                    meeting_name.clone(),
-                )
-                .await
-                {
-                    log_error!("Failed to show recording started notification: {}", e);
-                } else {
-                    log_info!("Successfully showed recording started notification");
-                }
-            });
-
-            Ok(())
-        }
-        Err(e) => {
-            log_error!("Failed to start audio recording: {}", e);
-            Err(format!("Failed to start recording: {}", e))
-        }
-    }
-}
-
-#[tauri::command]
-async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> Result<(), String> {
+async fn stop_recording<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
     log_info!("Attempting to stop recording...");
 
-    // Check the actual audio recording system state instead of the flag
-    if !audio::recording_commands::is_recording().await {
-        log_info!("Recording is already stopped");
-        return Ok(());
-    }
-
-    // Call the actual audio recording system to stop
-    match audio::recording_commands::stop_recording(
-        app.clone(),
-        audio::recording_commands::RecordingArgs {
-            save_path: args.save_path.clone(),
-        },
-    )
-    .await
-    {
-        Ok(false) => Ok(()),
+    match audio::recording_commands::stop_recording(app.clone()).await {
+        Ok(false) => Ok(false),
         Ok(true) => {
             RECORDING_FLAG.store(false, Ordering::SeqCst);
             tray::update_tray_menu(&app);
-
-            // Create the save directory if it doesn't exist
-            if let Some(parent) = std::path::Path::new(&args.save_path).parent() {
-                if !parent.exists() {
-                    log_info!("Creating directory: {:?}", parent);
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        let err_msg = format!("Failed to create save directory: {}", e);
-                        log_error!("{}", err_msg);
-                        return Err(err_msg);
-                    }
-                }
-            }
 
             // Show recording stopped notification through NotificationManager
             // This respects user's notification preferences
@@ -199,7 +117,7 @@ async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> R
                 log_info!("Successfully showed recording stopped notification");
             }
 
-            Ok(())
+            Ok(true)
         }
         Err(e) => {
             log_error!("Failed to stop audio recording: {}", e);
@@ -254,7 +172,7 @@ async fn resolve_meeting_audio_file(
 }
 
 const SAVED_AUDIO_FOLDER_QUERY: &str =
-    "SELECT folder_path FROM meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''";
+    "SELECT folder_path FROM active_meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''";
 
 async fn saved_audio_folder(
     pool: &sqlx::SqlitePool,
@@ -671,6 +589,19 @@ pub fn run() {
 
     let mut context = tauri::generate_context!();
     database::recovery::configure(&mut context);
+    let start_hidden = cfg!(windows) && cli_control::is_sign_in_launch(std::env::args_os());
+    if start_hidden {
+        if let Some(main) = context
+            .config_mut()
+            .app
+            .windows
+            .iter_mut()
+            .find(|w| w.label == "main")
+        {
+            main.visible = false;
+            main.focus = false;
+        }
+    }
     let mut builder = tauri::Builder::default();
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
@@ -684,9 +615,19 @@ pub fn run() {
         }));
     }
 
+    #[cfg(windows)]
+    {
+        builder = builder.plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name(cli_control::AUTOSTART_NAME)
+                .arg(cli_control::START_IN_TRAY_ARG)
+                .build(),
+        );
+    }
+
     builder
         // File + stdout + webview logging. The file lives in the app log dir
-        // (Windows: %APPDATA%\net.rismondo.openclaw.clawscribe\logs\ClawScribe.log).
+        // (Windows: %LOCALAPPDATA%\net.rismondo.openclaw.clawscribe\logs\ClawScribe.log).
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -729,12 +670,14 @@ pub fn run() {
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
-        .setup(|_app| {
+        .setup(move |_app| {
             // Settings that change how the core behaves come from the core's own
             // storage, before anything can start a recording or an import.
             behavior_settings::load_and_apply(_app.handle());
             audio::com_anchor::ensure_device_enumerator();
             audio::transcription::queue::cleanup_abandoned_transcription_spools();
+            audio::transcription::cloud::cleanup_abandoned_whisper_parts(_app.handle());
+            library::backup::clean_backup_scratch_on_startup(_app.handle());
 
             // The database comes first. If it cannot be opened, nothing else is
             // set up: no tray, no global shortcuts and no engine start-up, so
@@ -765,6 +708,9 @@ pub fn run() {
             // Initialize system tray
             if let Err(e) = tray::create_tray(_app.handle()) {
                 log::error!("Failed to create system tray: {}", e);
+                if start_hidden {
+                    tray::focus_main_window(_app.handle());
+                }
             }
             // Tray icon and tooltip follow the recorder, and the PC is kept
             // awake only while audio is captured. Independent of the tray
@@ -865,7 +811,13 @@ pub fn run() {
             if let Some(state) = _app.try_state::<state::AppState>() {
                 let pool = state.db_manager.pool().clone();
                 let app = _app.handle().clone();
-                tauri::async_runtime::spawn(summary::automatic::resume_at_startup(app, pool));
+                tauri::async_runtime::spawn(summary::automatic::resume_at_startup(
+                    app.clone(),
+                    pool.clone(),
+                ));
+                if !database::recovery::startup_recovery_active() {
+                    tauri::async_runtime::spawn(library::trash::purge_expired(app, pool));
+                }
             }
 
             Ok(())
@@ -886,16 +838,33 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
-                    let _ = window.emit("summary-flush-on-close", ());
-                    if let Err(e) = window.hide() {
-                        log::error!("Failed to hide main window on close request: {}", e);
-                    } else {
-                        log::info!("Main window hidden to tray on close request");
-                    }
+                    let window = window.clone();
+                    tauri::async_runtime::spawn(async move {
+                        use behavior_settings::CloseAction;
+
+                        let app = window.app_handle();
+                        let action = behavior_settings::close_button(app).await;
+                        match action.on_close(summary::edit_exit::recording_blocks_window_quit()) {
+                            CloseAction::Quit => summary::edit_exit::quit_from_window(app),
+                            CloseAction::KeepOpen => {
+                                let _ = window.emit("summary-flush-on-close", ());
+                                summary::edit_exit::show_recording_blocks_window_quit(app);
+                            }
+                            CloseAction::Hide => {
+                                let _ = window.emit("summary-flush-on-close", ());
+                                if window.hide().is_err() {
+                                    log::error!("Failed to hide main window on close request");
+                                } else {
+                                    behavior_settings::notify_close_to_tray(app.clone()).await;
+                                }
+                            }
+                        }
+                    });
                 }
             }
         })
         .invoke_handler(floating::restrict_commands(tauri::generate_handler![
+            cli_control::enable_windows_autostart,
             floating::open_floating_controls,
             floating::floating_status,
             floating::recording_window_appearance,
@@ -914,7 +883,6 @@ pub fn run() {
             library::calendar::set_meeting_calendar,
             library::calendar::migrate_legacy_meeting_calendars,
             library::calendar::get_meeting_series_template,
-            library::calendar::set_meeting_series_template,
             library::follow_through::list_open_reviewed_actions,
             library::follow_through::get_meeting_series_review,
             library::follow_through::get_meeting_series_preferences,
@@ -939,6 +907,7 @@ pub fn run() {
             library::summary_bookmarks::set_meeting_summary_bookmarks,
             library::export_local_word,
             library::export_local_markdown,
+            library::export_local_subtitles,
             exports::metadata::get_meeting_export_header,
             exports::local_open::open_saved_meeting_export,
             library::backup::backup_library,
@@ -954,6 +923,9 @@ pub fn run() {
             library::file_cleanup::list_pending_meeting_file_cleanup,
             library::file_cleanup::retry_meeting_file_cleanup,
             library::file_cleanup::keep_pending_meeting_files,
+            library::trash::list_trashed_meetings,
+            library::trash::restore_trashed_meeting,
+            library::trash::purge_trashed_meeting,
             library::archive::storage::inspect_archive_audio,
             library::archive::storage::remove_archive_audio,
             updates::get_update_channel,
@@ -962,7 +934,6 @@ pub fn run() {
             updates::discard_app_update,
             updates::set_update_channel,
             updates::check_app_update,
-            start_recording,
             stop_recording,
             is_recording,
             set_native_theme,
@@ -993,15 +964,11 @@ pub fn run() {
             parakeet_engine::commands::parakeet_transcribe_audio,
             parakeet_engine::commands::parakeet_get_models_directory,
             parakeet_engine::commands::parakeet_download_model,
-            parakeet_engine::commands::parakeet_retry_download,
             parakeet_engine::commands::parakeet_cancel_download,
             parakeet_engine::commands::parakeet_delete_corrupted_model,
             parakeet_engine::commands::open_parakeet_models_folder,
             parakeet_engine::commands::set_parakeet_use_directml,
-            parakeet_engine::commands::get_parakeet_use_directml,
             parakeet_engine::commands::get_parakeet_directml_status,
-            parakeet_engine::commands::get_parakeet_directml_session_disabled,
-            parakeet_engine::commands::get_parakeet_directml_default_unavailable,
             parakeet_engine::commands::set_parakeet_use_worker,
             parakeet_engine::commands::get_parakeet_use_worker,
             // Nemotron (streaming RNN-T, Beta) commands
@@ -1010,7 +977,6 @@ pub fn run() {
             nemotron_engine::commands::nemotron_download_model,
             nemotron_engine::commands::nemotron_cancel_download,
             // Parallel processing commands
-            get_audio_devices,
             get_recording_device_inventory,
             audio::transcription::engine::get_live_transcription_readiness,
             trigger_microphone_permission,
@@ -1032,7 +998,6 @@ pub fn run() {
             audio::recording_commands::get_recording_state,
             audio::recording_commands::get_active_recording_title,
             audio::recording_commands::set_active_recording_title,
-            audio::recording_commands::get_meeting_folder_path,
             // Source attribution (Beta, opt-in): Me/Participants labelling
             audio::recording_commands::set_source_attribution_enabled,
             audio::recording_commands::set_cloud_transcription_enabled,
@@ -1084,6 +1049,7 @@ pub fn run() {
             file_grants::pick_backup_restore_path,
             file_grants::pick_word_save_path,
             file_grants::pick_markdown_save_path,
+            file_grants::pick_subtitle_save_path,
             audio::interrupted::find_interrupted_recordings,
             audio::interrupted::preview_interrupted_recording,
             audio::interrupted::discard_interrupted_recording,
@@ -1091,9 +1057,7 @@ pub fn run() {
             audio::interrupted::repair_saved_recording,
             ollama::get_ollama_models,
             ollama::pull_ollama_model,
-            openai::auth::api_get_openai_auth_status,
             openai::auth::api_save_openai_auth_config,
-            openai::auth::api_clear_openai_auth_config,
             openai::openai::get_openai_models,
             summary::codex_provider::codex_get_config,
             summary::claude_code_provider::claude_code_get_config,
@@ -1113,8 +1077,6 @@ pub fn run() {
             anthropic::anthropic::get_anthropic_models,
             groq::groq::get_groq_models,
             api::api_get_meetings,
-            api::api_search_transcripts,
-            api::api_search_library,
             knowledge::store::saved_search::search_saved_meetings,
             knowledge::store::saved_search::resolve_saved_search_hit,
             api::api_get_model_config,
@@ -1133,6 +1095,10 @@ pub fn run() {
             api::api_get_meeting_transcript_timeline,
             api::api_update_transcript_speaker,
             api::api_update_transcript_speakers_matching,
+            speaker_profiles::get_speaker_profile_settings,
+            speaker_profiles::set_speaker_profile_preferences,
+            speaker_profiles::delete_speaker_profile,
+            speaker_profiles::get_meeting_speaker_voice_options,
             api::api_save_meeting_title,
             api::api_save_transcript,
             api::save_offline_recording_transcript,
@@ -1146,13 +1112,11 @@ pub fn run() {
             api::api_test_custom_openai_connection,
             api::api_test_custom_openai_processing,
             // Summary commands
-            summary::commands::api_process_transcript,
             summary::commands::api_generate_meeting_summary,
             summary::automatic::get_automatic_summary_preference,
             summary::automatic::migrate_automatic_summary_preference,
             summary::automatic::get_automatic_summary_destination,
             summary::automatic::set_automatic_summary_preference,
-            summary::automatic::start_recording_summary,
             summary::commands::polish_planner_tasks,
             // Meeting chat (transcript-grounded)
             summary::commands::api_get_summary,
@@ -1210,6 +1174,7 @@ pub fn run() {
             // Language preference commands
             set_language_preference,
             behavior_settings::get_behavior_settings,
+            behavior_settings::set_close_button_preference,
             behavior_settings::load_auto_update_preference,
             behavior_settings::set_auto_update_preference,
             behavior_settings::load_player_shortcuts,
@@ -1273,7 +1238,6 @@ pub fn run() {
             whisper_engine::commands::open_models_folder,
             // Onboarding commands
             onboarding::get_onboarding_status,
-            onboarding::save_onboarding_status_cmd,
             onboarding::complete_onboarding,
             // System settings commands
             #[cfg(target_os = "macos")]
@@ -1281,6 +1245,7 @@ pub fn run() {
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
             audio::retranscription::cancel_retranscription_command,
+            audio::retranscription::get_retranscription_status,
             // Speaker diarization commands
             audio::diarization::start_speaker_diarization_command,
             audio::diarization::active_speaker_diarization_command,
@@ -1301,7 +1266,6 @@ pub fn run() {
             exports::commands::microsoft_sign_out,
             exports::commands::microsoft_connection_status,
             exports::commands::export_to_onenote,
-            exports::commands::export_to_planner,
             exports::commands::export_meeting_markdown_to_onenote,
             exports::commands::export_meeting_to_onenote_section,
             exports::commands::list_onenote_resumes,
@@ -1329,7 +1293,6 @@ pub fn run() {
             ical_sources::remove_ical_source,
             exports::commands::current_or_next_meeting,
             exports::commands::preview_planner_tasks,
-            exports::actions::get_reviewed_meeting_actions,
             exports::actions::suggest_meeting_actions,
             exports::actions::resolve_reviewed_action_source,
             exports::actions::get_reviewed_action_editor,

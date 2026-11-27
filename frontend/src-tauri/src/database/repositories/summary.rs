@@ -326,7 +326,7 @@ mod tests {
         );
         assert_eq!(
             SummaryProcessesRepository::automatic_resume_candidates_after(
-                &pool, "approved", None, "", false,
+                &pool, "approved", None, "", false, None,
             )
             .await
             .unwrap(),
@@ -342,12 +342,86 @@ mod tests {
             .unwrap();
         assert!(
             SummaryProcessesRepository::automatic_resume_candidates_after(
-                &pool, "approved", None, "", false,
+                &pool, "approved", None, "", false, None,
             )
             .await
             .unwrap()
             .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn trash_keeps_paused_and_interrupted_automatic_notes_resumable() {
+        use crate::database::repositories::meeting::MeetingsRepository;
+        for interrupted in [false, true] {
+            let pool = crate::database::transcript_edits::tests::fixture().await;
+            let meeting = "review-test";
+            if interrupted {
+                assert!(SummaryProcessesRepository::create_automatic_process(
+                    &pool, meeting, "import", "approved"
+                )
+                .await
+                .unwrap());
+                SummaryProcessesRepository::fail_interrupted_processes(&pool)
+                    .await
+                    .unwrap();
+            } else {
+                assert!(
+                    SummaryProcessesRepository::defer_automatic_process_for_exit(
+                        &pool, meeting, "import", "approved"
+                    )
+                    .await
+                    .unwrap()
+                );
+            }
+            sqlx::query(
+                "INSERT INTO meetings(id,title,created_at,updated_at)
+                         VALUES('other','Another meeting',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert!(
+                SummaryProcessesRepository::defer_automatic_process_for_exit(
+                    &pool, "other", "import", "approved"
+                )
+                .await
+                .unwrap()
+            );
+            assert!(MeetingsRepository::move_to_trash(&pool, meeting, true)
+                .await
+                .unwrap());
+            let candidates = |only_meeting: Option<&'static str>| {
+                SummaryProcessesRepository::automatic_resume_candidates_after(
+                    &pool,
+                    "approved",
+                    None,
+                    "",
+                    false,
+                    only_meeting,
+                )
+            };
+            let claim = || {
+                SummaryProcessesRepository::claim_automatic_resume(
+                    &pool, meeting, "approved", false,
+                )
+            };
+            assert!(candidates(Some(meeting)).await.unwrap().is_empty());
+            assert_eq!(
+                candidates(None).await.unwrap(),
+                [("other".to_owned(), "approved".to_owned())]
+            );
+            assert!(!claim().await.unwrap());
+
+            assert!(MeetingsRepository::restore_from_trash(&pool, meeting)
+                .await
+                .unwrap());
+            assert_eq!(
+                candidates(Some(meeting)).await.unwrap(),
+                [(meeting.to_owned(), "approved".to_owned())]
+            );
+            assert!(claim().await.unwrap());
+        }
     }
 
     #[tokio::test]
@@ -378,6 +452,7 @@ mod tests {
                     None,
                     "",
                     allowed,
+                    None,
                 )
                 .await
                 .unwrap()
@@ -611,10 +686,13 @@ impl SummaryProcessesRepository {
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<Option<SummaryProcess>, sqlx::Error> {
-        sqlx::query_as::<_, SummaryProcess>("SELECT * FROM summary_processes WHERE meeting_id = ?")
-            .bind(meeting_id)
-            .fetch_optional(pool)
-            .await
+        sqlx::query_as::<_, SummaryProcess>(
+            "SELECT * FROM summary_processes WHERE meeting_id=?1 AND NOT EXISTS(
+                 SELECT 1 FROM meetings WHERE id=?1 AND deleted_at IS NOT NULL)",
+        )
+        .bind(meeting_id)
+        .fetch_optional(pool)
+        .await
     }
 
     pub async fn update_meeting_summary(
@@ -624,7 +702,7 @@ impl SummaryProcessesRepository {
     ) -> Result<bool, sqlx::Error> {
         let mut transaction = pool.begin().await?;
 
-        let meeting_exists: bool = sqlx::query("SELECT 1 FROM meetings WHERE id = ?")
+        let meeting_exists: bool = sqlx::query("SELECT 1 FROM active_meetings WHERE id = ?")
             .bind(meeting_id)
             .fetch_optional(&mut *transaction)
             .await?
@@ -735,7 +813,7 @@ impl SummaryProcessesRepository {
                     ))
                 ) THEN json_extract(p.metadata, '$.partial_notes') END END AS current_partial_notes
             FROM summary_processes p LEFT JOIN meetings m ON m.id = p.meeting_id
-            WHERE p.meeting_id = ? AND (m.id IS NOT NULL OR EXISTS (
+            WHERE p.meeting_id = ? AND m.deleted_at IS NULL AND (m.id IS NOT NULL OR EXISTS (
                 SELECT 1 FROM transcript_chunks t WHERE t.meeting_id = p.meeting_id
             ))
         "#).bind(meeting_id).fetch_optional(pool).await?;
@@ -756,10 +834,10 @@ impl SummaryProcessesRepository {
     ) -> Result<bool, sqlx::Error> {
         sqlx::query_scalar(
             r#"
-            SELECT NOT EXISTS (
-                SELECT 1 FROM summary_processes WHERE meeting_id = ?
-                AND NOT (? = 'recording' AND status = 'skipped'
-                    AND (error IS ? OR error IS ?) AND (automatic_origin = 'recording' OR automatic_origin IS NULL)
+            SELECT EXISTS (SELECT 1 FROM active_meetings WHERE id = ?1) AND NOT EXISTS (
+                SELECT 1 FROM summary_processes WHERE meeting_id = ?1
+                AND NOT (?2 = 'recording' AND status = 'skipped'
+                    AND (error IS ?3 OR error IS ?4) AND (automatic_origin = 'recording' OR automatic_origin IS NULL)
                     AND result IS NULL AND result_backup IS NULL AND previous_result IS NULL AND metadata IS NULL)
             )
         "#,
@@ -812,8 +890,8 @@ impl SummaryProcessesRepository {
             SELECT id, ?1, ?2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
                 CASE WHEN ?2 IS NULL THEN CURRENT_TIMESTAMP END,
                 CASE WHEN ?2 IS NOT NULL THEN CURRENT_TIMESTAMP END, ?3,
-                COALESCE((SELECT profile || ':' FROM retranscription_notes_retry WHERE meeting_id = meetings.id), '') || ?4
-            FROM meetings WHERE id = ?5
+                COALESCE((SELECT profile || ':' FROM retranscription_notes_retry WHERE meeting_id = m.id), '') || ?4
+            FROM active_meetings m WHERE id = ?5
             ON CONFLICT(meeting_id) DO UPDATE SET status = excluded.status, error = excluded.error,
                 start_time = excluded.start_time, updated_at = excluded.updated_at, end_time = excluded.end_time,
                 automatic_origin = excluded.automatic_origin, automatic_request_fingerprint = excluded.automatic_request_fingerprint,
@@ -832,7 +910,7 @@ impl SummaryProcessesRepository {
         fingerprint: &str,
         profile: Option<&str>,
     ) -> Result<Vec<(String, String)>, sqlx::Error> {
-        Self::automatic_resume_candidates_after(pool, fingerprint, profile, "", false).await
+        Self::automatic_resume_candidates_after(pool, fingerprint, profile, "", false, None).await
     }
 
     pub(crate) async fn automatic_resume_candidates_after(
@@ -841,10 +919,12 @@ impl SummaryProcessesRepository {
         profile: Option<&str>,
         after: &str,
         local: bool,
+        only_meeting: Option<&str>,
     ) -> Result<Vec<(String, String)>, sqlx::Error> {
         sqlx::query_as("SELECT meeting_id, automatic_request_fingerprint FROM summary_processes
             WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint IN (?1, ?2 || ':' || ?1)
-            AND meeting_id > ?3 AND (
+            AND meeting_id > ?3 AND meeting_id IN (SELECT id FROM active_meetings)
+            AND (?9 IS NULL OR meeting_id = ?9) AND (
                 (status = 'failed' AND automatic_resume_attempted = 0 AND error = ?4)
                 OR (status = 'cancelled' AND result IS NULL AND (
                     (?5 AND error IN (?6, ?7, ?8)) OR (automatic_resume_attempted = 0 AND error = ?8)
@@ -854,6 +934,7 @@ impl SummaryProcessesRepository {
             .bind(crate::summary::automatic::PAUSED_FOR_INFERENCE)
             .bind(crate::summary::service::RECORDING_INTERRUPTED_SUMMARY)
             .bind(crate::summary::automatic::PAUSED_FOR_EXIT)
+            .bind(only_meeting)
             .fetch_all(pool).await
     }
 
@@ -867,6 +948,7 @@ impl SummaryProcessesRepository {
             automatic_resume_attempted = CASE WHEN status = 'failed' OR (NOT ?7 AND error = ?6) THEN 1 ELSE automatic_resume_attempted END,
             status = 'pending', error = NULL, start_time = CURRENT_TIMESTAMP, end_time = NULL, updated_at = CURRENT_TIMESTAMP
             WHERE meeting_id = ?1 AND automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ?2
+            AND meeting_id IN (SELECT id FROM active_meetings)
             AND ((status = 'failed' AND automatic_resume_attempted = 0 AND error = ?3)
                 OR (status = 'cancelled' AND result IS NULL AND (
                     (?7 AND error IN (?4, ?5, ?6)) OR (automatic_resume_attempted = 0 AND error = ?6)
@@ -891,7 +973,7 @@ impl SummaryProcessesRepository {
         // reason — is preserved by the WHERE guard on the DO UPDATE.
         sqlx::query(r#"
             INSERT INTO summary_processes (meeting_id, status, error, created_at, updated_at, end_time, automatic_origin)
-            SELECT id, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ? FROM meetings WHERE id = ?
+            SELECT id, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ? FROM active_meetings WHERE id = ?
             ON CONFLICT(meeting_id) DO UPDATE SET
                 status = excluded.status, error = excluded.error,
                 updated_at = excluded.updated_at, end_time = excluded.end_time,

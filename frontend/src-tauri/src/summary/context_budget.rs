@@ -194,7 +194,7 @@ pub(crate) fn chunks_by_bytes(text: &str, budget: usize) -> Vec<String> {
     chunks
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReductionProgress {
     pub completed: usize,
     pub total: usize,
@@ -204,6 +204,7 @@ pub(crate) struct ReductionProgress {
 #[derive(Default)]
 pub(crate) struct Reduction {
     progress: std::sync::Mutex<ReductionProgress>,
+    progress_changed: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
     partial_notes: std::sync::Mutex<String>,
     source_excerpts: AtomicUsize,
     limit_retries: AtomicUsize,
@@ -223,6 +224,10 @@ impl Reduction {
             .lock()
             .map(|value| value.clone())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn on_progress_changed(&self, notify: impl Fn() + Send + Sync + 'static) {
+        let _ = self.progress_changed.set(Box::new(notify));
     }
 
     pub fn source_excerpts(&self) -> usize {
@@ -245,12 +250,21 @@ impl Reduction {
     }
 
     fn report(&self, completed: usize, total: usize, level: usize) {
-        if let Ok(mut progress) = self.progress.lock() {
-            *progress = ReductionProgress {
-                completed,
-                total,
-                level,
-            };
+        let next = ReductionProgress {
+            completed,
+            total,
+            level,
+        };
+        let Ok(mut progress) = self.progress.lock() else {
+            return;
+        };
+        if *progress == next {
+            return;
+        }
+        *progress = next;
+        drop(progress);
+        if let Some(notify) = self.progress_changed.get() {
+            notify();
         }
     }
 

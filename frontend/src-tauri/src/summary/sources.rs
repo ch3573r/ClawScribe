@@ -319,12 +319,20 @@ pub(crate) async fn prepare_snapshot(
         .begin()
         .await
         .map_err(|_| "Could not read the saved transcript")?;
-    let revision =
-        sqlx::query_scalar::<_, i64>("SELECT summary_content_revision FROM meetings WHERE id = ?")
-            .bind(meeting)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| "Could not read the saved transcript revision")?;
+    let stored = sqlx::query_as::<_, (i64, Option<String>)>(
+        "SELECT summary_content_revision, deleted_at FROM meetings WHERE id = ?",
+    )
+    .bind(meeting)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| "Could not read the saved transcript revision")?;
+    if stored
+        .as_ref()
+        .is_some_and(|(_, deleted_at)| deleted_at.is_some())
+    {
+        return Err("Restore the meeting from Trash before using its transcript.".into());
+    }
+    let revision = stored.map(|(revision, _)| revision);
     let rows: Vec<Transcript> = sqlx::query_as(
         "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY COALESCE(audio_start_time, 0), id",
     )
@@ -413,7 +421,7 @@ pub(crate) async fn saved_result(
     meeting: &str,
 ) -> Result<Option<serde_json::Value>, String> {
     let result: Option<String> =
-        sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id = ?")
+        sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id = (SELECT id FROM active_meetings WHERE id=?)")
             .bind(meeting)
             .fetch_optional(pool)
             .await

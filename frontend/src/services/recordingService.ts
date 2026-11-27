@@ -15,6 +15,8 @@ export interface RecordingState {
   recording_generation?: string | null;
   recording_mode?: 'live' | 'audio_only';
   is_recording: boolean;
+  is_stopping?: boolean;
+  last_stop_outcome?: Pick<RecordingStoppedPayload, 'library_save_failed' | 'message'> | null;
   is_paused: boolean;
   is_active: boolean;
   recording_duration: number | null;
@@ -35,6 +37,7 @@ export interface RecordingStoppedPayload {
   recording_generation?: string | null;
   recording_mode?: 'live' | 'audio_only';
   audio_save_failed?: boolean;
+  audio_saved?: boolean;
   capture_incomplete?: boolean;
   recording_files_incomplete?: boolean;
   transcription_incomplete?: boolean;
@@ -66,14 +69,6 @@ export class RecordingService {
    */
   async getRecordingMeetingName(): Promise<string | null> {
     return invoke<string | null>('get_recording_meeting_name');
-  }
-
-  /**
-   * Start recording (no device configuration)
-   * @returns Promise<void>
-   */
-  async startRecording(): Promise<void> {
-    return invoke('start_recording');
   }
 
   /**
@@ -109,14 +104,11 @@ export class RecordingService {
   }
 
   /**
-   * Stop recording and save to file
-   * @param savePath - Path to save audio file
+   * Stop the active recording and save it to the library
    * @returns Whether this call stopped a recording
    */
-  async stopRecording(savePath: string): Promise<boolean> {
-    return invoke<boolean>('stop_recording', {
-      args: { save_path: savePath }
-    });
+  async stopRecording(): Promise<boolean> {
+    return invoke<boolean>('stop_recording');
   }
 
   /**

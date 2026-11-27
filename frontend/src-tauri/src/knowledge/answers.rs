@@ -772,7 +772,7 @@ async fn selection_prompt(
             continue;
         }
         let row: Option<(String, String, Option<String>, Option<String>, i64)> = sqlx::query_as(
-            "SELECT substr(m.title,1,128),substr(m.created_at,1,128),CASE WHEN octet_length(s.result)<=? THEN s.result END,m.calendar_link,length(m.title)>128 FROM meetings m LEFT JOIN summary_processes s ON s.meeting_id=m.id AND s.status='completed' WHERE m.id=?"
+            "SELECT substr(m.title,1,128),substr(m.created_at,1,128),CASE WHEN octet_length(s.result)<=? THEN s.result END,m.calendar_link,length(m.title)>128 FROM active_meetings m LEFT JOIN summary_processes s ON s.meeting_id=m.id AND s.status='completed' WHERE m.id=?"
         ).bind(MAX_SAVED_TEXT_BYTES as i64).bind(meeting).fetch_optional(pool).await
             .map_err(|_| "Saved meeting overview unavailable")?;
         if let Some((title, date, raw, link, clipped)) = row {

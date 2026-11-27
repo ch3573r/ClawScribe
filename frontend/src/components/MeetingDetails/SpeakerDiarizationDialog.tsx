@@ -21,6 +21,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { autoAppliedSpeakerMessage } from '@/lib/speaker-labels';
 
 export interface SpeakerDiarizationProgress {
   meeting_id: string;
@@ -39,6 +40,7 @@ export interface SpeakerDiarizationComplete {
   provider: string;
   embedding_model: string;
   turn_count: number;
+  auto_applied_names?: string[];
 }
 
 interface SpeakerDiarizationDialogProps {
@@ -86,6 +88,7 @@ export function SpeakerDiarizationDialog({
   speakerMode,
   onClearError,
 }: SpeakerDiarizationDialogProps) {
+  const matchedNames = autoAppliedSpeakerMessage(result?.auto_applied_names);
   const speed = result && result.processing_seconds > 0
     ? result.duration_seconds / result.processing_seconds
     : null;
@@ -211,6 +214,7 @@ export function SpeakerDiarizationDialog({
                   <p className="mt-1 text-lg font-semibold text-foreground">{result.updated_segments}</p>
                 </div>
               </div>
+              {matchedNames && <p className="break-words text-sm text-foreground">{matchedNames}</p>}
               <div className="space-y-1 text-xs text-muted-foreground">
                 <div className="flex items-start gap-1.5">
                   <Cpu className="mt-0.5 h-3.5 w-3.5 shrink-0" />

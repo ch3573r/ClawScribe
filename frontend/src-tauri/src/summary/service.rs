@@ -19,7 +19,7 @@ use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -389,7 +389,7 @@ async fn meeting_prompt_context(
     mut prompt: String,
 ) -> Result<(Option<String>, String), String> {
     let row = sqlx::query(
-        "SELECT title, created_at, recording_duration_s, calendar_link FROM meetings WHERE id = ?",
+        "SELECT title, created_at, recording_duration_s, calendar_link FROM active_meetings WHERE id = ?",
     )
     .bind(meeting)
     .fetch_optional(pool)
@@ -742,6 +742,11 @@ impl SummaryService {
         include_speaker_labels: bool,
         job: &SummaryJob,
     ) {
+        let progress_app = app.clone();
+        let progress_meeting = meeting_id.clone();
+        job.reduction.on_progress_changed(move || {
+            let _ = progress_app.emit("summary-job-progress", &progress_meeting);
+        });
         let (model_provider, model_name, automatic, retry_translation) = match request {
             SummaryProviderRequest::Manual {
                 provider,

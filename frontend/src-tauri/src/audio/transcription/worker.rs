@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Runtime};
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 // Sequence counter for transcript updates
@@ -33,6 +34,38 @@ pub static SOURCE_ATTRIBUTION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 static ACTIVE_TRANSCRIPTION_METRICS: Lazy<StdMutex<Option<Arc<TranscriptionMetrics>>>> =
     Lazy::new(|| StdMutex::new(None));
+
+async fn dispatch_chunk<T>(
+    sender: &mpsc::Sender<T>,
+    item: T,
+    chunks_queued: &AtomicU64,
+    cancellation: &CancellationToken,
+) -> bool {
+    let permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return false,
+        permit = sender.reserve() => permit,
+    };
+    let Ok(permit) = permit else {
+        error!("Failed to send chunk to transcription worker");
+        return false;
+    };
+    // Count a dispatch before it can be completed, and only once it can be sent.
+    chunks_queued.fetch_add(1, Ordering::SeqCst);
+    permit.send(item);
+    true
+}
+
+async fn receive_work<T>(
+    receiver: &Mutex<mpsc::Receiver<T>>,
+    cancellation: &CancellationToken,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => None,
+        item = async { receiver.lock().await.recv().await } => item,
+    }
+}
 
 pub struct TranscriptionTask {
     pub handle: tokio::task::JoinHandle<()>,
@@ -221,13 +254,12 @@ pub fn start_transcription_task<R: Runtime>(
         const NUM_WORKERS: usize = 1;
         // A single buffered item plus the item currently in inference bounds the
         // worker-side memory. The remaining backlog stays in the disk queue.
-        let (work_sender, work_receiver) = tokio::sync::mpsc::channel::<QueuedAudioChunk>(1);
-        let work_receiver = Arc::new(tokio::sync::Mutex::new(work_receiver));
+        let (work_sender, work_receiver) = mpsc::channel::<QueuedAudioChunk>(1);
+        let work_receiver = Arc::new(Mutex::new(work_receiver));
 
         // Track completion: AtomicU64 for chunks queued, AtomicU64 for chunks completed
         let chunks_queued = Arc::new(AtomicU64::new(0));
         let chunks_completed = Arc::new(AtomicU64::new(0));
-        let input_finished = Arc::new(AtomicBool::new(false));
 
         info!(
             "📊 Starting {} transcription worker{} (serial mode for ordered emission)",
@@ -264,7 +296,7 @@ pub fn start_transcription_task<R: Runtime>(
             let app_clone = app.clone();
             let work_receiver_clone = work_receiver.clone();
             let chunks_completed_clone = chunks_completed.clone();
-            let input_finished_clone = input_finished.clone();
+            let cancellation = task_cancellation.clone();
             let chunks_queued_clone = chunks_queued.clone();
             let metrics_clone = task_metrics.clone();
             let failure_notice = failure_notice.clone();
@@ -289,13 +321,7 @@ pub fn start_transcription_task<R: Runtime>(
                 }
 
                 loop {
-                    // Try to get a chunk to process
-                    let chunk = {
-                        let mut receiver = work_receiver_clone.lock().await;
-                        receiver.recv().await
-                    };
-
-                    match chunk {
+                    match receive_work(&work_receiver_clone, &cancellation).await {
                         Some(queued_chunk) => {
                             let mut metrics_guard =
                                 ProcessingMetricsGuard::new(metrics_clone.clone(), &queued_chunk);
@@ -369,7 +395,7 @@ pub fn start_transcription_task<R: Runtime>(
                                     debug!("Transcription result: chars={}, confidence={:?}, partial={}", transcript.chars().count(), confidence_opt, is_partial);
                                     if is_partial {
                                         metrics_clone.mark_failed();
-                                        let _ = app_clone.emit("transcription-warning", "A speech segment is incomplete. Saved audio can be retranscribed after stopping.");
+                                        let _ = app_clone.emit("transcription-warning", "A speech segment is incomplete.");
                                     }
 
                                     // Every non-empty transcript is kept. A confidence
@@ -513,57 +539,28 @@ pub fn start_transcription_task<R: Runtime>(
                                 }));
                             }
                         }
-                        None => {
-                            // No more chunks available
-                            if input_finished_clone.load(Ordering::SeqCst) {
-                                // Double-check that all queued chunks are actually completed
-                                let final_queued = chunks_queued_clone.load(Ordering::SeqCst);
-                                let final_completed = chunks_completed_clone.load(Ordering::SeqCst);
-
-                                if final_completed >= final_queued {
-                                    info!(
-                                        "👷 Worker {} finishing - all {}/{} chunks processed",
-                                        worker_id, final_completed, final_queued
-                                    );
-                                    break;
-                                } else {
-                                    warn!("Waiting for dispatched chunks: {final_completed}/{final_queued} completed");
-                                    // AGGRESSIVE POLLING: Reduced from 50ms to 5ms for faster chunk detection during shutdown
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-                                }
-                            } else {
-                                // AGGRESSIVE POLLING: Reduced from 10ms to 1ms for faster response during shutdown
-                                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-                            }
-                        }
+                        None => break,
                     }
                 }
 
                 info!("👷 Worker {} completed", worker_id);
             });
         }
+        drop(work_receiver);
 
         // Main dispatcher: receive chunks and distribute to workers
         let mut receiver = transcription_receiver;
         loop {
             let next_item = tokio::select! {
+                biased;
                 _ = task_cancellation.cancelled() => break,
                 item = receiver.recv() => item,
             };
 
             match next_item {
                 Ok(Some(item)) => {
-                    let queued = chunks_queued.fetch_add(1, Ordering::SeqCst) + 1;
-                    debug!(
-                        "Dispatching chunk {} to transcription worker (total queued: {})",
-                        item.chunk.chunk_id, queued
-                    );
-                    let send_result = tokio::select! {
-                        _ = task_cancellation.cancelled() => break,
-                        result = work_sender.send(item) => result,
-                    };
-                    if send_result.is_err() {
-                        error!("Failed to send chunk to transcription worker");
+                    if !dispatch_chunk(&work_sender, item, &chunks_queued, &task_cancellation).await
+                    {
                         break;
                     }
                 }
@@ -571,12 +568,13 @@ pub fn start_transcription_task<R: Runtime>(
                 Err(error) => {
                     task_metrics.mark_failed();
                     error!("Failed to read transcription queue");
-                    let _ = app.emit("transcription-warning", "A staged audio segment could not be read. The recording audio is still preserved.");
+                    let _ = app.emit("transcription-warning", "A staged audio segment could not be read. The transcript may be incomplete.");
                     if !failure_notice.error_emitted.swap(true, Ordering::AcqRel) {
                         let _ = app.emit("transcription-error", serde_json::json!({
                             "error": error.to_string(),
-                            "userMessage": "A staged audio segment could not be read. The recording audio is still preserved.",
-                            "actionable": false
+                            "userMessage": "A staged audio segment could not be read. The transcript may be incomplete.",
+                            "actionable": false,
+                            "warningEmitted": true
                         }));
                     }
                     break;
@@ -585,7 +583,6 @@ pub fn start_transcription_task<R: Runtime>(
         }
 
         // Signal that input is finished
-        input_finished.store(true, Ordering::SeqCst);
         drop(work_sender); // Close the channel to signal workers
 
         let total_chunks_queued = chunks_queued.load(Ordering::SeqCst);
@@ -610,44 +607,21 @@ pub fn start_transcription_task<R: Runtime>(
             finished_worker_id += 1;
         }
 
-        // Final verification with retry logic to catch any stragglers
-        let mut verification_attempts = 0;
-        const MAX_VERIFICATION_ATTEMPTS: u32 = 10;
-
-        loop {
-            let final_queued = chunks_queued.load(Ordering::SeqCst);
-            let final_completed = chunks_completed.load(Ordering::SeqCst);
-
-            if task_cancellation.is_cancelled() {
-                warn!("Transcription cancelled with {final_completed}/{final_queued} dispatched chunks completed");
-                break;
-            } else if final_queued == final_completed {
-                info!(
-                    "All {} dispatched chunks finished; checking failure metrics",
-                    final_completed
-                );
-                break;
-            } else if verification_attempts < MAX_VERIFICATION_ATTEMPTS {
-                verification_attempts += 1;
-                warn!("Chunk count mismatch: {final_completed}/{final_queued} completed (attempt {verification_attempts})");
-
-                // Wait a bit for any remaining chunks to be processed
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            } else {
-                error!("Chunk loss after {verification_attempts} attempts: {final_completed}/{final_queued} completed");
-
-                // Emit critical error event
-                let _ = app.emit(
-                    "transcript-chunk-loss-detected",
-                    serde_json::json!({
-                        "chunks_queued": final_queued,
-                        "chunks_completed": final_completed,
-                        "chunks_lost": final_queued - final_completed,
-                        "message": "Some transcript chunks may have been lost during shutdown"
-                    }),
-                );
-                break;
-            }
+        // Once all workers have joined, neither count can change.
+        let final_completed = chunks_completed.load(Ordering::SeqCst);
+        if task_cancellation.is_cancelled() {
+            warn!("Transcription cancelled with {final_completed}/{total_chunks_queued} dispatched chunks completed");
+        } else if final_completed < total_chunks_queued {
+            error!("Only {final_completed}/{total_chunks_queued} dispatched chunks completed");
+            let _ = app.emit(
+                "transcript-chunk-loss-detected",
+                serde_json::json!({
+                    "chunks_queued": total_chunks_queued,
+                    "chunks_completed": final_completed,
+                    "chunks_lost": total_chunks_queued - final_completed,
+                    "message": "Some transcript chunks may have been lost during shutdown"
+                }),
+            );
         }
 
         task_metrics.set_worker_active(false);
@@ -681,7 +655,7 @@ impl SegmentFailureNotice {
     fn report(&self, error: &TranscriptionError, mut emit: impl FnMut(&str, serde_json::Value)) {
         emit(
             "transcription-warning",
-            serde_json::json!(error.to_string()),
+            serde_json::json!("A speech segment could not be transcribed."),
         );
         if !self.error_emitted.swap(true, Ordering::AcqRel) {
             emit(
@@ -689,7 +663,8 @@ impl SegmentFailureNotice {
                 serde_json::json!({
                     "error": error.to_string(),
                     "userMessage": format!("Transcription failed: {}", error),
-                    "actionable": false
+                    "actionable": false,
+                    "warningEmitted": true
                 }),
             );
         }
@@ -978,6 +953,44 @@ mod transcript_delivery_tests {
 mod metrics_lifecycle_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn cancelled_dispatch_does_not_count_an_item_waiting_for_capacity() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let cancellation = CancellationToken::new();
+        let queued = AtomicU64::new(0);
+        assert!(dispatch_chunk(&sender, 1, &queued, &cancellation).await);
+
+        let pending = dispatch_chunk(&sender, 2, &queued, &cancellation);
+        tokio::pin!(pending);
+        assert!(futures_util::poll!(&mut pending).is_pending());
+        cancellation.cancel();
+        assert!(!pending.await);
+        assert_eq!(queued.load(Ordering::SeqCst), 1);
+        assert_eq!(receiver.try_recv().unwrap(), 1);
+        assert!(receiver.try_recv().is_err());
+        drop(receiver);
+        assert!(!dispatch_chunk(&sender, 3, &queued, &CancellationToken::new()).await);
+        assert_eq!(queued.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn waiting_worker_exits_on_cancel_and_drains_on_normal_channel_close() {
+        let (sender, receiver) = mpsc::channel(1);
+        let receiver = Mutex::new(receiver);
+        let cancellation = CancellationToken::new();
+        let pending = receive_work(&receiver, &cancellation);
+        tokio::pin!(pending);
+        assert!(futures_util::poll!(&mut pending).is_pending());
+        cancellation.cancel();
+        assert_eq!(pending.await, None);
+
+        sender.send(1).await.unwrap();
+        drop(sender);
+        let normal_stop = CancellationToken::new();
+        assert_eq!(receive_work(&receiver, &normal_stop).await, Some(1));
+        assert_eq!(receive_work(&receiver, &normal_stop).await, None);
+    }
+
     #[test]
     fn live_timestamp_uses_local_time_for_the_supplied_instant() {
         let instant = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_123);
@@ -1003,6 +1016,7 @@ mod metrics_lifecycle_tests {
                     "transcription-error" => {
                         errors += 1;
                         assert!(payload["userMessage"].is_string());
+                        assert_eq!(payload["warningEmitted"], true);
                     }
                     _ => panic!("Unexpected event"),
                 },

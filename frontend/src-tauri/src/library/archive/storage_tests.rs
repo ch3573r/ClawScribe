@@ -206,6 +206,82 @@ async fn removes_only_the_reviewed_app_copy_and_keeps_database_and_folder() {
 }
 
 #[tokio::test]
+async fn removes_active_audio_with_an_unrelated_recording_in_trash() {
+    use crate::database::repositories::meeting::MeetingsRepository;
+    let _guard = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    let fixture = Fixture::new().await;
+    let other_folder = fixture.roots[0].join("other");
+    fs::create_dir(&other_folder).unwrap();
+    let retained = other_folder.join("audio.mp4");
+    fs::write(&retained, "retained audio").unwrap();
+    add_meeting(&fixture.pool, "trashed", &other_folder).await;
+    assert!(
+        MeetingsRepository::move_to_trash(&fixture.pool, "trashed", true)
+            .await
+            .unwrap()
+    );
+
+    let request = fixture.request().await;
+    let results = remove_selected(fixture.pool.clone(), fixture.roots.clone(), vec![request])
+        .await
+        .unwrap();
+    assert_eq!(
+        results[0].removed_bytes,
+        Some(11),
+        "{:?}",
+        results[0].reason
+    );
+    assert!(retained.exists());
+}
+
+#[tokio::test]
+async fn protects_a_folder_also_claimed_by_a_trashed_meeting() {
+    use crate::database::repositories::meeting::MeetingsRepository;
+    let fixture = Fixture::new().await;
+    add_meeting(&fixture.pool, "trashed", &fixture.folder).await;
+    assert!(
+        MeetingsRepository::move_to_trash(&fixture.pool, "trashed", true)
+            .await
+            .unwrap()
+    );
+
+    let checks = fixture.checks().await;
+    assert_eq!(
+        checks[0].reason,
+        Some("Another meeting uses this recording folder.")
+    );
+    assert!(checks[0].revision.is_none());
+}
+
+#[tokio::test]
+async fn refuses_audio_removal_if_the_reviewed_meeting_enters_trash() {
+    use crate::database::repositories::meeting::MeetingsRepository;
+    let _guard = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    let fixture = Fixture::new().await;
+    let request = fixture.request().await;
+    let rows = folders(&fixture.pool).await.unwrap();
+    let canonical = canonical_folders(&fixture.roots, &rows);
+    let candidate = inspect_candidate(&fixture.roots, &rows, &canonical, "first", true).unwrap();
+    assert!(
+        MeetingsRepository::move_to_trash(&fixture.pool, "first", true)
+            .await
+            .unwrap()
+    );
+    let job = Arc::new(crate::audio::inference::claim_job().unwrap());
+    let result = remove_prepared(
+        &fixture.pool,
+        &fixture.roots,
+        &request,
+        &rows,
+        candidate,
+        job,
+    )
+    .await;
+    assert_eq!(result, Err(FOLDER_CHANGED));
+    assert!(fixture.folder.join("audio.mp4").exists());
+}
+
+#[tokio::test]
 async fn refuses_unknown_provenance_outside_paths_and_shared_folders() {
     let fixture = Fixture::new().await;
     for (id, name, retranscribed) in [
@@ -411,4 +487,51 @@ async fn refuses_recovery_directory_created_after_candidate_inspection() {
     .await;
     assert_eq!(result, Err(RECOVERY_PENDING));
     assert!(fixture.folder.join("audio.mp4").exists());
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT saved_audio_removed_by_user FROM meetings WHERE id = 'first'"
+    )
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap());
+}
+
+#[tokio::test]
+async fn failed_unlink_clears_only_this_attempts_removal_marker() {
+    let _guard = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    let fixture = Fixture::new().await;
+    for previously_removed in [false, true] {
+        sqlx::query("UPDATE meetings SET saved_audio_removed_by_user = ? WHERE id = 'first'")
+            .bind(previously_removed)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        let request = fixture.request().await;
+        let rows = folders(&fixture.pool).await.unwrap();
+        let canonical = canonical_folders(&fixture.roots, &rows);
+        let candidate =
+            inspect_candidate(&fixture.roots, &rows, &canonical, "first", true).unwrap();
+        let job = Arc::new(crate::audio::inference::claim_job().unwrap());
+        let result = remove_prepared_with(
+            &fixture.pool,
+            &fixture.roots,
+            &request,
+            &rows,
+            candidate,
+            job,
+            |_, _| Err(io::ErrorKind::PermissionDenied.into()),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err("Could not remove the saved audio. Close any player using it and try again.")
+        );
+        assert!(fixture.folder.join("audio.mp4").is_file());
+        let removed = sqlx::query_scalar::<_, bool>(
+            "SELECT saved_audio_removed_by_user FROM meetings WHERE id = 'first'",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(removed, previously_removed);
+    }
 }

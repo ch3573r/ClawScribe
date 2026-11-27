@@ -4,25 +4,27 @@ import { useCallback, useId, useRef, useState, type KeyboardEvent } from "react"
 import { Check, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { getSpeakerColor, getSpeakerOptions, getSpeakerRename, resolveSpeakerName, speakerLabel, type SpeakerDetails } from "@/lib/speaker-labels";
+import { canRememberSpeaker, getSpeakerColor, getSpeakerOptions, getSpeakerRename, resolveSpeakerName, speakerLabel, type SpeakerDetails } from "@/lib/speaker-labels";
+import { useSpeakerVoiceOption } from "./SpeakerVoiceOptions";
 
-export type RenameSpeaker = (from: string | null | undefined, to: string | null) => Promise<number> | number | void;
+export type RenameSpeaker = (from: string | null | undefined, to: string | null, rememberVoice?: boolean) => Promise<number> | number | void;
 
 function useSpeakerSave() {
   const [saving, setSaving] = useState(false);
   const pending = useRef(false);
-  const save = async (operation: () => unknown, complete: () => void) => {
+  const save = async (operation: () => unknown, complete: () => void, rememberVoice = false) => {
     if (pending.current) return;
     pending.current = true;
     setSaving(true);
     try {
       await operation();
       complete();
-    } catch {
-      toast.error("Could not save the speaker label. Please try again.");
+    } catch (error) {
+      toast.error(rememberVoice && typeof error === "string" ? error : "Could not save the speaker label. Please try again.");
     } finally {
       pending.current = false;
       setSaving(false);
@@ -36,20 +38,44 @@ export function SpeakerDot({ color }: { color: string }) {
 }
 
 function RenameSpeakerForm({ speaker, catalog, saving, onRename, onBack }: {
-  speaker: string; catalog: readonly SpeakerDetails[]; saving: boolean; onRename: (name: string) => void; onBack?: () => void;
+  speaker: string; catalog: readonly SpeakerDetails[]; saving: boolean; onRename: (name: string, rememberVoice: boolean) => void; onBack?: () => void;
 }) {
   const [value, setValue] = useState(speaker);
+  const [rememberVoice, setRememberVoice] = useState(false);
   const id = useId();
   const selectInput = useCallback((input: HTMLInputElement | null) => { if (input) { input.focus(); input.select(); } }, []);
   const rename = getSpeakerRename(catalog, speaker, value);
-  return <form className="space-y-3" onSubmit={event => { event.preventDefault(); if (rename.name && rename.changed && !saving) onRename(rename.name); }}>
+  const voice = useSpeakerVoiceOption(speaker);
+  const suggestedName = voice?.suggestedName;
+  const canRemember = canRememberSpeaker(voice, rename);
+  function changeName(name: string) {
+    setValue(name);
+    setRememberVoice(false);
+  }
+  return <form className="space-y-3" onSubmit={event => {
+    event.preventDefault();
+    if (rename.name && rename.changed && !saving) onRename(rename.name, canRemember && rememberVoice);
+  }}>
     <label htmlFor={id} className="block text-sm font-semibold">Rename speaker</label>
     <Input id={id} aria-describedby={`${id}-help`} value={value} maxLength={64} disabled={saving}
       ref={selectInput}
-      onChange={event => setValue(event.target.value)} />
+      onChange={event => changeName(event.target.value)} />
     <p id={`${id}-help`} className="text-xs text-muted-foreground">
       {rename.merge ? `Merges with ${rename.merge}` : `Applies to ${rename.count} ${rename.count === 1 ? "segment" : "segments"}`}
     </p>
+    {suggestedName && (
+      <Button type="button" variant="outline" size="sm" disabled={saving}
+        className="h-auto max-w-full whitespace-normal text-left"
+        onClick={() => changeName(suggestedName)}>
+        Use suggested name {suggestedName}
+      </Button>
+    )}
+    {canRemember && (
+      <label className="flex items-start gap-2 text-xs">
+        <Checkbox checked={rememberVoice} disabled={saving} onCheckedChange={checked => setRememberVoice(checked === true)} />
+        <span>Remember this voice on this device</span>
+      </label>
+    )}
     <div className="flex gap-2">
       <Button type="submit" size="sm" disabled={saving || !rename.changed}>{rename.merge ? "Merge" : "Rename"}</Button>
       {onBack && <Button type="button" variant="ghost" size="sm" disabled={saving} onClick={onBack}>Back</Button>}
@@ -80,9 +106,9 @@ export function RenameSpeakerPopover({ speaker, catalog, onRename, onOpenChange 
         target?.focus();
       }}>
       <RenameSpeakerForm key={speaker} speaker={speaker} catalog={catalog} saving={saving}
-        onRename={name => {
+        onRename={(name, rememberVoice) => {
           destination.current = name;
-          void save(() => onRename(speaker, name), () => { setOpen(false); onOpenChange?.(false); });
+          void save(() => onRename(speaker, name, rememberVoice), () => { setOpen(false); onOpenChange?.(false); }, rememberVoice);
         }} />
     </PopoverContent>
   </Popover>;
@@ -130,7 +156,7 @@ export function SpeakerLabelPopover({ segmentId, timestamp, speaker, catalog, so
       <h3 id={`${id}-title`} className={`text-sm font-semibold ${renaming ? "sr-only" : "mb-2"}`}>{renaming ? "Rename speaker" : "Who said this?"}</h3>
       {renaming && onRename ? <RenameSpeakerForm speaker={renaming} catalog={catalog} saving={saving}
         onBack={() => setRenaming(null)}
-        onRename={name => void save(() => onRename(renaming, name), close)} /> : <>
+        onRename={(name, rememberVoice) => void save(() => onRename(renaming, name, rememberVoice), close, rememberVoice)} /> : <>
         {options.length > 0 && <div role="group" aria-label="Meeting speakers and confirmed attendees" className="max-h-52 space-y-1 overflow-y-auto" onKeyDown={moveOption}>
           {options.map(name => <Button key={name} variant="ghost" type="button" disabled={saving}
             aria-label={`Assign ${name}`} aria-pressed={name === current} onClick={() => void assign(name)}

@@ -2,15 +2,16 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useConfig } from '@/contexts/ConfigContext';
-import { useTranscriptionModels } from '@/hooks/useTranscriptionModels';
+import { isCloudModel, modelOptionLabel, useFileCloudDestination, useTranscriptionModels, type CloudDestination } from '@/hooks/useTranscriptionModels';
 import { importSummarySelection, useSummaryDestination, type ImportSummaryChoice } from '@/hooks/useSummaryDestination';
 import type { AudioFileInfo, ImportQueueItem } from '@/hooks/useImportAudio';
 import { useBackgroundImportQueue } from '@/contexts/ImportDialogContext';
 import { errorText } from '@/lib/errorText';
 import { readPinnedSummaryLanguageDefault } from '@/lib/summary-language-preferences';
-import { fileLanguageOptions } from '@/lib/transcription-language';
+import { fileLanguageOptions, fileLanguageSelection } from '@/lib/transcription-language';
 import { providerLabel } from '@/components/settings/provider-data';
 import { Button } from '../ui/button';
 import { Checkbox } from '../ui/checkbox';
@@ -27,8 +28,6 @@ interface ImportAudioDialogProps {
 }
 
 type Draft = { file: AudioFileInfo; title: string };
-type CloudDestination = { endpoint: string; fingerprint: string };
-const isCloud = (provider?: string | null) => provider === 'cloud-whisper' || provider === 'mai-transcribe';
 
 const statusLabels: Record<ImportQueueItem['status'], string> = {
   queued: 'Waiting for the transcription engine',
@@ -46,20 +45,19 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
   const { items, error: queueError, recoveryNotice, loading } = useBackgroundImportQueue();
   const { availableModels, selectedModelKey, setSelectedModelKey, loadingModels, fetchModels } = useTranscriptionModels(transcriptModelConfig);
   const model = availableModels.find(option => `${option.provider}:${option.name}` === selectedModelKey);
-  const cloudProvider = isCloud(model?.provider) ? model?.provider : undefined;
+  const cloudProvider = isCloudModel(model?.provider) ? model?.provider : undefined;
   const { destination: summaryDestination, error: summaryError } = useSummaryDestination(open, modelConfig, isAutoSummary);
   const [summaryChoice, setSummaryChoice] = useState<ImportSummaryChoice>('default');
   const summary = importSummarySelection(summaryChoice, isAutoSummary, summaryDestination);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [language, setLanguage] = useState(selectedLanguage || 'auto');
+  const effectiveLanguage = fileLanguageSelection(model?.provider, language);
   useEffect(() => {
-    if (model?.provider === 'mai-transcribe' && language === 'auto-translate') setLanguage('auto');
-  }, [model?.provider, language]);
+    if (!loadingModels && model && language !== effectiveLanguage) setLanguage(effectiveLanguage);
+  }, [loadingModels, model, language, effectiveLanguage]);
   const [meetingDate, setMeetingDate] = useState('');
   const [useFileDate, setUseFileDate] = useState(false);
-  const [destination, setDestination] = useState<CloudDestination | null>(null);
-  const [destinationError, setDestinationError] = useState<string | null>(null);
-  const [approvedDestination, setApprovedDestination] = useState<string | null>(null);
+  const { destination, destinationError, approvedDestination, setApprovedDestination } = useFileCloudDestination(open, cloudProvider);
   const [retryDraft, setRetryDraft] = useState<{ id: string; destination: CloudDestination; chooseFile: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -68,19 +66,8 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
 
   useEffect(() => { if (open) void fetchModels(); }, [open, fetchModels]);
 
-  useEffect(() => {
-    let active = true;
-    setDestination(null);
-    setApprovedDestination(null);
-    setDestinationError(null);
-    if (open && cloudProvider) {
-      void invoke<CloudDestination>('import_cloud_destination', { provider: cloudProvider }).then(
-        value => { if (active) setDestination(value); },
-        caught => { if (active) setDestinationError(errorText(caught, 'Could not read the cloud destination')); },
-      );
-    }
-    return () => { active = false; };
-  }, [open, cloudProvider]);
+  const canEnqueue = busy === null && !loading && !queueError && !loadingModels && Boolean(model)
+    && (!cloudProvider || Boolean(approvedDestination));
 
   function addDrafts(files: AudioFileInfo[]) {
     setDrafts(current => {
@@ -115,15 +102,16 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
   }
 
   async function enqueue() {
+    if (!canEnqueue || !model) return;
     const date = meetingDate && !useFileDate ? new Date(meetingDate) : null;
     if (date && Number.isNaN(date.getTime())) throw new Error('Choose a valid meeting date and time');
     const submitted = new Set(drafts.map(({ file }) => file.path));
     await invoke('enqueue_imports', {
       files: drafts.map(({ file, title }) => ({ sourcePath: file.path, title })),
       options: {
-        language: model?.provider === 'parakeet' || language === 'auto' ? null : language,
-        model: model?.name ?? null,
-        provider: model?.provider ?? null,
+        language: effectiveLanguage === 'auto' ? null : effectiveLanguage,
+        model: model.name,
+        provider: model.provider,
         meetingAt: date?.toISOString() ?? null,
         useFileDate,
         summarize: summary !== null,
@@ -148,7 +136,7 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
   }
 
   async function prepareRetry(item: ImportQueueItem, chooseFile = item.requires_file) {
-    if (isCloud(item.provider)) {
+    if (isCloudModel(item.provider)) {
       const reviewed = await invoke<CloudDestination>('import_cloud_destination', { provider: item.provider });
       setRetryDraft({ id: item.id, destination: reviewed, chooseFile });
     } else {
@@ -183,7 +171,7 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
                     <p className="break-words text-xs text-muted-foreground">
                       {item.status === 'cancelling' ? statusLabels.cancelling : item.progress?.message ?? statusLabels[item.status]}
                       {item.result && (item.result.segments_count === 0 ? ' · no speech detected' : ` · ${item.result.segments_count} segments`)}
-                      {item.result?.transcription_provider && isCloud(item.provider) && !isCloud(item.result.transcription_provider) && ' · transcribed locally'}
+                      {item.result?.transcription_provider && isCloudModel(item.provider) && !isCloudModel(item.result.transcription_provider) && ' · transcribed locally'}
                       {item.elapsed_seconds && item.result?.duration_seconds ? ` · ${(item.result.duration_seconds / item.elapsed_seconds).toFixed(1)}× realtime` : ''}
                     </p>
                     {item.message && <p className="break-words text-xs text-muted-foreground">{item.message}</p>}
@@ -243,14 +231,17 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
                 </div>
                 <div className="space-y-1 text-sm">
                   <label htmlFor="import-model">Transcription model</label>
-                  <Select value={selectedModelKey} onValueChange={setSelectedModelKey} disabled={loadingModels}>
-                    <SelectTrigger id="import-model"><SelectValue placeholder={loadingModels ? 'Loading models…' : 'Default model'} /></SelectTrigger>
-                    <SelectContent>{availableModels.map(option => <SelectItem key={`${option.provider}:${option.name}`} value={`${option.provider}:${option.name}`}>{option.displayName}</SelectItem>)}</SelectContent>
+                  <Select value={selectedModelKey} onValueChange={setSelectedModelKey} disabled={loadingModels || !availableModels.length}>
+                    <SelectTrigger id="import-model"><SelectValue placeholder={loadingModels ? 'Loading models…' : 'Select a model'} /></SelectTrigger>
+                    <SelectContent>{availableModels.map(option => <SelectItem key={`${option.provider}:${option.name}`} value={`${option.provider}:${option.name}`}>{modelOptionLabel(option)}</SelectItem>)}</SelectContent>
                   </Select>
+                  {!loadingModels && availableModels.length === 0 && <p role="status" className="text-xs text-muted-foreground">
+                    No transcription models available. <Link className="underline" href="/settings?tab=transcription">Open transcription settings</Link>
+                  </p>}
                   <label htmlFor="import-language">Language</label>
-                  <Select value={model?.provider === 'parakeet' ? 'auto' : language} onValueChange={setLanguage} disabled={model?.provider === 'parakeet'}>
+                  <Select value={effectiveLanguage} onValueChange={setLanguage} disabled={loadingModels || !model || model.provider === 'parakeet'}>
                     <SelectTrigger id="import-language"><SelectValue /></SelectTrigger>
-                    <SelectContent>{fileLanguageOptions(model?.provider).map(option => <SelectItem key={option.code} value={option.code}>{option.name}</SelectItem>)}</SelectContent>
+                    <SelectContent>{fileLanguageOptions(model?.provider).map(option => <SelectItem key={option.code} value={option.code}>{option.label}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>
               </div>
@@ -277,7 +268,7 @@ export function ImportAudioDialog({ open, onOpenChange, preselectedFiles }: Impo
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
-          {drafts.length > 0 && <Button disabled={busy !== null || loading || Boolean(queueError) || Boolean(cloudProvider && (!destination || approvedDestination !== destination.fingerprint))}
+          {drafts.length > 0 && <Button disabled={!canEnqueue}
             onClick={() => void perform('enqueue', enqueue)}>{busy === 'enqueue' ? 'Adding files…' : `Import ${drafts.length === 1 ? 'file' : `${drafts.length} files`}`}</Button>}
         </DialogFooter>
       </DialogContent>

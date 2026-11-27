@@ -1,4 +1,5 @@
-import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
+import { isActiveSummary, isTerminalSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
+import type { SubscribeToSummary } from '@/lib/summary-updates';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { confirmSummaryRegeneration } from '@/lib/meetingDrafts';
 import { openExternal } from '@/lib/openExternal';
@@ -7,7 +8,6 @@ import type { MeetingMetadata, MeetingSummary } from '@/types';
 import type { OllamaModel } from '@/contexts/ConfigContext';
 import { isEditorSummary, readMeetingSummary, summaryDetails } from '@/lib/meeting-summary';
 import { ModelConfig } from '@/components/ModelSettingsModal';
-import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
@@ -81,6 +81,7 @@ async function checkSummaryModel(config: ModelConfig, isMounted: () => boolean, 
 }
 
 interface UseSummaryGenerationProps {
+  subscribeToSummary: SubscribeToSummary;
   beforeGeneration?: () => Promise<void>;
   hasExistingSummary?: boolean;
   meeting: MeetingMetadata;
@@ -95,6 +96,7 @@ interface UseSummaryGenerationProps {
 }
 
 export function useSummaryGeneration({
+  subscribeToSummary,
   beforeGeneration,
   hasExistingSummary = false,
   meeting,
@@ -111,12 +113,10 @@ export function useSummaryGeneration({
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [isCheckingModels, setIsCheckingModels] = useState(false);
 
-  const { attachSummaryPolling, stopSummaryPolling } = useSidebar();
   const [jobUpdate, setJobUpdate] = useState<SummaryJobSnapshot | null>(null);
   const starting = useRef(false);
   const mounted = useRef(false);
-  // Lets go of a run this page attached to when the page goes away. A background
-  // poll (the automatic summary) then carries on and finishes on its own.
+  // Navigation releases this view's subscription. Native generation continues.
   const detachSummary = useRef<(() => void) | null>(null);
   useEffect(() => {
     mounted.current = true;
@@ -145,84 +145,44 @@ export function useSummaryGeneration({
     }
   }, []);
 
-  // What to do with each poll result: restore, error or completion. Shared by a
+  // Apply restore, error or completion to the current view. Shared by a
   // run this page started and a run it attached to.
-  const handleSummaryUpdate = useCallback(async (pollingResult: SummaryJobSnapshot, isRegeneration: boolean) => {
+  const handleSummaryUpdate = useCallback(async (snapshot: SummaryJobSnapshot, isRegeneration: boolean) => {
     if (!mounted.current) return;
-    setJobUpdate(pollingResult);
-    if (pollingResult.status === 'skipped') {
+    setJobUpdate(snapshot);
+    if (snapshot.status === 'skipped') {
       setSummaryStatus('idle');
       setSummaryError(null);
       return;
     }
 
     // Handle cancellation
-    if (pollingResult.status === 'cancelled') {
+    if (snapshot.status === 'cancelled') {
       console.log('Summary generation was cancelled');
 
-      // Reload summary from database (backend has already restored from backup)
-      try {
-        const existingSummary = await invokeTauri<SummaryJobSnapshot>('api_get_summary', {
-          meetingId: meeting.id
-        });
-        if (!mounted.current) return;
-
-        const restored = readMeetingSummary(existingSummary?.data).summary;
-        if (restored) {
-          console.log('Restored previous summary after cancellation');
-          setAiSummary(restored);
-          setSummaryStatus('completed');
-        } else {
-          setSummaryStatus('idle');
-        }
-      } catch (error) {
-        if (!mounted.current) return;
-        console.error('Failed to reload summary after cancellation:', error);
-        setSummaryStatus('idle');
-      }
+      const restored = readMeetingSummary(snapshot.data).summary;
+      setAiSummary(restored);
+      setSummaryStatus(restored ? 'completed' : 'idle');
 
       setSummaryError(null);
       return;
     }
 
     // Handle errors
-    if (pollingResult.status === 'error' || pollingResult.status === 'failed') {
-      console.error('Backend returned error:', pollingResult.error);
-      const errorMessage = pollingResult.error || `Summary ${isRegeneration ? 'regeneration' : 'generation'} failed`;
+    if (snapshot.status === 'error' || snapshot.status === 'failed') {
+      console.error('Backend returned error:', snapshot.error);
+      const errorMessage = snapshot.error || `Summary ${isRegeneration ? 'regeneration' : 'generation'} failed`;
 
-      // If this was a regeneration, try to restore previous summary from database
-      if (isRegeneration) {
-        try {
-          const existingSummary = await invokeTauri<SummaryJobSnapshot>('api_get_summary', {
-            meetingId: meeting.id
-          });
-          if (!mounted.current) return;
-
-          const restored = readMeetingSummary(existingSummary?.data).summary;
-          if (restored) {
-            console.log('Restored previous summary after regeneration failure');
-            setAiSummary(restored);
-            setSummaryStatus('completed');
-            setSummaryError(null);
-
-            // Show error toast with restoration message
-            toast.error(`Failed to regenerate summary`, {
-              description: `${errorMessage}. Your previous summary has been restored.`,
-            });
-
-            await Analytics.trackSummaryGenerationCompleted(
-              modelConfig.provider,
-              modelConfig.model,
-              false,
-              undefined,
-              errorMessage
-            );
-            return;
-          }
-        } catch (error) {
-          if (!mounted.current) return;
-          console.error('Failed to reload summary after error:', error);
-        }
+      const restored = isRegeneration ? readMeetingSummary(snapshot.data).summary : null;
+      if (restored) {
+        setAiSummary(restored);
+        setSummaryStatus('completed');
+        setSummaryError(null);
+        toast.error('Failed to regenerate summary', {
+          description: `${errorMessage}. Your previous summary has been restored.`,
+        });
+        await Analytics.trackSummaryGenerationCompleted(modelConfig.provider, modelConfig.model, false, undefined, errorMessage);
+        return;
       }
 
       // Continue with normal error handling if not regeneration or reload failed
@@ -258,12 +218,12 @@ export function useSummaryGeneration({
     }
 
     // Handle successful completion
-    if (pollingResult.status === 'completed' && pollingResult.data) {
+    if (snapshot.status === 'completed' && snapshot.data) {
       console.log('Summary generation completed');
 
       // Update meeting title if available
-      const result = readMeetingSummary(pollingResult.data);
-      const meetingName = result.meetingName || pollingResult.meetingName;
+      const result = readMeetingSummary(snapshot.data);
+      const meetingName = result.meetingName || snapshot.meetingName;
       if (meetingName) {
         updateMeetingTitle(meetingName);
       }
@@ -288,7 +248,7 @@ export function useSummaryGeneration({
       setSummaryStatus('completed');
 
       // Show success toast
-      if (summaryDetails(pollingResult.data).translation) {
+      if (summaryDetails(snapshot.data).translation) {
         toast.warning('English notes saved. Translation needs a retry.', { id: `summary-ready:${meeting.id}` });
       } else {
         toast.success('Summary ready', { id: `summary-ready:${meeting.id}`, description: meetingName || meeting.title, duration: 4000 });
@@ -317,10 +277,19 @@ export function useSummaryGeneration({
   const watchSummary = useCallback((isRegeneration: boolean, newRun = false) => {
     if (!mounted.current) return;
     detachSummary.current?.();
-    // A response already in flight from an earlier run belongs to that run.
-    if (newRun) stopSummaryPolling(meeting.id);
-    detachSummary.current = attachSummaryPolling(meeting.id, result => handleSummaryUpdate(result, isRegeneration));
-  }, [attachSummaryPolling, handleSummaryUpdate, meeting.id, stopSummaryPolling]);
+    detachSummary.current = subscribeToSummary(result => {
+      if (isTerminalSummary(result.status)) {
+        detachSummary.current?.();
+        detachSummary.current = null;
+      }
+      if (result.status === 'idle') {
+        result = { status: 'error', error: 'Summary generation is no longer active. Please generate the summary again.' };
+      } else if (result.status === 'completed' && !result.data) {
+        result = { status: 'error', error: 'Summary generation completed without saved content. Please try again.' };
+      }
+      return handleSummaryUpdate(result, isRegeneration);
+    }, { refresh: newRun });
+  }, [subscribeToSummary, handleSummaryUpdate]);
 
   // Unified summary processing logic
   const startSummary = useCallback(async ({
@@ -342,6 +311,15 @@ export function useSummaryGeneration({
     } catch {
       if (mounted.current) toast.error('Save your pending edits before generating a summary.');
       return;
+    }
+    if (!translationTarget && !customPrompt.trim()) {
+      try {
+        customPrompt = await getMeetingContext(meeting.id);
+      } catch {
+        if (mounted.current) toast.error('Could not load meeting context. Try generating again.');
+        return;
+      }
+      if (!mounted.current) return;
     }
     setSummaryStatus(isRegeneration ? 'regenerating' : 'processing');
     setSummaryError(null);
@@ -432,16 +410,6 @@ export function useSummaryGeneration({
     }
     starting.current = true;
     try {
-      let customPrompt = request.customPrompt ?? '';
-      if (!request.translationTarget && !customPrompt.trim()) {
-        try {
-          customPrompt = await getMeetingContext(meeting.id);
-        } catch {
-          if (mounted.current) toast.error('Could not load meeting context. Try generating again.');
-          return;
-        }
-      }
-      if (!mounted.current) return;
       if (modelConfig.provider === 'ollama' || modelConfig.provider === 'builtin-ai') {
         setIsCheckingModels(true);
         try {
@@ -450,11 +418,11 @@ export function useSummaryGeneration({
           if (mounted.current) setIsCheckingModels(false);
         }
       }
-      if (mounted.current) await startSummary({ ...request, customPrompt });
+      if (mounted.current) await startSummary(request);
     } finally {
       starting.current = false;
     }
-  }, [startSummary, summaryStatus, isModelConfigLoading, modelConfig, meeting.id, onOpenModelSettings]);
+  }, [startSummary, summaryStatus, isModelConfigLoading, modelConfig, onOpenModelSettings]);
 
   const handleGenerateSummary = useCallback((customPrompt = '') =>
     processSummary({ customPrompt, isRegeneration: hasExistingSummary }), [processSummary, hasExistingSummary]);

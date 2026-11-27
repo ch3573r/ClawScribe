@@ -12,6 +12,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use super::audio_processing::create_meeting_folder;
 use super::incremental_saver::IncrementalAudioSaver;
 use super::outcome::RecordingOutcome;
+use super::recording_state::RecordingState;
 use super::transcription::TranscriptUpdate;
 
 /// Structured transcript segment for JSON export
@@ -175,7 +176,9 @@ pub struct RecordingSaver {
     metadata: Option<MeetingMetadata>,
     transcripts: Arc<RecordingTranscripts>,
     snapshot_write_lock: Arc<Mutex<()>>,
+    metadata_write_lock: Arc<Mutex<()>>,
     snapshot_task: Option<tokio::task::JoinHandle<()>>,
+    capture_state: Option<Arc<RecordingState>>,
     transcription_provider: Option<String>,
     transcription_model: Option<String>,
     transcription_source_language: Option<String>,
@@ -193,7 +196,9 @@ impl RecordingSaver {
             metadata: None,
             transcripts: Arc::default(),
             snapshot_write_lock: Arc::new(Mutex::new(())),
+            metadata_write_lock: Arc::new(Mutex::new(())),
             snapshot_task: None,
+            capture_state: None,
             transcription_provider: None,
             transcription_model: None,
             transcription_source_language: None,
@@ -258,12 +263,17 @@ impl RecordingSaver {
         mic_name: Option<String>,
         sys_name: Option<String>,
     ) {
+        let _writer = self
+            .metadata_write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let started = self.capture_started_at().unwrap_or(started);
         if let Some(ref mut metadata) = self.metadata {
             metadata.created_at = started.to_rfc3339();
             metadata.devices.microphone = mic_name;
             metadata.devices.system_audio = sys_name;
 
-            // Recovery uses this timestamp even if a second device is slow to open.
+            // Record the device-open fallback until the first frame is available.
             if let Some(folder) = &self.meeting_folder {
                 let metadata_clone = metadata.clone();
                 if let Err(_e) = write_metadata(folder, &metadata_clone) {
@@ -271,6 +281,10 @@ impl RecordingSaver {
                 }
             }
         }
+    }
+
+    fn capture_started_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.capture_state.as_ref()?.capture_started_at()
     }
 
     pub(super) fn bind_transcript_session(&self, session_id: &str) -> Arc<RecordingTranscripts> {
@@ -311,13 +325,14 @@ impl RecordingSaver {
     pub fn start_accumulation(
         &mut self,
         auto_save: bool,
-        state: Arc<super::recording_state::RecordingState>,
+        state: Arc<RecordingState>,
     ) -> Result<Option<super::transcription::queue::TranscriptionQueueSender>> {
         let name = self
             .meeting_name
             .clone()
             .unwrap_or_else(|| "Meeting".into());
         self.initialize_meeting_folder(&name, auto_save)?;
+        self.capture_state = Some(state.clone());
         // Only a recording that writes audio can run out of space for it.
         self.start_snapshot_timer(TRANSCRIPT_SNAPSHOT_INTERVAL, Some((state, auto_save)));
         if !auto_save {
@@ -339,19 +354,21 @@ impl RecordingSaver {
     fn start_snapshot_timer(
         &mut self,
         interval_duration: Duration,
-        state: Option<(Arc<super::recording_state::RecordingState>, bool)>,
+        state: Option<(Arc<RecordingState>, bool)>,
     ) {
         let Some(folder) = self.meeting_folder.clone() else {
             return;
         };
         let transcripts = self.transcripts.clone();
         let write_lock = self.snapshot_write_lock.clone();
+        let metadata_lock = self.metadata_write_lock.clone();
         self.snapshot_task = Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(interval_duration);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await;
             let mut disk_watch = super::disk_space::DiskWatch::new(Instant::now());
             let mut gap_saved = false;
+            let mut start_saved = false;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {},
@@ -362,6 +379,33 @@ impl RecordingSaver {
                             None => std::future::pending().await,
                         }
                     } => {},
+                }
+                if !start_saved {
+                    if let Some(started) = state
+                        .as_ref()
+                        .and_then(|(state, _)| state.capture_started_at())
+                    {
+                        let folder = folder.clone();
+                        let lock = metadata_lock.clone();
+                        start_saved = tokio::task::spawn_blocking(move || {
+                            let _writer = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                            let mut marker = crate::database::meeting_files::read_marker(&folder)
+                                .ok_or_else(|| {
+                                anyhow::anyhow!("Recording metadata is unavailable")
+                            })?;
+                            if marker.get("status").and_then(serde_json::Value::as_str)
+                                == Some("recording")
+                            {
+                                marker["created_at"] = started.to_rfc3339().into();
+                                let json = serde_json::to_vec_pretty(&marker)?;
+                                crate::library::atomic_write(&folder.join("metadata.json"), &json)
+                                    .map_err(anyhow::Error::msg)?;
+                            }
+                            Ok::<_, anyhow::Error>(())
+                        })
+                        .await
+                        .is_ok_and(|result| result.is_ok());
+                    }
                 }
                 if let Some((state, true)) = &state {
                     if !gap_saved && state.capture_incomplete() {
@@ -459,11 +503,21 @@ impl RecordingSaver {
         }
         // Never delete possible capture from a partially opened device. Mark
         // the folder interrupted so recovery can distinguish it from a live session.
+        let started = self.capture_started_at();
         if let (Some(folder), Some(metadata)) = (&self.meeting_folder, &mut self.metadata) {
+            if let Some(started) = started {
+                metadata.created_at = started.to_rfc3339();
+            }
             metadata.status = "error".into();
             let metadata = metadata.clone();
             let folder = folder.clone();
-            let _ = save_metadata(folder.clone(), metadata, false).await;
+            let _ = save_metadata(
+                folder.clone(),
+                metadata,
+                false,
+                self.metadata_write_lock.clone(),
+            )
+            .await;
             let _ = self.write_transcripts_json(&folder).await;
         }
     }
@@ -582,6 +636,7 @@ impl RecordingSaver {
             outcome,
             ..Default::default()
         };
+        let capture_started_at = self.capture_started_at();
         // Attempt every artifact independently, then report all failures.
         if let Some(folder) = &self.meeting_folder {
             if !matches!(
@@ -595,6 +650,9 @@ impl RecordingSaver {
                     .push("The final transcript snapshot could not be saved.");
             }
             if let Some(metadata) = &mut self.metadata {
+                if let Some(started) = capture_started_at {
+                    metadata.created_at = started.to_rfc3339();
+                }
                 metadata.duration_seconds =
                     super::provenance::measured_duration(recording_duration);
                 metadata.duration_measured = metadata.duration_seconds.is_some();
@@ -608,6 +666,7 @@ impl RecordingSaver {
                     folder.clone(),
                     metadata.clone(),
                     report.outcome.capture_incomplete,
+                    self.metadata_write_lock.clone(),
                 )
                 .await
                 .is_err()
@@ -653,9 +712,14 @@ impl RecordingSaver {
                 "completed"
             }
             .into();
-            if save_metadata(folder.clone(), metadata.clone(), false)
-                .await
-                .is_err()
+            if save_metadata(
+                folder.clone(),
+                metadata.clone(),
+                false,
+                self.metadata_write_lock.clone(),
+            )
+            .await
+            .is_err()
             {
                 report.outcome.recording_files_incomplete = true;
                 report
@@ -774,8 +838,10 @@ async fn save_metadata(
     folder: PathBuf,
     metadata: MeetingMetadata,
     capture_gap: bool,
+    write_lock: Arc<Mutex<()>>,
 ) -> Result<()> {
     tokio::task::spawn_blocking(move || {
+        let _writer = write_lock.lock().unwrap_or_else(PoisonError::into_inner);
         let result = write_metadata(&folder, &metadata);
         if capture_gap {
             let _ = crate::library::atomic_write(
@@ -937,6 +1003,58 @@ mod snapshot_tests {
             super::super::interrupted::recovered_provenance(folder, &marker, None).started_at,
             Some(started)
         );
+    }
+
+    #[tokio::test]
+    async fn first_capture_sample_replaces_device_open_time_for_recovery_and_final_save() {
+        use super::super::recording_state::{AudioChunk, DeviceType};
+
+        let root = tempfile::tempdir().unwrap();
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(root.path().to_path_buf());
+        let state = RecordingState::new();
+        let (sender, _audio) = tokio::sync::mpsc::channel(1);
+        state.set_audio_sender(sender);
+        saver.start_accumulation(false, state.clone()).unwrap();
+        state.start_recording().unwrap();
+        let fallback = chrono::Utc::now() - chrono::Duration::seconds(1);
+        saver.mark_capture_started(fallback, Some("Test input".into()), None);
+        let folder = saver.get_meeting_folder().unwrap().clone();
+
+        let stamp = state.admit_capture(Instant::now(), 480, 48_000).unwrap();
+        assert_eq!(stamp.seconds, 0.0);
+        let started = state.capture_started_at().unwrap().to_rfc3339();
+        state
+            .send_audio_chunk(AudioChunk {
+                data: vec![0.1; 480],
+                sample_rate: 48_000,
+                timestamp: stamp.seconds,
+                chunk_id: 0,
+                device_type: DeviceType::Microphone,
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if crate::database::meeting_files::read_marker(&folder)
+                    .is_some_and(|marker| marker["created_at"].as_str() == Some(started.as_str()))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        state.stop_recording();
+        saver
+            .finalize_files(Some(0.5), RecordingOutcome::default())
+            .await
+            .unwrap();
+        let marker = crate::database::meeting_files::read_marker(&folder).unwrap();
+        assert_eq!(marker["created_at"].as_str(), Some(started.as_str()));
+        assert_eq!(marker["devices"]["microphone"], "Test input");
+        assert_eq!(saver.started_at(), Some(started.as_str()));
     }
 
     #[tokio::test]

@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::library::subtitles::SubtitleFormat;
+
 const GRANT_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const MAX_GRANTS: usize = 32;
 pub(crate) const AUDIO_EXTENSIONS: &[&str] = &[
@@ -29,14 +31,16 @@ const CHOOSE_AGAIN: &str = "Choose the file again.";
 pub(crate) enum Purpose {
     /// An audio file to try a hosted transcription provider with.
     TestAudio,
-    /// Where to write a library backup (`.zip`).
+    /// Where to write a library backup.
     BackupSave,
-    /// A library backup to restore (`.zip`).
+    /// A library backup to restore.
     BackupOpen,
     /// Where to write a Word export (`.docx`).
     WordSave,
     /// Where to write a Markdown export (`.md`).
     MarkdownSave,
+    /// Where to write a subtitle export in the chosen format.
+    SubtitleSave(SubtitleFormat),
     /// Open or locate a document successfully written from an export save grant.
     OpenExport,
     /// The folder recordings are saved in.
@@ -274,12 +278,19 @@ pub async fn pick_reference_document<R: Runtime>(
 pub async fn pick_backup_save_path<R: Runtime>(
     app: AppHandle<R>,
     suggested_name: String,
+    encrypted: Option<bool>,
 ) -> Result<Option<String>, String> {
-    let Some(chosen) = pick_save(app, "ClawScribe meeting archive", "zip", suggested_name).await?
+    let extension = if encrypted == Some(true) {
+        crate::library::backup::encryption::EXTENSION
+    } else {
+        "zip"
+    };
+    let Some(chosen) =
+        pick_save(app, "ClawScribe meeting archive", extension, suggested_name).await?
     else {
         return Ok(None);
     };
-    let path = with_extension(chosen, "zip")?;
+    let path = with_extension(chosen, extension)?;
     save_target_parent_exists(&path)?;
     grant(Purpose::BackupSave, &path)?;
     Ok(Some(path.to_string_lossy().into_owned()))
@@ -290,7 +301,8 @@ pub async fn pick_backup_save_path<R: Runtime>(
 pub async fn pick_backup_restore_path<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<Option<String>, String> {
-    let Some(path) = pick_file(app, "ClawScribe meeting archive", &["zip"]).await? else {
+    const EXTENSIONS: &[&str] = &["zip", crate::library::backup::encryption::EXTENSION];
+    let Some(path) = pick_file(app, "ClawScribe meeting archive", EXTENSIONS).await? else {
         return Ok(None);
     };
     grant(Purpose::BackupOpen, &path)?;
@@ -324,6 +336,22 @@ pub async fn pick_markdown_save_path<R: Runtime>(
     let path = with_extension(chosen, "md")?;
     save_target_parent_exists(&path)?;
     grant(Purpose::MarkdownSave, &path)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+pub(crate) async fn pick_subtitle_save_path<R: Runtime>(
+    app: AppHandle<R>,
+    format: SubtitleFormat,
+    suggested_name: String,
+) -> Result<Option<String>, String> {
+    let extension = format.extension();
+    let Some(chosen) = pick_save(app, format.label(), extension, suggested_name).await? else {
+        return Ok(None);
+    };
+    let path = with_extension(chosen, extension)?;
+    save_target_parent_exists(&path)?;
+    grant(Purpose::SubtitleSave(format), &path)?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
@@ -382,6 +410,18 @@ mod tests {
         give_back(Purpose::WordSave, &taken);
         let again = take(Purpose::WordSave, &chosen.to_string_lossy()).unwrap();
         assert_eq!(again.granted, original, "the lifetime does not restart");
+    }
+
+    #[test]
+    fn subtitle_save_grant_is_limited_to_the_requested_format() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let path = local("subtitles.srt");
+        let srt = Purpose::SubtitleSave(SubtitleFormat::Srt);
+        let vtt = Purpose::SubtitleSave(SubtitleFormat::Vtt);
+        grant(srt, &path).unwrap();
+        assert!(take(vtt, &path.to_string_lossy()).is_err());
+        assert!(take(srt, &path.to_string_lossy()).is_ok());
+        assert!(take(srt, &path.to_string_lossy()).is_err());
     }
 
     #[test]

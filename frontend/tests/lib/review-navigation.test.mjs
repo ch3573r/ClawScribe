@@ -141,6 +141,31 @@ test('bulk local export uses the core picker and stops before writing if it is c
   }
 });
 
+test('bulk subtitle export uses a format-specific save grant without loading notes', async () => {
+  for (const format of ['srt', 'vtt']) {
+    const called = [];
+    let path = null;
+    const { exportArchiveMeeting } = loadTsModule('src/components/Archive/archive-bulk-export.ts', {
+      '@tauri-apps/api/core': { invoke: async (command, args) => {
+        called.push([command, args]);
+        if (command === 'pick_subtitle_save_path') return path;
+      } },
+    });
+    const meeting = { id: 'fixture', title: 'Fixture title', created_at: '2026-01-02T12:00:00' };
+    assert.equal(await exportArchiveMeeting(meeting, format), false);
+    assert.deepEqual(called.map(([command]) => command), ['pick_subtitle_save_path']);
+    assert.ok(called[0][1].suggestedName.endsWith(`.${format}`));
+    called.length = 0;
+    path = `user-chosen.${format}`;
+    assert.equal(await exportArchiveMeeting(meeting, format, false), true);
+    assert.deepEqual(called.map(([command]) => command), ['pick_subtitle_save_path', 'export_local_subtitles']);
+    assert.equal(called[1][1].meetingId, meeting.id);
+    assert.equal(called[1][1].path, path);
+    assert.equal(called[1][1].format, format);
+    assert.equal(called[1][1].includeSpeakers, false);
+  }
+});
+
 test('bulk deletion requires confirmation and defaults to keeping recording files', async () => {
   const calls = [];
   const hooks = createHookHarness();

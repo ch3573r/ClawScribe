@@ -7,6 +7,8 @@ export interface SummaryJobSnapshot {
   error?: string | null;
   partial_notes?: string | null;
   progress?: { completed: number; total: number; level: number } | null;
+  transcript_changed?: boolean | null;
+  has_previous_result?: boolean;
 }
 
 export function isActiveSummary(status?: string): boolean {

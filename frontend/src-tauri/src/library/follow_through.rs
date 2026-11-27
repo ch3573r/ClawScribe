@@ -161,7 +161,7 @@ async fn list(
     }
     let search = search.to_lowercase();
     let mut meetings = sqlx::query_as::<_, MeetingRow>(
-        "SELECT id, title, created_at, calendar_link, reviewed_actions FROM meetings
+        "SELECT id, title, created_at, calendar_link, reviewed_actions FROM active_meetings
          WHERE reviewed_actions IS NOT NULL AND reviewed_actions != '[]'
          ORDER BY julianday(created_at) DESC, id",
     )
@@ -345,7 +345,7 @@ pub(crate) struct SeriesReview {
 
 async fn meeting_row(conn: &mut SqliteConnection, meeting_id: &str) -> Result<MeetingRow, String> {
     sqlx::query_as(
-        "SELECT id, title, created_at, calendar_link, reviewed_actions FROM meetings WHERE id = ?",
+        "SELECT id, title, created_at, calendar_link, reviewed_actions FROM active_meetings WHERE id = ?",
     )
     .bind(meeting_id)
     .fetch_optional(conn)
@@ -413,7 +413,7 @@ async fn prior_occurrences(
             "WITH candidates AS (
                SELECT id, title, reviewed_actions, CASE WHEN json_valid(calendar_link)
                    THEN calendar_link ELSE NULL END AS link
-               FROM meetings WHERE id != ?
+               FROM active_meetings WHERE id != ?
              )
              SELECT m.id, m.title, m.link, m.reviewed_actions, n.approved_notes
              FROM candidates m LEFT JOIN approved_series_notes n ON n.meeting_id = m.id

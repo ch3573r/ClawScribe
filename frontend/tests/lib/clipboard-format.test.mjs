@@ -1,11 +1,43 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadTsModule } from './load-ts-module.mjs';
+import { deferred } from './hook-harness.mjs';
 
 const clip = loadTsModule('src/lib/clipboard-format.ts');
 const { summaryClipboard, transcriptClipboard, markdownToPlainText, markdownToSafeHtml, stripSourceAnchors, escapeHtml, writeClipboard } = clip;
 
 const MEETING_ID = 'meeting-3f2a9c1e-0000-4000-8000-123456789abc';
+
+test('plain text copy reports success only after the clipboard accepts the content', async t => {
+  let write = deferred();
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, 'navigator', original);
+    else delete globalThis.navigator;
+  });
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { clipboard: { writeText: value => {
+      assert.equal(value, 'Selected notes');
+      return write.promise;
+    } } },
+  });
+  const feedback = [];
+  const { copyPlainText } = loadTsModule('src/lib/copy-plain-text.ts', {
+    sonner: { toast: { success: value => feedback.push(value), error: value => feedback.push(value) } },
+  });
+  const copy = copyPlainText('Selected notes', 'Copied', 'Copy failed');
+  assert.deepEqual(feedback, []);
+  write.reject(new Error('Clipboard denied'));
+  await copy;
+  assert.deepEqual(feedback, ['Copy failed']);
+  write = deferred();
+  const retry = copyPlainText('Selected notes', 'Copied', 'Copy failed');
+  assert.deepEqual(feedback, ['Copy failed']);
+  write.resolve();
+  await retry;
+  assert.deepEqual(feedback, ['Copy failed', 'Copied']);
+});
 const summary = [
   '## Decisions',
   '',

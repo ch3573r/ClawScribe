@@ -22,7 +22,7 @@ registered saved meeting folders, the library database and indexes, reference
 originals, and local database snapshots. Sizes use filesystem metadata and
 count each shared recording folder once. Unavailable recording folders and
 skipped files are reported. Unattached interrupted recordings, user-created
-backup ZIPs, and model downloads are outside these totals.
+portable backup files, and model downloads are outside these totals.
 
 **Settings → General → Storage** also opens **Library storage** and **Backup and
 restore**. Use **Show storage by meeting** for a paginated breakdown of audio,
@@ -44,13 +44,13 @@ Removal is permanent and turns off playback and retranscription from that
 copy. The meeting, its measured duration and source, transcript, summaries, notes, reference originals,
 recording-folder support files, and existing backups remain available.
 Imported originals outside the meeting folder remain where they were.
-ClawScribe only removes audio after confirmation.
+ClawScribe records the confirmed removal so that backup repair skips that audio.
 
-Use **Bulk actions** to add project tags to the selection, export a Markdown
-or Word file per meeting, start a Meeting memory conversation with those
-meetings selected, or delete them. Export asks where to save each file. Cancel
-a save dialog to stop the batch. Deleting requires confirmation and keeps
-recording files on disk unless you also select their removal. Opening a scoped
+Use **Bulk actions** to add project tags to the selection, export a Markdown,
+Word, SRT, or WebVTT file per meeting, start a Meeting memory conversation with
+those meetings selected, or move them to Trash. Export asks where to save each
+file. Cancel a save dialog to stop the batch. Recording files stay on disk through
+Trash retention. Opening a scoped
 Meeting memory conversation leaves the question and sending under your control.
 
 ## Open actions and saved live answers
@@ -156,11 +156,12 @@ open the marker in the meeting, where you can play from its recording time. A ch
 deleted source prompts a new search. **Back to archive** restores your search,
 filters and sort order for the current app session.
 
-Queries accept up to 256 characters. The desktop shows up to 50 matches
-per source type. Saved summaries, notes and bookmark labels are checked
-locally with a 512 KiB limit per stored entry. Searches reaching a size, row,
-result or time limit display a notice. Browse or narrow the query and filters to search
-a smaller set. Literal search uses a local substring index to find candidates,
+Queries accept up to 256 characters. The first page shows up to 50 matches
+per source type. Choose **Load more** to continue searching saved summaries,
+notes and bookmarks. ClawScribe checks the editor's visible text before
+applying the result limit. It searches saved entries up to 512 KiB each.
+If another search limit leaves some sources unchecked, Archive displays a notice.
+Date and project filters search a smaller set. Literal search uses a local substring index to find candidates,
 then checks the saved text and its exact offset. Short searches and terms without
 an indexable substring use a bounded scan. No download or answer provider is required.
 Select **Hybrid** beside Archive search to also find passages with similar
@@ -329,6 +330,15 @@ confirmed attendee names, and project tags when available.
 ClawScribe opens the native save dialog and authorizes the chosen path for that
 export. Local document exports require no Microsoft connection.
 
+## Subtitles
+
+Choose **SRT subtitles (.srt)** or **WebVTT subtitles (.vtt)** in a saved meeting's
+**Export** menu or in the Archive's **Bulk actions → Export meetings** dialog.
+ClawScribe uses the start and end times saved with each transcript segment.
+Speaker labels are on by default and can be turned off. The export skips segments
+without usable recording times and reports an error if the meeting has no timed
+text. You can still export those transcripts as Word or Markdown.
+
 ## Shared document export options
 
 The **Export** menu groups local Word and Markdown, Confluence, OneNote, and OneDrive DOCX/PDF.
@@ -401,7 +411,7 @@ the summary provider for that run. The switch applies to the whole meeting.
 
 ## Backup and restore
 
-Open **Meetings → Backup and restore** to save or restore a ZIP archive. Finish
+Open **Meetings → Backup and restore** to save or restore an archive. Finish
 active recording, import, retranscription, and Microsoft export work before
 starting a manual backup or restore. Keep the app open until it completes.
 
@@ -430,6 +440,8 @@ backup schedules, and unfinished recording recovery spools stay with the source
 profile. Missing recording folders are reported by meeting title without
 blocking the backup. The archive includes their meeting data, and restore
 leaves their recording folder unset.
+Speaker profiles, pending voice matches, and their settings stay on the source
+device. Applied speaker names travel with the transcript.
 Unreadable folders and folder links still stop backup with a named error.
 Nonempty `.audio-spool` and `.checkpoints` directories
 remain on the source computer. They do not block backup: available saved audio,
@@ -440,7 +452,17 @@ archive. Choosing a file for another operation clears the previous report;
 cancelling the file picker keeps it. Preserve a separate copy of source recording
 folders, including hidden files, if you need the recovery originals. Backup never
 removes them.
-Archives are not encrypted; keep them in trusted storage.
+Turn on **Encrypt this backup** for a passphrase-protected `.clawbackup` file.
+ClawScribe asks for the passphrase when you choose an encrypted archive to
+restore. Keep the passphrase somewhere safe. ClawScribe does not store it or
+have a way to recover it. Encryption uses Argon2id key derivation and
+authenticated XChaCha20-Poly1305 in chunks. Encrypted operations check local
+disk space before writing a temporary ZIP. Restore also checks room to extract
+the selected files when they share the same drive as that ZIP. ClawScribe removes
+the temporary ZIP at the end of the operation and clears leftover scratch files
+at startup and before encrypted operations.
+Plain ZIP backups still work. Scheduled backups use plain ZIP, so keep
+unencrypted archives in trusted storage.
 
 Version 3 backups include explicitly saved live answers attached to an archived
 recording when ClawScribe can verify that every source came from that recording.
@@ -451,14 +473,19 @@ excluded. The backup reports their count, and restore reports omissions for
 meetings it adds. Unsaved live chat, pending answers from unfinished recordings,
 connection settings, and sharing approvals stay out of the archive.
 
-Restore adds meetings whose IDs are absent from the library and skips existing
-IDs without overwriting them. Restore validates the archive structure and checks
-existing IDs before extracting audio, so disk space is needed only for new
-meetings' recordings. Audio is staged in a new app-owned directory and database
-inserts commit together. If another operation adds a meeting during extraction,
-its staged files are removed before commit; cleanup failure rolls back the import.
-If a previously skipped meeting is deleted during restore, retry is required so
-its audio can be extracted. Invalid archives leave existing meetings alone.
+Restore adds meetings whose IDs are absent from the library. Select **Repair
+missing audio for existing meetings** before choosing the archive to also copy
+missing audio for matching meetings. Restore reports repaired meetings and
+unavailable recording locations. Reconnect unavailable storage and retry repair.
+ClawScribe skips audio with a recorded removal choice. Repair may bring back
+audio you removed before this version. Restore keeps existing
+audio, transcripts, notes, and other meeting data. For a missing or empty
+recording folder on available storage, ClawScribe attaches a new app-owned
+folder. An existing folder must be a verified, unshared ClawScribe recording
+folder without pending recovery files before audio can be added there.
+Restore validates the archive before extracting new or missing files. If a
+meeting or its recording folder changes during restore, retry the restore.
+Invalid archives leave existing meetings alone.
 Restore displays saved audio-omission warnings for imported meetings.
 Meetings whose recovery files were excluded retain a message directing recovery
 to the original computer.
@@ -546,17 +573,23 @@ library, choose **Return to original library**, then quit and reopen ClawScribe.
 The recovery workspace stays on disk. If the original library still fails to
 open, **Open recovery library** reopens the previous workspace when available.
 
-## Deleting meetings
+## Moving meetings to Trash
 
-Choose **Delete meeting** in an archive row’s menu or use the sidebar delete
-button. The confirmation names the meeting and lets you choose whether to
-remove its recording files.
+Choose **Move to Trash** in an archive row’s menu, in the bulk actions, or
+from the sidebar. The meeting disappears from Archive, search, export, Meeting
+memory, and the local assistant. Its transcript, notes, and recording files
+stay on disk during retention. Open **Meetings → Trash** to restore it or
+delete it permanently. ClawScribe checks for expired meetings at startup and
+while running and permanently deletes them after 30 days.
 
-Deletion removes the meeting's database records, including transcript revisions,
+Portable backups include meetings in Trash and any recording files included
+by the backup settings. Restoring a copy from backup puts it back in Trash
+with a fresh 30-day window. An existing local meeting keeps its current state.
+
+Permanent deletion removes the meeting's database records, including transcript revisions,
 previous summaries, context, notes, chat, tags, and bookmarks. App-managed export
 history, Codex scratch runs, outputs under app data, and cached transcript recovery
-copies are also removed where possible. Unsaved title and summary edits for the
-deleted meeting are discarded.
+copies are also removed where possible.
 References used only by this meeting are deleted, including extracted text and
 original files, even when recording files are kept. References shared with another
 meeting remain available there. Answers that depended on a deleted reference are
@@ -564,15 +597,15 @@ invalidated and their saved content is cleared. Startup also cleans abandoned re
 when recording and imports are idle; unknown reference files are kept for at least
 24 hours before cleanup. Portable backups include only attached references.
 
-**Also delete the recording files** is on by default. It removes the whole
-recording folder, including audio, transcript copies, metadata, recovery originals,
+The confirmation when moving a meeting to Trash lets you choose whether to
+remove its recording files at permanent deletion. That removes the whole
+verified recording folder, including audio, transcript copies, metadata, recovery originals,
 and generated documents. The folder must be inside the configured save location,
 a supported default recording location, or app-data `restored-recordings`; it must
-contain an app recording marker, have no links or junctions in its path, and not
+contain a matching recording marker, have no links or junctions in its path, and not
 overlap another meeting's folder. Folders failing these checks or file deletion
-are kept. Uncheck the option to keep
-the folder and its contents. While recording or transcription is running, only
-deletion with this option off is allowed.
+are kept. Uncheck the option to keep the folder and its contents.
+Permanent deletion waits for recording, transcription, export, or backup work to finish.
 
 If file cleanup could not finish, open **Meetings → Archive → Storage**. Under
 **Pending file cleanup**, review the item and the reason it was kept. Close apps
@@ -619,3 +652,11 @@ meetings. Each new snapshot keeps the newest two, and startup cleanup removes
 snapshots older than 14 days. Retention can last longer while the app is closed
 or cleanup fails. Portable backups are separate, unencrypted archives. Meeting
 deletion does not remove these archives or copies exported elsewhere.
+ClawScribe syncs each pre-migration snapshot in a staging file and renames it
+into place before removing speaker profiles and pending voice matches. If the
+sync or rename fails, ClawScribe discards the staging file, logs a warning,
+and continues startup and migration. If a scrub fails, ClawScribe keeps the
+rollback copy and retries at startup and when deleting a profile or turning
+off speaker profiles.
+Scrubbing preserves the snapshot's original expiration date. Startup removes
+abandoned snapshot staging files.

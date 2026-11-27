@@ -46,16 +46,16 @@ Scope rules:
 
 ## Auth And Storage
 
-The sign-in flow is foreground and user-initiated. Logs may record connection
-state and sanitized Graph errors, but must not record bearer tokens, refresh
-tokens, auth codes, or callback URLs containing credentials.
+The sign-in flow is foreground and user-initiated. The loopback listener checks
+the callback route and sign-in state before accepting the authorization code.
+Logs may record connection state and sanitized errors, but must not record
+bearer tokens, refresh tokens, auth codes, or callback URLs containing credentials.
 
 The persisted Microsoft session contains the refresh token and account metadata,
 not the short-lived access token. When the Windows credential store cannot
 persist it, the fallback file is protected with DPAPI for the current Windows
-user. A legacy plaintext fallback is removed only after successful encrypted
-migration; failed migration can leave the legacy file in place. Non-Windows
-platforms do not write a new plaintext Microsoft-token fallback.
+user. Successful migration removes the legacy plaintext fallback. If migration
+fails, ClawScribe requires the user to sign in again.
 
 AI and hosted-transcription keys use separate provider-specific protected
 credential references; Microsoft sign-in does not supply those credentials.
@@ -177,8 +177,13 @@ See [todo-export.md](todo-export.md).
 - `403`: show consent, tenant policy, or access-denied guidance.
 - `404`: selected destination no longer exists or is not visible.
 - `429`: respect `Retry-After` and avoid duplicate exports.
-- `503`: bounded retry, then surface service unavailable.
+- `503`: retry reads within the retry limit. If a destination create is
+  unconfirmed, check Microsoft 365 for the destination before submitting again.
 - OneNote `10008`: skip section listing and use create-new/saved-ID flows.
+
+Destination pickers follow up to 20 Graph pages. If more pages remain, the
+picker reports that the complete list could not be loaded. To Do list creation
+also stops when it cannot finish checking for an existing list with that name.
 
 Graph failures should not delete local meeting artifacts.
 

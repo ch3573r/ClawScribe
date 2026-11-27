@@ -13,8 +13,9 @@ import { useLiveTranscriptionReadiness } from '@/hooks/useLiveTranscriptionReadi
 import { reportStartFailure, useStartRecordingSession } from '@/hooks/useRecordingStart';
 import { audioSourceReadiness } from '@/lib/audioDevicePreferences';
 import { recordingActionBlock, startReadinessReason } from '@/lib/recording-start-readiness';
-import { useSummaryPolling } from '@/hooks/useSummaryPolling';
 import { allowLoadedMeetingDrafts, discardMeetingDraft } from '@/lib/meetingDrafts';
+import { indexedDBService } from '@/services/indexedDBService';
+import { toast } from 'sonner';
 
 
 interface SidebarItem {
@@ -32,7 +33,7 @@ export interface CurrentMeeting {
   updated_at?: string;
 }
 
-interface SidebarContextType extends ReturnType<typeof useSummaryPolling> {
+interface SidebarContextType {
   deleteTarget: CurrentMeeting | null;
   setDeleteTarget: (meeting: CurrentMeeting | null) => void;
   projectTags: MeetingTag[];
@@ -129,7 +130,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [isMeetingActive, setIsMeetingActive] = useState(false);
   const [nextMeetingTitle, setNextMeetingTitle] = useState('');
   const startingFromSidebar = React.useRef(false);
-  const { activeSummaryPolls, startSummaryPolling, stopSummaryPolling, attachSummaryPolling } = useSummaryPolling();
 
   // Use recording state from RecordingStateContext (single source of truth)
   const recording = useRecordingState();
@@ -201,18 +201,26 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     const subscription = listen('library-changed', () => {
       if (active) { void refreshProjectTags(); void fetchMeetings(); }
     });
-    const deleted = listen<string>('library-meeting-deleted', ({ payload: id }) => {
+    const trashed = listen<string>('library-meeting-trashed', ({ payload: id }) => {
       if (!active) return;
       discardMeetingDraft(id);
       setMeetings(rows => rows.filter(row => row.id !== id));
+      setCurrentMeeting(current => current?.id === id ? null : current);
       void refreshProjectTags();
     });
+    const deleted = listen<string>('library-meeting-deleted', ({ payload: id }) => {
+      if (!active) return;
+      void indexedDBService.deleteMeeting(id).catch(() => {
+        toast.warning('Could not remove a cached recovery copy.');
+      });
+    });
     void subscription.catch(() => { if (active) setProjectTagsError('Could not watch project tags. Reopen ClawScribe to retry.'); });
+    void trashed.catch(() => {});
     void deleted.catch(() => {});
     return () => {
       active = false;
       tagsVersion.current += 1;
-      for (const listener of [subscription, deleted]) void listener.then(unlisten => unlisten()).catch(() => {});
+      for (const listener of [subscription, trashed, deleted]) void listener.then(unlisten => unlisten()).catch(() => {});
     };
   }, [refreshProjectTags, fetchMeetings, setMeetings]);
 
@@ -278,10 +286,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       nextMeetingTitle,
       setNextMeetingTitle,
       liveReadiness,
-      activeSummaryPolls,
-      startSummaryPolling,
-      stopSummaryPolling,
-      attachSummaryPolling,
       refetchMeetings: fetchMeetings,
   }), [
     deleteTarget, projectTags, projectTagsError, projectTagsLoading, refreshProjectTags,
@@ -289,8 +293,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     sidebarMaxWidth, sidebarOffset, isSidebarResizing, toggleCollapse, meetings,
     meetingsError, meetingsLoading, setMeetings, isMeetingActive, handleRecordingToggle, recordingActionReason, nextMeetingTitle,
     liveReadiness.data, liveReadiness.error, liveReadiness.refresh,
-    activeSummaryPolls, startSummaryPolling,
-    stopSummaryPolling, attachSummaryPolling, fetchMeetings,
+    fetchMeetings,
   ]);
 
   return (

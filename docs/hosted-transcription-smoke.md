@@ -15,9 +15,20 @@ against that file.
 Cloud endpoints follow the integration transport policy: HTTPS, loopback HTTP,
 or explicitly opted-in local-network HTTP. Each provider saves its own opt-in.
 HTTP requests validate and pin DNS answers and disable redirects and proxies.
-The provider test accepts only existing non-empty audio files. It reuses a saved
-key only for the saved endpoint; testing another endpoint requires entering a
-new key. Loading a rejected legacy endpoint still lets you correct its settings.
+The provider test accepts existing non-empty audio files. Saving a hosted
+configuration publishes the endpoint and protected key reference together. The
+provider test reuses a saved key for its saved endpoint. Enter a key to test an
+edited endpoint. Loading a rejected legacy endpoint still lets you correct its
+settings.
+
+OpenAI accepts up to 25 MB per upload. For larger inputs, ClawScribe uses its
+bundled FFmpeg to produce 32 kbps, 16 kHz mono MP3 parts and applies each part's
+start time to its segments and words. Import and Enhance display progress by
+part. Custom Whisper endpoints stream the original file up to 500 MB and
+use the same compression and splitting for larger files. ClawScribe keeps
+prepared parts in its local app cache, deletes them after the job, and sweeps
+abandoned parts at startup. Split preparation supports recordings shorter
+than 24 hours.
 
 Standard Azure Speech omits enhanced mode and an explicit model. Existing
 MAI provider settings retain their endpoint and protected key. Use the Speech
@@ -36,8 +47,11 @@ resource endpoint, not a Foundry project URL.
 
 ## Inputs
 
-Use a short audio file with clear speech. Keep OpenAI-hosted Whisper uploads
-below 25 MB.
+Use a short audio file with clear speech for the provider smoke test. To verify
+long audio end to end, repeat in Import or Enhance with a speech recording over
+25 MB and verify that the transcript seeks to the original audio. Use a
+recording over 100 minutes to verify progress across uploads and timing after
+the first split.
 
 Common optional input:
 

@@ -220,15 +220,26 @@ restores polling for an active session after a reload, and permits one poll at a
 time. Lifecycle events invalidate older polls. Cleanup also removes subscriptions
 whose asynchronous registration finishes after the provider unmounts.
 
+`audio/stream.rs` copies CPAL input into a bounded pool of reusable buffers.
+Per-source workers run DSP and pass the capture position of each block to the
+mixer. The mixer uses a pause-adjusted 48 kHz timeline for both inputs, with
+bounded lookahead and silence where a source has no samples. Saving and live
+speech detection receive the same mixed windows.
+
 `audio/transcription/queue.rs` serves both live recognition and the retained
 recording spool. Startup removes abandoned UUID-named temporary transcription
 queues without following links; queues owned by a running session are retained. Bounded producer buffers feed independent disk workers so disk
 latency does not block the mixer. `audio/audio_spool.rs` encodes final audio from
 the available PCM spool in one pass with a duration-scaled deadline and recovers
-it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. Both paths accept a readable temporary tail at the next sequence
+it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. New capture chunks carry absolute sample positions, and a stop
+records the intended end. Both paths insert silence for known missing spans so
+later audio keeps its transcript position. Older spools still recover in
+sequence. Older builds can read new capture chunks and play them in sequence.
+Both paths accept a readable temporary tail at the next sequence
 position. Torn temporary writes record a gap without preventing spool cleanup;
-unreadable published chunks retain their originals. Playback uses scoped asset-protocol byte ranges and an HTML audio
-element. The speech worker delivers each completed decode directly to its
+unreadable published chunks retain their originals. Playback uses asset-protocol
+byte ranges and an HTML audio element. The core grants access to each resolved
+recording file individually. The speech worker delivers each completed decode directly to its
 session's transcript saver before emitting the UI event. The saver accepts
 remaining results during Stop's bounded drain and closes intake before final
 publication. A coalescing worker writes transcript snapshots during recording
@@ -297,6 +308,9 @@ child loop and the supervisor.
   cancellation the child is killed and reaped.
 - After a crash or timeout the supervisor starts a new child, reloads the model
   and retries the segment once. A cancelled call is never retried.
+- Panics before app logging starts and in headless worker processes write a
+  sanitized report to `crash.log` in the app log folder. The supervisor notes
+  when a child that it reaped left a report.
 - A crash or timeout while DirectML was in use turns DirectML off for every
   later Parakeet load in this app session, in the child and in the app, and the
   beta settings page reports it.
@@ -558,8 +572,16 @@ An interrupted cancellation stays cancelled, and other unfinished items need
 their original files again. A damaged queue file is preserved in app settings
 and a fresh queue accepts new files. Deleting a meeting prunes its completed
 import entry. Source paths and picker grants stay in memory. Hosted imports
-require explicit approval of the selected destination and check the saved
-endpoint and cloud setting again before upload.
+and retranscription require explicit approval of the selected destination.
+The approved fingerprint is checked against current settings and the upload
+path checks the cloud opt-in again immediately before sending audio. When
+cloud transcription falls back locally, both paths prefer the configured
+installed model, then the default Parakeet model, then another installed model.
+Retranscription acknowledges a job after it owns the inference slot and returns
+the provider and model used for the saved transcript in the completion event.
+The core retains the latest run status, and an app-wide listener reports results
+across meeting navigation. A recreated window reads the status to restore
+progress and cancellation controls for an active run.
 
 ## Microsoft Export Persistence
 

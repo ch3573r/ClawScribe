@@ -23,7 +23,7 @@ pub async fn set_sharing(
         .await
         .map_err(|_| "Reference sharing settings are unavailable")?;
     if let ConversationOwner::Meeting(id) = owner {
-        sqlx::query("INSERT INTO knowledge_owners(id,kind,meeting_id) SELECT ?,'meeting',id FROM meetings WHERE id=? ON CONFLICT(id) DO NOTHING")
+        sqlx::query("INSERT INTO knowledge_owners(id,kind,meeting_id) SELECT ?,'meeting',id FROM active_meetings WHERE id=? ON CONFLICT(id) DO NOTHING")
             .bind(&key).bind(id).execute(&mut *tx).await.map_err(|_| "Reference sharing settings are unavailable")?;
     }
     let exists: bool =

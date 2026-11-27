@@ -15,6 +15,7 @@ import {
   ToDoIcon,
 } from "@/components/IntegrationIcons";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -63,6 +64,7 @@ import { ExportContentOptions } from "./ExportContentOptions";
 import { defaultExportOptions, prepareMeetingExport, readExportSummary, type MeetingExportHeader } from "@/lib/meetingExportContent";
 import { safeDocumentName } from "@/lib/library";
 import { archiveDateKey } from "@/lib/archive-review";
+import { exportMeetingSubtitles, isSubtitleFormat, subtitleFormats, type SubtitleFormat } from "@/lib/subtitle-export";
 import { useWebhookSettings } from "@/hooks/useWebhookSettings";
 import { canSendWebhook, webhookCommandError, webhookDeliveryMessage, type WebhookDelivery } from "@/lib/webhook";
 import { WebhookExportHistory } from "./WebhookExportHistory";
@@ -79,12 +81,15 @@ interface MeetingExportButtonsProps {
   seriesDestination?: FollowUpDestination | null;
 }
 
-type DocumentDestination = "word" | "markdown" | "onedrive" | "confluence";
+type LocalExportDestination = "word" | "markdown" | SubtitleFormat;
+type DocumentDestination = LocalExportDestination | "onedrive" | "confluence";
 type Busy = DocumentDestination | "onenote" | "webhook" | null;
 
 const documentLabels: Record<DocumentDestination, { title: string; description: string; submit: string }> = {
   word: { title: "Export Word document", description: "Save an editable .docx on this computer. Microsoft sign-in is not required.", submit: "Save as Word document" },
   markdown: { title: "Export Markdown", description: "Save a Markdown file on this computer.", submit: "Save as Markdown" },
+  srt: { title: "Export SRT subtitles", description: "Only segments with recording times are included.", submit: "Save subtitles" },
+  vtt: { title: "Export WebVTT subtitles", description: "Only segments with recording times are included.", submit: "Save subtitles" },
   onedrive: { title: "Export to OneDrive", description: "Upload the selected content as DOCX and, if enabled in Settings, PDF to your saved OneDrive destination.", submit: "Upload to OneDrive" },
   confluence: { title: "Export to Confluence", description: "Copy the selected content as a browser draft or publish it using your configured Confluence connection.", submit: "Export to Confluence" },
 };
@@ -637,41 +642,56 @@ export function MeetingExportButtons({
     }
   }, [getMarkdown, exportOptions, meetingCreatedAt, meetingId, meetingTitle, openHistory]);
 
-  const exportLocalDocument = async (destination: "word" | "markdown") => {
+  const exportLocalDocument = async (destination: LocalExportDestination) => {
     if (pending.current) return;
     pending.current = true;
     setBusy(destination);
     const isMarkdown = destination === "markdown";
+    const isSubtitle = isSubtitleFormat(destination);
     try {
-      const markdown = await readExportSummary(getMarkdown, exportOptions);
-      // The core opens the save dialog and only accepts the path it chose here.
-      const path = await invoke<string | null>(isMarkdown ? "pick_markdown_save_path" : "pick_word_save_path", {
-        suggestedName: isMarkdown ? safeDocumentName(meetingTitle, "md", archiveDateKey(meetingCreatedAt)) : safeDocumentName(meetingTitle),
-      });
-      if (!path) return;
-      const canOpen = await invoke<boolean>(isMarkdown ? "export_local_markdown" : "export_local_word", {
-        meetingId, title: meetingTitle, markdown, path,
-        includeTranscript: exportOptions.content !== "summary",
-        includeSpeakers: exportOptions.speakers,
-        includeTimestamps: exportOptions.timestamps,
-        includeBookmarks: exportOptions.bookmarks ?? false,
-      });
+      let saved: { path: string; canOpen: boolean };
+      if (isSubtitle) {
+        const file = await exportMeetingSubtitles(meetingId, meetingTitle, meetingCreatedAt, destination, exportOptions.speakers);
+        if (!file) return;
+        saved = file;
+      } else {
+        const markdown = await readExportSummary(getMarkdown, exportOptions);
+        // The core opens the save dialog and only accepts the path it chose here.
+        const path = await invoke<string | null>(isMarkdown ? "pick_markdown_save_path" : "pick_word_save_path", {
+          suggestedName: isMarkdown ? safeDocumentName(meetingTitle, "md", archiveDateKey(meetingCreatedAt)) : safeDocumentName(meetingTitle),
+        });
+        if (!path) return;
+        const canOpen = await invoke<boolean>(isMarkdown ? "export_local_markdown" : "export_local_word", {
+          meetingId, title: meetingTitle, markdown, path,
+          includeTranscript: exportOptions.content !== "summary",
+          includeSpeakers: exportOptions.speakers,
+          includeTimestamps: exportOptions.timestamps,
+          includeBookmarks: exportOptions.bookmarks ?? false,
+        });
+        saved = { path, canOpen };
+      }
       const openSavedExport = (showInFolder: boolean) => {
-        void invoke("open_saved_meeting_export", { path, showInFolder }).catch(error => {
+        void invoke("open_saved_meeting_export", { path: saved.path, showInFolder }).catch(error => {
           toast.error("Could not open the saved export", { description: errorText(error) });
         });
       };
-      toast.success(isMarkdown ? "Markdown file saved" : "Word document saved", canOpen ? {
+      toast.success(isSubtitle ? "Subtitle file saved" : isMarkdown ? "Markdown file saved" : "Word document saved", saved.canOpen ? {
         action: { label: "Open file", onClick: () => openSavedExport(false) },
         cancel: { label: "Show in folder", onClick: () => openSavedExport(true) },
       } : undefined);
       setDocumentDestination(null);
     } catch (error) {
-      toast.error(isMarkdown ? "Markdown export failed" : "Word export failed", { description: errorText(error) });
+      toast.error(isSubtitle ? "Subtitle export failed" : isMarkdown ? "Markdown export failed" : "Word export failed", { description: errorText(error) });
     } finally {
       pending.current = false;
       setBusy(null);
     }
+  };
+
+  const submitDocumentExport = () => {
+    if (documentDestination === "confluence") return exportConfluence();
+    if (documentDestination === "onedrive") return exportOneDrive();
+    if (documentDestination) return exportLocalDocument(documentDestination);
   };
 
   async function sendWebhook() {
@@ -717,6 +737,12 @@ export function MeetingExportButtons({
             <FileText className="mr-2 h-4 w-4" />
             Markdown (.md)
           </DropdownMenuItem>
+          {subtitleFormats.map(({ format, label }) => (
+            <DropdownMenuItem key={format} onSelect={() => openDocumentExport(format)}>
+              <FileText className="mr-2 h-4 w-4" />
+              {label}
+            </DropdownMenuItem>
+          ))}
           {connected && (
             <DropdownMenuItem onClick={openOneNote}>
               <OneNoteIcon className="mr-2 h-4 w-4" />
@@ -760,10 +786,16 @@ export function MeetingExportButtons({
             <DialogTitle>{documentDestination && documentLabels[documentDestination].title}</DialogTitle>
             <DialogDescription>{documentDestination && documentLabels[documentDestination].description}</DialogDescription>
           </DialogHeader>
-          <ExportContentOptions value={exportOptions} onChange={setExportOptions} disabled={busy !== null} />
+          {isSubtitleFormat(documentDestination) ? (
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox checked={exportOptions.speakers} disabled={busy !== null}
+                onCheckedChange={checked => setExportOptions(options => ({ ...options, speakers: checked === true }))} />
+              Speaker labels
+            </label>
+          ) : <ExportContentOptions value={exportOptions} onChange={setExportOptions} disabled={busy !== null} />}
           <DialogFooter>
             <Button variant="outline" disabled={busy !== null} onClick={() => setDocumentDestination(null)}>Cancel</Button>
-            <Button disabled={busy !== null} onClick={documentDestination === "word" || documentDestination === "markdown" ? () => exportLocalDocument(documentDestination) : documentDestination === "onedrive" ? exportOneDrive : exportConfluence}>
+            <Button disabled={busy !== null} onClick={submitDocumentExport}>
               {busy !== null ? "Exporting…" : documentDestination && documentLabels[documentDestination].submit}
             </Button>
           </DialogFooter>

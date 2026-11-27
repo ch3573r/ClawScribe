@@ -8,6 +8,7 @@
 // We intentionally do NOT init env_logger here — only one global logger can be
 // set, and double-init panics.
 fn main() {
+    app_lib::crash_report::install_panic_hook();
     if let Some(code) = app_lib::mcp::dispatch() {
         std::process::exit(code);
     }

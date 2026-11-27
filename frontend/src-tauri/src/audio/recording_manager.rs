@@ -278,8 +278,7 @@ impl RecordingManager {
 
         // Start audio streams - they send RAW unmixed chunks to pipeline for mixing
         // Pipeline handles mixing and distribution to both recording and transcription
-        // Save the start when the first device opens. Invitation checks and
-        // starting another device can each cross midnight.
+        // Record the first device-open time until capture supplies sample zero.
         let saver = &mut self.recording_saver;
         self.stream_manager
             .start_streams(
@@ -466,10 +465,7 @@ impl RecordingManager {
 
         // A native driver can block while pausing or destroying a stream.
         // Freeze this session first, then bound how long Stop waits for release.
-        let mut streams = std::mem::replace(
-            &mut self.stream_manager,
-            AudioStreamManager::new(self.state.clone()),
-        );
+        let mut streams = self.take_streams();
         let release = tokio::task::spawn_blocking(move || streams.stop_streams());
 
         if let Some(ref mut monitor) = self.device_monitor {
@@ -513,10 +509,12 @@ impl RecordingManager {
     }
 
     pub(super) fn recording_provenance(&self) -> super::provenance::RecordingProvenance {
-        super::provenance::RecordingProvenance::recording(
+        let mut provenance = super::provenance::RecordingProvenance::recording(
             self.get_active_recording_duration(),
             self.recording_saver.started_at(),
-        )
+        );
+        provenance.started_at = self.state.capture_started_at().or(provenance.started_at);
+        provenance
     }
 
     pub(crate) fn library_transcripts(&self) -> Vec<crate::api::TranscriptSegment> {
@@ -789,14 +787,54 @@ impl RecordingManager {
         self.state.mark_source_missing(device, source);
     }
 
-    pub async fn attempt_device_reconnect(
+    pub(super) fn take_streams(&mut self) -> AudioStreamManager {
+        std::mem::replace(
+            &mut self.stream_manager,
+            AudioStreamManager::new(self.state.clone()),
+        )
+    }
+
+    pub(super) fn take_reconnect_stream(
         &mut self,
+        source: &RecordingDeviceType,
+    ) -> AudioStreamManager {
+        let mut detached = AudioStreamManager::new(self.state.clone());
+        self.stream_manager.move_source_to(source, &mut detached);
+        detached
+    }
+
+    #[cfg(test)]
+    pub(super) fn start_audio_fixture(
+        &mut self,
+        root: PathBuf,
+    ) -> super::transcription::queue::TranscriptionQueueSender {
+        self.set_mode(super::recording_mode::RecordingMode::AudioOnly);
+        self.set_recordings_folder(root);
+        self.set_meeting_name(Some("Synthetic meeting".into()));
+        self.state.start_recording().unwrap();
+        self.recording_saver
+            .start_accumulation(true, self.state.clone())
+            .unwrap()
+            .unwrap()
+    }
+
+    pub(super) fn restore_reconnect_stream(
+        &mut self,
+        source: &RecordingDeviceType,
+        mut detached: AudioStreamManager,
+    ) {
+        detached.move_source_to(source, &mut self.stream_manager);
+    }
+
+    pub(super) async fn reconnect_streams(
+        state: &RecordingState,
+        streams: &mut AudioStreamManager,
         device_name: &str,
         device_type: DeviceMonitorType,
     ) -> Result<ReconnectResult> {
         let (source, kind) = source_types(device_type);
-        let Some(revision) = self.state.source_failure_revision(device_name, &source) else {
-            return Ok(self.reconnect_result(false));
+        let Some(revision) = state.source_failure_revision(device_name, &source) else {
+            return Ok(Self::reconnect_result(state, false));
         };
 
         let device = list_audio_devices()
@@ -804,10 +842,12 @@ impl RecordingManager {
             .into_iter()
             .find(|device| device.name == device_name && device.device_type == kind);
         let Some(device) = device.map(Arc::new) else {
-            return Ok(self.reconnect_result(false));
+            return Ok(Self::reconnect_result(state, false));
         };
-        if self
-            .stream_manager
+        if !state.is_recording() {
+            return Ok(Self::reconnect_result(state, false));
+        }
+        if streams
             .reconnect_source(device, source.clone())
             .await
             .is_err()
@@ -816,21 +856,20 @@ impl RecordingManager {
         } else {
             // Keep the source visibly unavailable until it opens, and never
             // clear a newer error reported by a callback during that open.
-            self.state.mark_source_reconnected(&source, revision);
+            state.mark_source_reconnected(&source, revision);
         }
         // An error callback can report a disconnect even while the stream is opening.
-        Ok(self.reconnect_result(self.source_active(&source)))
+        let reconnected = streams.source_active(&source) && !state.source_is_missing(&source);
+        Ok(Self::reconnect_result(state, reconnected))
     }
 
-    fn source_active(&self, source: &RecordingDeviceType) -> bool {
-        self.stream_manager.source_active(source) && !self.state.source_is_missing(source)
-    }
-
-    fn reconnect_result(&self, reconnected: bool) -> ReconnectResult {
+    fn reconnect_result(state: &RecordingState, reconnected: bool) -> ReconnectResult {
         ReconnectResult {
             reconnected,
-            microphone_active: self.source_active(&RecordingDeviceType::Microphone),
-            system_audio_active: self.source_active(&RecordingDeviceType::System),
+            microphone_active: state.get_microphone_device().is_some()
+                && !state.source_is_missing(&RecordingDeviceType::Microphone),
+            system_audio_active: state.get_system_device().is_some()
+                && !state.source_is_missing(&RecordingDeviceType::System),
         }
     }
 
@@ -853,7 +892,9 @@ impl Drop for RecordingManager {
     }
 }
 
-fn source_types(device: DeviceMonitorType) -> (RecordingDeviceType, super::devices::DeviceType) {
+pub(super) fn source_types(
+    device: DeviceMonitorType,
+) -> (RecordingDeviceType, super::devices::DeviceType) {
     use super::devices::DeviceType;
     match device {
         DeviceMonitorType::Microphone => (RecordingDeviceType::Microphone, DeviceType::Input),
@@ -894,7 +935,7 @@ mod reconnect_recovery_tests {
         let pending = manager.state.disconnected_devices();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].1, system);
-        assert!(!manager.reconnect_result(false).reconnected);
+        assert!(!RecordingManager::reconnect_result(&manager.state, false).reconnected);
         let system_failure = manager
             .state
             .source_failure_revision("synthetic output", &system)

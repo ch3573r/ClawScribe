@@ -2,6 +2,7 @@
 
 import { CustomVocabularySettings } from "@/components/CustomVocabularySettings";
 import { TranscriptSettings } from "@/components/TranscriptSettings";
+import { SpeakerProfilesSettings } from "@/components/settings/SpeakerProfilesSettings";
 import { TranscriptionLanguage } from "@/components/settings/TranscriptionLanguage";
 import { TranscriptionOptions } from "@/components/settings/TranscriptionOptions";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,7 @@ export function TranscriptionSettingsPage() {
       <SettingsColumns aside={<CustomVocabularySettings />}>
         <TranscriptionLanguage />
         <TranscriptionOptions />
+        <SpeakerProfilesSettings />
       </SettingsColumns>
     </SettingsStack>
   );

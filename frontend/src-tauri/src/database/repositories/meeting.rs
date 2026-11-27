@@ -2,18 +2,31 @@ use crate::api::{MeetingDetails, MeetingTranscript, TranscriptWord};
 use crate::database::models::{MeetingModel, Transcript, TranscriptTimelineRow};
 use chrono::Utc;
 use sqlx::{Connection, Error as SqlxError, SqliteConnection, SqlitePool};
-use tracing::{error, info};
+use tracing::error;
 
 pub struct MeetingsRepository;
 
 pub(crate) struct DeletedMeetingFiles {
+    #[cfg(test)]
     pub folder: Option<String>,
     pub cleanup_ids: Vec<i64>,
 }
 
+#[derive(serde::Serialize, sqlx::FromRow)]
+pub(crate) struct TrashedMeeting {
+    id: String,
+    title: String,
+    deleted_at: String,
+    expires_at: String,
+    delete_recording_on_purge: bool,
+}
+
+const TRASH_RETENTION: &str = "+30 days";
+const EXPIRED: &str = "datetime(deleted_at, ?1) <= CURRENT_TIMESTAMP";
+
 impl MeetingsRepository {
     pub async fn get_meetings(pool: &SqlitePool) -> Result<Vec<MeetingModel>, sqlx::Error> {
-        sqlx::query_as("SELECT id,title,created_at,updated_at,folder_path FROM meetings ORDER BY created_at DESC")
+        sqlx::query_as("SELECT id,title,created_at,updated_at,folder_path FROM active_meetings ORDER BY created_at DESC")
             .fetch_all(pool)
             .await
     }
@@ -25,20 +38,93 @@ impl MeetingsRepository {
             .map(|(deleted, _)| deleted)
     }
 
-    /// Persist the requested cleanup before committing the deletion, including
-    /// the original storage names that will no longer be reachable from SQLite.
+    pub(crate) async fn move_to_trash(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        delete_files: bool,
+    ) -> Result<bool, SqlxError> {
+        let result = sqlx::query(
+            "UPDATE meetings SET deleted_at=CURRENT_TIMESTAMP, delete_recording_on_purge=?
+             WHERE id=? AND deleted_at IS NULL",
+        )
+        .bind(delete_files)
+        .bind(meeting_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub(crate) async fn trash(pool: &SqlitePool) -> Result<Vec<TrashedMeeting>, SqlxError> {
+        sqlx::query_as(
+            "SELECT id,title,deleted_at,datetime(deleted_at,?) expires_at,
+                    delete_recording_on_purge AND coalesce(trim(folder_path)<>'',0) delete_recording_on_purge
+             FROM meetings WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC,id",
+        )
+        .bind(TRASH_RETENTION)
+        .fetch_all(pool)
+        .await
+    }
+
+    pub(crate) async fn restore_from_trash(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<bool, SqlxError> {
+        let result = sqlx::query(
+            "UPDATE meetings SET deleted_at=NULL, delete_recording_on_purge=1
+             WHERE id=? AND deleted_at IS NOT NULL",
+        )
+        .bind(meeting_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub(crate) async fn expired_trash_ids(pool: &SqlitePool) -> Result<Vec<String>, SqlxError> {
+        sqlx::query_scalar(&format!(
+            "SELECT id FROM meetings WHERE deleted_at IS NOT NULL AND {EXPIRED}
+                                    ORDER BY deleted_at,id LIMIT 20"
+        ))
+        .bind(TRASH_RETENTION)
+        .fetch_all(pool)
+        .await
+    }
+
+    pub(crate) async fn purge_from_trash(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        expired_only: bool,
+    ) -> Result<Option<DeletedMeetingFiles>, SqlxError> {
+        Self::purge(pool, meeting_id, expired_only, None).await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn delete_from_library(
         pool: &SqlitePool,
         meeting_id: &str,
         delete_files: bool,
     ) -> Result<Option<DeletedMeetingFiles>, SqlxError> {
+        Self::purge(pool, meeting_id, false, Some(delete_files)).await
+    }
+
+    /// Verify eligibility inside the same write transaction that records file cleanup.
+    async fn purge(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        expired_only: bool,
+        immediate: Option<bool>,
+    ) -> Result<Option<DeletedMeetingFiles>, SqlxError> {
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-        let Some((title, folder)) = sqlx::query_as::<_, (String, Option<String>)>(
-            "SELECT title, folder_path FROM meetings WHERE id = ?",
-        )
-        .bind(meeting_id)
-        .fetch_optional(&mut *tx)
-        .await?
+        let Some((title, folder, delete_recording)) =
+            sqlx::query_as::<_, (String, Option<String>, bool)>(&format!(
+                "SELECT title,folder_path,delete_recording_on_purge FROM meetings
+                      WHERE id=?2 AND (?3 OR deleted_at IS NOT NULL) AND (NOT ?4 OR {EXPIRED})"
+            ))
+            .bind(TRASH_RETENTION)
+            .bind(meeting_id)
+            .bind(immediate.is_some())
+            .bind(expired_only)
+            .fetch_optional(&mut *tx)
+            .await?
         else {
             return Ok(None);
         };
@@ -48,13 +134,14 @@ impl MeetingsRepository {
         }
         let recording = folder
             .as_deref()
-            .filter(|path| delete_files && !path.trim().is_empty());
+            .filter(|path| immediate.unwrap_or(delete_recording) && !path.trim().is_empty());
         let cleanup_ids = crate::library::file_cleanup::enqueue(
             &mut tx, meeting_id, &title, recording, &originals,
         )
         .await?;
         tx.commit().await?;
         Ok(Some(DeletedMeetingFiles {
+            #[cfg(test)]
             folder,
             cleanup_ids,
         }))
@@ -79,7 +166,7 @@ impl MeetingsRepository {
             Ok((success, originals)) => {
                 if success {
                     transaction.commit().await?;
-                    info!(
+                    tracing::info!(
                         "Successfully deleted meeting {} and all associated data",
                         meeting_id
                     );
@@ -112,7 +199,7 @@ impl MeetingsRepository {
 
         // Get meeting details
         let meeting: Option<MeetingModel> = sqlx::query_as(
-            "SELECT id, title, created_at, updated_at, folder_path FROM meetings WHERE id = ?",
+            "SELECT id, title, created_at, updated_at, folder_path FROM active_meetings WHERE id = ?",
         )
         .bind(meeting_id)
         .fetch_optional(&mut *transaction)
@@ -174,7 +261,7 @@ impl MeetingsRepository {
         }
 
         let meeting: Option<MeetingModel> = sqlx::query_as(
-            "SELECT id, title, created_at, updated_at, folder_path FROM meetings WHERE id = ?",
+            "SELECT id, title, created_at, updated_at, folder_path FROM active_meetings WHERE id = ?",
         )
         .bind(meeting_id)
         .fetch_optional(pool)
@@ -205,6 +292,10 @@ impl MeetingsRepository {
 
         // Count and rows must refer to the same snapshot during retranscription.
         let mut transaction = pool.begin().await?;
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM active_meetings WHERE id=?")
+            .bind(meeting_id)
+            .fetch_one(&mut *transaction)
+            .await?;
         let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?")
             .bind(meeting_id)
             .fetch_one(&mut *transaction)
@@ -236,7 +327,8 @@ impl MeetingsRepository {
         sqlx::query_as(
             "SELECT id, transcript AS text, original_transcript AS original_text,
                     audio_start_time, audio_end_time, speaker
-             FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
+             FROM transcripts WHERE meeting_id = (SELECT id FROM active_meetings WHERE id=?)
+             ORDER BY audio_start_time, id",
         )
         .bind(meeting_id)
         .fetch_all(pool)
@@ -406,6 +498,128 @@ async fn delete_meeting_with_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn moving_a_meeting_to_trash_hides_it_and_keeps_its_transcript() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        assert!(
+            MeetingsRepository::move_to_trash(&pool, "review-test", true)
+                .await
+                .unwrap()
+        );
+
+        assert!(MeetingsRepository::get_meetings(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM transcripts WHERE meeting_id='review-test'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pending_meeting_file_cleanup")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            MeetingsRepository::get_meeting_metadata(&pool, "review-test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            crate::exports::metadata::Header::load(&pool, "review-test", false)
+                .await
+                .is_err()
+        );
+        let scope = crate::knowledge::types::KnowledgeScope::Meeting {
+            meeting_id: "review-test".into(),
+        };
+        let frozen = crate::knowledge::retrieval::freeze_scope(&pool, &scope)
+            .await
+            .unwrap();
+        assert!(frozen.meeting_ids.is_empty());
+        assert!(MeetingsRepository::restore_from_trash(&pool, "review-test")
+            .await
+            .unwrap());
+        assert_eq!(
+            MeetingsRepository::get_meeting(&pool, "review-test")
+                .await
+                .unwrap()
+                .unwrap()
+                .transcripts
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_purge_rechecks_expiry_and_honors_recording_retention_choice() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let id = "review-test";
+        sqlx::query("UPDATE meetings SET folder_path='synthetic recording' WHERE id=?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(MeetingsRepository::purge_from_trash(&pool, id, false)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+            .await
+            .unwrap());
+        assert!(MeetingsRepository::purge_from_trash(&pool, id, true)
+            .await
+            .unwrap()
+            .is_none());
+        let age = || async {
+            sqlx::query("UPDATE meetings SET deleted_at=datetime('now','-31 days') WHERE id=?")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        };
+        age().await;
+        assert_eq!(
+            MeetingsRepository::expired_trash_ids(&pool).await.unwrap(),
+            [id]
+        );
+        assert!(MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
+        assert!(MeetingsRepository::purge_from_trash(&pool, id, true)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+            .await
+            .unwrap());
+        age().await;
+        assert!(MeetingsRepository::purge_from_trash(&pool, id, true)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(!MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT kind FROM pending_meeting_file_cleanup ORDER BY kind"
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap(),
+            ["codex", "exports", "outputs"]
+        );
+    }
 
     #[tokio::test]
     async fn timeline_keeps_saved_text_and_timing_without_word_alignment() {

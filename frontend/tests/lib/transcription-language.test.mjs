@@ -4,11 +4,16 @@ import { loadTsModule } from './load-ts-module.mjs';
 
 const language = loadTsModule('src/lib/transcription-language.ts');
 
-test('Azure file transcription offers autodetection and German, never English translation', () => {
-  const codes = language.fileLanguageOptions('mai-transcribe').map(option => option.code);
-  assert.ok(codes.includes('auto') && codes.includes('de'));
-  assert.ok(!codes.includes('auto-translate'));
+test('only local Whisper offers translation for files', () => {
+  for (const provider of ['mai-transcribe', 'cloud-whisper', 'nemotron', 'parakeet', undefined]) {
+    assert.ok(!language.fileLanguageOptions(provider).some(option => option.code === 'auto-translate'));
+    assert.equal(language.fileLanguageSelection(provider, 'auto-translate'), 'auto');
+  }
   assert.ok(language.fileLanguageOptions('whisper').some(option => option.code === 'auto-translate'));
+  assert.equal(language.fileLanguageSelection('whisper', 'auto-translate'), 'auto-translate');
+  assert.equal(language.fileLanguageSelection('cloud-whisper', 'de'), 'de');
+  assert.equal(language.fileLanguageSelection('parakeet', 'de'), 'auto');
+  assert.equal(language.fileLanguageOptions('nemotron').find(option => option.code === 'auto').label, 'System language');
 });
 
 test('each engine maps the way the core chooses its live engine', () => {

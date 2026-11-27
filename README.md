@@ -80,6 +80,14 @@ runs in the background: the window keeps its page and any unsaved text, and it
 is not brought to the front. See
 [Recording from the tray, shortcuts and command line](docs/tray-and-recording-control.md).
 
+Closing the main window keeps ClawScribe running in the system tray by default.
+Under **Settings → General → Close button**, choose **Quit** to exit when
+closing the window. If a recording is active, the window stays open so you can save it.
+
+To start ClawScribe in the tray at Windows sign-in, turn on **Start ClawScribe
+when I sign in to Windows** in **Settings → Preferences**. This lets enabled
+call detection run without opening the main window.
+
 ## Capture And Transcription
 
 - Microphone and system-audio capture from the local Windows session.
@@ -121,6 +129,9 @@ is not brought to the front. See
 - Detect speakers in a saved recording and cancel from the dialog or meeting
   toolbar. Cancellation waits for the current native step before another recording
   can start.
+- Optionally remember a speaker’s voice on this device after naming them. Later
+  speaker detection can suggest their name, or apply it if you enable automatic
+  matching in **Settings → Transcription**.
 - Import support for MP4, M4A, WAV, MP3, FLAC, OGG, AAC, MKV, WebM, and WMA.
   Review and queue multiple files from the picker or by dropping them on the
   app. Cancel or retry an individual import from the queue. Open a saved meeting
@@ -188,12 +199,16 @@ punctuation; single-letter keys such as C# and C++ are left unchanged.
 Cloud transcription requires explicit opt-in. Saved cloud settings remain visible
 when the opt-in is off. Settings explain which local engine and model live
 recordings use. Cloud APIs apply to Import and Enhance (whole-file), while live
-recordings stay on-device.
-Hosted Whisper can provide word timestamps; MAI has sentence-level timing and
-may use approximate local VAD-row alignment, not fabricated word timestamps.
-The implemented OpenAI-hosted upload limit is 25 MB; the implemented MAI limit
-is 300 MB. MAI uploads use WAV, MP3, or
-FLAC, with other formats converted locally to 16 kHz mono WAV. Rejected cloud
+recordings stay on-device. Both file dialogs show the upload destination and
+require approval before sending audio. Enhance can continue in the background
+and shows the model that actually produced the transcript.
+Hosted Whisper can provide word timestamps. Text-only responses use local
+speech boundaries to estimate passage timing. For OpenAI, ClawScribe converts
+large files to 16 kHz mono MP3 and splits them to fit the 25 MB upload limit.
+Custom Whisper endpoints receive the original file up to 500 MB. Larger files
+are compressed and split using the same process.
+Azure Speech uploads are limited to 300 MB and use WAV, MP3, or FLAC, with
+other formats converted locally to 16 kHz mono WAV. Rejected cloud
 requests can fall back to local transcription with a notification explaining
 why. See [hosted transcription verification](docs/hosted-transcription-smoke.md).
 
@@ -208,10 +223,17 @@ and bookmarks from the sidebar or **Meetings → Archive**. Search for several
 terms in any order or put an exact phrase in quotes. Results are grouped by
 meeting and highlight matches in the saved text. Open a source in its meeting
 or play a timed transcript result. The Archive keeps the current search,
-project, date and attention filters when you return. Choose **Hybrid** to add
+project, date and attention filters when you return. Choose **Load more** to
+continue searching saved summaries, notes, and bookmarks. Choose **Hybrid** to add
 semantic transcript matches when the local semantic index is ready. Use
-**Select meetings** for bulk tagging, local export, deletion, or to scope a
+**Select meetings** for bulk tagging, local export, moving to Trash, or to scope a
 Meeting memory conversation.
+
+Use **Meetings → Trash** to restore a removed meeting within 30 days or delete
+it permanently. Recording files stay on disk during retention.
+
+Export a saved transcript as SRT or WebVTT subtitles, with optional speaker
+labels. You can export a single meeting or a batch from the Archive.
 
 Read and correct the transcript while the speaker timeline loads. The text
 stays available when the recording is missing. Use **Find and replace** to
@@ -448,12 +470,14 @@ input and output and start off. [Local assistant access](docs/local-library.md#l
 recordings, custom templates, vocabulary, approved series notes, and linked
 calendar series preferences. It includes explicitly saved live answers when their
 recording supplied all the source material. Restore adds missing meetings and
-keeps existing meetings and preferences. Backups continue when recording
+offers optional audio repair for matching meetings. Existing audio, notes, and
+preferences are preserved. Backups continue when recording
 folders are missing and report affected meetings,
 excluded recovery files, unavailable audio, skipped custom template items, and
 excluded saved live answers.
-Archives exclude credentials and models and are not encrypted.
-Daily backups are optional and keep three recent copies in a chosen local folder.
+Archives exclude credentials and models. Manual backups can be encrypted with
+a passphrase. Optional daily backups keep three unencrypted copies in a chosen
+local folder.
 Recordings take priority over scheduled backups, which retry when the library is idle.
 If the database fails to open, a separate recovery library can import one of
 these archives while preserving the original files. From recovery, select
@@ -471,7 +495,7 @@ with another meeting, or failing ownership checks are kept. Review retained
 files and retry cleanup in **Meetings → Archive → Storage**. Staged cleanup
 stays pending while its storage location is unavailable.
 Pre-migration database snapshots and separate backup archives can retain deleted
-meetings. See [local library tools](docs/local-library.md#deleting-meetings).
+meetings. See [local library tools](docs/local-library.md#moving-meetings-to-trash).
 
 The recordings folder picker saves the verified target of a link or junction.
 For an older linked setting, choose the folder again in **Settings → Recording**.

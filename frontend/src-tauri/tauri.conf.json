@@ -29,13 +29,11 @@
                 "style-src": "'self' 'unsafe-inline'",
                 "img-src": "'self' asset: https://asset.localhost data:",
                 "media-src": "'self' asset: http://asset.localhost https://asset.localhost",
-                "connect-src": "'self' http://localhost:11434 https://api.ollama.ai"
+                "connect-src": "'self'"
             },
             "assetProtocol": {
                 "enable": true,
-                "scope": [
-                    "$APPDATA/**"
-                ]
+                "scope": []
             },
             "capabilities": [
                 {
@@ -62,6 +60,20 @@
                         "notification:allow-is-permission-granted",
                         "dialog:allow-message",
                         "process:default"
+                    ]
+                },
+                {
+                    "identifier": "windows-autostart",
+                    "description": "Allow the main settings window to manage startup at Windows sign-in",
+                    "platforms": [
+                        "windows"
+                    ],
+                    "windows": [
+                        "main"
+                    ],
+                    "permissions": [
+                        "autostart:allow-is-enabled",
+                        "autostart:allow-disable"
                     ]
                 }
             ]
@@ -109,6 +121,7 @@
             "nsis": {
                 "installerIcon": "icons/app_icon.ico",
                 "uninstallerIcon": "icons/app_icon.ico",
+                "installerHooks": "scripts/installer-hooks.nsh",
                 "installMode": "currentUser",
                 "languages": [
                     "English"

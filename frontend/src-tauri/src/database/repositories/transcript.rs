@@ -55,7 +55,7 @@ mod recording_save_tests {
             .unwrap();
         }
         let saved: (String, String) =
-            sqlx::query_as("SELECT title, calendar_link FROM meetings WHERE id = ?")
+            sqlx::query_as("SELECT title, calendar_link FROM active_meetings WHERE id = ?")
                 .bind(id)
                 .fetch_one(&pool)
                 .await
@@ -96,7 +96,7 @@ mod recording_save_tests {
             .unwrap();
         }
         let (created, updated): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) =
-            sqlx::query_as("SELECT created_at, updated_at FROM meetings WHERE id = ?")
+            sqlx::query_as("SELECT created_at, updated_at FROM active_meetings WHERE id = ?")
                 .bind(id)
                 .fetch_one(&pool)
                 .await
@@ -201,7 +201,7 @@ mod recording_save_tests {
             id
         );
         let (title, folder, saved_link, source, duration): (String, String, String, String, f64) =
-            sqlx::query_as("SELECT title, folder_path, calendar_link, recording_source, recording_duration_s FROM meetings WHERE id = ?")
+            sqlx::query_as("SELECT title, folder_path, calendar_link, recording_source, recording_duration_s FROM active_meetings WHERE id = ?")
                 .bind(id)
                 .fetch_one(&pool)
                 .await
@@ -443,12 +443,22 @@ impl TranscriptsRepository {
         meeting_id: &str,
         from_speaker: Option<&str>,
         speaker: Option<&str>,
+        remember_voice: bool,
     ) -> Result<u64, SqlxError> {
         let mut conn = pool.acquire().await?;
         let mut transaction = conn.begin().await?;
         crate::database::transcript_edits::assert_editable(&mut transaction, meeting_id)
             .await
             .map_err(SqlxError::Protocol)?;
+        if remember_voice {
+            crate::speaker_profiles::remember_voice(
+                &mut transaction,
+                meeting_id,
+                from_speaker,
+                speaker,
+            )
+            .await?;
+        }
         crate::summary::sources::preserve_legacy_speaker_links(&mut transaction, meeting_id)
             .await?;
         let now = Utc::now();

@@ -11,7 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -140,11 +140,13 @@ async fn supervise(
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let started = SystemTime::now();
     let mut child = command
         .spawn()
         .map_err(|_| DocumentError::WorkerUnavailable)?;
+    let pid = child.id().ok_or(DocumentError::WorkerUnavailable)?;
     let result = async {
-        job.assign(child.id().ok_or(DocumentError::WorkerUnavailable)?)?;
+        job.assign(pid)?;
         let mut input = child.stdin.take().ok_or(DocumentError::WorkerUnavailable)?;
         input.write_all(b"GO\n").await.map_err(|_| DocumentError::WorkerUnavailable)?;
         drop(input);
@@ -173,6 +175,11 @@ async fn supervise(
     }
     drop(job);
     let _ = child.wait().await;
+    if result.is_err() {
+        tokio::task::spawn_blocking(move || {
+            crate::crash_report::report_child_panic("Document worker", pid, started);
+        });
+    }
     #[cfg(test)]
     REAPED.fetch_add(1, Ordering::SeqCst);
     result

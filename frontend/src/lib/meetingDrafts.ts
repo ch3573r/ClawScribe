@@ -1,9 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import type { EditorSummary, Section } from '@/types';
+import { setMeetingContext } from '@/lib/meetingContext';
 
 export type SummaryDraft = EditorSummary | { MeetingName: string; MeetingNotes: { sections: Section[] } };
-type Edits = { title?: string; summary?: SummaryDraft; readSummary?: () => Promise<SummaryDraft> };
+type Edits = { title?: string; summary?: SummaryDraft; readSummary?: () => Promise<SummaryDraft>; context?: string };
 export type SaveState = 'saved' | 'unsaved' | 'saving' | 'error' | 'discarded';
 
 // Capture each revision's data before awaiting disk writes. This queue outlives
@@ -15,10 +16,10 @@ export function createDraftQueue(write: (edits: Edits, canWrite: () => boolean) 
   const listeners = new Set<() => void>();
   const notify = () => { changed(); listeners.forEach(listener => listener()); };
   const canWrite = () => state !== 'discarded';
-  const dirty = () => edits.title !== undefined || edits.summary !== undefined;
+  const dirty = () => edits.title !== undefined || edits.summary !== undefined || edits.context !== undefined;
   const schedule = () => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => { void flush().catch(reportSaveError); }, 2000);
+    timer = setTimeout(() => { void flush().catch(reportSaveError); }, edits.context !== undefined ? 400 : 2000);
   };
   const edit = (patch: Edits) => {
     if (!canWrite()) return;
@@ -80,8 +81,16 @@ discardedDraft.discard();
 const busy = (status?: string) => ['pending', 'processing', 'summarizing', 'regenerating'].includes(status?.toLowerCase() ?? '');
 const hasPendingDrafts = () => [...drafts.values()].some(draft => draft.dirty());
 let pendingUpdate: Promise<unknown> = Promise.resolve();
-const publishPending = () => {
-  const update = pendingUpdate.catch(() => {}).then(() => invoke('api_set_summary_edits_pending', { pending: hasPendingDrafts() }));
+let acknowledgedPending: boolean | undefined;
+const publishPending = (force = false) => {
+  const update = pendingUpdate.catch(() => {}).then(async () => {
+    const pending = hasPendingDrafts();
+    if (force || acknowledgedPending !== pending) {
+      acknowledgedPending = undefined;
+      await invoke('api_set_summary_edits_pending', { pending });
+      acknowledgedPending = pending;
+    }
+  });
   // Edits still autosave if the notification fails. A hand-off must wait for
   // a fresh acknowledgement before allowing exit or installation.
   void update.catch(() => {});
@@ -94,6 +103,8 @@ export function meetingDraft(meetingId: string) {
   let draft = drafts.get(meetingId);
   if (!draft) {
     draft = createDraftQueue(async (edits, canWrite) => {
+      if (edits.context !== undefined) await setMeetingContext(meetingId, edits.context);
+      if (!canWrite() || (edits.title === undefined && edits.summary === undefined)) return;
       const current = await invoke<{ status: string }>('api_get_summary', { meetingId });
       if (!canWrite()) return;
       if (busy(current?.status)) throw new Error('Summary generation is still running.');
@@ -121,11 +132,15 @@ export function allowLoadedMeetingDrafts(meetings: readonly { id: string }[]) {
   for (const { id } of meetings) deletedMeetings.delete(id);
 }
 
+export async function flushMeetingContextDrafts() {
+  await Promise.all([...drafts.values()].filter(draft => draft.edits.context !== undefined).map(draft => draft.drain()));
+}
+
 export async function flushMeetingDrafts() {
   try {
     do {
       await Promise.all([...drafts.values()].filter(draft => draft.dirty()).map(draft => draft.drain()));
-      await publishPending();
+      await publishPending(true);
     } while (hasPendingDrafts());
   } catch (error) { reportSaveError(); throw error; }
 }

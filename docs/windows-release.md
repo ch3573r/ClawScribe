@@ -199,6 +199,8 @@ The app build must first stage `frontend/src-tauri/binaries/ffmpeg-x86_64-pc-win
 The test helper fails immediately if that file is missing, then copies it beside
 the test executable as `ffmpeg.exe`. Recording tests use this build-staged encoder
 without relying on PATH or downloading an encoder at test time.
+The Windows app also requires its bundled encoder beside the executable.
+A missing encoder is fixed by repairing the ClawScribe installation.
 
 The helper compiles the actual release-profile library test executable and loads
 the same staged sherpa/ONNX DLL set used by the installer. It rejects missing
@@ -538,8 +540,9 @@ checks are cached for 24 hours and concurrent requests share one check per
 channel. Installation requires a user action.
 
 The preview channel considers the stable update and the newest eligible Windows
-x64 release in GitHub's 100 most recent release entries. It compares numeric
-runtime versions, rather than publication order or version strings. Drafts,
+x64 release in GitHub's 100 most recent release entries. It ranks candidates by
+numeric runtime version. For equal runtime versions, it prefers stable releases
+and orders preview tags by semantic version precedence. Drafts,
 incomplete asset uploads, empty assets, and releases without the Windows setup
 and updater manifest are excluded. Discovery uses GitHub's public API without
 credentials, with bounded response size and timeouts. Rate limits and network

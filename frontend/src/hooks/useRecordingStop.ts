@@ -39,7 +39,7 @@ export function useRecordingStop() {
 
     const audioOnly = payload.recording_mode === 'audio_only';
     const outcome = recordingOutcome(payload);
-    const recoveryMessage = recordingRecoveryMessage(outcome);
+    const recoveryMessage = recordingRecoveryMessage(outcome, payload.audio_saved);
     (recoveryMessage ? toast.warning : toast.success)(recoveryMessage ? 'Meeting saved with warnings' : 'Recording saved', {
       description: recoveryMessage || (audioOnly
         ? 'Audio saved. Open the meeting and choose Transcribe when ready.'

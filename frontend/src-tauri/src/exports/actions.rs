@@ -69,7 +69,7 @@ pub(super) async fn load_saved(
     meeting_id: &str,
 ) -> Result<Option<SavedActions>, String> {
     let raw: Option<Option<String>> =
-        sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = ?")
+        sqlx::query_scalar("SELECT reviewed_actions FROM active_meetings WHERE id = ?")
             .bind(meeting_id)
             .fetch_optional(pool)
             .await
@@ -204,7 +204,7 @@ fn revision(raw: Option<&str>) -> String {
 
 async fn editor(pool: &SqlitePool, meeting_id: &str) -> Result<ActionReview, String> {
     let raw: Option<String> =
-        sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = ?")
+        sqlx::query_scalar("SELECT reviewed_actions FROM active_meetings WHERE id = ?")
             .bind(meeting_id)
             .fetch_optional(pool)
             .await
@@ -696,7 +696,7 @@ async fn save_checked(
         .await
         .map_err(|_| "Could not save meeting actions.")?;
     let previous: Option<String> =
-        sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = ?")
+        sqlx::query_scalar("SELECT reviewed_actions FROM active_meetings WHERE id = ?")
             .bind(meeting_id)
             .fetch_optional(&mut *transaction)
             .await
@@ -1061,11 +1061,18 @@ mod tests {
     #[tokio::test]
     async fn empty_review_and_edited_actions_survive_reload_and_upgrade() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query("CREATE TABLE meetings (id TEXT PRIMARY KEY)")
+        sqlx::query("CREATE TABLE meetings (id TEXT PRIMARY KEY, deleted_at TEXT)")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO meetings VALUES ('existing')")
+        // Reads go through the Trash-aware view, as in the real schema.
+        sqlx::query(
+            "CREATE VIEW active_meetings AS SELECT rowid, * FROM meetings WHERE deleted_at IS NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO meetings (id) VALUES ('existing')")
             .execute(&pool)
             .await
             .unwrap();

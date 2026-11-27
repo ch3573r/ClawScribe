@@ -21,9 +21,7 @@ import {
 import { useRouter, usePathname } from "next/navigation";
 import { useSidebar } from "./SidebarProvider";
 import { ConfirmationModal } from "../ConfirmationModel/confirmation-modal";
-import { indexedDBService } from "@/services/indexedDBService";
-import { discardMeetingDraft } from "@/lib/meetingDrafts";
-import { openStorageDialog } from "@/lib/storage-dialog-controller";
+import { meetingDraft } from "@/lib/meetingDrafts";
 import Analytics from "@/lib/analytics";
 import { groupMeetings, shortMeetingDate } from "@/lib/sidebarMeetings";
 import { Meta, StatusText } from "@/components/ui/settings-layout";
@@ -153,6 +151,7 @@ const Sidebar: React.FC = () => {
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "";
 
   const [deleteFiles, setDeleteFiles] = useState(true);
+  const [movingToTrash, setMovingToTrash] = useState(false);
   const deletingMeeting = useRef(false);
   useEffect(() => { setDeleteFiles(true); }, [deleteTarget]);
 
@@ -181,54 +180,42 @@ const Sidebar: React.FC = () => {
   const handleDelete = async (itemId: string) => {
     if (deletingMeeting.current) return;
     deletingMeeting.current = true;
-    console.log("Deleting item:", itemId);
+    setMovingToTrash(true);
 
     try {
-      const result = await invoke<{ folder_path: string | null; cleanup_pending: boolean }>("api_delete_meeting", {
+      await meetingDraft(itemId).drain();
+      await invoke("api_delete_meeting", {
         meetingId: itemId,
         deleteFiles,
       });
-      discardMeetingDraft(itemId);
       setMeetings(previous => previous.filter(meeting => meeting.id !== itemId));
 
       // Track meeting deletion
       Analytics.trackMeetingDeleted(itemId);
 
       // Show success toast
-      toast.success("Meeting deleted successfully", {
-        description: deleteFiles ? "The meeting was removed from your library." : "Recording files were kept.",
+      toast.success("Meeting moved to Trash", {
+        description: "Restore it from Meetings → Trash within 30 days.",
       });
-
-      if (result.cleanup_pending) {
-        toast.warning('Some meeting files were kept', {
-          description: 'Review the pending cleanup in Library storage.',
-          action: { label: 'Review files', onClick: openStorageDialog },
-        });
-      }
+      setDeleteTarget(null);
 
       // If deleting the active meeting, navigate to home
       if (currentMeeting?.id === itemId) {
         setCurrentMeeting(previous => previous?.id === itemId ? null : previous);
         if (pathname === "/meeting-details") router.push("/");
       }
-      try {
-        await indexedDBService.deleteMeeting(itemId);
-      } catch {
-        toast.warning('Meeting deleted, but its cached recovery copy could not be removed.');
-      }
     } catch (error) {
-      console.error("Failed to delete meeting:", error);
-      toast.error("Failed to delete meeting", {
+      toast.error("Could not move meeting to Trash", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
       deletingMeeting.current = false;
+      setMovingToTrash(false);
     }
   };
 
   const handleDeleteConfirm = () => {
     if (deleteTarget) void handleDelete(deleteTarget.id);
-    setDeleteTarget(null);
   };
 
   // Handle modal editing of meeting names
@@ -502,7 +489,7 @@ const Sidebar: React.FC = () => {
                   setDeleteTarget({ id: item.id, title: item.title });
                 }}
                 className="whitespace-normal h-auto gap-0 [&_svg]:size-3.5 rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                aria-label={`Delete ${item.title}`}
+                aria-label={`Move ${item.title} to Trash`}
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </Button>
@@ -707,7 +694,7 @@ const Sidebar: React.FC = () => {
                 </div>
               )}
               {searchError && <p role="alert" className="mb-2 px-1 text-xs text-destructive">{searchError}</p>}
-              {searchResults?.limited && <p role="status" className="mb-2 px-1 text-xs text-muted-foreground">Limited results. Try more specific text.</p>}
+              {searchResults?.limited && <p role="status" className="mb-2 px-1 text-xs text-muted-foreground">Limited results. Open Archive to search further.</p>}
               {searchResults && visibleMeetings.length > 0 && <Button variant="outline" size="sm" className="mb-2" onClick={() => {
                 openMatchScope({ notes: noteSelection.references(visibleMeetings.flatMap(meeting => savedMatches.get(meeting.id) ?? [])), question: searchQuery.trim(), ids: visibleMeetings.map(meeting => meeting.id), project: { tags: [], mode: "any", untagged: false }, from: "", to: "" });
                 if (pathname !== "/meetings") router.push("/meetings");
@@ -795,12 +782,14 @@ const Sidebar: React.FC = () => {
       {/* Confirmation Modal for Delete */}
       <ConfirmationModal
         isOpen={!!deleteTarget}
-        title={`Delete “${deleteTarget?.title ?? 'meeting'}”?`}
-        text="Delete this meeting and its transcript, notes, export history, and temporary Codex files? This action cannot be undone."
+        title={`Move “${deleteTarget?.title ?? 'meeting'}” to Trash?`}
+        text="Keep this meeting and its files in Trash for 30 days. You can restore it from Meetings → Trash."
+        confirmLabel={movingToTrash ? "Moving…" : "Move to Trash"}
+        confirmDisabled={movingToTrash}
         onConfirm={handleDeleteConfirm}
-        onCancel={() => setDeleteTarget(null)}
+        onCancel={() => { if (!deletingMeeting.current) setDeleteTarget(null); }}
       >
-        <label className="mb-6 flex items-start gap-2 text-sm"><Checkbox checked={deleteFiles} onCheckedChange={checked => setDeleteFiles(checked === true)} className="mt-1 h-[13px] w-[13px]" />Also delete the recording files (audio, transcript copy, metadata, and generated documents).</label>
+        <label className="mb-6 flex items-start gap-2 text-sm"><Checkbox checked={deleteFiles} disabled={movingToTrash} onCheckedChange={checked => setDeleteFiles(checked === true)} className="mt-1 h-[13px] w-[13px]" />Also remove verified recording files when the meeting is permanently deleted.</label>
       </ConfirmationModal>
 
       {/* Edit Meeting Title Modal */}

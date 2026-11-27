@@ -186,7 +186,7 @@ where
     check(&cancel, &preempt)?;
     let exists: bool = super::store::cancellable(
         &cancel,
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id=?)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM active_meetings WHERE id=?)")
             .bind(&meeting)
             .fetch_one(&pool),
     )

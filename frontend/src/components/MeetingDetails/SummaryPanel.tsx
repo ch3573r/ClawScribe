@@ -80,10 +80,12 @@ interface SummaryPanelProps {
   customPrompt: string;
   contextLoading: boolean;
   onPromptChange: (value: string) => void;
+  onPromptBlur: () => void;
   onSaveSummary: (summary: EditorSummary) => Promise<void>;
   onSummaryChange: (summary: Summary) => void;
   summaryError: string | null;
   jobSnapshot: SummaryJobSnapshot | null;
+  onRefreshSummary: () => void;
   getSummaryStatusMessage: (status: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error') => string;
   availableTemplates: Array<{ id: string, name: string, description: string }>;
   selectedTemplate: string;
@@ -130,11 +132,12 @@ export function SummaryPanel({
   onGenerateSummary,
   onRetryTranslation,
   onStopGeneration,
-  customPrompt, contextLoading, onPromptChange,
+  customPrompt, contextLoading, onPromptChange, onPromptBlur,
   onSaveSummary,
   onSummaryChange,
   summaryError,
   jobSnapshot,
+  onRefreshSummary,
   getSummaryStatusMessage,
   availableTemplates,
   selectedTemplate,
@@ -304,7 +307,7 @@ export function SummaryPanel({
   const progress = jobSnapshot?.progress;
   const jobState = jobSnapshot?.status;
   const jobNotice = jobState && ['skipped', 'failed', 'cancelled', 'unavailable'].includes(jobState)
-    ? jobState === 'unavailable' ? 'Could not check summary progress. Trying again…' : jobSnapshot?.error
+    ? jobState === 'unavailable' ? 'Could not check the saved summary.' : jobSnapshot?.error
     : null;
   const generationDisabled = contextLoading || isModelConfigLoading || checkingModels || savingRecovery;
   const recoveredNotes = jobState === 'failed' ? jobSnapshot?.partial_notes : null;
@@ -611,6 +614,7 @@ export function SummaryPanel({
           {(jobNotice || summaryStatus === 'error') && (
             <p role={jobState === 'failed' || summaryStatus === 'error' ? 'alert' : 'status'} className="mx-4 mb-3 text-sm text-muted-foreground">
               {jobNotice || summaryError || getSummaryStatusMessage(summaryStatus)}
+                {jobState === 'unavailable' && <Button type="button" size="sm" variant="ghost" onClick={onRefreshSummary}>Retry</Button>}
             </p>
           )}
           {recoveredNotes && (
@@ -655,7 +659,7 @@ export function SummaryPanel({
           <MeetingChat key={meeting.id} meetingId={meeting.id} provider={modelConfig?.provider} model={modelConfig?.model} dockTarget={dockTarget} onDockOpenChange={setChatDocked} />
         </div>
         {contextOpen && <label className="mt-2 block text-xs text-muted-foreground" id={`summary-context-${meeting.id}`}>Context for the summary
-          <Textarea aria-label="Context for the summary" placeholder="People involved, meeting overview, objectives…" rows={3} className="mt-1 max-h-40 min-h-20 resize-y" disabled={contextLoading} aria-busy={contextLoading} value={customPrompt} onChange={event => onPromptChange(event.target.value)} />
+          <Textarea aria-label="Context for the summary" placeholder="People involved, meeting overview, objectives…" rows={3} className="mt-1 max-h-40 min-h-20 resize-y" disabled={contextLoading} aria-busy={contextLoading} value={customPrompt} onChange={event => onPromptChange(event.target.value)} onBlur={onPromptBlur} />
         </label>}
       </footer>
     </div>

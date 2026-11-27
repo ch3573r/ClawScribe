@@ -71,7 +71,6 @@ test('sidebar provider restores width, shares offsets, reclamps on resize and cl
     }) },
     '@/hooks/useRecordingStart': { useStartRecordingSession: () => () => {} },
     '@/hooks/useLiveTranscriptionReadiness': { useLiveTranscriptionReadiness: () => ({}) },
-    '@/hooks/useSummaryPolling': { useSummaryPolling: () => ({ activeSummaryPolls: new Map(), startSummaryPolling() {}, stopSummaryPolling() {} }) },
     '@tauri-apps/api/core': { invoke: async () => [] },
     '@tauri-apps/api/event': { listen: async () => () => {} },
   });

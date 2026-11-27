@@ -26,6 +26,11 @@ fn main() {
 @"
 #[path = "$sourceRoot/mod.rs"] pub mod documents;
 #[cfg(test)] #[path = "$sourceRoot/../document_contract_tests.rs"] mod document_contract_tests;
+// The document worker reports child panics through the app's crash log. This
+// standalone crate has no app log directory, so the report is a no-op here.
+pub mod crash_report {
+    pub(crate) fn report_child_panic(_worker: &'static str, _pid: u32, _started: std::time::SystemTime) {}
+}
 "@ | Set-Content -LiteralPath (Join-Path $testRoot 'lib.rs') -Encoding utf8NoBOM
 @"
 [package]

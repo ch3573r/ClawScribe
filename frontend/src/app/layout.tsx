@@ -37,6 +37,7 @@ import { OnboardingFlow } from '@/components/onboarding'
 import { DownloadProgressToastProvider } from '@/components/shared/DownloadProgressToast'
 import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcessingProvider'
+import { RetranscriptionProvider } from '@/contexts/RetranscriptionProvider'
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
@@ -203,15 +204,25 @@ export default function RootLayout({
   }, []);
   // Surface non-fatal warnings raised by the recording pipeline.
   useEffect(() => {
-    const unlisten = listen<string>('recording-warning', (event) => {
-      const isTranscriptionWarning = event.payload.startsWith('Live transcription');
+    let disposed = false;
+    const showWarning = (message: string, isTranscriptionWarning: boolean) => {
+      if (disposed) return;
       toast.warning(isTranscriptionWarning ? 'Live transcription incomplete' : 'Recording warning', {
-        description: event.payload,
+        id: isTranscriptionWarning ? 'live-transcription-warning' : undefined,
+        description: message,
         duration: 12000,
       });
-    });
+    };
+    const subscriptions = [
+      listen<string>('recording-warning', ({ payload }) => showWarning(payload, payload.startsWith('Live transcription'))),
+      listen<string>('transcription-warning', ({ payload }) => showWarning(payload, true)),
+    ];
+    for (const subscription of subscriptions) {
+      void subscription.catch(() => console.warn('Could not subscribe to recording warnings.'));
+    }
     return () => {
-      unlisten.then((fn) => fn());
+      disposed = true;
+      for (const subscription of subscriptions) void subscription.then(unlisten => unlisten(), () => {});
     };
   }, []);
 
@@ -239,7 +250,15 @@ export default function RootLayout({
 
       if (reason === 'upload_too_large') {
         toast.warning('Recording too large for cloud transcription', {
-          description: 'The selected cloud provider rejected this recording as too large or too long. ClawScribe is switching to local transcription.',
+          description: 'The recording is too large or too long for the selected cloud provider. ClawScribe is switching to local transcription.',
+          duration: 14000,
+        });
+        return;
+      }
+
+      if (reason === 'audio_preparation') {
+        toast.warning('Could not prepare audio for Hosted Whisper', {
+          description: 'ClawScribe is switching to local transcription. Check that the audio plays and that there is free disk space before retrying.',
           duration: 14000,
         });
         return;
@@ -365,6 +384,7 @@ export default function RootLayout({
         <ThemeInitializer />
         {showOnboarding === false && <AppShortcuts />}
         <AppTitlebar />
+        <RetranscriptionProvider>
           <RecordingStateProvider>
             <TranscriptProvider>
               <ConfigProvider key={setupCompletedHere ? 'completed-setup' : 'startup'}>
@@ -413,6 +433,7 @@ export default function RootLayout({
               </ConfigProvider>
             </TranscriptProvider>
           </RecordingStateProvider>
+        </RetranscriptionProvider>
 
         <AppToaster />
       </body>

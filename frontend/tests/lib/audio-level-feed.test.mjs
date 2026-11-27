@@ -76,6 +76,27 @@ test('changing the microphone restarts the monitor in order, and a page left mid
   assert.equal(feed.monitored.deviceName, 'B', 'the late first result does not replace the new device');
 });
 
+test('a stale microphone preference meters the default device selected by the native monitor', async t => {
+  const selected = 'Previous USB Headset';
+  const fallback = 'Current USB Headset';
+  const m = setup(t, async command => command === 'start_audio_level_monitoring' ? [{
+    requested_name: selected, device_name: fallback, used_default: true,
+  }] : undefined);
+  const options = { enabled: true, micDevice: `${selected} (input)` };
+  m.render(options);
+  await flush();
+  assert.deepEqual({ ...m.render(options).monitored }, { deviceName: fallback, usedDefault: true });
+
+  m.listeners.get('audio-levels')({ payload: { levels: [
+    { device_name: selected, rms_level: 1, peak_level: 1, is_active: true },
+    { device_name: fallback, rms_level: 0.25, peak_level: 0.5, is_active: true },
+  ] } });
+  const { microphone } = m.render(options);
+  assert.equal(microphone.deviceName, fallback);
+  assert.equal(Math.round(microphone.db), -12);
+  assert.equal(microphone.active, true);
+});
+
 test('nothing is started while disabled, such as during a recording, and errors can be retried', async t => {
   let fail = true;
   const m = setup(t, async command => {

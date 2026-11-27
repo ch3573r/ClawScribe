@@ -1,7 +1,7 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
-import { useState, useEffect, useCallback, Suspense } from "react";
-import { type MeetingDetails as MeetingDetailsData, type MeetingSummary } from "@/types";
+import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
+import type { MeetingDetails as MeetingDetailsData, MeetingSummary } from "@/types";
 import { readMeetingSummary } from '@/lib/meeting-summary';
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -11,8 +11,15 @@ import { LoaderIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { listen } from '@tauri-apps/api/event';
-import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
+import type { SummaryJobSnapshot } from '@/lib/summary-job-status';
+import { createSummaryUpdates } from '@/lib/summary-updates';
 import { emptyLiveTranscriptMessage, type CaptureDetails, type RecordingOutcome, recordingBlocksAutoSummary, recordingRecoveryMessage } from '@/lib/recording-outcome';
+
+const emptySummaryView: {
+  snapshot: SummaryJobSnapshot | null;
+  content: MeetingSummary | null;
+  contentKey: string;
+} = { snapshot: null, content: null, contentKey: 'null' };
 
 function MeetingDetailsContent() {
   const searchParams = useSearchParams() ?? new URLSearchParams();
@@ -20,11 +27,11 @@ function MeetingDetailsContent() {
   const evidenceToken = searchParams.get('evidence');
   const fromArchive = searchParams.get('from') === 'archive';
   const archiveAction = searchParams.get('archiveAction');
-  const { setCurrentMeeting, refetchMeetings, stopSummaryPolling } = useSidebar();
+  const { setCurrentMeeting, refetchMeetings } = useSidebar();
   const router = useRouter();
   const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsData | null>(null);
-  const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null);
-  const [summaryJob, setSummaryJob] = useState<SummaryJobSnapshot | null>(null);
+  const [{ snapshot: summaryJob, content: meetingSummary }, setSummaryView] = useState(emptySummaryView);
+  const summaryUpdates = useMemo(() => meetingId && meetingId !== 'intro-call' ? createSummaryUpdates(meetingId) : null, [meetingId]);
   const [error, setError] = useState<string | null>(null);
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
   const [capture, setCapture] = useState<{ meetingId: string; details: CaptureDetails } | null>(null);
@@ -126,79 +133,33 @@ function MeetingDetailsContent() {
   // Reset states when meetingId changes (prevent race conditions)
   useEffect(() => {
     setMeetingDetails(null);
-    setMeetingSummary(null);
     setError(null);
   }, [meetingId]);
 
-  // Cleanup: Stop polling when navigating away from a meeting
   useEffect(() => {
-    return () => {
-      if (meetingId) {
-        // A background poll (automatic summary started while the user was
-        // elsewhere) is not this page's to stop.
-        stopSummaryPolling(meetingId, { keepBackground: true });
-      }
-    };
-  }, [meetingId, stopSummaryPolling]);
-
-  useEffect(() => {
-
-    if (!meetingId || meetingId === 'intro-call') {
+    setSummaryView(emptySummaryView);
+    if (!summaryUpdates) {
       console.warn("No valid meeting ID in URL - meetingId:");
       setError("No meeting selected");
       Analytics.trackPageView('meeting_details');
       return;
     }
-
-
-    setMeetingDetails(null);
-    setMeetingSummary(null);
-    setSummaryJob(null);
-    setError(null);
-    let active = true;
-    let latestRequest = 0;
-
-    const fetchMeetingSummary = async () => {
-      const request = ++latestRequest;
-      try {
-        const summary = await invoke<SummaryJobSnapshot>('api_get_summary', {
-          meetingId: meetingId,
-        });
-        if (!active || request !== latestRequest) return;
-
-        setSummaryJob(summary);
-        const running = isActiveSummary(summary.status);
-        // Nothing to show yet; the run's own progress is shown by the summary panel.
-        if (running && !summary.data) {
-          setMeetingSummary(null);
-          return;
-        }
-
-        // Check if the summary request failed with 404 or error status, or if no summary exists yet (idle)
-        // Note: 'cancelled' and 'failed' statuses can still have data if backup was restored
-        if (!summary.data) {
-          console.warn("Meeting summary not found or no summary generated yet:");
-          setMeetingSummary(null);
-          return;
-        }
-
-        setMeetingSummary(readMeetingSummary(summary.data).summary);
-      } catch {
-        if (active && request === latestRequest) console.error('Could not read the saved summary');
+    return summaryUpdates.subscribe(snapshot => {
+      if (snapshot.status === 'unavailable') {
+        setSummaryView(previous => ({ ...previous, snapshot: { ...previous.snapshot, ...snapshot } }));
+        return;
       }
-    };
-
-    const subscription = listen<string>('summary-job-changed', event => {
-      if (event.payload === meetingId && active) void fetchMeetingSummary();
+      // Progress and transcript events can change metadata without changing
+      // the notes. Keep the editor model and its block array in that case.
+      const content = readMeetingSummary(snapshot.data).summary;
+      const contentKey = JSON.stringify(content);
+      setSummaryView(previous => ({
+        snapshot,
+        contentKey,
+        content: previous.contentKey === contentKey ? previous.content : content,
+      }));
     });
-    void subscription.then(() => {
-      if (active) void fetchMeetingSummary();
-    }, () => { if (active) void fetchMeetingSummary(); });
-    return () => {
-      active = false;
-      void subscription.then(unlisten => unlisten()).catch(() => {});
-    };
-  }, [meetingId]);
+  }, [summaryUpdates]);
 
   if (error) {
     return (
@@ -220,7 +181,7 @@ function MeetingDetailsContent() {
   // Show the full-page spinner only for the initial load. Post-processing
   // refetches must keep PageContent mounted so completion benchmark dialogs
   // are not destroyed as soon as retranscription/diarization finishes.
-  if (!meetingDetails || meetingDetails.id !== meetingId) {
+  if (!summaryUpdates || !meetingDetails || meetingDetails.id !== meetingId) {
     return <div className="flex h-full items-center justify-center">
       <LoaderIcon className="animate-spin size-6 " />
     </div>;
@@ -241,6 +202,8 @@ function MeetingDetailsContent() {
     actionId={searchParams.get('actionId')}
     summaryData={meetingSummary}
     summaryJob={summaryJob}
+    subscribeToSummary={summaryUpdates.subscribe}
+    refreshSummary={summaryUpdates.refresh}
     onMeetingUpdated={async () => {
       // Refetch meeting details to get updated title from backend
       await fetchMeetingDetails();
