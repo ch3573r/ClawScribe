@@ -279,8 +279,8 @@ test('the self-test cannot write outside an owned profile or touch a credential 
   const manager = read('frontend/src-tauri/src/database/manager.rs');
   assert.equal([...manager.matchAll(/migrate_provider_credentials/g)].length, 1);
   assert.match(manager, /if migrate_credentials \{\n\s+crate::database::repositories::setting::migrate_provider_credentials\(&pool\)\.await;\n\s+\}/);
-  assert.match(manager, /Self::open\(tauri_db_path, backend_db_path, true\)/);
-  assert.match(manager, /Self::open\(tauri_db_path, backend_db_path, false\)/);
+  assert.match(manager, /Self::open\(\s*tauri_db_path,\s*backend_db_path,\s*true,/);
+  assert.match(manager, /Self::open\(\s*tauri_db_path,\s*backend_db_path,\s*false,/);
   // The profile: marker, state and report are created, never overwritten or followed.
   assert.match(selfTestProduction, /write_new\(&plain\.join\(PROFILE_MARKER\)/);
   assert.match(selfTestProduction, /write_new\(&profile\.join\(STATE_FILE\)/);
