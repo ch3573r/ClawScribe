@@ -93,6 +93,8 @@ pub(super) fn render(
         number += 1;
         if format == SubtitleFormat::Srt {
             let _ = writeln!(out, "{number}");
+            // Subtitle players can interpret HTML tags and ASS overrides in SRT text.
+            text = text.replace('<', "＜").replace("{\\", "｛\\");
         } else {
             text = text
                 .replace('&', "&amp;")
@@ -125,13 +127,13 @@ mod tests {
             passage(0.0, f64::INFINITY, "Infinite end"),
             passage(0.0, f64::NAN, "Invalid end"),
             passage(0.0, 1.0, " \n\u{0}"),
-            passage(1.0, 1.0001, "Short response"),
+            passage(1.0, 1.0001, r"<b>Short response</b> {\an8}"),
             passage(2.0, 1.0, "Reversed range"),
             passage(3.0, 4.0, "Next response"),
         ];
         assert_eq!(
             render(&rows, SubtitleFormat::Srt, true).unwrap(),
-            "1\n00:00:01,000 --> 00:00:01,001\nShort response\n\n2\n00:00:03,000 --> 00:00:04,000\nNext response\n\n"
+            "1\n00:00:01,000 --> 00:00:01,001\n＜b>Short response＜/b> ｛\\an8}\n\n2\n00:00:03,000 --> 00:00:04,000\nNext response\n\n"
         );
     }
 }

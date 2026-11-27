@@ -123,6 +123,7 @@
             "nsis": {
                 "installerIcon": "icons/app_icon.ico",
                 "uninstallerIcon": "icons/app_icon.ico",
+                "installerHooks": "scripts/installer-hooks.nsh",
                 "installMode": "currentUser",
                 "languages": [
                     "English"

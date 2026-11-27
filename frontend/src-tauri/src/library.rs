@@ -939,7 +939,7 @@ mod tests {
             (
                 subtitles::SubtitleFormat::Srt,
                 true,
-                "1\n01:01:01,125 --> 01:01:03,500\nÄnne & Jo: <edited> & first second --> line\n\n",
+                "1\n01:01:01,125 --> 01:01:03,500\nÄnne & Jo: ＜edited> & first second --> line\n\n",
             ),
             (
                 subtitles::SubtitleFormat::Vtt,
