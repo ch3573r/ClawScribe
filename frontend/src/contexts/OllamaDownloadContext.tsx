@@ -110,7 +110,6 @@ export function OllamaDownloadProvider({ children }: { children: React.ReactNode
           (event) => {
             if (disposed) return;
             const { modelName, error } = event.payload;
-            console.error(`❌ [OllamaDownloadContext] Download error for ${modelName}:`, error);
 
             toast.error(`Download failed: ${modelName}`, {
               description: error,

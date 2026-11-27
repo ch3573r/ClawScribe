@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
 use once_cell::sync::Lazy;
-use reqwest::Client;
+use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::process::Command;
@@ -84,7 +84,8 @@ struct OllamaApiModel {
 fn is_localhost_endpoint(endpoint: Option<&str>) -> bool {
     match endpoint {
         None | Some("") => true,
-        Some(url) => url.contains("localhost") || url.contains("127.0.0.1") || url.contains("::1"),
+        Some(endpoint) => url::Url::parse(endpoint)
+            .is_ok_and(|url| matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))),
     }
 }
 
@@ -132,8 +133,10 @@ pub async fn get_ollama_models(endpoint: Option<String>) -> Result<Vec<OllamaMod
         Ok(Err(http_err)) => {
             // Only fallback to CLI if endpoint is localhost/empty
             if is_localhost_endpoint(endpoint.as_deref()) {
-                get_models_via_cli()
-                    .map_err(|cli_err| format!("{}\n\nAlso tried CLI: {}", http_err, cli_err))
+                tokio::task::spawn_blocking(get_models_via_cli)
+                    .await
+                    .unwrap_or_else(|_| Err("The Ollama CLI task stopped unexpectedly.".into()))
+                    .map_err(|cli_err| format!("{http_err}\n\nAlso tried CLI: {cli_err}"))
             } else {
                 Err(http_err)
             }
@@ -324,12 +327,48 @@ async fn pull_model(
     result
 }
 
+async fn pull_error_detail(mut response: Response) -> Option<String> {
+    const MAX_BODY_BYTES: usize = 8 * 1024;
+    const MAX_MESSAGE_CHARS: usize = 240;
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_BODY_BYTES as u64)
+    {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if body.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    #[derive(Deserialize)]
+    struct PullError {
+        error: String,
+    }
+    let error: PullError = serde_json::from_slice(&body).ok()?;
+    let normalized = error.error.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let mut detail: String = chars.by_ref().take(MAX_MESSAGE_CHARS).collect();
+    if chars.next().is_some() {
+        detail.pop();
+        detail.push('…');
+    }
+    (!detail.is_empty()).then_some(detail)
+}
+
 async fn download_model(
     model_name: &str,
     base_url: &str,
     report_progress: impl Fn(u8),
 ) -> Result<(), String> {
-    let client = Client::new();
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Could not initialize the Ollama HTTP client.")?;
     let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
 
     let payload = serde_json::json!({
@@ -354,10 +393,15 @@ async fn download_model(
         })?;
 
     if !response.status().is_success() {
-        return Err(format!(
-            "Failed to pull model (HTTP {}).",
-            response.status()
-        ));
+        let status = response.status();
+        let detail = timeout(Duration::from_secs(3), pull_error_detail(response))
+            .await
+            .ok()
+            .flatten();
+        return Err(match detail {
+            Some(detail) => format!("Failed to pull model (HTTP {status}). {detail}"),
+            None => format!("Failed to pull model (HTTP {status})."),
+        });
     }
 
     // Process streaming response (NDJSON format)
@@ -422,6 +466,48 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpSocket};
 
+    #[test]
+    fn cli_fallback_accepts_only_loopback_hosts() {
+        for endpoint in [
+            None,
+            Some(""),
+            Some("http://localhost:11434"),
+            Some("https://LOCALHOST:11434"),
+            Some("http://127.0.0.1:11434"),
+            Some("http://[::1]:11434"),
+        ] {
+            assert!(is_localhost_endpoint(endpoint), "{endpoint:?}");
+        }
+        for endpoint in [
+            "http://localhost.example.com",
+            "https://example.com/127.0.0.1?host=localhost",
+            "https://localhost@example.com",
+            "http://[2001:db8::1]:11434",
+            "not a localhost URL",
+        ] {
+            assert!(!is_localhost_endpoint(Some(endpoint)), "{endpoint}");
+        }
+    }
+
+    async fn serve_pull_response(response: String) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        (endpoint, server)
+    }
+
+    fn http_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
     #[tokio::test]
     async fn pull_can_retry_after_connection_failure() {
         let socket = TcpSocket::new_v4().unwrap();
@@ -447,26 +533,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pull_does_not_follow_redirects() {
+        let (target, target_server) = serve_pull_response(http_response("200 OK", "")).await;
+        let (endpoint, server) = serve_pull_response(format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nConnection: close\r\nContent-Length: 0\r\nLocation: {target}/api/pull\r\n\r\n"
+        ))
+        .await;
+        let result = pull_model("test-redirect", Some(&endpoint), |_, _| {}).await;
+        server.await.unwrap();
+        target_server.abort();
+        assert!(result.unwrap_err().contains("HTTP 307"));
+    }
+
+    #[tokio::test]
+    async fn pull_surfaces_a_truncated_json_error_in_the_toast_event() {
+        let cause = "pull model manifest: file does not exist";
+        let body = serde_json::json!({ "error": format!("{cause} {}", "ö".repeat(300)) });
+        let (endpoint, server) = serve_pull_response(http_response(
+            "500 Internal Server Error",
+            &body.to_string(),
+        ))
+        .await;
+        let toast = RefCell::new(None);
+        let error = pull_model("test-http-error", Some(&endpoint), |event, payload| {
+            if event == "ollama-model-download-error" {
+                toast.replace(payload["error"].as_str().map(str::to_owned));
+            }
+        })
+        .await
+        .unwrap_err();
+        server.await.unwrap();
+        assert!(error.contains(cause), "{error}");
+        assert!(error.ends_with('…'));
+        assert!(error.chars().count() < 300);
+        assert_eq!(toast.into_inner().as_deref(), Some(error.as_str()));
+    }
+
+    #[tokio::test]
+    async fn pull_falls_back_to_http_status_when_the_error_body_is_oversized() {
+        let body = serde_json::json!({ "error": "x".repeat(9000) }).to_string();
+        let response = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+            body.len(),
+        );
+        let (endpoint, server) = serve_pull_response(response).await;
+        let error = pull_model("test-large-http-error", Some(&endpoint), |_, _| {})
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert_eq!(
+            error,
+            "Failed to pull model (HTTP 500 Internal Server Error)."
+        );
+    }
+
+    #[tokio::test]
     async fn pull_progress_stays_monotonic_when_a_new_layer_starts() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
-            let body = concat!(
-                "{\"completed\":60,\"total\":100}\n",
-                "{\"completed\":5,\"total\":100}\n",
-                "{\"completed\":75,\"total\":100}\n",
-                "{\"completed\":100,\"total\":100}\n",
-                "{\"status\":\"success\"}\n",
-            );
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
-        });
+        let body = concat!(
+            "{\"completed\":60,\"total\":100}\n",
+            "{\"completed\":5,\"total\":100}\n",
+            "{\"completed\":75,\"total\":100}\n",
+            "{\"completed\":100,\"total\":100}\n",
+            "{\"status\":\"success\"}\n",
+        );
+        let (endpoint, server) = serve_pull_response(http_response("200 OK", body)).await;
 
         let progress = RefCell::new(Vec::new());
         pull_model("test-progress", Some(&endpoint), |event, payload| {
