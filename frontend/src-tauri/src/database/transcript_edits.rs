@@ -1,6 +1,9 @@
 //! Reviewed transcript corrections. SQLite is authoritative; edits preserve timing
 //! and the original text, invalidate word alignment, and can be undone atomically.
 use crate::audio::outcome::RecordingOutcome;
+use crate::database::repositories::meeting::{
+    MeetingsRepository, FILE_PUBLICATION_LOCK, NOT_FOUND,
+};
 use crate::{database::models::Transcript, state::AppState};
 use regex::{NoExpand, RegexBuilder};
 use serde::{Deserialize, Serialize};
@@ -151,17 +154,34 @@ fn validate_text(text: &str) -> Result<(), String> {
 }
 
 async fn rows(pool: &SqlitePool, meeting: &str) -> Result<Vec<Transcript>, String> {
-    sqlx::query_as("SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id")
-        .bind(meeting)
-        .fetch_all(pool)
+    let mut tx = pool.begin().await.map_err(error)?;
+    require_active(&mut tx, meeting).await?;
+    let transcripts = sqlx::query_as(
+        "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
+    )
+    .bind(meeting)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(error)?;
+    tx.commit().await.map_err(error)?;
+    Ok(transcripts)
+}
+
+async fn require_active(conn: &mut SqliteConnection, meeting: &str) -> Result<(), String> {
+    if !MeetingsRepository::is_active(conn, meeting)
         .await
-        .map_err(error)
+        .map_err(error)?
+    {
+        return Err(NOT_FOUND.into());
+    }
+    Ok(())
 }
 
 pub(crate) async fn assert_editable(
     conn: &mut SqliteConnection,
     meeting: &str,
 ) -> Result<(), String> {
+    require_active(conn, meeting).await?;
     if crate::audio::diarization::is_diarizing_meeting(meeting) {
         return Err("Wait for speaker detection to finish before editing its transcript".into());
     }
@@ -174,11 +194,11 @@ pub(crate) async fn assert_editable(
 }
 
 async fn apply(pool: &SqlitePool, meeting: &str, changes: &[Change]) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(error)?;
+    assert_editable(&mut tx, meeting).await?;
     if changes.is_empty() {
         return Ok(());
     }
-    let mut tx = pool.begin().await.map_err(error)?;
-    assert_editable(&mut tx, meeting).await?;
     for change in changes {
         validate_text(&change.after)?;
         let result = sqlx::query("UPDATE transcripts SET original_transcript = COALESCE(original_transcript, transcript), transcript = ?, word_timestamps_json = NULL WHERE meeting_id = ? AND id = ? AND transcript = ?")
@@ -403,15 +423,15 @@ pub(crate) fn import_file_payload(metadata: &serde_json::Value) -> Result<String
     .map_err(error)
 }
 
-pub(crate) async fn import_file_stage(
-    pool: &SqlitePool,
+pub(crate) async fn import_file_stage<'e>(
+    executor: impl sqlx::SqliteExecutor<'e>,
     meeting: &str,
 ) -> Result<Option<&'static str>, String> {
     let payload = sqlx::query_scalar::<_, Option<String>>(
         "SELECT retranscription_json FROM transcript_file_sync WHERE meeting_id = ?",
     )
     .bind(meeting)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .map_err(error)?
     .flatten();
@@ -730,6 +750,14 @@ pub(crate) async fn sync_file_with_profile(
     roots: &[PathBuf],
     notes_profile: impl FnOnce(&Path) -> Result<Option<String>, String>,
 ) -> Result<SyncedFiles, String> {
+    let _files = FILE_PUBLICATION_LOCK.lock().await;
+    let folder: Option<String> =
+        sqlx::query_scalar("SELECT folder_path FROM active_meetings WHERE id = ?")
+            .bind(meeting)
+            .fetch_optional(pool)
+            .await
+            .map_err(error)?
+            .ok_or(NOT_FOUND)?;
     let Some(payload) = sqlx::query_scalar::<_, Option<String>>(
         "SELECT retranscription_json FROM transcript_file_sync WHERE meeting_id = ?",
     )
@@ -749,12 +777,6 @@ pub(crate) async fn sync_file_with_profile(
         Some(FilePublication::Retranscription(_)) => SyncedFiles::Retranscription,
         _ => SyncedFiles::Other,
     };
-    let folder: Option<String> =
-        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
-            .bind(meeting)
-            .fetch_one(pool)
-            .await
-            .map_err(error)?;
     let Some(folder) = folder.filter(|value| !value.trim().is_empty()) else {
         // Without a recording folder (for example a library restored without
         // its files) no file can ever be written. Retrying would fail forever,
@@ -953,31 +975,38 @@ pub async fn api_get_transcript_edit_state(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<EditState, String> {
-    let pool = state.db_manager.pool();
+    read_edit_state(state.db_manager.pool(), &meeting_id).await
+}
+
+async fn read_edit_state(pool: &SqlitePool, meeting_id: &str) -> Result<EditState, String> {
+    let mut tx = pool.begin().await.map_err(error)?;
+    require_active(&mut tx, meeting_id).await?;
     let can_undo: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM transcript_edit_batches WHERE meeting_id = ? AND undone = 0",
     )
-    .bind(&meeting_id)
-    .fetch_one(pool)
+    .bind(meeting_id)
+    .fetch_one(&mut *tx)
     .await
     .map_err(error)?;
     let pending: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM transcript_file_sync WHERE meeting_id = ?")
-            .bind(&meeting_id)
-            .fetch_one(pool)
+            .bind(meeting_id)
+            .fetch_one(&mut *tx)
             .await
             .map_err(error)?;
-    let edits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ? AND original_transcript IS NOT NULL AND transcript != original_transcript").bind(&meeting_id).fetch_one(pool).await.map_err(error)?;
+    let edits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ? AND original_transcript IS NOT NULL AND transcript != original_transcript").bind(meeting_id).fetch_one(&mut *tx).await.map_err(error)?;
     let revisions: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM transcript_revisions WHERE meeting_id = ?")
-            .bind(&meeting_id)
-            .fetch_one(pool)
+            .bind(meeting_id)
+            .fetch_one(&mut *tx)
             .await
             .map_err(error)?;
+    let import_file_stage = import_file_stage(&mut *tx, meeting_id).await?;
+    tx.commit().await.map_err(error)?;
     Ok(EditState {
         can_undo: can_undo > 0,
         pending_file_sync: pending > 0,
-        import_file_stage: import_file_stage(pool, &meeting_id).await?,
+        import_file_stage,
         has_edits: edits > 0,
         can_restore_previous: revisions > 0,
     })
@@ -1023,13 +1052,16 @@ pub async fn api_update_transcript_text<R: Runtime>(
     let job = crate::audio::inference::claim_job()?;
     validate_text(&text)?;
     let pool = state.db_manager.pool();
+    let mut tx = pool.begin().await.map_err(error)?;
+    require_active(&mut tx, &meeting_id).await?;
     let row: Transcript =
         sqlx::query_as("SELECT * FROM transcripts WHERE meeting_id = ? AND id = ?")
             .bind(&meeting_id)
             .bind(transcript_id)
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(error)?;
+    tx.commit().await.map_err(error)?;
     if row.transcript != expected_text {
         return Err("The transcript changed. Reload it before editing.".into());
     }
@@ -1213,6 +1245,61 @@ pub(crate) mod tests {
             preview.examples[0].after,
             "Möller in der Müllerstraße ruft Möller."
         );
+    }
+
+    #[tokio::test]
+    async fn trashed_transcript_rejects_editing_and_file_sync() {
+        use crate::database::repositories::{
+            meeting::MeetingsRepository, transcript::TranscriptsRepository,
+        };
+
+        let pool = fixture().await;
+        let meeting = "review-test";
+        let (_, changes) = replacement_plan(
+            rows(&pool, meeting).await.unwrap(),
+            "project",
+            "work",
+            false,
+            false,
+        )
+        .unwrap();
+        apply(&pool, meeting, &changes).await.unwrap();
+        assert!(MeetingsRepository::move_to_trash(&pool, meeting, false)
+            .await
+            .unwrap());
+
+        assert!(matches!(rows(&pool, meeting).await, Err(e) if e == "Meeting not found."));
+        assert!(
+            matches!(read_edit_state(&pool, meeting).await, Err(e) if e == "Meeting not found.")
+        );
+        assert_eq!(
+            apply(&pool, meeting, &[]).await.unwrap_err(),
+            "Meeting not found."
+        );
+        assert_eq!(
+            apply(&pool, meeting, &changes).await.unwrap_err(),
+            "Meeting not found."
+        );
+        assert!(matches!(undo(&pool, meeting).await, Err(e) if e == "Meeting not found."));
+        assert_eq!(
+            restore_previous(&pool, meeting, &[]).await.unwrap_err(),
+            "Meeting not found."
+        );
+        assert!(
+            matches!(TranscriptsRepository::update_transcript_speaker(&pool, meeting, "a", Some("Alex")).await, Err(sqlx::Error::Protocol(e)) if e == "Meeting not found.")
+        );
+        assert!(
+            matches!(TranscriptsRepository::update_transcript_speakers_matching(&pool, meeting, None, Some("Alex"), true).await, Err(sqlx::Error::Protocol(e)) if e == "Meeting not found.")
+        );
+        assert!(
+            matches!(sync_file(&pool, meeting, &[]).await, Err(e) if e == "Meeting not found.")
+        );
+
+        assert!(MeetingsRepository::restore_from_trash(&pool, meeting)
+            .await
+            .unwrap());
+        let edit_state = read_edit_state(&pool, meeting).await.unwrap();
+        assert!(edit_state.can_undo && edit_state.has_edits && edit_state.pending_file_sync);
     }
 
     #[tokio::test]

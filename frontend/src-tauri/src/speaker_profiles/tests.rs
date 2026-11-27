@@ -2,6 +2,24 @@ use super::*;
 use sqlx::migrate::Migrator;
 use std::borrow::Cow;
 
+#[tokio::test]
+async fn voice_options_reject_a_trashed_meeting_even_when_profiles_are_off() {
+    use crate::database::repositories::meeting::MeetingsRepository;
+
+    let pool = crate::database::transcript_edits::tests::fixture().await;
+    let meeting = "review-test";
+    assert!(meeting_voice_options(&pool, meeting)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(MeetingsRepository::move_to_trash(&pool, meeting, false)
+        .await
+        .unwrap());
+    assert!(
+        matches!(meeting_voice_options(&pool, meeting).await, Err(e) if e == "Meeting not found.")
+    );
+}
+
 #[test]
 fn one_profile_needs_a_clear_lead_over_a_lane_below_threshold() {
     let profile = KnownVoice {

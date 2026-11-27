@@ -23,6 +23,9 @@ pub(crate) struct TrashedMeeting {
 
 const TRASH_RETENTION: &str = "+30 days";
 const EXPIRED: &str = "datetime(deleted_at, ?1) <= CURRENT_TIMESTAMP";
+pub(crate) const NOT_FOUND: &str = "Meeting not found.";
+// Serialize Trash with publication of transcript files outside SQLite.
+pub(crate) static FILE_PUBLICATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl MeetingsRepository {
     pub(crate) async fn is_active<'e>(
@@ -53,6 +56,7 @@ impl MeetingsRepository {
         meeting_id: &str,
         delete_files: bool,
     ) -> Result<bool, SqlxError> {
+        let _files = FILE_PUBLICATION_LOCK.lock().await;
         let result = sqlx::query(
             "UPDATE meetings SET deleted_at=CURRENT_TIMESTAMP, delete_recording_on_purge=?
              WHERE id=? AND deleted_at IS NULL",

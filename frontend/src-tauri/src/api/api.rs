@@ -1197,6 +1197,11 @@ pub async fn api_update_transcript_speaker<R: Runtime>(
             );
             Ok(serde_json::json!({"updated": updated, "speaker": speaker}))
         }
+        Err(sqlx::Error::Protocol(message))
+            if message == crate::database::repositories::meeting::NOT_FOUND =>
+        {
+            Err(message)
+        }
         Err(e) => {
             log_error!("Failed to update speaker for transcript in meeting");
             Err(format!("Failed to update speaker label: {}", e))
@@ -1234,6 +1239,11 @@ pub async fn api_update_transcript_speakers_matching<R: Runtime>(
                 );
             }
             Ok(serde_json::json!({"updated": updated, "speaker": speaker}))
+        }
+        Err(sqlx::Error::Protocol(message))
+            if message == crate::database::repositories::meeting::NOT_FOUND =>
+        {
+            Err(message)
         }
         Err(e) => {
             log_error!("Failed to update matching speaker labels in meeting");
