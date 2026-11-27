@@ -350,15 +350,21 @@ async fn run_retranscription<R: Runtime>(
                 "Uploading audio for cloud transcription...",
             );
             let outcome = approved
-                .transcribe(&app, model.as_deref(), &audio_path, language.as_deref(), |progress, message| {
-                    emit_progress(
-                        &app,
-                        &meeting_id,
-                        "transcribing",
-                        5 + 70 * progress / 100,
-                        message,
-                    )
-                })
+                .transcribe(
+                    &app,
+                    model.as_deref(),
+                    &audio_path,
+                    language.as_deref(),
+                    |progress, message| {
+                        emit_progress(
+                            &app,
+                            &meeting_id,
+                            "transcribing",
+                            5 + 70 * progress / 100,
+                            message,
+                        )
+                    },
+                )
                 .await;
             if RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire) {
                 return Err(anyhow!("Retranscription cancelled"));
@@ -1454,11 +1460,20 @@ mod tests {
         let (pool, _) = publication_fixture().await;
         let id = "review-test";
         let replacement = create_transcript_segments(&[("new transcript".into(), 0.0, 2000.0)]);
-        assert!(MeetingsRepository::move_to_trash(&pool, id, false).await.unwrap());
-        assert_eq!(commit_retranscription(&pool, id, &replacement, &publication(), false, None)
-            .await.unwrap_err().to_string(), "Meeting not found.");
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+            .await
+            .unwrap());
+        assert_eq!(
+            commit_retranscription(&pool, id, &replacement, &publication(), false, None)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Meeting not found."
+        );
         let text: String = sqlx::query_scalar("SELECT transcript FROM transcripts WHERE id = 'a'")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(text, "Äpfel project");
     }
 

@@ -435,11 +435,13 @@ async fn check_removal(
     {
         return Err(FOLDER_CLAIMS_CHANGED);
     }
-    let current: ArchiveFolder = sqlx::query_as(&format!("{FOLDERS_QUERY} AND m.deleted_at IS NULL AND m.id = ?"))
-        .bind(&request.id)
-        .fetch_one(db)
-        .await
-        .map_err(|_| FOLDER_CHANGED)?;
+    let current: ArchiveFolder = sqlx::query_as(&format!(
+        "{FOLDERS_QUERY} AND m.deleted_at IS NULL AND m.id = ?"
+    ))
+    .bind(&request.id)
+    .fetch_one(db)
+    .await
+    .map_err(|_| FOLDER_CHANGED)?;
     if current.needs_recovery {
         return Err(RECOVERY_PENDING);
     }
