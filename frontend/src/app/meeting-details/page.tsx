@@ -1,7 +1,7 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
-import type { MeetingDetails as MeetingDetailsData } from "@/types";
+import type { MeetingDetails as MeetingDetailsData, MeetingSummary } from "@/types";
 import { readMeetingSummary } from '@/lib/meeting-summary';
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -15,6 +15,12 @@ import type { SummaryJobSnapshot } from '@/lib/summary-job-status';
 import { createSummaryUpdates } from '@/lib/summary-updates';
 import { emptyLiveTranscriptMessage, type CaptureDetails, type RecordingOutcome, recordingBlocksAutoSummary, recordingRecoveryMessage } from '@/lib/recording-outcome';
 
+const emptySummaryView: {
+  snapshot: SummaryJobSnapshot | null;
+  content: MeetingSummary | null;
+  contentKey: string;
+} = { snapshot: null, content: null, contentKey: 'null' };
+
 function MeetingDetailsContent() {
   const searchParams = useSearchParams() ?? new URLSearchParams();
   const meetingId = searchParams.get('id');
@@ -24,9 +30,8 @@ function MeetingDetailsContent() {
   const { setCurrentMeeting, refetchMeetings } = useSidebar();
   const router = useRouter();
   const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsData | null>(null);
-  const [summaryJob, setSummaryJob] = useState<SummaryJobSnapshot | null>(null);
+  const [{ snapshot: summaryJob, content: meetingSummary }, setSummaryView] = useState(emptySummaryView);
   const summaryUpdates = useMemo(() => meetingId && meetingId !== 'intro-call' ? createSummaryUpdates(meetingId) : null, [meetingId]);
-  const meetingSummary = useMemo(() => readMeetingSummary(summaryJob?.data).summary, [summaryJob?.data]);
   const [error, setError] = useState<string | null>(null);
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
   const [capture, setCapture] = useState<{ meetingId: string; details: CaptureDetails } | null>(null);
@@ -132,15 +137,27 @@ function MeetingDetailsContent() {
   }, [meetingId]);
 
   useEffect(() => {
-    setSummaryJob(null);
+    setSummaryView(emptySummaryView);
     if (!summaryUpdates) {
       console.warn("No valid meeting ID in URL - meetingId:");
       setError("No meeting selected");
       Analytics.trackPageView('meeting_details');
       return;
     }
-    return summaryUpdates.subscribe(summary => {
-      setSummaryJob(previous => summary.status === 'unavailable' ? { ...previous, ...summary } : summary);
+    return summaryUpdates.subscribe(snapshot => {
+      if (snapshot.status === 'unavailable') {
+        setSummaryView(previous => ({ ...previous, snapshot: { ...previous.snapshot, ...snapshot } }));
+        return;
+      }
+      // Progress and transcript events can change metadata without changing
+      // the notes. Keep the editor model and its block array in that case.
+      const content = readMeetingSummary(snapshot.data).summary;
+      const contentKey = JSON.stringify(content);
+      setSummaryView(previous => ({
+        snapshot,
+        contentKey,
+        content: previous.contentKey === contentKey ? previous.content : content,
+      }));
     });
   }, [summaryUpdates]);
 

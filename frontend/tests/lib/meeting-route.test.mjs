@@ -10,6 +10,7 @@ function createView({ fromRecording = false, outcome = null } = {}) {
   let metadata = null;
   const calls = [];
   const summaries = new Map();
+  const listeners = new Map();
   const jsx = (type, props) => ({ type, props });
   const sidebar = { setCurrentMeeting() {}, refetchMeetings() {} };
   const router = { push() {} };
@@ -24,7 +25,12 @@ function createView({ fromRecording = false, outcome = null } = {}) {
     '@/lib/analytics': { default: { trackPageView() {} }, __esModule: true },
     '@/contexts/ConfigContext': { useConfig: () => ({ isAutoSummary: true }) },
     '@/hooks/usePaginatedTranscripts': { usePaginatedTranscripts: () => ({ metadata, transcripts }) },
-    '@tauri-apps/api/event': { listen: async () => () => {} },
+    '@tauri-apps/api/event': { listen: async (event, callback) => {
+      if (!listeners.has(event)) listeners.set(event, new Set());
+      const callbacks = listeners.get(event);
+      callbacks.add(callback);
+      return () => callbacks.delete(callback);
+    } },
     '@tauri-apps/api/core': { invoke(command, args) {
       calls.push({ command, args });
       if (command === 'get_recording_outcome') return Promise.resolve(outcome);
@@ -45,6 +51,7 @@ function createView({ fromRecording = false, outcome = null } = {}) {
   const render = () => harness.render(() => MeetingDetails().props.children.type());
   return {
     ...harness, calls, summaries, render,
+    emit(event, payload) { listeners.get(event)?.forEach(callback => callback({ payload })); },
     content() { return findContent(render()); },
     navigate(id) { meetingId = id; metadata = null; render(); },
     loadMetadata() { metadata = { id: meetingId, title: meetingId }; render(); },
@@ -106,6 +113,50 @@ test('opening a recorded meeting displays an existing native summary', async () 
   await flush();
   assert.equal(view.calls.some(call => call.command === 'api_get_model_config'), false);
   view.unmount();
+});
+
+test('transcript and progress updates keep the same editor data until the saved content changes', async t => {
+  const view = createView();
+  t.after(view.unmount);
+  const snapshot = (notes, changed) => ({
+    status: changed ? 'processing' : 'completed',
+    transcript_changed: changed,
+    data: {
+      generation: { model: changed ? 'new-metadata' : 'old-metadata' },
+      summary_json: [{
+        id: 'note', type: 'paragraph', props: {}, children: [],
+        content: [{ type: 'text', text: notes, styles: {} }],
+      }],
+    },
+  });
+  view.render();
+  view.loadMetadata();
+  await flush();
+  view.summaries.get('first').resolve(snapshot('Saved notes', false));
+  await flush();
+  const original = view.content().summaryData;
+  assert.equal(original.summary_json[0].content[0].text, 'Saved notes');
+
+  view.emit('transcript-text-edited', { meeting_id: 'first' });
+  view.summaries.get('first').resolve(snapshot('Saved notes', true));
+  await flush();
+  assert.equal(view.content().summaryJob.transcript_changed, true);
+  assert.equal(view.content().summaryData, original);
+
+  view.emit('summary-job-progress', 'first');
+  view.summaries.get('first').resolve({
+    ...snapshot('Saved notes', true),
+    progress: { completed: 1, total: 3, level: 1 },
+  });
+  await flush();
+  assert.equal(view.content().summaryJob.progress.completed, 1);
+  assert.equal(view.content().summaryData, original);
+
+  view.emit('summary-job-changed', 'first');
+  view.summaries.get('first').resolve(snapshot('New notes', false));
+  await flush();
+  assert.notEqual(view.content().summaryData, original);
+  assert.equal(view.content().summaryData.summary_json[0].content[0].text, 'New notes');
 });
 
 test('reopening a skipped recording displays its reason without starting a second job', async () => {

@@ -119,6 +119,22 @@ test('a failed attached run ends in the error state', async t => {
   assert.equal(view.summaryError, 'Synthetic failure');
 });
 
+for (const [status, error] of [
+  ['idle', 'Summary generation is no longer active. Please generate the summary again.'],
+  ['completed', 'Summary generation completed without saved content. Please try again.'],
+]) {
+  test(`an attached run reports an error for ${status} without saved content`, async t => {
+    const app = setup();
+    t.after(() => app.hooks.unmount());
+    app.render().attachToRunningSummary(false);
+    await app.subscriptions[0].onUpdate({ status });
+    const view = app.render();
+    assert.equal(view.summaryStatus, 'error');
+    assert.equal(view.summaryError, error);
+    assert.equal(app.subscriptions[0].active, false);
+  });
+}
+
 test('an encoded BlockNote result keeps its edited blocks and Markdown fallback', async t => {
   const app = setup();
   t.after(() => app.hooks.unmount());
