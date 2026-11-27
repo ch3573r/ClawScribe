@@ -25,7 +25,7 @@ const AUDIO_FILE_CANDIDATES: &[&str] = &[
     "audio.wma",
 ];
 
-use super::ffmpeg::find_ffmpeg_path;
+use super::ffmpeg::{find_ffmpeg_path, FFMPEG_UNAVAILABLE};
 
 /// Encodes the raw recording spool, with recovery support for legacy AAC checkpoints.
 pub struct IncrementalAudioSaver {
@@ -123,9 +123,7 @@ impl IncrementalAudioSaver {
 
         std::fs::write(&list_file, list_content)?;
 
-        let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| {
-            anyhow!("FFmpeg not found. Please install FFmpeg to finalize recordings.")
-        })?;
+        let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| anyhow!(FFMPEG_UNAVAILABLE))?;
         info!("Using the audio encoder");
 
         // Run FFmpeg concat command
@@ -637,8 +635,7 @@ fn recover_legacy_checkpoints(meeting_folder: &str) -> Result<AudioRecoveryStatu
     let staged_path = folder_path.join(format!(".recovery-{}.mp4", uuid::Uuid::new_v4()));
     let output_path_str = output_path.to_string_lossy().to_string();
 
-    let ffmpeg_path = find_ffmpeg_path()
-        .ok_or_else(|| "FFmpeg not found. Please install FFmpeg to recover audio.".to_string())?;
+    let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| FFMPEG_UNAVAILABLE.to_string())?;
     info!("Using the audio recovery encoder");
 
     let mut command = std::process::Command::new(ffmpeg_path);

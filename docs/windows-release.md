@@ -199,6 +199,8 @@ The app build must first stage `frontend/src-tauri/binaries/ffmpeg-x86_64-pc-win
 The test helper fails immediately if that file is missing, then copies it beside
 the test executable as `ffmpeg.exe`. Recording tests use this build-staged encoder
 without relying on PATH or downloading an encoder at test time.
+The Windows app also requires its bundled encoder beside the executable.
+A missing encoder is fixed by repairing the ClawScribe installation.
 
 The helper compiles the actual release-profile library test executable and loads
 the same staged sherpa/ONNX DLL set used by the installer. It rejects missing

@@ -248,22 +248,6 @@ export const microsoftExportService = {
     });
   },
 
-  async exportToPlanner(
-    meetingId: string,
-    meetingTitle: string,
-    summaryJson: string,
-    planId: string,
-    bucketId: string,
-  ): Promise<ExportReport> {
-    return invoke<ExportReport>("export_to_planner", {
-      meetingId,
-      meetingTitle,
-      summaryJson,
-      planId,
-      bucketId,
-    });
-  },
-
   async summaryHasActionItems(markdown: string): Promise<boolean> {
     return invoke<boolean>("summary_has_action_items", { markdown });
   },

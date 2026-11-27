@@ -360,28 +360,46 @@ pub(crate) async fn registered_meeting_folder(
     meeting_id: &str,
     roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
-    let folder: Option<String> = sqlx::query_scalar(
-        "SELECT folder_path FROM meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
-    )
-    .bind(meeting_id)
-    .fetch_optional(pool)
+    registered_meeting_folder_if_present(pool, meeting_id, roots)
+        .await?
+        .ok_or_else(|| "This meeting has no recording folder".into())
+}
+
+/// Preserves the distinction between a meeting with no folder and one with an
+/// invalid or unavailable saved folder.
+pub(crate) async fn registered_meeting_folder_if_present(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    roots: &[PathBuf],
+) -> Result<Option<PathBuf>, String> {
+    let folder: Option<String> =
+        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| "Could not read the meeting")?
+            .ok_or("Meeting not found")?;
+    let Some(folder) = folder.filter(|path| !path.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let roots = roots.to_vec();
+    tokio::task::spawn_blocking(move || {
+        // On a local drive, or inside a root the user trusted (a network folder).
+        let path = Path::new(&folder);
+        if !crate::trusted_roots::text_allowed(&folder, &roots)
+            || is_cleanup_path(path)
+            || directory_chain(path).is_err()
+        {
+            return Err("The recording folder is not available".into());
+        }
+        let resolved = crate::trusted_roots::resolve_allowed(&folder, &roots)?;
+        if is_cleanup_path(&resolved) {
+            return Err("The recording folder is not available".into());
+        }
+        Ok(Some(plain_path(&resolved)))
+    })
     .await
-    .map_err(|_| "Could not read the meeting".to_string())?;
-    let folder = folder.ok_or_else(|| "This meeting has no recording folder".to_string())?;
-    // On a local drive, or inside a root the user trusted (a network folder).
-    let path = Path::new(&folder);
-    if !crate::trusted_roots::text_allowed(&folder, roots)
-        || is_cleanup_path(path)
-        || directory_chain(path).is_err()
-    {
-        return Err("The recording folder is not available".into());
-    }
-    let resolved = crate::trusted_roots::resolve_allowed(&folder, roots)?;
-    if !is_cleanup_path(&resolved) {
-        Ok(plain_path(&resolved))
-    } else {
-        Err("The recording folder is not available".into())
-    }
+    .map_err(|_| "Recording folder resolution was interrupted")?
 }
 
 /// Removes the recording folder the core registered for `meeting_id`: an

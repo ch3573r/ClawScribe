@@ -15,12 +15,16 @@ function* sourceFiles(directory) {
   }
 }
 
-test('literal app commands invoked by the frontend are registered in Tauri', () => {
+function registeredCommands() {
   const core = readFileSync(path.join(frontend, 'src-tauri/src/lib.rs'), 'utf8');
   const handler = /tauri::generate_handler!\[([\s\S]+?)\]\)/.exec(core);
   assert.ok(handler, 'Missing application invoke handler');
-  const registered = new Set(handler[1].replace(/\/\/[^\n]*/g, '').split(',')
+  return new Set(handler[1].replace(/\/\/[^\n]*/g, '').split(',')
     .map(entry => /([a-zA-Z_]\w*)\s*$/.exec(entry)?.[1]));
+}
+
+test('literal app commands invoked by the frontend are registered in Tauri', () => {
+  const registered = registeredCommands();
   const missing = [];
   for (const file of sourceFiles(path.join(frontend, 'src'))) {
     const source = readFileSync(file, 'utf8');
@@ -47,4 +51,32 @@ test('literal app commands invoked by the frontend are registered in Tauri', () 
     visit(tree);
   }
   assert.deepEqual(missing, []);
+});
+
+test('retired commands are absent and their current entry points are registered', () => {
+  const registered = registeredCommands();
+  const retired = [
+    'api_clear_openai_auth_config', 'api_get_openai_auth_status', 'api_process_transcript',
+    'api_search_library', 'api_search_transcripts', 'export_to_planner', 'get_audio_devices',
+    'get_meeting_folder_path', 'get_parakeet_directml_default_unavailable',
+    'get_parakeet_directml_session_disabled', 'get_parakeet_use_directml',
+    'get_reviewed_meeting_actions', 'open_database_folder', 'parakeet_retry_download',
+    'save_onboarding_status_cmd', 'set_meeting_series_template', 'start_recording',
+    'start_recording_summary',
+  ];
+  assert.deepEqual(retired.filter(command => registered.has(command)), []);
+  for (const command of [
+    'get_parakeet_directml_status', 'get_recording_device_inventory', 'pull_ollama_model',
+    'resolve_meeting_audio_file', 'start_recording_with_devices_and_meeting', 'stop_recording',
+  ]) {
+    assert.ok(registered.has(command), `${command} must stay registered`);
+  }
+});
+
+test('saved audio uses dynamic asset grants and the webview cannot connect to Ollama directly', () => {
+  const { app: { security } } = JSON.parse(readFileSync(path.join(frontend, 'src-tauri/tauri.conf.json'), 'utf8'));
+  assert.equal(security.assetProtocol.enable, true);
+  assert.deepEqual(security.assetProtocol.scope, []);
+  assert.match(security.csp['media-src'], /\bhttps?:\/\/asset\.localhost\b/);
+  assert.equal(security.csp['connect-src'], "'self'");
 });

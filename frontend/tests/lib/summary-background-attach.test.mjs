@@ -23,7 +23,6 @@ function setup(t) {
     if (command === 'get_recording_outcome') return null;
     if (command === 'api_get_model_config') return { model: 'synthetic-model' };
     if (command === 'api_get_default_template') return 'standard_meeting';
-    if (command === 'api_process_transcript') return { process_id: 'synthetic-process' };
     throw new Error(`Unexpected command ${command} ${JSON.stringify(args)}`);
   };
   const sonner = { toast: {

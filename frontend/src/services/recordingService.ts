@@ -69,14 +69,6 @@ export class RecordingService {
   }
 
   /**
-   * Start recording (no device configuration)
-   * @returns Promise<void>
-   */
-  async startRecording(): Promise<void> {
-    return invoke('start_recording');
-  }
-
-  /**
    * Start recording with device configuration and meeting name
    * @param micDeviceName - Microphone device name (null for default)
    * @param systemDeviceName - System audio device name (null for default when available)

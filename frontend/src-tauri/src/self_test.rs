@@ -784,9 +784,7 @@ fn package_layout() -> Result<String, String> {
     ))
 }
 
-/// The packaged encoder must sit next to the executable and run. The shared
-/// lookup would otherwise fall back to PATH or a download, which the check must
-/// never do.
+/// Verify the packaged encoder sits next to the executable and runs.
 fn packaged_encoder() -> Result<String, String> {
     let ffmpeg = executable_folder()?.join("ffmpeg.exe");
     if !ffmpeg.is_file() {

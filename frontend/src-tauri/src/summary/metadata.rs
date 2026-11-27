@@ -32,14 +32,14 @@ pub(crate) fn read_transcription_source_language_from_metadata(
 pub(crate) fn write_summary_language_to_metadata(
     folder: &Path,
     summary_language: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     write_language_field_to_metadata(folder, SUMMARY_LANGUAGE_FIELD, summary_language)
 }
 
 pub(crate) fn write_detected_summary_language_to_metadata(
     folder: &Path,
     summary_language: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     write_language_field_to_metadata(folder, DETECTED_SUMMARY_LANGUAGE_FIELD, summary_language)
 }
 
@@ -52,6 +52,7 @@ pub(crate) fn write_transcription_source_language_to_metadata(
     source_language: Option<&str>,
 ) -> Result<()> {
     write_language_field_to_metadata(folder, TRANSCRIPTION_SOURCE_LANGUAGE_FIELD, source_language)
+        .map(|_| ())
 }
 
 fn read_language_field_from_metadata(folder: &Path, field: &str) -> Result<Option<String>> {
@@ -78,7 +79,10 @@ fn write_language_field_to_metadata(
     folder: &Path,
     field: &str,
     summary_language: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<String>> {
+    let summary_language = summary_language
+        .map(normalise_supported_summary_language)
+        .transpose()?;
     let _guard = METADATA_WRITE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -100,10 +104,9 @@ fn write_language_field_to_metadata(
     let object = value
         .as_object_mut()
         .expect("metadata value checked as object");
-    match summary_language {
+    match &summary_language {
         Some(code) => {
-            let normalised = normalise_supported_summary_language(code)?;
-            object.insert(field.to_string(), Value::String(normalised));
+            object.insert(field.to_string(), Value::String(code.clone()));
         }
         None => {
             object.remove(field);
@@ -122,7 +125,7 @@ fn write_language_field_to_metadata(
         )
     })?;
 
-    Ok(())
+    Ok(summary_language)
 }
 
 fn metadata_path(folder: &Path) -> PathBuf {
