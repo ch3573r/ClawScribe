@@ -1,3 +1,6 @@
+use crate::database::meeting_files::{
+    lookup_registered_meeting_folder, RegisteredMeetingFolder, RECORDING_FOLDER_UNAVAILABLE,
+};
 use crate::database::repositories::{
     meeting::MeetingsRepository, summary::SummaryProcessesRepository,
     transcript_chunk::TranscriptChunksRepository,
@@ -12,7 +15,7 @@ use crate::summary::metadata::{
 use crate::summary::service::SummaryService;
 use log::{error as log_error, info as log_info, warn as log_warn};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Runtime};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -67,11 +70,6 @@ impl MeetingSummaryLanguagePreference {
     }
 }
 
-enum MeetingFolderResolution {
-    Folder(PathBuf),
-    NoFolder,
-}
-
 /// Saves a meeting summary (Native SQLx implementation)
 ///
 /// Expected format: { "markdown": "...", "summary_json": [...BlockNote blocks...] }
@@ -124,7 +122,7 @@ pub async fn api_restore_previous_summary<R: Runtime>(
 /// Gets the per-meeting summary language override from metadata.json.
 #[tauri::command]
 pub async fn api_get_meeting_summary_language<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<MeetingSummaryLanguagePreference, String> {
@@ -133,18 +131,20 @@ pub async fn api_get_meeting_summary_language<R: Runtime>(
         meeting_id
     );
 
-    match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
-        MeetingFolderResolution::Folder(folder) => read_summary_language_from_metadata(&folder)
-            .map(MeetingSummaryLanguagePreference::metadata)
-            .map_err(|e| e.to_string()),
-        MeetingFolderResolution::NoFolder => Ok(MeetingSummaryLanguagePreference::local_fallback()),
-    }
+    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    with_meeting_language_metadata(
+        state.db_manager.pool(),
+        &meeting_id,
+        &roots,
+        LanguageMetadataAccess::Read(read_summary_language_from_metadata),
+    )
+    .await
 }
 
 /// Saves or clears the per-meeting summary language override in metadata.json.
 #[tauri::command]
 pub async fn api_save_meeting_summary_language<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     summary_language: Option<String>,
@@ -155,22 +155,22 @@ pub async fn api_save_meeting_summary_language<R: Runtime>(
         summary_language
     );
 
-    match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
-        MeetingFolderResolution::Folder(folder) => {
-            write_summary_language_to_metadata(&folder, summary_language.as_deref())
-                .map_err(|e| e.to_string())?;
-            read_summary_language_from_metadata(&folder)
-                .map(MeetingSummaryLanguagePreference::metadata)
-                .map_err(|e| e.to_string())
-        }
-        MeetingFolderResolution::NoFolder => Ok(MeetingSummaryLanguagePreference::local_fallback()),
-    }
+    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    with_meeting_language_metadata(
+        state.db_manager.pool(),
+        &meeting_id,
+        &roots,
+        LanguageMetadataAccess::Write(move |folder: &Path| {
+            write_summary_language_to_metadata(folder, summary_language.as_deref())
+        }),
+    )
+    .await
 }
 
 /// Gets the cached Auto-detected summary language from metadata.json.
 #[tauri::command]
 pub async fn api_get_meeting_detected_summary_language<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<MeetingSummaryLanguagePreference, String> {
@@ -179,20 +179,20 @@ pub async fn api_get_meeting_detected_summary_language<R: Runtime>(
         meeting_id
     );
 
-    match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
-        MeetingFolderResolution::Folder(folder) => {
-            read_detected_summary_language_from_metadata(&folder)
-                .map(MeetingSummaryLanguagePreference::metadata)
-                .map_err(|e| e.to_string())
-        }
-        MeetingFolderResolution::NoFolder => Ok(MeetingSummaryLanguagePreference::local_fallback()),
-    }
+    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    with_meeting_language_metadata(
+        state.db_manager.pool(),
+        &meeting_id,
+        &roots,
+        LanguageMetadataAccess::Read(read_detected_summary_language_from_metadata),
+    )
+    .await
 }
 
 /// Saves or clears the cached Auto-detected summary language in metadata.json.
 #[tauri::command]
 pub async fn api_save_meeting_detected_summary_language<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     detected_summary_language: Option<String>,
@@ -203,19 +203,19 @@ pub async fn api_save_meeting_detected_summary_language<R: Runtime>(
         detected_summary_language
     );
 
-    match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
-        MeetingFolderResolution::Folder(folder) => {
+    let roots = crate::audio::recording_preferences::recording_roots(&app).await;
+    with_meeting_language_metadata(
+        state.db_manager.pool(),
+        &meeting_id,
+        &roots,
+        LanguageMetadataAccess::Write(move |folder: &Path| {
             write_detected_summary_language_to_metadata(
-                &folder,
+                folder,
                 detected_summary_language.as_deref(),
             )
-            .map_err(|e| e.to_string())?;
-            read_detected_summary_language_from_metadata(&folder)
-                .map(MeetingSummaryLanguagePreference::metadata)
-                .map_err(|e| e.to_string())
-        }
-        MeetingFolderResolution::NoFolder => Ok(MeetingSummaryLanguagePreference::local_fallback()),
-    }
+        }),
+    )
+    .await
 }
 
 /// Detects the dominant supported summary language from transcript segments.
@@ -226,20 +226,44 @@ pub async fn api_detect_transcript_summary_language(
     Ok(detect_summary_language(&transcript_texts))
 }
 
-async fn resolve_meeting_folder(
+enum LanguageMetadataAccess<F> {
+    Read(F),
+    Write(F),
+}
+
+async fn with_meeting_language_metadata(
     pool: &sqlx::SqlitePool,
     meeting_id: &str,
-) -> Result<MeetingFolderResolution, String> {
-    let meeting = MeetingsRepository::get_meeting_metadata(pool, meeting_id)
-        .await
-        .map_err(|e| format!("Failed to load meeting metadata: {}", e))?
-        .ok_or_else(|| format!("Meeting not found: {}", meeting_id))?;
-
-    let Some(folder_path) = meeting.folder_path.filter(|p| !p.trim().is_empty()) else {
-        return Ok(MeetingFolderResolution::NoFolder);
+    roots: &[PathBuf],
+    access: LanguageMetadataAccess<
+        impl FnOnce(&Path) -> anyhow::Result<Option<String>> + Send + 'static,
+    >,
+) -> Result<MeetingSummaryLanguagePreference, String> {
+    let folder = match lookup_registered_meeting_folder(pool, meeting_id, roots).await? {
+        RegisteredMeetingFolder::Available(folder) => folder,
+        RegisteredMeetingFolder::None => {
+            return Ok(MeetingSummaryLanguagePreference::local_fallback())
+        }
+        RegisteredMeetingFolder::Unavailable => {
+            return match access {
+                LanguageMetadataAccess::Read(_) => {
+                    Ok(MeetingSummaryLanguagePreference::metadata(None))
+                }
+                LanguageMetadataAccess::Write(_) => Err(RECORDING_FOLDER_UNAVAILABLE.into()),
+            };
+        }
     };
 
-    Ok(MeetingFolderResolution::Folder(PathBuf::from(folder_path)))
+    tokio::task::spawn_blocking(move || {
+        let access = match access {
+            LanguageMetadataAccess::Read(access) | LanguageMetadataAccess::Write(access) => access,
+        };
+        access(&folder)
+            .map(MeetingSummaryLanguagePreference::metadata)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "Meeting language metadata processing was interrupted")?
 }
 
 fn summary_job_status(
@@ -754,4 +778,122 @@ Action items:\n",
         ));
     }
     Ok(polished)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn meeting_language_metadata_uses_registered_folders_off_the_async_thread() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let saved_folder = tempfile::tempdir().unwrap();
+        let saved_path = saved_folder.path().to_str().unwrap();
+        let missing_folder = saved_folder.path().join("moved-meeting");
+        for (id, path) in [
+            ("saved", Some(saved_path)),
+            ("unregistered", Some("relative-folder")),
+            ("missing", missing_folder.to_str()),
+            ("legacy", None),
+        ] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 'Test meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
+                .bind(id)
+                .bind(path)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let async_thread = std::thread::current().id();
+        let saved = with_meeting_language_metadata(
+            &pool,
+            "saved",
+            &[],
+            LanguageMetadataAccess::Write(move |folder: &Path| {
+                assert_ne!(std::thread::current().id(), async_thread);
+                write_summary_language_to_metadata(folder, Some("de-DE"))
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            saved,
+            MeetingSummaryLanguagePreference::metadata(Some("de".into()))
+        );
+        assert_eq!(
+            with_meeting_language_metadata(
+                &pool,
+                "saved",
+                &[],
+                LanguageMetadataAccess::Read(read_summary_language_from_metadata),
+            )
+            .await
+            .unwrap(),
+            saved
+        );
+        assert_eq!(
+            with_meeting_language_metadata(
+                &pool,
+                "legacy",
+                &[],
+                LanguageMetadataAccess::Read(|_: &Path| {
+                    panic!("meetings without a folder cannot access metadata")
+                }),
+            )
+            .await
+            .unwrap(),
+            MeetingSummaryLanguagePreference::local_fallback()
+        );
+        assert!(with_meeting_language_metadata(
+            &pool,
+            "unregistered",
+            &[],
+            LanguageMetadataAccess::Read(read_summary_language_from_metadata),
+        )
+        .await
+        .is_err());
+        for read in [
+            read_summary_language_from_metadata as fn(&Path) -> anyhow::Result<Option<String>>,
+            read_detected_summary_language_from_metadata,
+        ] {
+            assert_eq!(
+                with_meeting_language_metadata(
+                    &pool,
+                    "missing",
+                    &[],
+                    LanguageMetadataAccess::Read(read)
+                )
+                .await
+                .unwrap(),
+                MeetingSummaryLanguagePreference::metadata(None)
+            );
+        }
+        assert_eq!(
+            with_meeting_language_metadata(
+                &pool,
+                "missing",
+                &[],
+                LanguageMetadataAccess::Write(|folder: &Path| {
+                    write_summary_language_to_metadata(folder, Some("de"))
+                }),
+            )
+            .await
+            .unwrap_err(),
+            RECORDING_FOLDER_UNAVAILABLE
+        );
+        assert!(!missing_folder.exists());
+        assert!(with_meeting_language_metadata(
+            &pool,
+            "unknown",
+            &[],
+            LanguageMetadataAccess::Read(read_summary_language_from_metadata),
+        )
+        .await
+        .is_err());
+    }
 }

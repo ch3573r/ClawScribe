@@ -138,6 +138,46 @@ impl std::fmt::Display for MsAuthError {
     }
 }
 
+fn auth_network_error(operation: &str, error: fn(String) -> MsAuthError) -> MsAuthError {
+    log::warn!("Microsoft {operation} failed (network error)");
+    error("Could not reach Microsoft. Try again.".into())
+}
+
+fn auth_http_error(
+    status: reqwest::StatusCode,
+    operation: &str,
+    error: fn(String) -> MsAuthError,
+) -> MsAuthError {
+    log::warn!(
+        "Microsoft {operation} failed (HTTP {}, request rejected)",
+        status.as_u16()
+    );
+    error(format!(
+        "Microsoft rejected the {operation} (HTTP {})",
+        status.as_u16()
+    ))
+}
+
+async fn read_auth_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    operation: &str,
+    error: fn(String) -> MsAuthError,
+) -> Result<T, MsAuthError> {
+    let status = response.status();
+    if !status.is_success() {
+        return Err(auth_http_error(status, operation, error));
+    }
+    response.json().await.map_err(|_| {
+        log::warn!(
+            "Microsoft {operation} failed (HTTP {}, invalid response)",
+            status.as_u16()
+        );
+        error(format!(
+            "Microsoft returned an invalid response to the {operation}"
+        ))
+    })
+}
+
 pub async fn start_device_code_flow(
     http: &reqwest::Client,
     config: &MicrosoftAuthConfig,
@@ -150,18 +190,9 @@ pub async fn start_device_code_flow(
         ])
         .send()
         .await
-        .map_err(|e| MsAuthError::Network(e.to_string()))?;
+        .map_err(|_| auth_network_error("device code request", MsAuthError::Network))?;
 
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(MsAuthError::Unexpected(format!(
-            "Device code request failed: {body}"
-        )));
-    }
-
-    resp.json::<DeviceCodeResponse>()
-        .await
-        .map_err(|e| MsAuthError::Unexpected(format!("Failed to parse device code response: {e}")))
+    read_auth_response(resp, "device code request", MsAuthError::Unexpected).await
 }
 
 pub async fn poll_device_code_token(
@@ -178,30 +209,42 @@ pub async fn poll_device_code_token(
         ])
         .send()
         .await
-        .map_err(|e| MsAuthError::Network(e.to_string()))?;
+        .map_err(|_| auth_network_error("token poll", MsAuthError::Network))?;
 
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-
     if status.is_success() {
-        let token: TokenResponse = serde_json::from_str(&body)
-            .map_err(|e| MsAuthError::Unexpected(format!("Failed to parse token: {e}")))?;
-        return Ok(PollResult::Completed(token));
+        return read_auth_response(resp, "token poll", MsAuthError::Unexpected)
+            .await
+            .map(PollResult::Completed);
     }
 
-    let error_code = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("error")?.as_str().map(String::from))
-        .unwrap_or_default();
+    let payload = resp.json::<serde_json::Value>().await.ok();
+    token_poll_error(
+        status,
+        payload.as_ref().and_then(|value| value["error"].as_str()),
+    )
+}
 
-    match error_code.as_str() {
-        "authorization_pending" | "slow_down" => Ok(PollResult::Pending),
-        "expired_token" => Ok(PollResult::Expired),
-        "authorization_declined" => Ok(PollResult::Denied),
-        "consent_required" | "interaction_required" => Err(MsAuthError::ConsentRequired),
-        _ => Err(MsAuthError::Unexpected(format!(
-            "Token poll error: {error_code}"
-        ))),
+fn token_poll_error(
+    status: reqwest::StatusCode,
+    error_code: Option<&str>,
+) -> Result<PollResult, MsAuthError> {
+    match error_code {
+        Some("authorization_pending" | "slow_down") => Ok(PollResult::Pending),
+        Some("expired_token") => Ok(PollResult::Expired),
+        Some("authorization_declined") => Ok(PollResult::Denied),
+        Some("consent_required" | "interaction_required") => {
+            log::warn!(
+                "Microsoft token poll failed (HTTP {}, consent required)",
+                status.as_u16()
+            );
+            Err(MsAuthError::ConsentRequired)
+        }
+        _ => Err(auth_http_error(
+            status,
+            "token poll",
+            MsAuthError::Unexpected,
+        )),
     }
 }
 
@@ -220,16 +263,9 @@ pub async fn refresh_access_token(
         ])
         .send()
         .await
-        .map_err(|e| MsAuthError::TokenRefreshFailed(e.to_string()))?;
+        .map_err(|_| auth_network_error("token refresh", MsAuthError::TokenRefreshFailed))?;
 
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(MsAuthError::TokenRefreshFailed(body));
-    }
-
-    resp.json::<TokenResponse>()
-        .await
-        .map_err(|e| MsAuthError::TokenRefreshFailed(e.to_string()))
+    read_auth_response(resp, "token refresh", MsAuthError::TokenRefreshFailed).await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,23 +286,98 @@ pub async fn fetch_user_profile(
         .header("Authorization", format!("Bearer {access_token}"))
         .send()
         .await
-        .map_err(|e| MsAuthError::Network(e.to_string()))?;
+        .map_err(|_| auth_network_error("profile request", MsAuthError::Network))?;
 
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(MsAuthError::Unexpected(format!(
-            "Failed to fetch profile: {body}"
-        )));
-    }
-
-    resp.json::<UserProfile>()
-        .await
-        .map_err(|e| MsAuthError::Unexpected(format!("Failed to parse profile: {e}")))
+    read_auth_response(resp, "profile request", MsAuthError::Unexpected).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn synthetic_response(status: &str, body: &str) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let reply = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream.write_all(reply.as_bytes()).await.unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        server.await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn auth_errors_exclude_provider_details_from_rejections_and_malformed_successes() {
+        let body = r#"{"error":"synthetic-provider-detail","error_description":"synthetic trace"}"#;
+        let response = synthetic_response("400 Bad Request", body).await;
+        let error = read_auth_response::<TokenResponse>(
+            response,
+            "token refresh",
+            MsAuthError::TokenRefreshFailed,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Token refresh failed: Microsoft rejected the token refresh (HTTP 400)"
+        );
+        let response =
+            synthetic_response("200 OK", r#"{"id":["synthetic-provider-detail"]}"#).await;
+        let error =
+            read_auth_response::<UserProfile>(response, "profile request", MsAuthError::Unexpected)
+                .await
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Unexpected auth error: Microsoft returned an invalid response to the profile request"
+        );
+    }
+
+    #[test]
+    fn token_poll_errors_preserve_known_outcomes_and_hide_unknown_codes() {
+        let status = reqwest::StatusCode::BAD_REQUEST;
+        for code in ["authorization_pending", "slow_down"] {
+            assert!(matches!(
+                token_poll_error(status, Some(code)),
+                Ok(PollResult::Pending)
+            ));
+        }
+        assert!(matches!(
+            token_poll_error(status, Some("expired_token")),
+            Ok(PollResult::Expired)
+        ));
+        assert!(matches!(
+            token_poll_error(status, Some("authorization_declined")),
+            Ok(PollResult::Denied)
+        ));
+        assert!(matches!(
+            token_poll_error(status, Some("consent_required")),
+            Err(MsAuthError::ConsentRequired)
+        ));
+        let error = token_poll_error(status, Some("synthetic-provider-detail")).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Unexpected auth error: Microsoft rejected the token poll (HTTP 400)"
+        );
+    }
 
     #[test]
     fn default_config_has_expected_client_and_tenant() {

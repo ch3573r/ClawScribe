@@ -17,7 +17,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 use super::audio_processing::{audio_to_mono, resample, resample_audio};
-use super::ffmpeg::find_ffmpeg_path;
+use super::ffmpeg::{find_ffmpeg_path, FFMPEG_UNAVAILABLE};
 
 /// Extensions requiring ffmpeg pre-conversion (Symphonia lacks these demuxers/codecs)
 const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["mkv", "webm", "wma"];
@@ -285,16 +285,7 @@ fn convert_to_wav_with_ffmpeg(
     input_path: &Path,
     progress_callback: Option<&ProgressCallback>,
 ) -> Result<tempfile::TempPath> {
-    let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| {
-        anyhow!(
-            "FFmpeg not found. FFmpeg is required to decode .{} files. \
-             It will be downloaded automatically on next launch, or install it manually.",
-            input_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("this format")
-        )
-    })?;
+    let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| anyhow!(FFMPEG_UNAVAILABLE))?;
 
     // Create temp file in the same directory as the input to avoid cross-device issues
     let parent_dir = input_path.parent().unwrap_or_else(|| Path::new("."));

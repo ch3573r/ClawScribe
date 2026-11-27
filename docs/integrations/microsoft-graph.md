@@ -46,16 +46,16 @@ Scope rules:
 
 ## Auth And Storage
 
-The sign-in flow is foreground and user-initiated. Logs may record connection
-state and sanitized Graph errors, but must not record bearer tokens, refresh
-tokens, auth codes, or callback URLs containing credentials.
+The sign-in flow is foreground and user-initiated. The loopback listener checks
+the callback route and sign-in state before accepting the authorization code.
+Logs may record connection state and sanitized errors, but must not record
+bearer tokens, refresh tokens, auth codes, or callback URLs containing credentials.
 
 The persisted Microsoft session contains the refresh token and account metadata,
 not the short-lived access token. When the Windows credential store cannot
 persist it, the fallback file is protected with DPAPI for the current Windows
-user. A legacy plaintext fallback is removed only after successful encrypted
-migration; failed migration can leave the legacy file in place. Non-Windows
-platforms do not write a new plaintext Microsoft-token fallback.
+user. Successful migration removes the legacy plaintext fallback. If migration
+fails, ClawScribe requires the user to sign in again.
 
 AI and hosted-transcription keys use separate provider-specific protected
 credential references; Microsoft sign-in does not supply those credentials.

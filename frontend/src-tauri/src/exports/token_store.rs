@@ -210,8 +210,6 @@ fn save_to_file(json: &str) -> Result<(), TokenStoreError> {
         let encrypted = protect_bytes(json.as_bytes())?;
         std::fs::write(&path, encrypted)
             .map_err(|e| TokenStoreError::SerializationError(e.to_string()))?;
-        // The encrypted file supersedes any pre-0.5.36 plaintext copy.
-        delete_legacy_plaintext_file();
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
@@ -236,7 +234,10 @@ fn load_from_file() -> Option<PersistedToken> {
                 .ok()
                 .and_then(|json| serde_json::from_slice::<PersistedToken>(&json).ok())
             {
-                Some(token) => return Some(token),
+                Some(token) => {
+                    delete_legacy_plaintext_file();
+                    return Some(token);
+                }
                 None => log::warn!(
                     "Stored Microsoft token fallback could not be decrypted; ignoring it"
                 ),
@@ -246,28 +247,35 @@ fn load_from_file() -> Option<PersistedToken> {
 
     // Pre-0.5.36 plaintext fallback: migrate to the encrypted format on
     // first read and delete the plaintext file.
-    let legacy_path = legacy_plaintext_token_path()?;
-    let json = std::fs::read_to_string(&legacy_path).ok()?;
+    migrate_legacy_token(&legacy_plaintext_token_path()?, save_to_file)
+}
+
+fn migrate_legacy_token(
+    legacy_path: &std::path::Path,
+    save_encrypted: impl FnOnce(&str) -> Result<(), TokenStoreError>,
+) -> Option<PersistedToken> {
+    let json = std::fs::read_to_string(legacy_path).ok()?;
     let token: PersistedToken = serde_json::from_str(&json).ok()?;
-    log::warn!("Migrating Microsoft token from plaintext fallback to encrypted storage");
-    match save_to_file(&json) {
-        Ok(()) => {}
-        Err(e) => {
-            // Windows: keep the plaintext copy only if re-encryption failed,
-            // otherwise the sign-in would be lost. Non-Windows fails closed on
-            // write, so the legacy file is intentionally left for a later
-            // platform-specific migration.
-            log::warn!("Could not migrate Microsoft token to encrypted storage: {e}");
-            return Some(token);
-        }
+    let persisted = serde_json::to_string(&token).ok()?;
+    if save_encrypted(&persisted).is_err() {
+        log::warn!("Could not migrate the Microsoft session to encrypted storage. Sign in again.");
+        return None;
     }
-    delete_legacy_plaintext_file();
+    remove_legacy_file(legacy_path);
     Some(token)
 }
 
 fn delete_legacy_plaintext_file() {
     if let Some(path) = legacy_plaintext_token_path() {
-        let _ = std::fs::remove_file(path);
+        remove_legacy_file(&path);
+    }
+}
+
+fn remove_legacy_file(path: &std::path::Path) {
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("Could not remove the legacy Microsoft session file");
+        }
     }
 }
 
@@ -300,9 +308,15 @@ pub fn save_token(token: &StoredToken) -> Result<(), TokenStoreError> {
         }
         Err(e) => {
             log::warn!("Keychain token write failed ({e}); using file fallback");
-            save_fallback(&json, save_to_file, || {
-                credential_entry()?.delete_credential()
-            })
+            save_fallback(
+                &json,
+                |json| {
+                    save_to_file(json)?;
+                    delete_legacy_plaintext_file();
+                    Ok(())
+                },
+                || credential_entry()?.delete_credential(),
+            )
         }
     }
 }
@@ -413,6 +427,34 @@ pub(super) async fn refresh_session_token(
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
+
+    #[test]
+    fn legacy_token_requires_encrypted_save_and_is_removed_after_migration() {
+        let config = tempfile::tempdir().unwrap();
+        let legacy = config.path().join("ms-token.json");
+        let json = r#"{"access_token":"<redacted-token>","refresh_token":"<redacted-token>","user_id":"test-user","user_display_name":"Test User","user_email":null,"tenant_id":"organizations"}"#;
+        std::fs::write(&legacy, json).unwrap();
+
+        assert!(migrate_legacy_token(&legacy, |_| {
+            Err(TokenStoreError::KeyringError("test save failed".into()))
+        })
+        .is_none());
+        assert!(legacy.is_file());
+
+        let migrated = migrate_legacy_token(&legacy, |stored| {
+            assert!(!stored.contains("access_token"));
+            assert!(serde_json::from_str::<PersistedToken>(stored).is_ok());
+            assert!(
+                legacy.is_file(),
+                "keep the source until encrypted storage succeeds"
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(migrated.user_id, "test-user");
+        assert!(!legacy.exists());
+    }
+
     #[test]
     fn fallback_replaces_stale_keychain_token() {
         use std::cell::RefCell;

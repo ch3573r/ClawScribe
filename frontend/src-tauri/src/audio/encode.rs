@@ -1,4 +1,4 @@
-use super::ffmpeg::find_ffmpeg_path; // Correct path to encode module
+use super::ffmpeg::{find_ffmpeg_path, FFMPEG_UNAVAILABLE};
 use super::AudioDevice;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -137,9 +137,7 @@ pub(super) fn encode_pcm_stream_at_bitrate(
     bitrate_kbps: u32,
     write: impl FnOnce(&mut std::process::ChildStdin) -> std::io::Result<()> + Send,
 ) -> anyhow::Result<()> {
-    let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| {
-        anyhow::anyhow!("FFmpeg not found. Please install FFmpeg to save recordings.")
-    })?;
+    let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| anyhow::anyhow!(FFMPEG_UNAVAILABLE))?;
     let mut command = Command::new(ffmpeg_path);
     command
         .args([

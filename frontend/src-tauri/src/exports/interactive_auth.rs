@@ -85,22 +85,54 @@ fn authorize_url(
     url.into()
 }
 
-/// The outcome captured from the loopback redirect.
-struct Redirect {
-    code: Option<String>,
-    state: Option<String>,
-    error: Option<String>,
-    error_description: Option<String>,
+/// Accept only the callback route registered with Entra and our current state.
+/// Invalid or unrelated requests must leave the listener available to Entra.
+fn parse_callback(request_line: &str, expected_state: &str) -> Option<Result<String, MsAuthError>> {
+    let mut parts = request_line.split_ascii_whitespace();
+    if parts.next()? != "GET" {
+        return None;
+    }
+    let query = parts.next()?.strip_prefix("/?")?;
+    if !matches!(parts.next()?, "HTTP/1.0" | "HTTP/1.1") || parts.next().is_some() {
+        return None;
+    }
+
+    let (mut code, mut state, mut error) = (None, None, None);
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        let slot = match key.as_ref() {
+            "code" => &mut code,
+            "state" => &mut state,
+            "error" => &mut error,
+            _ => continue,
+        };
+        if value.is_empty() || slot.replace(value.into_owned()).is_some() {
+            return None;
+        }
+    }
+    if state.as_deref() != Some(expected_state) {
+        return None;
+    }
+    match (code, error.as_deref()) {
+        (Some(code), None) => Some(Ok(code)),
+        (None, Some("access_denied")) => Some(Err(MsAuthError::AuthorizationDeclined)),
+        (None, Some("consent_required" | "interaction_required")) => {
+            Some(Err(MsAuthError::ConsentRequired))
+        }
+        (None, Some(_)) => Some(Err(MsAuthError::Unexpected(
+            "Microsoft did not authorize sign-in".into(),
+        ))),
+        _ => None,
+    }
 }
 
 /// Block on the loopback listener until Entra redirects back, then return the
-/// parsed query parameters. Responds to the browser with a small "you can close
-/// this window" page.
+/// verified authorization code. Responds to the browser with a short status page.
 fn wait_for_redirect(
     listener: TcpListener,
     cancel: CancellationToken,
     deadline: Instant,
-) -> Result<Redirect, MsAuthError> {
+    expected_state: &str,
+) -> Result<String, MsAuthError> {
     listener
         .set_nonblocking(true)
         .map_err(|e| MsAuthError::Network(e.to_string()))?;
@@ -160,47 +192,29 @@ fn wait_for_redirect(
                 continue 'accept;
             }
         }
-        let request_line = String::from_utf8_lossy(&request);
-
-        // Request line looks like: `GET /?code=...&state=... HTTP/1.1`
-        let path = request_line.split_whitespace().nth(1).unwrap_or("");
-        let full = format!("http://localhost{path}");
-        let parsed = url::Url::parse(&full).ok();
-
-        let (mut code, mut state, mut error, mut error_description) = (None, None, None, None);
-        if let Some(u) = parsed.as_ref() {
-            for (k, v) in u.query_pairs() {
-                match k.as_ref() {
-                    "code" => code = Some(v.into_owned()),
-                    "state" => state = Some(v.into_owned()),
-                    "error" => error = Some(v.into_owned()),
-                    "error_description" => error_description = Some(v.into_owned()),
-                    _ => {}
-                }
-            }
-        }
-
-        let has_payload = code.is_some() || error.is_some();
-        let body = if error.is_some() {
-            "<html><body style=\"font-family:sans-serif\"><h2>Sign-in failed</h2><p>You can close this window and return to ClawScribe.</p></body></html>"
-        } else {
-            "<html><body style=\"font-family:sans-serif\"><h2>Signed in to ClawScribe</h2><p>You can close this window and return to the app.</p></body></html>"
+        let result = request
+            .split(|byte| *byte == b'\n')
+            .next()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .and_then(|line| parse_callback(line, expected_state));
+        let (status, title) = match &result {
+            Some(Ok(_)) => ("200 OK", "Continue in ClawScribe"),
+            Some(Err(_)) => ("400 Bad Request", "Sign-in failed"),
+            None => ("400 Bad Request", "Invalid sign-in request"),
         };
+        let body = format!(
+            "<html><body style=\"font-family:sans-serif\"><h2>{title}</h2><p>You can close this window and return to ClawScribe.</p></body></html>"
+        );
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
 
-        if has_payload {
-            return Ok(Redirect {
-                code,
-                state,
-                error,
-                error_description,
-            });
+        if let Some(result) = result {
+            return result;
         }
         // Otherwise keep listening (ignored a stray request).
     }
@@ -232,21 +246,40 @@ async fn exchange_code(
         .map_err(|e| MsAuthError::Network(e.to_string()))?;
 
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        let code = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("error")?.as_str().map(String::from))
-            .unwrap_or_default();
-        return Err(match code.as_str() {
-            "invalid_grant" => MsAuthError::InvalidGrant(body),
-            "consent_required" | "interaction_required" => MsAuthError::ConsentRequired,
-            _ => MsAuthError::Unexpected(format!("Token exchange failed: {body}")),
-        });
+        let body = resp.text().await.unwrap_or_default();
+        return Err(token_exchange_error(status, &body));
     }
 
-    serde_json::from_str::<TokenResponse>(&body)
-        .map_err(|e| MsAuthError::Unexpected(format!("Failed to parse token: {e}")))
+    resp.json::<TokenResponse>().await.map_err(|_| {
+        log::warn!("Microsoft token exchange returned an invalid success response");
+        MsAuthError::Unexpected("Microsoft returned an invalid token response".into())
+    })
+}
+
+fn token_exchange_error(status: reqwest::StatusCode, body: &str) -> MsAuthError {
+    let payload = serde_json::from_str::<serde_json::Value>(body).ok();
+    let (kind, error) = match payload.as_ref().and_then(|value| value["error"].as_str()) {
+        Some("invalid_grant") => (
+            "invalid grant",
+            MsAuthError::InvalidGrant("Sign in to Microsoft again".into()),
+        ),
+        Some("consent_required" | "interaction_required") => {
+            ("consent required", MsAuthError::ConsentRequired)
+        }
+        _ => (
+            "other error",
+            MsAuthError::Unexpected(format!(
+                "Microsoft token exchange failed (HTTP {})",
+                status.as_u16()
+            )),
+        ),
+    };
+    log::warn!(
+        "Microsoft token exchange failed (HTTP {}, {kind})",
+        status.as_u16()
+    );
+    error
 }
 
 pub async fn run_interactive_sign_in(
@@ -299,29 +332,10 @@ async fn run_interactive_attempt(
     open_browser(&auth_url);
 
     let deadline = Instant::now() + SIGN_IN_TIMEOUT;
-    let redirect =
-        tokio::task::spawn_blocking(move || wait_for_redirect(listener, cancel, deadline))
+    let code =
+        tokio::task::spawn_blocking(move || wait_for_redirect(listener, cancel, deadline, &state))
             .await
             .map_err(|_| MsAuthError::Unexpected("Sign-in listener failed".into()))??;
-
-    if let Some(err) = redirect.error {
-        let desc = redirect.error_description.unwrap_or_default();
-        return Err(match err.as_str() {
-            "access_denied" => MsAuthError::AuthorizationDeclined,
-            "consent_required" | "interaction_required" => MsAuthError::ConsentRequired,
-            _ => MsAuthError::Unexpected(format!("{err}: {desc}")),
-        });
-    }
-
-    if redirect.state.as_deref() != Some(state.as_str()) {
-        return Err(MsAuthError::Unexpected(
-            "State mismatch in sign-in redirect (possible CSRF)".to_string(),
-        ));
-    }
-
-    let code = redirect
-        .code
-        .ok_or_else(|| MsAuthError::Unexpected("No authorization code in redirect".to_string()))?;
 
     exchange_code(http, config, &code, &pkce.verifier, &redirect_uri).await
 }
@@ -329,6 +343,78 @@ async fn run_interactive_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_rejects_unrelated_paths_and_state_before_showing_success() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            wait_for_redirect(
+                listener,
+                CancellationToken::new(),
+                Instant::now() + Duration::from_secs(3),
+                "test-state",
+            )
+        });
+        for target in [
+            "/favicon.ico",
+            "/other?code=test-code&state=test-state",
+            "/?code=test-code&state=wrong-state",
+            "/?error=access_denied&state=wrong-state",
+        ] {
+            let mut client = std::net::TcpStream::connect(address).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            write!(client, "GET {target} HTTP/1.1\r\n\r\n").unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 400"), "{target}");
+            assert!(!response.contains("Continue in ClawScribe"), "{target}");
+        }
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .write_all(b"GET /?code=test-code&state=test-state HTTP/1.1\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.contains("Continue in ClawScribe"));
+        assert_eq!(worker.join().unwrap().unwrap(), "test-code");
+    }
+
+    #[test]
+    fn provider_errors_keep_their_type_without_exposing_provider_details() {
+        let error = token_exchange_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid_grant","error_description":"synthetic provider diagnostic"}"#,
+        );
+        assert!(matches!(error, MsAuthError::InvalidGrant(_)));
+        assert_eq!(
+            error.to_string(),
+            "Invalid grant: Sign in to Microsoft again"
+        );
+
+        let error = token_exchange_error(
+            reqwest::StatusCode::BAD_GATEWAY,
+            "synthetic provider diagnostic",
+        );
+        assert_eq!(
+            error.to_string(),
+            "Unexpected auth error: Microsoft token exchange failed (HTTP 502)"
+        );
+        let callback = parse_callback(
+            "GET /?error=access_denied&state=test-state HTTP/1.1",
+            "test-state",
+        );
+        assert!(matches!(
+            callback,
+            Some(Err(MsAuthError::AuthorizationDeclined))
+        ));
+    }
 
     #[test]
     fn listener_accepts_callback_after_client_connects() {
@@ -339,6 +425,7 @@ mod tests {
                 listener,
                 CancellationToken::new(),
                 Instant::now() + Duration::from_secs(2),
+                "test-state",
             )
         });
         let mut client = std::net::TcpStream::connect(address).unwrap();
@@ -346,9 +433,7 @@ mod tests {
         client
             .write_all(b"GET /?code=test-code&state=test-state HTTP/1.1\r\n\r\n")
             .unwrap();
-        let result = worker.join().unwrap().unwrap();
-        assert_eq!(result.code.as_deref(), Some("test-code"));
-        assert_eq!(result.state.as_deref(), Some("test-state"));
+        assert_eq!(worker.join().unwrap().unwrap(), "test-code");
     }
 
     #[test]
@@ -360,6 +445,7 @@ mod tests {
                 listener,
                 CancellationToken::new(),
                 Instant::now() + Duration::from_secs(9),
+                "test-state",
             )
         });
         let _idle = std::net::TcpStream::connect(address).unwrap();
@@ -368,10 +454,7 @@ mod tests {
         let mut next = std::net::TcpStream::connect(address).unwrap();
         next.write_all(b"GET /?code=test-code&state=test-state HTTP/1.1\r\n\r\n")
             .unwrap();
-        assert_eq!(
-            worker.join().unwrap().unwrap().code.as_deref(),
-            Some("test-code")
-        );
+        assert_eq!(worker.join().unwrap().unwrap(), "test-code");
         assert!(started.elapsed() >= Duration::from_secs(4));
         assert!(started.elapsed() < Duration::from_secs(8));
     }
@@ -388,6 +471,7 @@ mod tests {
                     listener,
                     worker_cancel,
                     Instant::now() + Duration::from_millis(150),
+                    "test-state",
                 )
                 .map(|_| ())
             });
