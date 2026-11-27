@@ -4,6 +4,8 @@ use super::common::{
     create_readable_transcript_segments_with_words, split_transcripts_to_timing_grid,
     transcript_words_from_token_timestamps, TranscribedSegment,
 };
+use super::import::{local_batch_language, resolve_local_fallback, unload_local_batch_engine};
+use super::transcription::cloud::{self, CloudFallbackReasonCategory};
 use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
 use crate::database::transcript_edits::{RetranscriptionFileUpdate, SyncedFiles};
 use crate::parakeet_engine::ParakeetEngine;
@@ -132,6 +134,10 @@ pub struct RetranscriptionResult {
     pub segments_count: usize,
     pub duration_seconds: f64,
     pub language: Option<String>,
+    pub provider: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
     pub file_warning: bool,
     #[serde(skip)]
     published_retranscription: bool,
@@ -144,77 +150,51 @@ pub struct RetranscriptionError {
     pub error: String,
 }
 
-/// Check if retranscription is currently in progress
-pub fn is_retranscription_in_progress() -> bool {
-    RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst)
-}
-
-/// Start retranscription of a meeting's audio
-pub async fn start_retranscription<R: Runtime>(
-    app: AppHandle<R>,
-    meeting_id: String,
-    meeting_folder_path: String,
-    language: Option<String>,
-    model: Option<String>,
-    provider: Option<String>,
-) -> Result<RetranscriptionResult> {
-    // Registered so a starting recording can cancel this job. A cancel before
-    // the transcript is saved leaves the meeting's transcript untouched: the
-    // delete and insert happen in one transaction after the last cancel check.
+async fn claim_retranscription() -> Result<
+    (
+        super::inference::BatchPermit,
+        RetranscriptionGuard,
+        PhaseGuard,
+    ),
+    String,
+> {
+    // A recording may cancel the job until the last check before saving.
     let cancel: super::inference::CancelBatchJob = Arc::new(cancel_retranscription_if_possible);
     let job = super::inference::claim_batch_job(
         super::inference::BatchJob::Retranscription,
         cancel,
         "Local summary stopped because retranscription started. Generate it again afterwards.",
     )
-    .await
-    .map_err(anyhow::Error::msg)?;
-    // Acquire guard - ensures flag is cleared even on panic/early return
-    let guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
+    .await?;
+    let guard = RetranscriptionGuard::acquire()?;
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
-    // Open the cancellation window after resetting its flag.
     let phase = PhaseGuard::open();
-    let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
+    Ok((job, guard, phase))
+}
 
-    let use_parakeet = provider.as_deref() == Some("parakeet")
-        || super::transcription::cloud::is_cloud_provider(provider.as_deref());
-    let use_nemotron = provider.as_deref() == Some("nemotron");
-    let result = run_retranscription(
-        app.clone(),
-        meeting_id.clone(),
-        meeting_folder_path,
-        language,
-        model,
-        provider,
-    )
-    .await;
+fn verify_cloud_approval(approved: Option<&str>, current: &str) -> Result<(), String> {
+    if approved != Some(current) {
+        return Err("Review and approve the current cloud upload destination".into());
+    }
+    Ok(())
+}
 
-    // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch_for(use_parakeet, use_nemotron).await;
-
-    match &result {
-        Ok(res) => {
-            let _ = app.emit("retranscription-complete", res);
-            // A local summary needs the slot this batch held through file publication and engine unload.
-            drop(phase);
-            drop(guard);
-            drop(job);
-            if res.published_retranscription {
-                crate::summary::automatic::publication::wake(&app, meeting_id);
-            }
+fn cloud_fallback_message(error: &cloud::CloudTranscriptionError) -> &'static str {
+    match error.category() {
+        CloudFallbackReasonCategory::AuthConfig => {
+            "Cloud transcription settings or credentials were unavailable."
         }
-        Err(e) => {
-            let _ = app.emit(
-                "retranscription-error",
-                RetranscriptionError {
-                    meeting_id: meeting_id.clone(),
-                    error: e.to_string(),
-                },
-            );
+        CloudFallbackReasonCategory::UploadTooLarge => {
+            "The recording exceeded the cloud provider’s upload limit."
+        }
+        CloudFallbackReasonCategory::UnsupportedMedia => {
+            "The cloud provider could not process this audio format."
+        }
+        CloudFallbackReasonCategory::ProviderOutput => "The cloud transcript could not be used.",
+        CloudFallbackReasonCategory::Transient => {
+            "The cloud provider could not complete transcription."
         }
     }
-
-    result
 }
 
 /// Internal function to run retranscription
@@ -224,7 +204,8 @@ async fn run_retranscription<R: Runtime>(
     meeting_folder_path: String,
     language: Option<String>,
     mut model: Option<String>,
-    mut provider: Option<String>,
+    provider: &mut Option<String>,
+    cloud_destination: Option<&str>,
 ) -> Result<RetranscriptionResult> {
     // The folder is the one the core saved for this meeting; the path the
     // webview sends is not trusted.
@@ -250,7 +231,10 @@ async fn run_retranscription<R: Runtime>(
     );
 
     let mut cloud_fallback_error = None;
-    if super::transcription::cloud::is_cloud_provider(provider.as_deref()) {
+    let mut fallback_reason = None;
+    if cloud::is_cloud_provider(provider.as_deref()) {
+        let approved = cloud_destination
+            .ok_or_else(|| anyhow!("Review and approve the current cloud upload destination"))?;
         if super::recording_commands::cloud_transcription_enabled() {
             let provider_id = provider.as_deref().unwrap_or_default().to_string();
             emit_progress(
@@ -260,14 +244,14 @@ async fn run_retranscription<R: Runtime>(
                 5,
                 "Uploading audio for cloud transcription...",
             );
-            let outcome = super::transcription::cloud::transcribe_whole_file(
+            let outcome = cloud::transcribe_whole_file(
                 &app,
                 &provider_id,
                 model.as_deref(),
                 &audio_path,
                 language.as_deref(),
                 &RETRANSCRIPTION_CANCELLED,
-                None,
+                Some(approved),
             )
             .await;
             if RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire) {
@@ -317,27 +301,23 @@ async fn run_retranscription<R: Runtime>(
                     .await;
                 }
                 Err(error) => {
-                    warn!("Cloud retranscription failed; using the configured local fallback");
-                    super::transcription::cloud::emit_fallback_event(
-                        &app,
-                        Some(&meeting_id),
-                        &provider_id,
-                        &error,
-                    );
+                    fallback_reason = Some(cloud_fallback_message(&error).to_owned());
+                    cloud::emit_fallback_event(&app, Some(&meeting_id), &provider_id, &error);
                     cloud_fallback_error = Some(error);
                 }
             }
         } else {
-            info!("Cloud transcription provider requested while Beta toggle is disabled; using local fallback");
+            fallback_reason = Some("Cloud transcription was disabled before upload.".to_owned());
         }
-
-        provider = Some("parakeet".to_string());
-        model = Some(DEFAULT_PARAKEET_MODEL.to_string());
+        let local = resolve_local_fallback(&app, cloud_fallback_error.as_ref()).await?;
+        *provider = Some(local.0.to_owned());
+        model = Some(local.1);
     }
 
     // Determine which local provider to use after any cloud fallback.
     let use_parakeet = provider.as_deref() == Some("parakeet");
     let use_nemotron = provider.as_deref() == Some("nemotron");
+    let language = local_batch_language(provider.as_deref(), language);
 
     // Emit progress: decoding
     emit_progress(&app, &meeting_id, "decoding", 5, "Decoding audio file...");
@@ -620,7 +600,7 @@ async fn run_retranscription<R: Runtime>(
     .unwrap_or_default();
     let source_language = super::common::transcription_source_language_hint(language.as_deref());
 
-    save_retranscription_transcripts(
+    let mut result = save_retranscription_transcripts(
         &app,
         &meeting_id,
         &audio_path,
@@ -631,7 +611,9 @@ async fn run_retranscription<R: Runtime>(
         source_language.as_deref(),
         capture_gaps,
     )
-    .await
+    .await?;
+    result.fallback_reason = fallback_reason;
+    Ok(result)
 }
 
 async fn prepare_cloud_retranscription_timing_grid<R: Runtime>(
@@ -746,6 +728,9 @@ async fn save_retranscription_transcripts<R: Runtime>(
         segments_count: segments.len(),
         duration_seconds,
         language: publication.source_language,
+        provider: publication.provider,
+        model: publication.model,
+        fallback_reason: None,
         file_warning: synced.is_err(),
         published_retranscription: synced == Ok(SyncedFiles::Retranscription),
     })
@@ -1152,32 +1137,57 @@ pub async fn start_retranscription_command<R: Runtime>(
     meeting_folder_path: String,
     language: Option<String>,
     model: Option<String>,
-    provider: Option<String>,
+    mut provider: Option<String>,
+    cloud_destination: Option<String>,
 ) -> Result<RetranscriptionStarted, String> {
-    // Check if retranscription is already in progress (guard will be acquired in start_retranscription)
-    if is_retranscription_in_progress() {
-        return Err("Retranscription already in progress".to_string());
+    if let Some(provider) = provider
+        .as_deref()
+        .filter(|id| cloud::is_cloud_provider(Some(id)))
+    {
+        let destination =
+            super::import::queue::import_cloud_destination(app.clone(), provider.to_owned())
+                .await?;
+        verify_cloud_approval(cloud_destination.as_deref(), &destination.fingerprint)?;
     }
 
-    // Clone values for the spawned task
-    let meeting_id_clone = meeting_id.clone();
-
-    // Spawn the retranscription in a background task
+    // Admission errors go directly to the caller. Accepted jobs always publish
+    // their terminal result, even after the dialog has closed.
+    let (job, guard, phase) = claim_retranscription().await?;
+    let job_meeting_id = meeting_id.clone();
     tauri::async_runtime::spawn(async move {
-        let result = start_retranscription(
-            app,
-            meeting_id_clone,
+        let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
+        let result = run_retranscription(
+            app.clone(),
+            job_meeting_id.clone(),
             meeting_folder_path,
             language,
             model,
-            provider,
+            &mut provider,
+            cloud_destination.as_deref(),
         )
         .await;
 
-        // Errors are already emitted as events in start_retranscription
-        // so we just log here for debugging
-        if let Err(_e) = result {
-            error!("Retranscription failed");
+        unload_local_batch_engine(provider.as_deref()).await;
+        drop(phase);
+        drop(guard);
+        drop(job);
+
+        match result {
+            Ok(result) => {
+                let _ = app.emit("retranscription-complete", &result);
+                if result.published_retranscription {
+                    crate::summary::automatic::publication::wake(&app, job_meeting_id);
+                }
+            }
+            Err(error) => {
+                let _ = app.emit(
+                    "retranscription-error",
+                    RetranscriptionError {
+                        meeting_id: job_meeting_id,
+                        error: error.to_string(),
+                    },
+                );
+            }
         }
     });
 
@@ -1199,6 +1209,34 @@ mod tests {
     use crate::audio::constants::AUDIO_EXTENSIONS;
     use crate::audio::incremental_saver::find_existing_audio_file;
     use std::path::Path;
+
+    #[tokio::test]
+    async fn rejected_admission_leaves_the_slot_available_for_retry() {
+        let _test = super::super::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let held = super::super::inference::claim_job().unwrap();
+        let error = claim_retranscription()
+            .await
+            .err()
+            .expect("expected a busy slot");
+        assert!(error.contains("Another recording or transcription job is active"));
+        assert!(!RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst));
+        drop(held);
+
+        let guard = RetranscriptionGuard::acquire().unwrap();
+        assert_eq!(
+            claim_retranscription().await.err().as_deref(),
+            Some("Retranscription already in progress")
+        );
+        drop(guard);
+        assert!(claim_retranscription().await.is_ok());
+    }
+
+    #[test]
+    fn cloud_upload_requires_the_reviewed_fingerprint() {
+        assert!(verify_cloud_approval(None, "current").is_err());
+        assert!(verify_cloud_approval(Some("previous"), "current").is_err());
+        assert!(verify_cloud_approval(Some("current"), "current").is_ok());
+    }
 
     #[tokio::test]
     async fn failed_commit_keeps_the_previous_revision_and_recording_files() {
@@ -1717,8 +1755,9 @@ mod tests {
     /// A cancel from a starting recording is accepted only while the retranscription
     /// can still stop, and reports false once it is saving or over, so no
     /// "being stopped" notice is sent for a job that has already succeeded.
-    #[test]
-    fn cancel_is_accepted_only_before_the_save_and_never_after_the_job_ends() {
+    #[tokio::test]
+    async fn cancel_is_accepted_only_before_the_save_and_never_after_the_job_ends() {
+        let _test = super::super::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         set_retranscription_phase(Phase::Finished);
         assert!(!cancel_retranscription_if_possible(), "no job is running");
         {

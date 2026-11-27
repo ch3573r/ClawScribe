@@ -188,7 +188,9 @@ punctuation; single-letter keys such as C# and C++ are left unchanged.
 Cloud transcription requires explicit opt-in. Saved cloud settings remain visible
 when the opt-in is off. Settings explain which local engine and model live
 recordings use. Cloud APIs apply to Import and Enhance (whole-file), while live
-recordings stay on-device.
+recordings stay on-device. Both file dialogs show the upload destination and
+require approval before sending audio. Enhance can continue in the background
+and shows the model that actually produced the transcript.
 Hosted Whisper can provide word timestamps; MAI has sentence-level timing and
 may use approximate local VAD-row alignment, not fabricated word timestamps.
 The implemented OpenAI-hosted upload limit is 25 MB; the implemented MAI limit

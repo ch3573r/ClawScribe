@@ -2,6 +2,7 @@
 
 use crate::api::TranscriptSegment;
 use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
+use crate::database::repositories::setting::SettingsRepository;
 use crate::parakeet_engine::ParakeetEngine;
 use crate::state::AppState;
 use crate::whisper_engine::WhisperEngine;
@@ -526,7 +527,7 @@ async fn start_import<R: Runtime>(
     title: String,
     language: Option<String>,
     model: Option<String>,
-    provider: Option<String>,
+    mut provider: Option<String>,
     options: ImportOptions,
     guard: ImportGuard,
     job: super::inference::BatchPermit,
@@ -537,23 +538,19 @@ async fn start_import<R: Runtime>(
     // `ImportFolderGuard`); the source file is never touched.
     let _ = crate::summary::summary_engine::force_shutdown_sidecar().await;
 
-    let use_parakeet = provider.as_deref() == Some("parakeet")
-        || super::transcription::cloud::is_cloud_provider(provider.as_deref());
-    let use_nemotron = provider.as_deref() == Some("nemotron");
     let result = run_import(
         app.clone(),
         source_path,
         title,
         language,
         model,
-        provider,
+        &mut provider,
         &options,
     )
     .await
     .map_err(|error| import_error(error, IMPORT_CANCELLED.load(Ordering::SeqCst)));
 
-    // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch_for(use_parakeet, use_nemotron).await;
+    unload_local_batch_engine(provider.as_deref()).await;
 
     // Release the transcription slot before starting a local summary or
     // telling the UI that another import can begin.
@@ -597,7 +594,7 @@ async fn run_import<R: Runtime>(
     title: String,
     language: Option<String>,
     mut model: Option<String>,
-    mut provider: Option<String>,
+    provider: &mut Option<String>,
     options: &ImportOptions,
 ) -> Result<ImportResult> {
     let source = PathBuf::from(&source_path);
@@ -722,7 +719,6 @@ async fn run_import<R: Runtime>(
                     .await;
                 }
                 Err(error) => {
-                    warn!("Cloud transcription failed; using the configured local fallback");
                     super::transcription::cloud::emit_fallback_event(
                         &app,
                         None,
@@ -732,17 +728,16 @@ async fn run_import<R: Runtime>(
                     cloud_fallback_error = Some(error);
                 }
             }
-        } else {
-            info!("Cloud transcription provider requested while Beta toggle is disabled; using local fallback");
         }
-
-        provider = Some("parakeet".to_string());
-        model = Some(DEFAULT_PARAKEET_MODEL.to_string());
+        let local = resolve_local_fallback(&app, cloud_fallback_error.as_ref()).await?;
+        *provider = Some(local.0.to_owned());
+        model = Some(local.1);
     }
 
     // Determine which local provider to use after any cloud fallback.
     let use_parakeet = provider.as_deref() == Some("parakeet");
     let use_nemotron = provider.as_deref() == Some("nemotron");
+    let language = local_batch_language(provider.as_deref(), language);
 
     emit_progress(&app, "decoding", 15, "Decoding audio file...");
 
@@ -1327,6 +1322,108 @@ async fn insert_import(
     Ok(())
 }
 
+type LocalModel = (&'static str, String);
+
+fn choose_local_fallback<'a>(
+    configured: Option<(&str, &str)>,
+    installed: &'a [LocalModel],
+) -> Option<&'a LocalModel> {
+    configured
+        .and_then(|(provider, model)| {
+            let provider = if provider == "whisper" {
+                "localWhisper"
+            } else {
+                provider
+            };
+            installed
+                .iter()
+                .find(|(id, name)| *id == provider && name == model)
+        })
+        .or_else(|| {
+            installed.iter().find(|(provider, model)| {
+                *provider == "parakeet" && model == DEFAULT_PARAKEET_MODEL
+            })
+        })
+        .or_else(|| installed.first())
+}
+
+pub(super) async fn resolve_local_fallback<R: Runtime>(
+    app: &AppHandle<R>,
+    cloud_error: Option<&super::transcription::cloud::CloudTranscriptionError>,
+) -> Result<LocalModel> {
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| anyhow!("Meeting storage is unavailable"))?;
+    let configured = SettingsRepository::get_transcript_config(state.db_manager.pool())
+        .await
+        .unwrap_or_else(|_| {
+            warn!("Could not read the configured local transcription model");
+            None
+        });
+    let preferred = configured
+        .as_ref()
+        .map(|config| (config.provider.as_str(), config.model.as_str()));
+    let (parakeet, whisper, nemotron) = tokio::join!(
+        crate::parakeet_engine::commands::parakeet_get_available_models(),
+        crate::whisper_engine::commands::whisper_get_available_models(),
+        crate::nemotron_engine::commands::nemotron_get_available_models(app.clone()),
+    );
+    let mut installed = Vec::new();
+    installed.extend(
+        parakeet
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|model| matches!(model.status, crate::parakeet_engine::ModelStatus::Available))
+            .map(|model| ("parakeet", model.name)),
+    );
+    installed.extend(
+        whisper
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|model| matches!(model.status, crate::whisper_engine::ModelStatus::Available))
+            .map(|model| ("localWhisper", model.name)),
+    );
+    installed.extend(
+        nemotron
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|model| matches!(model.status, crate::parakeet_engine::ModelStatus::Available))
+            .map(|model| ("nemotron", model.name)),
+    );
+    installed.sort_unstable();
+    let choice = choose_local_fallback(preferred, &installed).cloned().ok_or_else(|| {
+        let error = anyhow!("No installed local transcription model is available. Download one in Transcription settings.");
+        match cloud_error {
+            Some(cloud_error) => super::transcription::cloud::local_fallback_error_context(cloud_error, error),
+            None => error,
+        }
+    })?;
+    info!("Using local transcription fallback ({})", choice.0);
+    Ok(choice)
+}
+
+pub(super) async fn unload_local_batch_engine(provider: Option<&str>) {
+    if !super::transcription::cloud::is_cloud_provider(provider) {
+        super::common::unload_engine_after_batch_for(
+            provider == Some("parakeet"),
+            provider == Some("nemotron"),
+        )
+        .await;
+    }
+}
+
+pub(super) fn local_batch_language(
+    provider: Option<&str>,
+    language: Option<String>,
+) -> Option<String> {
+    if provider == Some("parakeet")
+        || (provider == Some("nemotron") && language.as_deref() == Some("auto-translate"))
+    {
+        return None;
+    }
+    language
+}
+
 /// Get or initialize the Whisper engine
 async fn get_or_init_whisper<R: Runtime>(
     app: &AppHandle<R>,
@@ -1666,6 +1763,32 @@ mod tests {
     use super::super::common::{create_transcript_segments, write_transcripts_json};
     use super::*;
     use crate::audio::common::split_segment_at_silence;
+
+    #[test]
+    fn local_fallback_prefers_available_config_then_default_parakeet() {
+        let installed = [
+            ("localWhisper", "small".to_owned()),
+            ("parakeet", DEFAULT_PARAKEET_MODEL.to_owned()),
+            ("nemotron", "nemotron-test".to_owned()),
+        ];
+        assert_eq!(
+            choose_local_fallback(Some(("localWhisper", "small")), &installed),
+            Some(&installed[0]),
+        );
+        assert_eq!(
+            choose_local_fallback(Some(("nemotron", "nemotron-test")), &installed),
+            Some(&installed[2]),
+        );
+        assert_eq!(
+            choose_local_fallback(Some(("nemotron", "missing")), &installed),
+            Some(&installed[1]),
+        );
+        assert_eq!(
+            choose_local_fallback(None, &installed[..1]),
+            Some(&installed[0])
+        );
+        assert_eq!(choose_local_fallback(None, &[]), None);
+    }
 
     #[test]
     fn copying_checks_cancel_between_bounded_writes() {
