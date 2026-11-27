@@ -55,6 +55,20 @@ pub struct AudioChunk {
     pub device_type: DeviceType,
 }
 
+pub(super) struct CaptureStamp {
+    pub resume_revision: u64,
+    pub seconds: f64,
+    earliest_seconds: f64,
+}
+
+impl CaptureStamp {
+    pub fn skip_frames(&self, rate: u32) -> usize {
+        ((self.earliest_seconds - self.seconds) * f64::from(rate))
+            .ceil()
+            .max(0.0) as usize
+    }
+}
+
 /// Processed audio chunk (post-VAD) for recording
 #[derive(Debug, Clone)]
 pub struct ProcessedAudioChunk {
@@ -140,6 +154,10 @@ pub struct RecordingState {
     speech_clock_ms: AtomicU64,
     is_paused: AtomicBool,
     resume_revision: AtomicU64,
+    capture_epoch: Instant,
+    capture_origin_ns: AtomicU64,
+    capture_cutoff_ns: AtomicU64,
+    capture_lost_through: AtomicU64,
 
     // Audio devices
     microphone_device: Mutex<Option<Arc<AudioDevice>>>,
@@ -191,13 +209,18 @@ impl RecordingState {
     pub fn start_recording(&self) -> Result<()> {
         *self.latest_levels.lock().unwrap() = LiveLevels::default();
         self.capture_incomplete.store(false, Ordering::Release);
-        self.is_recording.store(true, Ordering::SeqCst);
-        *self.recording_start.lock().unwrap() = Some(Instant::now());
+        let start = Instant::now();
+        let start_ns = self.capture_nanos(start);
+        self.capture_origin_ns.store(start_ns, Ordering::SeqCst);
+        self.capture_cutoff_ns.store(start_ns, Ordering::SeqCst);
+        self.capture_lost_through.store(0, Ordering::Relaxed);
+        *self.recording_start.lock().unwrap() = Some(start);
         *self.recording_end.lock().unwrap() = None;
         self.recent_errors.lock().unwrap().clear();
         self.error_count.store(0, Ordering::SeqCst);
         self.recoverable_error_count.store(0, Ordering::SeqCst);
         *self.last_error.lock().unwrap() = None;
+        self.is_recording.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -248,8 +271,13 @@ impl RecordingState {
 
         // Calculate pause duration and add to total
         if let Some(pause_start) = self.pause_start.lock().unwrap().take() {
-            let pause_duration = pause_start.elapsed();
+            let resumed = Instant::now();
+            let pause_duration = resumed.duration_since(pause_start);
             *self.total_pause_duration.lock().unwrap() += pause_duration;
+            self.capture_origin_ns
+                .fetch_add(pause_duration.as_nanos() as u64, Ordering::SeqCst);
+            self.capture_cutoff_ns
+                .store(self.capture_nanos(resumed), Ordering::SeqCst);
             log::info!(
                 "Recording resumed after pause of {:.2}s",
                 pause_duration.as_secs_f64()
@@ -276,6 +304,37 @@ impl RecordingState {
 
     pub(super) fn resume_revision(&self) -> u64 {
         self.resume_revision.load(Ordering::SeqCst)
+    }
+
+    fn capture_nanos(&self, instant: Instant) -> u64 {
+        instant
+            .saturating_duration_since(self.capture_epoch)
+            .as_nanos() as u64
+    }
+
+    /// Snapshot the active capture clock without locking on the audio callback.
+    pub(super) fn capture_stamp(&self, captured_at: Instant) -> Option<CaptureStamp> {
+        let resume_revision = self.resume_revision();
+        let origin = self.capture_origin_ns.load(Ordering::SeqCst);
+        let cutoff = self.capture_cutoff_ns.load(Ordering::SeqCst);
+        if !self.is_active() || resume_revision != self.resume_revision() {
+            return None;
+        }
+        let relative = |nanos: u64| (nanos as f64 - origin as f64) / 1_000_000_000.0;
+        Some(CaptureStamp {
+            resume_revision,
+            seconds: relative(self.capture_nanos(captured_at)),
+            earliest_seconds: relative(cutoff),
+        })
+    }
+
+    pub(super) fn record_capture_gap_end(&self, end_sample: u64) {
+        self.capture_lost_through
+            .fetch_max(end_sample, Ordering::Relaxed);
+    }
+
+    pub(super) fn capture_gap_end(&self) -> u64 {
+        self.capture_lost_through.load(Ordering::Relaxed)
     }
 
     pub fn mark_source_missing(&self, device: Arc<AudioDevice>, device_type: DeviceType) {
@@ -427,6 +486,9 @@ impl RecordingState {
         match sender.try_send(chunk) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(chunk)) => {
+                let end = (chunk.timestamp * f64::from(chunk.sample_rate)).round() as u64
+                    + chunk.data.len() as u64;
+                self.record_capture_gap_end(end);
                 self.record_sample_loss(chunk.data.len());
                 return Ok(());
             }
@@ -719,6 +781,10 @@ impl Default for RecordingState {
             is_recording: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
             resume_revision: AtomicU64::new(0),
+            capture_epoch: Instant::now(),
+            capture_origin_ns: AtomicU64::new(0),
+            capture_cutoff_ns: AtomicU64::new(0),
+            capture_lost_through: AtomicU64::new(0),
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
             disconnected_devices: Mutex::new(Vec::new()),

@@ -380,17 +380,18 @@ async fn mixed_capture_clock_survives_mismatched_callbacks_and_stop() -> Result<
                     }
                 })
                 .collect();
-            mic.process_audio_data(&samples);
+            mic.process_fixture_data(&samples, mic_cursor as f64 / MIC_RATE as f64);
             mic_cursor = mic_end;
         } else {
             let samples: Vec<_> = (system_cursor..system_end)
                 .map(|index| if MARKERS.contains(&index) { 0.5 } else { 0.0 })
                 .collect();
-            system.process_audio_data(&samples);
+            system.process_fixture_data(&samples, system_cursor as f64 / RATE as f64);
             system_cursor = system_end;
         }
     }
 
+    mic.finish_capture(|chunk| state.send_audio_chunk(chunk));
     state.stop_recording();
     drop(sender);
     pipeline_task.await??;
@@ -518,8 +519,9 @@ async fn capture_fixture(
             system_input.fill(0.0);
         }
         let before = Instant::now();
-        mic.process_audio_data(&mic_input[..callback_samples]);
-        system.process_audio_data(&system_input[..callback_samples]);
+        let timestamp = tick as f64 / RATE as f64;
+        mic.process_fixture_data(&mic_input[..callback_samples], timestamp);
+        system.process_fixture_data(&system_input[..callback_samples], timestamp);
         let elapsed = before.elapsed();
         callback_total += elapsed;
         callback_peak = callback_peak.max(elapsed);

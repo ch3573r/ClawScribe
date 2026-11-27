@@ -48,6 +48,8 @@ const PACKET_POOL_SIZE: usize = 32;
 struct CapturePacket<T> {
     samples: Vec<T>,
     resume_revision: u64,
+    timestamp: f64,
+    missing_frames: usize,
 }
 
 #[derive(Default)]
@@ -61,6 +63,7 @@ struct CaptureInput<T> {
     free: HeapCons<Vec<T>>,
     status: Arc<CaptureHandoffStatus>,
     packet_capacity: usize,
+    missing_frames: usize,
 }
 
 struct CaptureOutput<T> {
@@ -85,6 +88,7 @@ fn capture_handoff<T>(
             free: free_rx,
             status: status.clone(),
             packet_capacity,
+            missing_frames: 0,
         },
         CaptureOutput {
             ready: ready_rx,
@@ -95,14 +99,22 @@ fn capture_handoff<T>(
 }
 
 impl<T: Copy> CaptureInput<T> {
-    fn copy_samples(&mut self, samples: &[T], resume_revision: u64) {
+    fn copy_samples(
+        &mut self,
+        samples: &[T],
+        resume_revision: u64,
+        timestamp: f64,
+        rate: u32,
+        channels: usize,
+    ) -> bool {
         let mut remaining = samples;
         while !remaining.is_empty() {
             let Some(mut buffer) = self.free.try_pop() else {
+                self.missing_frames += remaining.len() / channels;
                 self.status
                     .dropped_samples
                     .fetch_add(remaining.len(), Ordering::Relaxed);
-                return;
+                return false;
             };
             let (packet, rest) = remaining.split_at(remaining.len().min(self.packet_capacity));
             buffer.extend_from_slice(packet);
@@ -110,9 +122,13 @@ impl<T: Copy> CaptureInput<T> {
             let _ = self.ready.try_push(CapturePacket {
                 samples: buffer,
                 resume_revision,
+                timestamp: timestamp
+                    + ((samples.len() - remaining.len()) / channels) as f64 / f64::from(rate),
+                missing_frames: std::mem::take(&mut self.missing_frames),
             });
             remaining = rest;
         }
+        true
     }
 }
 
@@ -142,10 +158,15 @@ impl<T: cpal::SizedSample + Copy + Send + 'static> CaptureOutput<T> {
                 converted.extend(packet.samples.iter().copied().map(&to_f32));
                 packet.samples.clear();
                 let _ = self.free.try_push(packet.samples);
-                capture.process_captured_data(&converted, packet.resume_revision, |chunk| {
-                    state.send_captured_chunk(&sender, chunk)
-                });
+                capture.process_captured_data(
+                    &converted,
+                    packet.resume_revision,
+                    packet.timestamp,
+                    packet.missing_frames,
+                    |chunk| state.send_captured_chunk(&sender, chunk),
+                );
             } else if can_exit {
+                capture.finish_capture(|chunk| state.send_captured_chunk(&sender, chunk));
                 return;
             } else {
                 // The real-time thread only writes to the ring; it never wakes
@@ -423,11 +444,34 @@ impl AudioStream {
         let error_handler = capture.clone();
         let stream = device.build_input_stream(
             &config.clone().into(),
-            move |data: &[T], _: &cpal::InputCallbackInfo| {
+            move |data: &[T], info: &cpal::InputCallbackInfo| {
                 input.status.copying.store(true, Ordering::SeqCst);
-                let revision = callback_state.resume_revision();
-                if callback_state.is_active() && callback_state.resume_revision() == revision {
-                    input.copy_samples(data, revision);
+                let callback = std::time::Instant::now();
+                let channels = usize::from(channels);
+                let frames = data.len() / channels;
+                let time = info.timestamp();
+                let age = time
+                    .callback
+                    .duration_since(&time.capture)
+                    .unwrap_or_else(|| Duration::from_secs_f64(frames as f64 / f64::from(rate)));
+                let captured_at = callback.checked_sub(age).unwrap_or(callback);
+                if let Some(stamp) = callback_state.capture_stamp(captured_at) {
+                    // A capture buffer can straddle the start or resume boundary.
+                    let skip = stamp.skip_frames(rate);
+                    if skip < frames
+                        && !input.copy_samples(
+                            &data[skip * channels..frames * channels],
+                            stamp.resume_revision,
+                            stamp.seconds + skip as f64 / f64::from(rate),
+                            rate,
+                            channels,
+                        )
+                    {
+                        let end = stamp.seconds + frames as f64 / f64::from(rate);
+                        callback_state.record_capture_gap_end(
+                            (end * f64::from(super::pipeline::CAPTURE_SAMPLE_RATE)).round() as u64,
+                        );
+                    }
                 }
                 input.status.copying.store(false, Ordering::SeqCst);
             },
@@ -664,7 +708,7 @@ mod tests {
             DeviceType::System,
         );
         let (mut input, output) = capture_handoff(2, 2);
-        input.copy_samples(&[1_i16, 2, 3, 4, 5, 6], 0);
+        assert!(!input.copy_samples(&[1_i16, 2, 3, 4, 5, 6], 0, 0.0, 48_000, 1));
 
         // The driver can still own its callback when Stop freezes capture.
         state.stop_recording();
