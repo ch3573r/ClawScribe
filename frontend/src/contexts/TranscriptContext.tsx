@@ -10,12 +10,13 @@ import { recordingService } from '@/services/recordingService';
 import { compareGeneration, recordingIdentity } from '@/lib/recording-identity';
 import { indexedDBService } from '@/services/indexedDBService';
 import { insertLiveTranscripts } from './live-transcript-order';
+import { copyPlainText } from '@/lib/copy-plain-text';
 
 interface TranscriptContextType {
   transcripts: Transcript[];
   transcriptsRef: MutableRefObject<Transcript[]>
   addTranscript: (update: TranscriptUpdate) => void;
-  copyTranscript: () => void;
+  copyTranscript: () => Promise<void>;
   flushBuffer: () => void;
   meetingTitle: string;
   setMeetingTitle: (title: string) => void;
@@ -237,7 +238,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   }, [appendTranscripts]);
 
   // Copy transcript to clipboard with recording-relative timestamps
-  const copyTranscript = useCallback(() => {
+  const copyTranscript = useCallback(async () => {
     // Format timestamps as recording-relative [MM:SS] instead of wall-clock time
     const formatTime = (seconds: number | undefined): string => {
       if (seconds === undefined) return '[--:--]';
@@ -250,9 +251,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     const fullTranscript = transcripts
       .map(t => `${formatTime(t.audio_start_time)} ${t.text}`)
       .join('\n');
-    navigator.clipboard.writeText(fullTranscript);
-
-    toast.success("Transcript copied to clipboard");
+    await copyPlainText(fullTranscript, 'Transcript copied to clipboard', 'Could not copy the transcript');
   }, [transcripts]);
 
   const markMeetingAsSaved = useCallback(async (id?: string | null) => {

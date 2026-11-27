@@ -886,12 +886,28 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
-                    let _ = window.emit("summary-flush-on-close", ());
-                    if let Err(e) = window.hide() {
-                        log::error!("Failed to hide main window on close request: {}", e);
-                    } else {
-                        log::info!("Main window hidden to tray on close request");
-                    }
+                    let window = window.clone();
+                    tauri::async_runtime::spawn(async move {
+                        use behavior_settings::CloseAction;
+
+                        let app = window.app_handle();
+                        let action = behavior_settings::close_button(app).await;
+                        match action.on_close(summary::edit_exit::recording_blocks_window_quit()) {
+                            CloseAction::Quit => summary::edit_exit::quit_from_window(app),
+                            CloseAction::KeepOpen => {
+                                let _ = window.emit("summary-flush-on-close", ());
+                                summary::edit_exit::show_recording_blocks_window_quit(app);
+                            }
+                            CloseAction::Hide => {
+                                let _ = window.emit("summary-flush-on-close", ());
+                                if window.hide().is_err() {
+                                    log::error!("Failed to hide main window on close request");
+                                } else {
+                                    behavior_settings::notify_close_to_tray(app.clone()).await;
+                                }
+                            }
+                        }
+                    });
                 }
             }
         })
@@ -1210,6 +1226,7 @@ pub fn run() {
             // Language preference commands
             set_language_preference,
             behavior_settings::get_behavior_settings,
+            behavior_settings::set_close_button_preference,
             behavior_settings::load_auto_update_preference,
             behavior_settings::set_auto_update_preference,
             behavior_settings::load_player_shortcuts,

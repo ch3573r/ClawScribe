@@ -31,6 +31,7 @@ struct Attempt {
     code: i32,
     deadline: Instant,
     dialog_open: bool,
+    from_close_button: bool,
 }
 
 enum Begin {
@@ -40,11 +41,11 @@ enum Begin {
 }
 
 impl ExitState {
-    fn begin(&mut self, code: i32, now: Instant) -> Begin {
+    fn begin(&mut self, code: i32, now: Instant, from_close_button: bool) -> Begin {
         if self.attempt.is_some() {
             return Begin::AlreadyWaiting;
         }
-        if !self.pending {
+        if !self.pending && !from_close_button {
             return Begin::Allow;
         }
         self.next_id += 1;
@@ -53,16 +54,17 @@ impl ExitState {
             code,
             deadline: now + Duration::from_secs(5),
             dialog_open: false,
+            from_close_button,
         });
         Begin::Wait(self.next_id)
     }
 
-    fn finish(&mut self, id: u64) -> Option<i32> {
+    fn finish(&mut self, id: u64) -> Option<Attempt> {
         let attempt = self.attempt.as_ref()?;
         if attempt.id != id || attempt.dialog_open || self.pending {
             return None;
         }
-        self.attempt.take().map(|attempt| attempt.code)
+        self.attempt.take()
     }
 
     fn prompt(&mut self, id: u64, now: Instant, failed: bool) -> bool {
@@ -76,29 +78,62 @@ impl ExitState {
         true
     }
 
-    fn choose(&mut self, id: u64, quit: bool) -> Option<i32> {
+    fn choose(&mut self, id: u64, quit: bool) -> Option<Attempt> {
         let attempt = self.attempt.as_ref()?;
         if attempt.id != id || !attempt.dialog_open {
             return None;
         }
-        let code = self.attempt.take()?.code;
-        if quit {
-            self.pending = false;
-            Some(code)
-        } else {
-            None
-        }
+        let attempt = self.attempt.take()?;
+        quit.then_some(attempt)
     }
 }
 
 /// Returns true when this exit request must wait for save or user choice.
 pub fn request_exit(app: &AppHandle, code: i32, prevent_exit: impl FnOnce()) -> bool {
-    let begin = app
-        .state::<SummaryEditsState>()
-        .0
-        .lock()
-        .unwrap()
-        .begin(code, Instant::now());
+    begin_exit(app, code, false, prevent_exit)
+}
+
+// A close click can race the webview's first pending-edit acknowledgement.
+// Give the webview a chance to drain the draft even in that case.
+pub(crate) fn quit_from_window(app: &AppHandle) {
+    begin_exit(app, 0, true, || {});
+}
+
+pub(crate) fn recording_blocks_window_quit() -> bool {
+    use crate::audio::recording_commands::{capture_active, is_starting};
+    capture_active() || is_starting()
+}
+
+pub(crate) fn show_recording_blocks_window_quit(app: &AppHandle) {
+    app.dialog()
+        .message("Stop and save the recording before quitting ClawScribe.")
+        .title("Recording in progress")
+        .kind(MessageDialogKind::Warning)
+        .show(|_| {});
+}
+
+fn resume_exit(app: &AppHandle, attempt: Attempt, discard: bool) {
+    if attempt.from_close_button && recording_blocks_window_quit() {
+        show_recording_blocks_window_quit(app);
+    } else {
+        if discard {
+            app.state::<SummaryEditsState>().0.lock().unwrap().pending = false;
+        }
+        app.exit(attempt.code);
+    }
+}
+
+fn begin_exit(
+    app: &AppHandle,
+    code: i32,
+    from_close_button: bool,
+    prevent_exit: impl FnOnce(),
+) -> bool {
+    let begin = app.state::<SummaryEditsState>().0.lock().unwrap().begin(
+        code,
+        Instant::now(),
+        from_close_button,
+    );
     if !matches!(begin, Begin::Allow) {
         prevent_exit();
     }
@@ -139,14 +174,14 @@ fn show_discard_prompt(app: &AppHandle, id: u64, failed: bool) {
             "Keep ClawScribe open".into(),
         ))
         .show(move |quit| {
-            let code = callback_app
+            let attempt = callback_app
                 .state::<SummaryEditsState>()
                 .0
                 .lock()
                 .unwrap()
                 .choose(id, quit);
-            if let Some(code) = code {
-                callback_app.exit(code);
+            if let Some(attempt) = attempt {
+                resume_exit(&callback_app, attempt, true);
             }
         });
 }
@@ -162,9 +197,9 @@ pub fn api_finish_summary_edit_exit(
     state: tauri::State<'_, SummaryEditsState>,
     attempt_id: u64,
 ) {
-    let code = state.0.lock().unwrap().finish(attempt_id);
-    if let Some(code) = code {
-        app.exit(code);
+    let attempt = state.0.lock().unwrap().finish(attempt_id);
+    if let Some(attempt) = attempt {
+        resume_exit(&app, attempt, false);
     }
 }
 
@@ -182,7 +217,7 @@ mod tests {
             pending: true,
             ..ExitState::default()
         };
-        let Begin::Wait(id) = state.begin(7, now) else {
+        let Begin::Wait(id) = state.begin(7, now, false) else {
             panic!("Expected save wait")
         };
         (state, id)
@@ -198,7 +233,15 @@ mod tests {
         assert!(edits.ensure_saved_for_update().is_err());
         edits.0.lock().unwrap().pending = false;
         assert!(edits.ensure_saved_for_update().is_err());
-        assert_eq!(edits.0.lock().unwrap().finish(id), Some(7));
+        assert_eq!(
+            edits
+                .0
+                .lock()
+                .unwrap()
+                .finish(id)
+                .map(|attempt| attempt.code),
+            Some(7)
+        );
         assert!(edits.ensure_saved_for_update().is_ok());
     }
 
@@ -208,20 +251,19 @@ mod tests {
         let (mut state, id) = waiting(now);
         assert!(!state.prompt(id, now + Duration::from_secs(4), false));
         state.pending = false;
-        assert_eq!(state.finish(id), Some(7));
+        assert_eq!(state.finish(id).map(|attempt| attempt.code), Some(7));
         assert!(!state.prompt(id, now + Duration::from_secs(5), false));
     }
 
     #[test]
-    fn timeout_prompts_once_and_quit_discards_pending_edits() {
+    fn timeout_prompts_once_and_returns_the_exit_request_on_confirmation() {
         let now = Instant::now();
         let (mut state, id) = waiting(now);
         assert!(state.prompt(id, now + Duration::from_secs(5), false));
-        assert!(matches!(state.begin(8, now), Begin::AlreadyWaiting));
+        assert!(matches!(state.begin(8, now, false), Begin::AlreadyWaiting));
         assert!(!state.prompt(id, now + Duration::from_secs(10), true));
-        assert_eq!(state.choose(id, true), Some(7));
-        assert!(!state.pending);
-        assert!(matches!(state.begin(0, now), Begin::Allow));
+        assert_eq!(state.choose(id, true).map(|attempt| attempt.code), Some(7));
+        assert!(state.attempt.is_none());
     }
 
     #[test]
@@ -229,19 +271,29 @@ mod tests {
         let now = Instant::now();
         let (mut state, id) = waiting(now);
         assert!(state.prompt(id, now, true));
-        assert_eq!(state.choose(id, false), None);
+        assert!(state.choose(id, false).is_none());
         assert!(state.pending);
         assert!(state.attempt.is_none());
-        let Begin::Wait(next) = state.begin(9, now) else {
+        let Begin::Wait(next) = state.begin(9, now, false) else {
             panic!("Expected another attempt")
         };
         state.pending = false;
-        assert_eq!(
-            state.finish(id),
-            None,
+        assert!(
+            state.finish(id).is_none(),
             "Old callback cannot finish a new quit"
         );
         assert!(!state.prompt(id, now, true));
-        assert_eq!(state.finish(next), Some(9));
+        assert_eq!(state.finish(next).map(|attempt| attempt.code), Some(9));
+    }
+
+    #[test]
+    fn the_close_button_waits_even_before_the_webview_reports_pending_edits() {
+        let mut state = ExitState::default();
+        let Begin::Wait(id) = state.begin(0, Instant::now(), true) else {
+            panic!("Expected a flush request");
+        };
+        let attempt = state.finish(id).unwrap();
+        assert_eq!(attempt.code, 0);
+        assert!(attempt.from_close_button);
     }
 }

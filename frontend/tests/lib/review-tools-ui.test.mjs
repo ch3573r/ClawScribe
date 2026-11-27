@@ -15,6 +15,34 @@ const text = node => typeof node === 'string' || typeof node === 'number' ? Stri
 const names = value => Object.fromEntries(value.split(' ').map(name => [name, name]));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+test('the transcript list uses the clock position to highlight the active passage', () => {
+  let seconds = 35;
+  const clock = { subscribe: () => () => {}, getSnapshot: () => seconds };
+  const active = new Map();
+  const ui = transcriptView({ playbackClock: clock }, props => active.set(props.id, props.isActive));
+  ui.render();
+  assert.equal(active.get('row-3'), true);
+  seconds = 45;
+  ui.render();
+  assert.equal(active.get('row-3'), false);
+  assert.equal(active.get('row-4'), true);
+});
+
+test('the transcript panel leaves clock reads to the list and bookmark actions', () => {
+  let seconds = 35;
+  let reads = 0;
+  const clock = { subscribe: () => () => {}, getSnapshot: () => { reads++; return seconds; } };
+  const ui = panel({ playbackClock: clock });
+  try {
+    const nodes = ui.render();
+    assert.equal(reads, 0);
+    assert.equal(ui.view(nodes).playbackClock, clock);
+    const bookmark = nodes.find(node => node.type === 'MeetingBookmarks');
+    seconds = 45;
+    assert.equal(bookmark.props.getPlaybackTime(), 45);
+  } finally { ui.hooks.unmount(); }
+});
+
 // ---------------------------------------------------------------------------
 // Transcript view: find highlighting, scrolling to matches, follow playback
 // ---------------------------------------------------------------------------
@@ -300,7 +328,7 @@ function bookmarksUi(props = {}, stored = {}) {
     '@/components/ui/dialog': names('Dialog DialogContent DialogHeader DialogTitle DialogDescription'),
     '@/components/ui/accordion': names('Accordion AccordionContent AccordionItem AccordionTrigger'),
   });
-  const render = () => expand(hooks.render(() => MeetingBookmarks({ meetingId: 'meeting-1', currentTime: 42.34, onSeek() {}, onBookmarksChange: value => reported.push(value), ...props })));
+  const render = () => expand(hooks.render(() => MeetingBookmarks({ meetingId: 'meeting-1', getPlaybackTime: () => 42.34, onSeek() {}, onBookmarksChange: value => reported.push(value), ...props })));
   return { render, invoked, reported, toasts, storage, hooks, blockWrites: () => { failWrite = true; } };
 }
 

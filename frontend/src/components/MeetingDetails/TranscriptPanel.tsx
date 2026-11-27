@@ -13,7 +13,7 @@ import { MeetingBookmarks } from './MeetingBookmarks';
 import { Button } from '@/components/ui/button';
 import type { PlayerBindings } from '@/lib/player-bindings';
 import type { TranscriptTextPatch } from '@/lib/meetingTranscripts';
-import { usePlaybackTime, type PlaybackClock } from '@/hooks/useAudioPlayer';
+import type { PlaybackClock } from '@/hooks/useAudioPlayer';
 import { hasSavedSpeakerLabels } from '@/lib/speaker-attribution';
 
 interface TranscriptPanelProps {
@@ -116,7 +116,7 @@ export function TranscriptPanel({
   bookmarkRequest = 0,
   onBookmarksChange,
 }: TranscriptPanelProps) {
-  const activeTime = usePlaybackTime(playbackClock) ?? initialTime;
+  const getPlaybackTime = playbackClock?.getSnapshot ?? (initialTime === undefined ? undefined : () => initialTime);
   const panelRef = useRef<HTMLDivElement>(null);
   const [bookmarkOpen, setBookmarkOpen] = useState(false);
   const [bookmarkStart, setBookmarkStart] = useState<number>();
@@ -278,7 +278,7 @@ export function TranscriptPanel({
         <p role="status">{audioError ? 'Saved audio could not be played.' : audioUnavailableReason ?? 'Saved audio is unavailable.'} You can still read and correct the transcript.</p>
         {onRetryAudio && <Button variant="outline" size="sm" onClick={onRetryAudio}>Check again</Button>}
       </div>}
-      {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} focusedBookmark={focusedBookmark} currentTime={activeTime}
+      {meetingId && <MeetingBookmarks key={meetingId} meetingId={meetingId} focusedBookmark={focusedBookmark} getPlaybackTime={getPlaybackTime}
         initialTime={bookmarkStart} duration={recordingDuration} onSeek={onSeekToTime} addOpen={bookmarkOpen} onAddOpenChange={setBookmarkOpen} onBookmarksChange={onBookmarksChange}
         onReturnFocus={() => (bookmarkAnchor.current?.isConnected ? bookmarkAnchor.current : panelRef.current)?.focus()} />}
       {/* Transcript content - use virtualized view for better performance */}
@@ -306,7 +306,8 @@ export function TranscriptPanel({
           loadedCount={completeTimeline?.length ?? loadedCount}
           onLoadMore={onLoadMore}
           showSpeakerLabels={showSpeakerAttribution || canEditSpeakers}
-          activeTime={activeTime}
+          activeTime={initialTime}
+          playbackClock={playbackClock}
           onSeekToTime={onSeekToTime}
           followPlayback={followPlayback}
           onUserScroll={onFollowStop}

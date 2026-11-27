@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { flushMeetingContexts } from '@/lib/meetingContext';
+import { flushMeetingContextDrafts } from '@/lib/meetingDrafts';
 import { migrateLegacyMeetingCalendars } from '@/lib/meetingCalendarStore';
 import type { LibraryArchiveReport } from '@/lib/library';
 import { ScheduledBackups } from '@/components/ScheduledBackups';
@@ -35,7 +36,10 @@ export function LibraryBackup() {
       if (!path) return;
       setResult(null);
       await migrateLegacyMeetingCalendars();
-      if (!restore) await flushMeetingContexts();
+      if (!restore) {
+        await flushMeetingContextDrafts();
+        await flushMeetingContexts();
+      }
       const report = await invoke<LibraryArchiveReport>(restore ? 'restore_library' : 'backup_library', { path });
       setResult({ report, restore });
       const incomplete = report.incomplete_meetings?.length ?? 0;

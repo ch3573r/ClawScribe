@@ -11,7 +11,7 @@ function createView({ fromRecording = false, outcome = null } = {}) {
   const calls = [];
   const summaries = new Map();
   const jsx = (type, props) => ({ type, props });
-  const sidebar = { setCurrentMeeting() {}, refetchMeetings() {}, stopSummaryPolling() {} };
+  const sidebar = { setCurrentMeeting() {}, refetchMeetings() {} };
   const router = { push() {} };
   const transcripts = [{ id: 'segment', text: 'A synthetic test meeting.' }];
   const { default: MeetingDetails } = loadTsModule(fileURLToPath(new URL('../../src/app/meeting-details/page.tsx', import.meta.url)), {

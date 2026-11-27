@@ -4,6 +4,17 @@ The tray icon, the global shortcuts and the command-line flags all control the
 same recording. Starting a recording this way does not change what you are
 doing in ClawScribe.
 
+## Closing the main window
+
+By default, closing the window keeps ClawScribe running in the tray. ClawScribe
+shows a Windows notification the first time the window closes to the tray.
+Use the tray icon to reopen the window or choose **Quit** from its menu.
+
+Choose **Quit** under **Settings → General → Close button** to quit
+when closing the window. While a recording starts, runs or saves, the close button keeps
+the window open and asks you to stop and save first. ClawScribe flushes pending
+meeting edits, including summary context, when you hide the window or quit.
+
 ## Starting
 
 - The window keeps the page it is on and any text you have not saved. It is not
@@ -192,3 +203,8 @@ On the designated self-hosted machine with audio devices:
    close after saving. Restart ClawScribe, start another recording and confirm
    that the controls stay closed until opened explicitly. Check light and dark
    appearance and how the controls appear in a sharing preview.
+9. Close the main window with the default close button setting. Verify the tray
+   notice appears once and the tray icon reopens the window. Choose **Quit** in
+   General settings, start a recording and close the main window. Verify the
+   warning appears and capture continues. Stop and save, then close the window
+   and verify ClawScribe exits.

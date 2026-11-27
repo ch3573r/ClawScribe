@@ -80,6 +80,10 @@ runs in the background: the window keeps its page and any unsaved text, and it
 is not brought to the front. See
 [Recording from the tray, shortcuts and command line](docs/tray-and-recording-control.md).
 
+Closing the main window keeps ClawScribe running in the system tray by default.
+Under **Settings → General → Close button**, choose **Quit** to exit when
+closing the window. If a recording is active, the window stays open so you can save it.
+
 ## Capture And Transcription
 
 - Microphone and system-audio capture from the local Windows session.

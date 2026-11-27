@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useRouter } from "next/navigation";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Meta, SettingsCard, SettingsRow, SettingsStack } from "./ui/settings-layout";
 import { NoteRow } from "./settings/settings-parts";
 import { UpdateChannelSettings } from "./UpdateChannelSettings";
@@ -21,6 +22,7 @@ import { useInterruptedRecordings } from "@/hooks/useInterruptedRecordings";
 import { RECOVERY_OPEN_ALL, RECOVERY_OPEN_REQUEST } from "@/lib/interruptedRecordings";
 
 type FolderKind = "database" | "models" | "recordings";
+type CloseButton = "tray" | "quit";
 
 interface StorageRow {
   kind: FolderKind;
@@ -71,6 +73,11 @@ export function PreferenceSettings() {
   const [autoUpdateChecksEnabled, setAutoUpdateChecksEnabled] = useState<boolean | null>(null);
   const savingUpdatePreference = useRef(false);
   const [updatingPreference, setUpdatingPreference] = useState(false);
+  const [closeButton, setCloseButton] = useState<CloseButton>();
+  const [closeButtonError, setCloseButtonError] = useState(false);
+  const [closeButtonRevision, setCloseButtonRevision] = useState(0);
+  const [savingCloseButton, setSavingCloseButton] = useState(false);
+  const closeButtonPending = useRef(false);
   const [savingNotifications, setSavingNotifications] = useState(false);
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [saveFolder, setSaveFolder] = useState<string | undefined>(undefined);
@@ -94,6 +101,32 @@ export function PreferenceSettings() {
       .catch(() => { /* the default folder from the app is shown instead */ });
     return () => { active = false; window.removeEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, syncUpdatePreference); };
   }, [loadPreferences]);
+
+  useEffect(() => {
+    let active = true;
+    setCloseButtonError(false);
+    void invoke<{ closeButton: CloseButton }>("get_behavior_settings").then(settings => {
+      if (active) setCloseButton(settings.closeButton);
+    }).catch(() => {
+      if (active) setCloseButtonError(true);
+    });
+    return () => { active = false; };
+  }, [closeButtonRevision]);
+
+  const changeCloseButton = async (action: CloseButton) => {
+    if (closeButtonPending.current) return;
+    closeButtonPending.current = true;
+    setSavingCloseButton(true);
+    try {
+      await invoke("set_close_button_preference", { action });
+      setCloseButton(action);
+    } catch {
+      toast.error("Could not save the close button preference. Try again.");
+    } finally {
+      closeButtonPending.current = false;
+      setSavingCloseButton(false);
+    }
+  };
 
   // Track preferences viewed once per visit, when the settings are known.
   useEffect(() => {
@@ -186,6 +219,27 @@ export function PreferenceSettings() {
 
   return (
     <SettingsStack>
+      <SettingsCard title="Window">
+        <SettingsRow title="Close button" htmlFor="preferences-close-button"
+          description="When set to Quit, the window stays open while a recording is active.">
+          <Select value={closeButton ?? ""} onValueChange={action => {
+            if (action === "tray" || action === "quit") void changeCloseButton(action);
+          }} disabled={!closeButton || savingCloseButton}>
+            <SelectTrigger id="preferences-close-button" className="w-48" aria-busy={savingCloseButton || (!closeButton && !closeButtonError)}>
+              <SelectValue placeholder={closeButtonError ? "Unavailable" : "Loading…"} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="tray">Keep running in tray</SelectItem>
+              <SelectItem value="quit">Quit</SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+        {closeButtonError && <NoteRow tone="error">
+          Could not read the close button preference.{' '}
+          <Button type="button" size="sm" variant="outline" onClick={() => setCloseButtonRevision(value => value + 1)}>Retry</Button>
+        </NoteRow>}
+      </SettingsCard>
+
       <SettingsCard title="Updates">
         <SettingsRow
           title="Check for updates automatically"

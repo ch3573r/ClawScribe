@@ -7,8 +7,8 @@ import { createHookHarness, deferred, flush } from './hook-harness.mjs';
 // while the user was elsewhere) is shown as generating and its result is taken.
 function setup(start) {
   const hooks = createHookHarness();
-  const polls = [];
-  const events = { aiSummary: [], toasts: [], stopped: [], invocations: [] };
+  const subscriptions = [];
+  const events = { aiSummary: [], toasts: [], invocations: [] };
   const noop = () => {};
   const mocks = {
     react: hooks.react,
@@ -28,22 +28,22 @@ function setup(start) {
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
     '@/lib/meetingCalendar': { getMeetingCalendar: () => null },
     '@/lib/summary-language-preferences': { readMeetingSummaryLanguage: async () => ({ language: null }) },
-    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({
-      startSummaryPolling: (meetingId, processId, onUpdate) => polls.push({ meetingId, onUpdate }),
-      attachSummaryPolling: (meetingId, onUpdate) => { polls.push({ meetingId, onUpdate }); return () => {}; },
-      stopSummaryPolling: id => events.stopped.push(id),
-    }) },
   };
   const { useSummaryGeneration } = loadTsModule('src/hooks/meeting-details/useSummaryGeneration.ts', mocks);
   const render = () => hooks.render(() => useSummaryGeneration({
+    subscribeToSummary: (onUpdate, options) => {
+      const subscription = { onUpdate, options, active: true };
+      subscriptions.push(subscription);
+      return () => { subscription.active = false; };
+    },
     meeting: { id: 'saved-meeting', created_at: '2026-01-01' }, transcripts: [],
     modelConfig: { provider: 'synthetic', model: 'synthetic' }, isModelConfigLoading: false, selectedTemplate: '',
     updateMeetingTitle: noop, setAiSummary: value => events.aiSummary.push(value),
   }));
-  return { render, polls, events, hooks };
+  return { render, subscriptions, events, hooks };
 }
 
-test('a start response arriving after unmount cannot register a poll', async () => {
+test('a start response arriving after unmount cannot subscribe to summary updates', async () => {
   const start = deferred();
   const app = setup(start);
   const generating = app.render().handleGenerateSummary('Project notes');
@@ -52,17 +52,17 @@ test('a start response arriving after unmount cannot register a poll', async () 
   app.hooks.unmount();
   start.resolve({ process_id: 'saved-meeting' });
   await generating;
-  assert.equal(app.polls.length, 0);
+  assert.equal(app.subscriptions.length, 0);
 });
 
-test('attaching shows the run as generating and polls for the meeting once', t => {
+test('attaching shows the run as generating and subscribes once', t => {
   const app = setup();
   t.after(() => app.hooks.unmount());
   assert.equal(app.render().summaryStatus, 'idle');
   app.render().attachToRunningSummary(false);
   assert.equal(app.render().summaryStatus, 'processing');
-  assert.equal(app.polls.length, 1);
-  assert.equal(app.polls[0].meetingId, 'saved-meeting');
+  assert.equal(app.subscriptions.length, 1);
+  assert.equal(app.subscriptions[0].options.refresh, false);
 });
 
 test('attaching to a regeneration says so', t => {
@@ -79,7 +79,7 @@ test('translation retry keeps the saved draft and submits the explicit target on
   assert.equal(app.render().summaryStatus, 'regenerating');
   assert.deepEqual(app.events.aiSummary, []);
   assert.equal(app.events.invocations.length, 1);
-  assert.deepEqual(app.events.stopped, ['saved-meeting']);
+  assert.equal(app.subscriptions[0].options.refresh, true);
   const { command, args } = app.events.invocations[0];
   assert.equal(command, 'api_generate_meeting_summary');
   assert.equal(args.summaryLanguage, 'de');
@@ -87,14 +87,15 @@ test('translation retry keeps the saved draft and submits the explicit target on
   assert.equal(args.customPrompt, 'Project notes');
 });
 
-test('generating while attached leaves the active poll and its progress intact', async t => {
+test('generating while attached leaves the active subscription intact', async t => {
   const app = setup();
   t.after(() => app.hooks.unmount());
   app.render().attachToRunningSummary(false);
   await app.render().handleGenerateSummary();
-  assert.equal(app.polls.length, 1);
+  assert.equal(app.subscriptions.length, 1);
   assert.equal(app.render().summaryStatus, 'processing');
-  await app.polls[0].onUpdate({ status: 'skipped' });
+  await app.subscriptions[0].onUpdate({ status: 'skipped' });
+  assert.equal(app.subscriptions[0].active, false);
   assert.equal(app.render().summaryStatus, 'idle');
 });
 
@@ -102,7 +103,7 @@ test('the result of an attached run is taken when it finishes', async t => {
   const app = setup();
   t.after(() => app.hooks.unmount());
   app.render().attachToRunningSummary(false);
-  await app.polls[0].onUpdate({ status: 'completed', data: { markdown: 'Notes', MeetingName: '' } });
+  await app.subscriptions[0].onUpdate({ status: 'completed', data: { markdown: 'Notes', MeetingName: '' } });
   assert.deepEqual(JSON.parse(JSON.stringify(app.events.aiSummary)), [{ markdown: 'Notes' }]);
   assert.equal(app.render().summaryStatus, 'completed');
   assert.deepEqual(app.events.toasts, ['Summary ready']);
@@ -112,7 +113,7 @@ test('a failed attached run ends in the error state', async t => {
   const app = setup();
   t.after(() => app.hooks.unmount());
   app.render().attachToRunningSummary(false);
-  await app.polls[0].onUpdate({ status: 'failed', error: 'Synthetic failure' });
+  await app.subscriptions[0].onUpdate({ status: 'failed', error: 'Synthetic failure' });
   const view = app.render();
   assert.equal(view.summaryStatus, 'error');
   assert.equal(view.summaryError, 'Synthetic failure');
@@ -126,7 +127,7 @@ test('an encoded BlockNote result keeps its edited blocks and Markdown fallback'
     markdown: 'Fallback notes',
     summary_json: [{ id: 'paragraph-1', type: 'paragraph', props: {}, content: [], children: [] }],
   };
-  await app.polls[0].onUpdate({ status: 'completed', data: JSON.stringify(summary) });
+  await app.subscriptions[0].onUpdate({ status: 'completed', data: JSON.stringify(summary) });
   assert.deepEqual(JSON.parse(JSON.stringify(app.events.aiSummary)), [summary]);
   assert.equal(app.render().summaryStatus, 'completed');
 });
@@ -141,7 +142,7 @@ test('legacy notes follow their saved order and ignore metadata', async t => {
     _section_order: ['first', 'last'],
     MeetingName: 'Review',
   };
-  await app.polls[0].onUpdate({ status: 'completed', data });
+  await app.subscriptions[0].onUpdate({ status: 'completed', data });
   const summary = app.events.aiSummary[0];
   assert.deepEqual(Object.keys(summary), ['first', 'last']);
   assert.deepEqual({ ...summary.last.blocks[0] }, { id: 'stable', type: 'bullet', content: 'Done', color: 'default' });
@@ -152,7 +153,7 @@ test('the legacy edit envelope retains repeated headings', async t => {
   t.after(() => app.hooks.unmount());
   app.render().attachToRunningSummary(true);
   const sections = ['First', 'Second'].map(content => ({ title: 'Topic', blocks: [{ content }] }));
-  await app.polls[0].onUpdate({ status: 'completed', data: { MeetingNotes: { sections } } });
+  await app.subscriptions[0].onUpdate({ status: 'completed', data: { MeetingNotes: { sections } } });
   const saved = Object.values(app.events.aiSummary[0]);
   assert.deepEqual(saved.map(section => section.title), ['Topic', 'Topic']);
   assert.deepEqual(saved.map(section => section.blocks[0].content), ['First', 'Second']);

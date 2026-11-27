@@ -58,7 +58,6 @@ function summaryGeneration(provider, invoke, toast = { info() {}, error: message
   const { useSummaryGeneration } = loadTsModule('src/hooks/meeting-details/useSummaryGeneration.ts', {
     react: hooks.react,
     '@tauri-apps/api/core': { invoke },
-    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ attachSummaryPolling: () => () => {}, stopSummaryPolling() {} }) },
     '@/lib/analytics': { __esModule: true, default: { async trackSummaryGenerationStarted() {} } },
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
     '@/lib/meetingDrafts': { confirmSummaryRegeneration: async () => true },
@@ -66,6 +65,7 @@ function summaryGeneration(provider, invoke, toast = { info() {}, error: message
     sonner: { toast },
   });
   const render = () => hooks.render(() => useSummaryGeneration({
+    subscribeToSummary: () => () => {},
     meeting: { id: 'test-meeting', created_at: '2026-01-01T12:00:00Z' },
     modelConfig: { provider, model: 'synthetic-model' },
     isModelConfigLoading: false, selectedTemplate: '', updateMeetingTitle() {}, setAiSummary() {}, onOpenModelSettings,

@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Runtime};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_store::StoreExt;
 
 pub const STORE_FILE: &str = "behavior_settings.json";
@@ -33,6 +34,8 @@ const LEGACY_MIGRATED: &str = "legacy_migrated";
 const SHOW_CONVERSATION_METRICS: &str = "show_conversation_metrics";
 const SHOW_RECORDING_NOTIFICATION: &str = "show_recording_notification";
 const AUTO_UPDATE_CHECK: &str = "auto_update_check";
+const CLOSE_BUTTON: &str = "close_button";
+const TRAY_NOTICE_SHOWN: &str = "tray_notice_shown";
 const PLAYER_SHORTCUTS: &str = "player_shortcuts";
 const PLAYER_ACTIONS: &[&str] = &[
     "toggle",
@@ -52,6 +55,31 @@ const PLAYER_ACTIONS: &[&str] = &[
 pub(crate) static CHANGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub const DEFAULT_LANGUAGE: &str = "auto";
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloseButton {
+    #[default]
+    Tray,
+    Quit,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CloseAction {
+    Hide,
+    Quit,
+    KeepOpen,
+}
+
+impl CloseButton {
+    pub(crate) fn on_close(self, capture_active: bool) -> CloseAction {
+        match self {
+            Self::Tray => CloseAction::Hide,
+            Self::Quit if capture_active => CloseAction::KeepOpen,
+            Self::Quit => CloseAction::Quit,
+        }
+    }
+}
 
 /// Where the values are kept. The store plugin implements it; tests use memory.
 pub(crate) trait Backing {
@@ -87,6 +115,7 @@ pub(crate) struct Stored {
     pub language: Option<String>,
     pub show_recording_notification: Option<bool>,
     pub show_conversation_metrics: Option<bool>,
+    pub close_button: CloseButton,
     pub legacy_migrated: bool,
 }
 
@@ -103,6 +132,7 @@ pub struct BehaviorSettings {
     /// Whether the "recording started" notice is shown (default yes).
     pub show_recording_notification: bool,
     pub show_conversation_metrics: bool,
+    pub close_button: CloseButton,
     /// Whether the webview's old values were already handed over.
     pub legacy_migrated: bool,
 }
@@ -152,6 +182,7 @@ impl Stored {
                 .filter(|language| valid_language(language)),
             show_recording_notification: boolean(SHOW_RECORDING_NOTIFICATION),
             show_conversation_metrics: boolean(SHOW_CONVERSATION_METRICS),
+            close_button: read_close_button(backing),
             legacy_migrated: backing
                 .read(LEGACY_MIGRATED)
                 .and_then(|value| value.as_bool())
@@ -173,6 +204,7 @@ impl Stored {
                 .unwrap_or_else(|| DEFAULT_LANGUAGE.to_string()),
             show_recording_notification: self.show_recording_notification.unwrap_or(true),
             show_conversation_metrics: self.show_conversation_metrics.unwrap_or(true),
+            close_button: self.close_button,
             legacy_migrated: self.legacy_migrated,
         }
     }
@@ -217,6 +249,68 @@ pub(crate) fn replace(
 
 pub(crate) fn persist_bool(backing: &dyn Backing, key: &str, enabled: bool) -> Result<(), String> {
     persist(backing, key, json!(enabled))
+}
+
+fn read_close_button(backing: &dyn Backing) -> CloseButton {
+    backing
+        .read(CLOSE_BUTTON)
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+fn save_close_button(backing: &dyn Backing, action: CloseButton) -> Result<(), String> {
+    persist(backing, CLOSE_BUTTON, json!(action))
+}
+
+pub(crate) async fn close_button<R: Runtime>(app: &AppHandle<R>) -> CloseButton {
+    let _change = CHANGE_LOCK.lock().await;
+    open(app)
+        .map(|store| read_close_button(store.as_ref()))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn set_close_button_preference<R: Runtime>(
+    app: AppHandle<R>,
+    action: CloseButton,
+) -> Result<(), String> {
+    let _change = CHANGE_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || save_close_button(open(&app)?.as_ref(), action))
+        .await
+        .map_err(|_| "Could not save the close button preference".to_string())?
+}
+
+fn show_tray_notice(
+    backing: &dyn Backing,
+    show: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if backing
+        .read(TRAY_NOTICE_SHOWN)
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        show()?;
+        persist_bool(backing, TRAY_NOTICE_SHOWN, true)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn notify_close_to_tray<R: Runtime>(app: AppHandle<R>) {
+    let _change = CHANGE_LOCK.lock().await;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        show_tray_notice(open(&app)?.as_ref(), || {
+            app.notification()
+                .builder()
+                .title("ClawScribe is still running")
+                .body("Open ClawScribe from the system tray, or choose Quit from its tray menu.")
+                .show()
+                .map_err(|_| "Could not show the tray notice".into())
+        })
+    })
+    .await;
+    if !matches!(result, Ok(Ok(()))) {
+        log::warn!("Could not show or remember the close-to-tray notice");
+    }
 }
 
 pub(crate) fn persist_language(backing: &dyn Backing, language: &str) -> Result<(), String> {
@@ -627,6 +721,34 @@ pub(crate) mod test_memory {
 #[cfg(test)]
 mod ui_preference_tests {
     use super::{test_memory::Memory, *};
+
+    #[test]
+    fn closing_defaults_to_the_tray_and_a_saved_quit_respects_active_capture() {
+        let backing = Memory::default();
+        assert_eq!(
+            read_close_button(&backing).on_close(false),
+            CloseAction::Hide
+        );
+        save_close_button(&backing, CloseButton::Quit).unwrap();
+        assert_eq!(
+            read_close_button(&backing).on_close(false),
+            CloseAction::Quit
+        );
+        assert_eq!(
+            read_close_button(&backing).on_close(true),
+            CloseAction::KeepOpen
+        );
+        assert_eq!(backing.persisted(CLOSE_BUTTON), Some(json!("quit")));
+    }
+
+    #[test]
+    fn the_tray_notice_is_remembered_after_successful_delivery() {
+        let backing = Memory::default();
+        assert!(show_tray_notice(&backing, || Err("not delivered".into())).is_err());
+        show_tray_notice(&backing, || Ok(())).unwrap();
+        assert_eq!(backing.persisted(TRAY_NOTICE_SHOWN), Some(json!(true)));
+        show_tray_notice(&backing, || panic!("The notice was already delivered")).unwrap();
+    }
 
     #[test]
     fn native_ui_preferences_migrate_once() {
