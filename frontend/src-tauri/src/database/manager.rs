@@ -43,7 +43,13 @@ pub struct DatabaseManager {
 
 impl DatabaseManager {
     pub async fn new(tauri_db_path: &str, backend_db_path: &str) -> Result<Self> {
-        Self::open(tauri_db_path, backend_db_path, true).await
+        Self::open(
+            tauri_db_path,
+            backend_db_path,
+            true,
+            publish_migration_snapshot,
+        )
+        .await
     }
 
     /// The same backup, repair and migration path as [`Self::new`], without the
@@ -51,13 +57,20 @@ impl DatabaseManager {
     /// credential store. The packaged self-test opens its disposable profile this
     /// way so it can never read or write the real credential store.
     pub(crate) async fn new_isolated(tauri_db_path: &str, backend_db_path: &str) -> Result<Self> {
-        Self::open(tauri_db_path, backend_db_path, false).await
+        Self::open(
+            tauri_db_path,
+            backend_db_path,
+            false,
+            publish_migration_snapshot,
+        )
+        .await
     }
 
     async fn open(
         tauri_db_path: &str,
         backend_db_path: &str,
         migrate_credentials: bool,
+        publish_snapshot: SnapshotPublisher,
     ) -> Result<Self> {
         if let Some(parent_dir) = Path::new(tauri_db_path).parent() {
             if !parent_dir.exists() {
@@ -99,19 +112,11 @@ impl DatabaseManager {
         if remove_abandoned_snapshot_staging(Path::new(tauri_db_path)).is_err() {
             log::warn!("Could not remove abandoned pre-migration database staging files");
         }
-        match backup_before_migrations(&pool, Path::new(tauri_db_path), &migrator).await {
-            Ok(MigrationBackup::Ready) => {}
-            Ok(MigrationBackup::PublishFailed(error)) => {
-                log::warn!(
-                    "Could not publish the pre-migration database backup; migrations were deferred"
-                );
-                return Err(sqlx::Error::Io(error));
-            }
-            Err(_) => {
-                log::warn!(
-                    "Could not create the pre-migration database backup; continuing startup"
-                );
-            }
+        if backup_before_migrations(&pool, Path::new(tauri_db_path), &migrator, publish_snapshot)
+            .await
+            .is_err()
+        {
+            log::warn!("Could not create the pre-migration database backup; continuing startup");
         }
         Self::reconcile_line_ending_checksums(&pool, &migrator).await?;
         migrator.run(&pool).await?;
@@ -345,16 +350,14 @@ fn connection_options(path: &Path) -> SqliteConnectOptions {
         .foreign_keys(true)
 }
 
-enum MigrationBackup {
-    Ready,
-    PublishFailed(std::io::Error),
-}
+type SnapshotPublisher = fn(tempfile::TempPath, &Path) -> std::io::Result<()>;
 
 async fn backup_before_migrations(
     pool: &SqlitePool,
     database: &Path,
     migrator: &sqlx::migrate::Migrator,
-) -> Result<MigrationBackup> {
+    publish_snapshot: SnapshotPublisher,
+) -> Result<()> {
     let ledger: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )
@@ -367,7 +370,7 @@ async fn backup_before_migrations(
         .fetch_one(pool)
         .await?;
         if user_tables == 0 {
-            return Ok(MigrationBackup::Ready);
+            return Ok(());
         }
     }
     let applied: Vec<i64> = if ledger > 0 {
@@ -381,7 +384,7 @@ async fn backup_before_migrations(
         .iter()
         .all(|migration| applied.contains(&migration.version))
     {
-        return Ok(MigrationBackup::Ready);
+        return Ok(());
     }
     let root = database.parent().unwrap_or(Path::new(".")).join("backups");
     fs::create_dir_all(&root).map_err(sqlx::Error::Io)?;
@@ -398,10 +401,7 @@ async fn backup_before_migrations(
         .bind(staged.to_string_lossy().as_ref())
         .execute(pool)
         .await?;
-    if let Err(error) = publish_migration_snapshot(staged, &target) {
-        // Keep older snapshots and leave the source database at its old schema.
-        return Ok(MigrationBackup::PublishFailed(error));
-    }
+    publish_snapshot(staged, &target)?;
     if scrub_snapshot_profiles(&target).await.is_err() {
         log::warn!("Could not scrub saved voices from the new pre-migration database backup; keeping the rollback copy");
     }
@@ -423,7 +423,7 @@ async fn backup_before_migrations(
     for (_, path) in backups.into_iter().skip(2) {
         fs::remove_file(path).map_err(sqlx::Error::Io)?;
     }
-    Ok(MigrationBackup::Ready)
+    Ok(())
 }
 
 fn publish_migration_snapshot(staged: tempfile::TempPath, target: &Path) -> std::io::Result<()> {
@@ -769,6 +769,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_migrates_after_snapshot_publish_fails_and_cleans_the_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DATABASE_FILENAME);
+        let legacy = dir.path().join("missing.db");
+        let mut connection = connection_options(&path)
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE legacy_data (value TEXT)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO legacy_data VALUES ('preserved')")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+
+        let manager = DatabaseManager::open(
+            path.to_str().unwrap(),
+            legacy.to_str().unwrap(),
+            false,
+            |staged, target| {
+                // A destination collision makes the real no-clobber rename fail.
+                fs::copy(&staged, target).unwrap();
+                Err(publish_migration_snapshot(staged, target).unwrap_err())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM speaker_profile_preferences")
+                .fetch_one(&manager.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT value FROM legacy_data")
+                .fetch_one(&manager.pool)
+                .await
+                .unwrap(),
+            "preserved"
+        );
+        let files = fs::read_dir(dir.path().join("backups"))
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(regex::Regex::new(SNAPSHOT_NAME)
+            .unwrap()
+            .is_match(&files[0].file_name().to_string_lossy()));
+        manager.pool.close().await;
+    }
+
+    #[tokio::test]
     async fn a_failed_voice_scrub_keeps_the_published_rollback_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(DATABASE_FILENAME);
@@ -786,7 +844,7 @@ mod tests {
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)")
             .execute(&pool).await.unwrap();
 
-        backup_before_migrations(&pool, &path, &migrator)
+        backup_before_migrations(&pool, &path, &migrator, publish_migration_snapshot)
             .await
             .unwrap();
 
@@ -870,7 +928,7 @@ mod tests {
             .execute(&pool).await.unwrap();
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)")
             .execute(&pool).await.unwrap();
-        backup_before_migrations(&pool, &path, &migrator)
+        backup_before_migrations(&pool, &path, &migrator, publish_migration_snapshot)
             .await
             .unwrap();
 
@@ -964,7 +1022,7 @@ mod tests {
             .await
             .unwrap();
         let migrator = sqlx::migrate!("./migrations");
-        backup_before_migrations(&pool, &path, &migrator)
+        backup_before_migrations(&pool, &path, &migrator, publish_migration_snapshot)
             .await
             .unwrap();
         assert!(
@@ -975,7 +1033,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        backup_before_migrations(&pool, &path, &migrator)
+        backup_before_migrations(&pool, &path, &migrator, publish_migration_snapshot)
             .await
             .unwrap();
         migrator.run(&pool).await.unwrap();
@@ -988,13 +1046,13 @@ mod tests {
             std::time::SystemTime::now() + Duration::from_secs(24 * 60 * 60),
         )
         .unwrap();
-        backup_before_migrations(&pool, &path, &migrator)
+        backup_before_migrations(&pool, &path, &migrator, publish_migration_snapshot)
             .await
             .unwrap();
         assert_eq!(fs::read_dir(&backup_dir).unwrap().count(), 2);
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)").execute(&pool).await.unwrap();
         for _ in 0..3 {
-            backup_before_migrations(&pool, &path, &migrator)
+            backup_before_migrations(&pool, &path, &migrator, publish_migration_snapshot)
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(5)).await;

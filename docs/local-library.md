@@ -623,8 +623,9 @@ or cleanup fails. Portable backups are separate, unencrypted archives. Meeting
 deletion does not remove these archives or copies exported elsewhere.
 ClawScribe syncs each pre-migration snapshot in a staging file and renames it
 into place before removing speaker profiles and pending voice matches. If the
-sync or rename fails, startup defers the migration. If a scrub fails, ClawScribe
-keeps the rollback copy and retries at startup and when deleting a profile or
-turning off speaker profiles.
+sync or rename fails, ClawScribe discards the staging file, logs a warning,
+and continues startup and migration. If a scrub fails, ClawScribe keeps the
+rollback copy and retries at startup and when deleting a profile or turning
+off speaker profiles.
 Scrubbing preserves the snapshot's original expiration date. Startup removes
 abandoned snapshot staging files.
