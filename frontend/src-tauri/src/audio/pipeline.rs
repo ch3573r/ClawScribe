@@ -12,7 +12,9 @@ use super::audio_processing::{
     audio_to_mono, HighPassFilter, LoudnessNormalizer, NoiseSuppressionProcessor,
 };
 use super::devices::AudioDevice;
-use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState};
+use super::recording_state::{
+    AudioChunk, AudioError, DeviceType, RecordingState, CAPTURE_HANDOFF_MS,
+};
 use super::transcription::queue::{BufferedSpool, TranscriptionQueueSender};
 use super::vad::ContinuousVadProcessor;
 
@@ -325,7 +327,7 @@ impl AudioMixerRingBuffer {
             system: SourceTimeline::default(),
             cursor: 0,
             window_size_samples,
-            source_grace_samples: u64::from(rate / 10),
+            source_grace_samples: (u64::from(rate) * u64::from(CAPTURE_HANDOFF_MS)).div_ceil(1_000),
             max_buffer_size: window_size_samples * 8,
         }
     }
@@ -338,11 +340,19 @@ impl AudioMixerRingBuffer {
         source.add(self.cursor, start, samples, self.max_buffer_size)
     }
 
-    fn extract_window(&mut self, idle_clock: u64) -> Option<(u64, Vec<f32>, Vec<f32>)> {
+    fn extract_window(
+        &mut self,
+        idle_clock: u64,
+        allow_padding: bool,
+        protected: [bool; 2],
+    ) -> Option<(u64, Vec<f32>, Vec<f32>)> {
         let end = self.cursor + self.window_size_samples as u64;
-        let ready = self.mic.end.min(self.system.end) >= end
-            || self.mic.end.max(self.system.end).max(idle_clock) >= end + self.source_grace_samples;
-        ready.then(|| self.take_window(self.window_size_samples))
+        let ready = self.mic.end >= end && self.system.end >= end;
+        let can_pad = allow_padding
+            && (!protected[0] || self.mic.end >= end)
+            && (!protected[1] || self.system.end >= end)
+            && self.mic.end.max(self.system.end).max(idle_clock) >= end + self.source_grace_samples;
+        (ready || can_pad).then(|| self.take_window(self.window_size_samples))
     }
 
     fn extract_tail(&mut self, lost_through: u64) -> Option<(u64, Vec<f32>, Vec<f32>)> {
@@ -521,6 +531,10 @@ pub struct AudioCapture {
 }
 
 impl AudioCapture {
+    pub(super) fn device_type(&self) -> DeviceType {
+        self.device_type.clone()
+    }
+
     pub fn new(
         device: Arc<AudioDevice>,
         state: Arc<RecordingState>,
@@ -1071,9 +1085,8 @@ impl AudioPipeline {
             }
             let mut microphone_samples = false;
             let mut system_audible = false;
-            let mut idle_clock = 0;
             // Receive audio chunks with timeout
-            match tokio::time::timeout(
+            let idle = match tokio::time::timeout(
                 std::time::Duration::from_millis(50), // Shorter timeout for responsiveness
                 self.receiver.recv(),
             )
@@ -1130,6 +1143,7 @@ impl AudioPipeline {
                     if dropped > 0 {
                         self.state.record_sample_loss(dropped);
                     }
+                    false
                 }
                 Ok(None) => {
                     info!(
@@ -1138,21 +1152,35 @@ impl AudioPipeline {
                     );
                     break;
                 }
-                Err(_) => {
-                    // WASAPI may deliver no packets during loopback silence.
-                    // Advance only after an empty receive, so queued audio
-                    // takes precedence over the clock.
-                    if self.state.get_microphone_device().is_some()
-                        || self.state.get_system_device().is_some()
-                    {
-                        if let Some(stamp) = self.state.capture_stamp(std::time::Instant::now()) {
-                            idle_clock = (stamp.seconds * f64::from(self.sample_rate)) as u64;
-                        }
-                    }
-                }
-            }
+                Err(_) => true,
+            };
 
-            while let Some((start, mic, system)) = self.ring_buffer.extract_window(idle_clock) {
+            let now = std::time::Instant::now();
+            let clock = self.state.capture_stamp(now).map_or(0, |stamp| {
+                (stamp.seconds * f64::from(self.sample_rate)) as u64
+            });
+            // Packetless loopback can advance on idle ticks. A source with
+            // admitted input or recent callbacks gets time to deliver its DSP
+            // output. Take the queue check after reading worker progress.
+            let idle_clock = if idle
+                && (self.state.get_microphone_device().is_some()
+                    || self.state.get_system_device().is_some())
+            {
+                clock
+            } else {
+                0
+            };
+            loop {
+                let protected = self
+                    .state
+                    .sources_with_pending_capture(clock, self.ring_buffer.source_grace_samples);
+                let Some((start, mic, system)) = self.ring_buffer.extract_window(
+                    idle_clock,
+                    self.receiver.is_empty(),
+                    protected,
+                ) else {
+                    break;
+                };
                 self.process_mixed_window(start, &mic, &system).await?;
             }
 
@@ -1779,13 +1807,13 @@ mod queue_failure_tests {
     fn mixer_continues_when_only_one_source_delivers() {
         let mut mixer = AudioMixerRingBuffer::new(48_000);
         mixer.add_samples(DeviceType::System, 0, vec![0.5; 28_800]);
-        assert!(mixer.extract_window(0).is_none());
-        mixer.add_samples(DeviceType::System, 28_800, vec![0.5; 4_800]);
-        let (start, mic, system) = mixer.extract_window(0).unwrap();
+        assert!(mixer.extract_window(0, true, [false; 2]).is_none());
+        mixer.add_samples(DeviceType::System, 28_800, vec![0.5; 19_200]);
+        let (start, mic, system) = mixer.extract_window(0, true, [false; 2]).unwrap();
         assert_eq!(start, 0);
         assert_eq!(mic, vec![0.0; 28_800]);
         assert_eq!(system, vec![0.5; 28_800]);
-        assert_eq!(mixer.system.buffered, 4_800);
+        assert_eq!(mixer.system.buffered, 19_200);
     }
 
     #[test]
@@ -1795,7 +1823,7 @@ mod queue_failure_tests {
         samples.extend(vec![0.25; mixer.max_buffer_size]);
         assert_eq!(mixer.add_samples(DeviceType::System, 0, samples), 7);
         assert_eq!(mixer.system.buffered, mixer.max_buffer_size);
-        let (_, _, system) = mixer.extract_window(0).unwrap();
+        let (_, _, system) = mixer.extract_window(0, true, [false; 2]).unwrap();
         assert_eq!(system[..7], [0.0; 7]);
         assert_eq!(system[7], 0.25);
         assert_eq!(mixer.mic.buffered, 0);
@@ -1804,37 +1832,71 @@ mod queue_failure_tests {
     #[test]
     fn late_source_and_gaps_stay_at_their_capture_positions() {
         let mut mixer = AudioMixerRingBuffer::new(1_000);
-        mixer.add_samples(DeviceType::System, 0, vec![0.1; 700]);
-        assert_eq!(mixer.extract_window(0).unwrap().1, vec![0.0; 600]);
+        mixer.add_samples(DeviceType::System, 0, vec![0.1; 1_000]);
+        assert_eq!(
+            mixer.extract_window(0, true, [false; 2]).unwrap().1,
+            vec![0.0; 600]
+        );
         assert_eq!(
             mixer.add_samples(DeviceType::Microphone, 580, vec![0.2; 30]),
             20
         );
         mixer.add_samples(DeviceType::Microphone, 700, vec![0.3; 100]);
-        mixer.add_samples(DeviceType::System, 700, vec![0.1; 600]);
+        mixer.add_samples(DeviceType::System, 1_000, vec![0.1; 600]);
 
-        let (start, mic, system) = mixer.extract_window(0).unwrap();
+        let (start, mic, system) = mixer.extract_window(0, true, [false; 2]).unwrap();
         assert_eq!(start, 600);
         assert_eq!(mic[..10], [0.2; 10]);
         assert_eq!(mic[10..100], [0.0; 90]);
         assert_eq!(mic[100..200], [0.3; 100]);
         assert_eq!(mic[200..], [0.0; 400]);
         assert_eq!(system, vec![0.1; 600]);
-        let (start, _, system) = mixer.extract_tail(1_304).unwrap();
+        let (start, _, system) = mixer.extract_tail(1_604).unwrap();
         assert_eq!(start, 1_200);
-        assert_eq!(system[..100], [0.1; 100]);
-        assert_eq!(system[100..], [0.0; 4]);
+        assert_eq!(system[..400], [0.1; 400]);
+        assert_eq!(system[400..], [0.0; 4]);
     }
 
     #[test]
     fn packetless_capture_advances_after_the_same_window_grace_period() {
         let mut mixer = AudioMixerRingBuffer::new(1_000);
-        assert!(mixer.extract_window(699).is_none());
-        let (start, mic, system) = mixer.extract_window(700).unwrap();
+        assert!(mixer.extract_window(999, true, [false; 2]).is_none());
+        let (start, mic, system) = mixer.extract_window(1_000, true, [false; 2]).unwrap();
         assert_eq!(start, 0);
         assert_eq!(mic, vec![0.0; 600]);
         assert_eq!(mic, system);
-        assert!(mixer.extract_window(700).is_none());
+        assert!(mixer.extract_window(1_000, true, [false; 2]).is_none());
+    }
+
+    #[test]
+    fn a_worker_delayed_by_200_ms_still_contributes_its_admitted_audio() {
+        use super::super::recording_state::CaptureProgress;
+        use std::sync::atomic::Ordering;
+
+        let state = RecordingState::new();
+        let mic_progress = Arc::new(CaptureProgress::default());
+        state.register_capture_progress(DeviceType::Microphone, &mic_progress);
+        mic_progress.admitted_end.store(600, Ordering::Release);
+        mic_progress.pending_packets.store(1, Ordering::Release);
+
+        let mut mixer = AudioMixerRingBuffer::new(1_000);
+        mixer.add_samples(DeviceType::System, 0, vec![0.25; 800]);
+        let protected = state.sources_with_pending_capture(800, mixer.source_grace_samples);
+        assert!(mixer.extract_window(800, true, protected).is_none());
+        // A worker that has already admitted samples keeps the cursor behind
+        // its pending output even if the wall clock runs past the grace period.
+        let protected = state.sources_with_pending_capture(1_050, mixer.source_grace_samples);
+        assert!(mixer.extract_window(1_050, true, protected).is_none());
+
+        assert_eq!(
+            mixer.add_samples(DeviceType::Microphone, 0, vec![0.5; 600]),
+            0
+        );
+        mic_progress.pending_packets.store(0, Ordering::Release);
+        let (start, mic, system) = mixer.extract_window(1_050, true, protected).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(mic, vec![0.5; 600]);
+        assert_eq!(system, vec![0.25; 600]);
     }
 
     #[test]

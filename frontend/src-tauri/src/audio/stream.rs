@@ -13,8 +13,8 @@ use tokio::sync::mpsc;
 
 use super::capture::{get_current_backend, AudioCaptureBackend};
 use super::devices::{get_device_and_config, AudioDevice};
-use super::pipeline::AudioCapture;
-use super::recording_state::{DeviceType, RecordingState};
+use super::pipeline::{AudioCapture, CAPTURE_SAMPLE_RATE};
+use super::recording_state::{CaptureProgress, DeviceType, RecordingState, CAPTURE_HANDOFF_MS};
 
 #[cfg(target_os = "macos")]
 use super::capture::CoreAudioCapture;
@@ -43,10 +43,8 @@ pub struct AudioStream {
 // SAFETY: AudioStream contains StreamBackend which we've marked as Send
 unsafe impl Send for AudioStream {}
 
-const PACKET_POOL_SIZE: usize = 32;
-
-struct CapturePacket<T> {
-    samples: Vec<T>,
+struct CapturePacket {
+    samples: usize,
     resume_revision: u64,
     timestamp: f64,
     missing_frames: usize,
@@ -56,46 +54,45 @@ struct CapturePacket<T> {
 struct CaptureHandoffStatus {
     copying: AtomicBool,
     dropped_samples: AtomicUsize,
+    progress: Arc<CaptureProgress>,
 }
 
 struct CaptureInput<T> {
-    ready: HeapProd<CapturePacket<T>>,
-    free: HeapCons<Vec<T>>,
+    ready: HeapProd<CapturePacket>,
+    samples: HeapProd<T>,
     status: Arc<CaptureHandoffStatus>,
-    packet_capacity: usize,
     missing_frames: usize,
 }
 
 struct CaptureOutput<T> {
-    ready: HeapCons<CapturePacket<T>>,
-    free: HeapProd<Vec<T>>,
+    ready: HeapCons<CapturePacket>,
+    samples: HeapCons<T>,
     status: Arc<CaptureHandoffStatus>,
 }
 
-fn capture_handoff<T>(
-    packet_capacity: usize,
-    packet_count: usize,
-) -> (CaptureInput<T>, CaptureOutput<T>) {
-    let (ready_tx, ready_rx) = HeapRb::new(packet_count).split();
-    let (mut free_tx, free_rx) = HeapRb::new(packet_count).split();
-    for _ in 0..packet_count {
-        let _ = free_tx.try_push(Vec::with_capacity(packet_capacity));
-    }
+fn capture_handoff<T>(frames: usize, channels: usize) -> (CaptureInput<T>, CaptureOutput<T>) {
+    // A callback may contain as little as one frame. Reserve enough packet
+    // descriptors to use the entire sample ring at any callback size.
+    let (ready_tx, ready_rx) = HeapRb::new(frames).split();
+    let (sample_tx, sample_rx) = HeapRb::new(frames * channels).split();
     let status = Arc::new(CaptureHandoffStatus::default());
     (
         CaptureInput {
             ready: ready_tx,
-            free: free_rx,
+            samples: sample_tx,
             status: status.clone(),
-            packet_capacity,
             missing_frames: 0,
         },
         CaptureOutput {
             ready: ready_rx,
-            free: free_tx,
+            samples: sample_rx,
             status,
         },
     )
+}
+
+fn handoff_frames(rate: u32) -> usize {
+    (rate as usize * CAPTURE_HANDOFF_MS as usize).div_ceil(1_000)
 }
 
 impl<T: Copy> CaptureInput<T> {
@@ -107,32 +104,81 @@ impl<T: Copy> CaptureInput<T> {
         rate: u32,
         channels: usize,
     ) -> bool {
-        let mut remaining = samples;
-        while !remaining.is_empty() {
-            let Some(mut buffer) = self.free.try_pop() else {
-                self.missing_frames += remaining.len() / channels;
-                self.status
-                    .dropped_samples
-                    .fetch_add(remaining.len(), Ordering::Relaxed);
-                return false;
-            };
-            let (packet, rest) = remaining.split_at(remaining.len().min(self.packet_capacity));
-            buffer.extend_from_slice(packet);
-            // Every ready packet uses one of the fixed number of free buffers.
+        let frames = samples.len() / channels;
+        let available = if self.ready.is_full() {
+            0
+        } else {
+            self.samples.vacant_len() / channels
+        };
+        let accepted = frames.min(available);
+        if accepted > 0 {
+            let end = timestamp + accepted as f64 / f64::from(rate);
+            self.status
+                .progress
+                .pending_packets
+                .fetch_add(1, Ordering::AcqRel);
+            self.status.progress.admitted_end.fetch_max(
+                (end * f64::from(CAPTURE_SAMPLE_RATE)).round() as u64,
+                Ordering::Release,
+            );
+            let sample_count = accepted * channels;
+            self.samples.push_slice(&samples[..sample_count]);
+            // The descriptor makes the samples visible as one complete packet.
             let _ = self.ready.try_push(CapturePacket {
-                samples: buffer,
+                samples: sample_count,
                 resume_revision,
-                timestamp: timestamp
-                    + ((samples.len() - remaining.len()) / channels) as f64 / f64::from(rate),
+                timestamp,
                 missing_frames: std::mem::take(&mut self.missing_frames),
             });
-            remaining = rest;
         }
-        true
+        let dropped = frames - accepted;
+        self.missing_frames += dropped;
+        self.status
+            .dropped_samples
+            .fetch_add(dropped * channels, Ordering::Relaxed);
+        dropped == 0
     }
 }
 
-impl<T: cpal::SizedSample + Copy + Send + 'static> CaptureOutput<T> {
+#[cfg(windows)]
+struct DspThreadPriority(Option<windows::Win32::Foundation::HANDLE>);
+
+#[cfg(windows)]
+impl DspThreadPriority {
+    fn elevate() -> Self {
+        use windows::Win32::System::Threading::{
+            AvSetMmThreadCharacteristicsW, GetCurrentThread, SetThreadPriority,
+            THREAD_PRIORITY_HIGHEST,
+        };
+        let mut task_index = 0;
+        // These APIs affect only the current worker. The MMCSS handle is
+        // released on this same thread when the worker exits.
+        unsafe {
+            if let Ok(handle) =
+                AvSetMmThreadCharacteristicsW(windows::core::w!("Pro Audio"), &mut task_index)
+            {
+                Self(Some(handle))
+            } else {
+                let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+                Self(None)
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for DspThreadPriority {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0 {
+            // The handle is owned by this worker's MMCSS registration.
+            let _ = unsafe {
+                windows::Win32::System::Threading::AvRevertMmThreadCharacteristics(handle)
+            };
+        }
+    }
+}
+
+impl<T: cpal::SizedSample + Copy + Default + Send + 'static> CaptureOutput<T> {
     fn run(
         mut self,
         state: Arc<RecordingState>,
@@ -142,6 +188,7 @@ impl<T: cpal::SizedSample + Copy + Send + 'static> CaptureOutput<T> {
         channels: u16,
         to_f32: impl Fn(T) -> f32,
     ) {
+        let mut raw = Vec::new();
         let mut converted = Vec::new();
         loop {
             let stopped = !state.is_recording() || !self.ready.write_is_held();
@@ -153,11 +200,12 @@ impl<T: cpal::SizedSample + Copy + Send + 'static> CaptureOutput<T> {
                     (dropped * 48_000).div_ceil(usize::from(channels) * sample_rate as usize),
                 );
             }
-            if let Some(mut packet) = self.ready.try_pop() {
+            if let Some(packet) = self.ready.try_pop() {
+                raw.resize(packet.samples, T::default());
+                let count = self.samples.pop_slice(&mut raw);
+                debug_assert_eq!(count, packet.samples);
                 converted.clear();
-                converted.extend(packet.samples.iter().copied().map(&to_f32));
-                packet.samples.clear();
-                let _ = self.free.try_push(packet.samples);
+                converted.extend(raw[..count].iter().copied().map(&to_f32));
                 capture.process_captured_data(
                     &converted,
                     packet.resume_revision,
@@ -165,6 +213,10 @@ impl<T: cpal::SizedSample + Copy + Send + 'static> CaptureOutput<T> {
                     packet.missing_frames,
                     |chunk| state.send_captured_chunk(&sender, chunk),
                 );
+                self.status
+                    .progress
+                    .pending_packets
+                    .fetch_sub(1, Ordering::AcqRel);
             } else if can_exit {
                 capture.finish_capture(|chunk| state.send_captured_chunk(&sender, chunk));
                 return;
@@ -426,7 +478,7 @@ impl AudioStream {
         }
     }
 
-    fn build_typed_stream<T: cpal::SizedSample + Copy + Send + 'static>(
+    fn build_typed_stream<T: cpal::SizedSample + Copy + Default + Send + 'static>(
         device: &Device,
         config: &SupportedStreamConfig,
         state: Arc<RecordingState>,
@@ -438,8 +490,8 @@ impl AudioStream {
             .ok_or_else(|| anyhow::anyhow!("Audio pipeline not ready"))?;
         let rate = config.sample_rate().0;
         let channels = config.channels();
-        let packet_capacity = (rate as usize).div_ceil(10) * usize::from(channels);
-        let (mut input, output) = capture_handoff(packet_capacity, PACKET_POOL_SIZE);
+        let (mut input, output) = capture_handoff(handoff_frames(rate), usize::from(channels));
+        state.register_capture_progress(capture.device_type(), &input.status.progress);
         let callback_state = state.clone();
         let error_handler = capture.clone();
         let stream = device.build_input_stream(
@@ -480,7 +532,11 @@ impl AudioStream {
         )?;
         std::thread::Builder::new()
             .name("audio-capture-dsp".into())
-            .spawn(move || output.run(state, capture, sender, rate, channels, to_f32))?;
+            .spawn(move || {
+                #[cfg(windows)]
+                let _priority = DspThreadPriority::elevate();
+                output.run(state, capture, sender, rate, channels, to_f32);
+            })?;
         Ok(stream)
     }
 
@@ -707,8 +763,9 @@ mod tests {
             1,
             DeviceType::System,
         );
-        let (mut input, output) = capture_handoff(2, 2);
-        assert!(!input.copy_samples(&[1_i16, 2, 3, 4, 5, 6], 0, 0.0, 48_000, 1));
+        let (mut input, output) = capture_handoff(4, 1);
+        assert!(input.copy_samples(&[1_i16, 2], 0, 0.0, 48_000, 1));
+        assert!(!input.copy_samples(&[3, 4, 5, 6], 0, 2.0 / 48_000.0, 48_000, 1));
 
         // The driver can still own its callback when Stop freezes capture.
         state.stop_recording();
@@ -722,5 +779,21 @@ mod tests {
         ));
         assert!(state.capture_incomplete());
         assert_eq!(state.health.lock().unwrap().details.dropped_samples, 2);
+    }
+
+    #[test]
+    fn short_callbacks_use_the_full_handoff_duration() {
+        let rate = 48_000;
+        let frames = handoff_frames(rate);
+        let (mut input, _output) = capture_handoff(frames, 2);
+        for frame in 0..frames {
+            let start = frame as f64 / f64::from(rate);
+            assert!(input.copy_samples(&[1_i16, 2], 0, start, rate, 2));
+        }
+        assert_eq!(
+            input.status.progress.admitted_end.load(Ordering::Acquire),
+            frames as u64
+        );
+        assert!(!input.copy_samples(&[3, 4], 0, 0.4, rate, 2));
     }
 }

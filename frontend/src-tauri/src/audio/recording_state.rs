@@ -55,6 +55,14 @@ pub struct AudioChunk {
     pub device_type: DeviceType,
 }
 
+pub(super) const CAPTURE_HANDOFF_MS: u32 = 400;
+
+#[derive(Default)]
+pub(super) struct CaptureProgress {
+    pub admitted_end: AtomicU64,
+    pub pending_packets: AtomicU64,
+}
+
 pub(super) struct CaptureStamp {
     pub resume_revision: u64,
     pub seconds: f64,
@@ -158,6 +166,7 @@ pub struct RecordingState {
     capture_origin_ns: AtomicU64,
     capture_cutoff_ns: AtomicU64,
     capture_lost_through: AtomicU64,
+    capture_progress: Mutex<Vec<(DeviceType, std::sync::Weak<CaptureProgress>)>>,
 
     // Audio devices
     microphone_device: Mutex<Option<Arc<AudioDevice>>>,
@@ -335,6 +344,29 @@ impl RecordingState {
 
     pub(super) fn capture_gap_end(&self) -> u64 {
         self.capture_lost_through.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn register_capture_progress(
+        &self,
+        source: DeviceType,
+        progress: &Arc<CaptureProgress>,
+    ) {
+        let mut sources = self.capture_progress.lock().unwrap();
+        sources.retain(|(_, source)| source.strong_count() > 0);
+        sources.push((source, Arc::downgrade(progress)));
+    }
+
+    pub(super) fn sources_with_pending_capture(&self, clock: u64, grace: u64) -> [bool; 2] {
+        let mut active = [false; 2];
+        for (device, progress) in self.capture_progress.lock().unwrap().iter() {
+            if let Some(progress) = progress.upgrade() {
+                let end = progress.admitted_end.load(Ordering::Acquire);
+                let pending = progress.pending_packets.load(Ordering::Acquire);
+                let index = usize::from(*device == DeviceType::System);
+                active[index] |= pending > 0 || (end > 0 && clock < end.saturating_add(grace));
+            }
+        }
+        active
     }
 
     pub fn mark_source_missing(&self, device: Arc<AudioDevice>, device_type: DeviceType) {
@@ -785,6 +817,7 @@ impl Default for RecordingState {
             capture_origin_ns: AtomicU64::new(0),
             capture_cutoff_ns: AtomicU64::new(0),
             capture_lost_through: AtomicU64::new(0),
+            capture_progress: Mutex::new(Vec::new()),
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
             disconnected_devices: Mutex::new(Vec::new()),
