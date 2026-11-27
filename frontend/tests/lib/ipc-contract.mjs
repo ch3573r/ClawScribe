@@ -142,13 +142,35 @@ function commandNames(checker, expression, seen = new Set()) {
 }
 
 function argumentVariants(checker, args) {
-  if (!args) return [new Set()];
+  if (!args) return [new Map()];
   const type = checker.getTypeAtLocation(args);
   return (type.isUnion() ? type.types : [type]).map(variant => {
-    if (variant.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) return new Set();
+    if (variant.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) return new Map();
     if (variant.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) || checker.getIndexTypeOfType(variant, ts.IndexKind.String)) return null;
-    return new Set(checker.getPropertiesOfType(variant).map(property => property.name));
+    return new Map(checker.getPropertiesOfType(variant)
+      .map(property => [property.name, Boolean(property.flags & ts.SymbolFlags.Optional)]));
   });
+}
+
+function describeArguments(variant) {
+  return variant ? [...variant].map(([key, optional]) => key + (optional ? '?' : '')).join(', ') : '<dynamic keys>';
+}
+
+// A call that uses only completion or errors imposes no return type on the
+// app. Follow the promise through awaits and callbacks that ignore its value.
+function discardsResult(expression) {
+  const parent = expression.parent;
+  if (ts.isExpressionStatement(parent) || ts.isVoidExpression(parent)) return true;
+  if (ts.isAwaitExpression(parent) || ts.isParenthesizedExpression(parent)) return discardsResult(parent);
+  if (ts.isPropertyAccessExpression(parent) && parent.expression === expression
+    && ts.isCallExpression(parent.parent) && parent.parent.expression === parent) {
+    const method = parent.name.text;
+    if (method === 'catch' || method === 'finally') return discardsResult(parent.parent);
+    const handler = parent.parent.arguments[0];
+    if (method === 'then' && handler && (ts.isArrowFunction(handler) || ts.isFunctionExpression(handler))
+      && handler.parameters.length === 0) return true;
+  }
+  return false;
 }
 
 function returnMatches(expected, type) {
@@ -192,9 +214,17 @@ export function inspectInvokes(program, sources, signatures) {
       }
     }
     function isInvoke(expression) {
-      return ts.isIdentifier(expression) && imports.has(checker.getSymbolAtLocation(expression))
-        || ts.isPropertyAccessExpression(expression) && expression.name.text === 'invoke'
-          && namespaces.has(checker.getSymbolAtLocation(expression.expression));
+      if (ts.isIdentifier(expression)) {
+        const symbol = checker.getSymbolAtLocation(expression);
+        if (imports.has(symbol)) return true;
+        // Injection seams such as meetingTranscripts use the exact native
+        // function type so calls through the parameter are also checked.
+        const parameter = symbol?.valueDeclaration;
+        return parameter && ts.isParameter(parameter) && parameter.type && ts.isTypeQueryNode(parameter.type)
+          && imports.has(checker.getSymbolAtLocation(parameter.type.exprName));
+      }
+      return ts.isPropertyAccessExpression(expression) && expression.name.text === 'invoke'
+        && namespaces.has(checker.getSymbolAtLocation(expression.expression));
     }
     function visit(node) {
       if (ts.isCallExpression(node) && isInvoke(node.expression)) {
@@ -216,22 +246,30 @@ export function inspectInvokes(program, sources, signatures) {
           if (declared && !returnMatches(signature.returns, checker.getTypeFromTypeNode(declared))) {
             problems.push(`${location} ${name} returns ${JSON.stringify(signature.returns)}, invoked as ${declared.getText()}`);
           }
+          if (!declared && signature.returns.shape !== 'unit' && !discardsResult(node)) {
+            const inferred = checker.getAwaitedType(checker.getTypeAtLocation(node));
+            if (!inferred || inferred.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) {
+              problems.push(`${location} ${name} needs a return type on the invoke or an inferred result type`);
+            } else if (!returnMatches(signature.returns, inferred)) {
+              problems.push(`${location} ${name} returns ${JSON.stringify(signature.returns)}, inferred return type is ${checker.typeToString(inferred)}`);
+            }
+          }
           return [{ name, args: signature.args }];
         });
         if (contracts.length) {
           const matches = (variant, contract) => variant
-            && contract.args.every(({ key, optional }) => optional || variant.has(key))
-            && [...variant].every(key => contract.args.some(arg => arg.key === key));
+            && contract.args.every(({ key, optional }) => optional || variant.get(key) === false)
+            && [...variant.keys()].every(key => contract.args.some(arg => arg.key === key));
           for (const contract of contracts) {
             if (!variants.some(variant => matches(variant, contract))) {
               const expected = contract.args.map(arg => arg.key + (arg.optional ? '?' : '')).join(', ');
-              const actual = variants.map(variant => variant ? [...variant].join(', ') : '<dynamic keys>').join(' | ');
+              const actual = variants.map(describeArguments).join(' | ');
               problems.push(`${location} ${contract.name} argument keys expected [${expected}], got [${actual}]`);
             }
           }
           for (const variant of variants) {
             if (variants.length > 1 && !contracts.some(contract => matches(variant, contract))) {
-              problems.push(`${location} unmatched argument variant [${variant ? [...variant].join(', ') : '<dynamic keys>'}]`);
+              problems.push(`${location} unmatched argument variant [${describeArguments(variant)}]`);
             }
           }
         }

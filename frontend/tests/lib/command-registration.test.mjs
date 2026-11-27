@@ -64,6 +64,34 @@ test('contract check resolves widened fixed-map names and validates every choice
   assert.equal(computed, 2);
 });
 
+test('contract check rejects an unchecked return cast and a possibly missing required key', () => {
+  const { problems } = fixture(`
+    import { invoke } from '@tauri-apps/api/core';
+    async function read() {
+      const result = await invoke('status', { meetingId: 'sample' }) as boolean;
+      return result;
+    }
+    declare const optional: { meetingId?: string };
+    invoke<boolean | null>('status', optional);
+    void invoke('status', { meetingId: 'sample' });
+  `, rustFixture);
+  assert.equal(problems.length, 2);
+  assert.match(problems[0], /status.*return type/);
+  assert.match(problems[1], /expected \[meetingId, optionalKey\?\], got \[meetingId\?\]/);
+});
+
+test('contract check follows parameters typed as the native invoke function', () => {
+  const { problems, checked } = fixture(`
+    import type { invoke as nativeInvoke } from '@tauri-apps/api/core';
+    export function read(invoke: typeof nativeInvoke) {
+      return invoke<boolean>('status', { meetingId: 'sample' });
+    }
+  `, rustFixture);
+  assert.equal(checked, 1);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /status returns .*option.*invoked as boolean/);
+});
+
 test('retired commands are absent and their current entry points are registered', () => {
   const registered = registeredCommands(readFileSync(path.join(frontend, 'src-tauri/src/lib.rs'), 'utf8'));
   const retired = [

@@ -1,6 +1,5 @@
 import type { PaginatedTranscriptsResponse, Transcript } from '@/types';
-
-type Invoke = <T>(command: string, args: Record<string, unknown>) => Promise<T>;
+import type { invoke as nativeInvoke } from '@tauri-apps/api/core';
 
 export interface TranscriptTextPatch {
   id: string;
@@ -9,7 +8,7 @@ export interface TranscriptTextPatch {
   word_timestamps?: Transcript['word_timestamps'] | null;
 }
 
-export async function fetchAllMeetingTranscripts(invoke: Invoke, meetingId: string): Promise<Transcript[]> {
+export async function fetchAllMeetingTranscripts(invoke: typeof nativeInvoke, meetingId: string): Promise<Transcript[]> {
   const transcripts: Transcript[] = [];
   const seen = new Set<string>();
   let offset = 0;
