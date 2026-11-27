@@ -17,7 +17,6 @@ import {
   DropdownMenuTrigger, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu';
 import { Sparkles, Settings, Loader2, FileText, Check, Square, MoreHorizontal } from 'lucide-react';
-import Analytics from '@/lib/analytics';
 import { useState, useEffect, ReactNode } from 'react';
 
 interface SummaryGeneratorButtonGroupProps {
@@ -87,8 +86,8 @@ export function SummaryGeneratorButtonGroup({
       <DropdownMenuContent align="end">{templateItems}</DropdownMenuContent>
     </DropdownMenu>}
     {!compact && <Button variant="ghost" size="sm" className="px-2" onClick={() => setSettingsDialogOpen(true)}>AI model</Button>}
-    {isGenerating ? <Button variant="outline" size="sm" onClick={() => { Analytics.trackButtonClick('stop_summary_generation', 'meeting_details'); onStopGeneration(); }}><Square className="h-4 w-4" />Stop</Button>
-      : showRegenerate && <Button size="sm" className="px-2 text-xs" disabled={generationDisabled || isCheckingModels} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details'); void onGenerateSummary(customPrompt); }}>
+    {isGenerating ? <Button variant="outline" size="sm" onClick={() => { onStopGeneration(); }}><Square className="h-4 w-4" />Stop</Button>
+      : showRegenerate && <Button size="sm" className="px-2 text-xs" disabled={generationDisabled || isCheckingModels} onClick={() => { void onGenerateSummary(customPrompt); }}>
         {isCheckingModels ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Sparkles className="h-4 w-4" />}
         {isCheckingModels ? 'Checking models…' : 'Regenerate summary'}
       </Button>}

@@ -162,7 +162,6 @@ test('toolbar opens and closes the controlled transcription dialog', () => {
     react: hooks.react,
     '@tauri-apps/api/core': { invoke: async () => null },
     '@tauri-apps/api/event': { listen: async () => () => {} },
-    '@/lib/analytics': { trackButtonClick() {} },
     '@/components/ui/button': { Button: 'button' },
     '@/components/ui/dialog': stubs(['Dialog', 'DialogContent', 'DialogHeader', 'DialogFooter', 'DialogTitle', 'DialogDescription']),
     '@/components/ui/textarea': { Textarea: 'textarea' },

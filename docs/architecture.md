@@ -50,9 +50,7 @@ recordings and migration paths continue to work.
 
 ## Data Boundaries
 
-The backend contains no analytics client or analytics commands. Frontend analytics
-calls remain inert compatibility stubs; recording stop does not read provider
-credentials or copy transcripts for telemetry.
+ClawScribe has no analytics client or telemetry commands.
 Recording, summary status and notification logs omit meeting names and
 notification contents. Summary diagnostics use the meeting ID instead.
 

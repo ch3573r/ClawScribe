@@ -109,7 +109,6 @@ function recordingSettings(t, { preferences, save }) {
     '@/components/settings/useSignalCheck': { useSignalCheck: () => ({}) },
     '@/components/settings/useAudioLevelFeed': { useAudioLevelFeed: () => ({}) },
     '@/lib/sourceAttribution': { setSourceAttribution: () => calls.push(['setSourceAttribution']) },
-    '@/lib/analytics': { default: { track: () => {} }, __esModule: true },
     '@/lib/behaviorSettings': {
       loadBehaviorSettings: async () => behavior,
       getBehaviorSettings: () => behavior,

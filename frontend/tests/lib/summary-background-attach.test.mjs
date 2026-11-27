@@ -41,7 +41,6 @@ function setup(t) {
     '@tauri-apps/api/core': { invoke },
     '@tauri-apps/plugin-dialog': { confirm: async () => true },
     sonner,
-    '@/lib/analytics': { trackSummaryGenerationCompleted: async () => {}, trackSummaryGenerationStarted: async () => {}, trackCustomPromptUsed: async () => {} },
     '@/lib/meetingTranscripts': { fetchAllMeetingTranscripts: async () => [] },
     '@/lib/transcriptFormatting': { formatTranscriptLine: () => '' },
     '@/lib/meetingDrafts': { confirmSummaryRegeneration: async () => true },

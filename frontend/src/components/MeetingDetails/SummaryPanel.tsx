@@ -13,7 +13,6 @@ import { SummarySurface } from '@/components/AISummary/SummarySurface';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { SummaryGeneratorButtonGroup } from './SummaryGeneratorButtonGroup';
 import { SummaryUpdaterButtonGroup } from './SummaryUpdaterButtonGroup';
-import Analytics from '@/lib/analytics';
 import { TextReplaceDialog } from './TextReplaceDialog';
 import { SummarySources, ResolvedSummarySource } from './SummarySources';
 import { useCallback, useEffect, useRef, useState, RefObject } from 'react';
@@ -517,7 +516,7 @@ export function SummaryPanel({
       {aiSummary && details.transcriptChanged && <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
         <p role="status" className="text-xs font-medium text-warning-foreground">Transcript changed since generation</p>
         {!isSummaryLoading && transcripts.length > 0 && <Button size="sm" disabled={generationDisabled}
-          onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details_transcript_changed'); void onGenerateSummary(customPrompt); }}>
+          onClick={() => { void onGenerateSummary(customPrompt); }}>
           {checkingModels ? 'Checking models…' : 'Regenerate'}
         </Button>}
       </div>}
@@ -596,7 +595,7 @@ export function SummaryPanel({
               <h3 className="text-base font-semibold">{transcripts.length ? 'No summary yet' : 'No transcript yet'}</h3>
               <p className="max-w-sm text-sm text-muted-foreground">{transcripts.length ? 'Notes use the template and AI model chosen in the toolbar.' : 'Transcribe the recording first, then generate a summary.'}</p>
               {transcripts.length > 0 && (
-                <Button className="mt-2" disabled={generationDisabled} onClick={() => { Analytics.trackButtonClick('generate_summary', 'meeting_details_empty'); void onGenerateSummary(customPrompt); }}>
+                <Button className="mt-2" disabled={generationDisabled} onClick={() => { void onGenerateSummary(customPrompt); }}>
                   {checkingModels ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Sparkles className="h-4 w-4" />}
                   {checkingModels ? 'Checking models…' : jobState === 'failed' || jobState === 'cancelled' ? 'Retry summary' : 'Generate summary'}
                 </Button>

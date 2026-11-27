@@ -676,7 +676,6 @@ async function meetingPage({ audioReady = true } = {}) {
     react: hooks.react,
     'framer-motion': { motion: { div: 'div' } },
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
-    '@/lib/analytics': { trackPageView() {} },
     sonner: { toast: { error() {}, warning() {}, info() {}, success() {} } },
     '@tauri-apps/api/core': { invoke: async () => 'synthetic/audio.wav' },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({}) },

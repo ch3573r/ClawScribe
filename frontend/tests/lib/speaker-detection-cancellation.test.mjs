@@ -108,7 +108,6 @@ test('a background detection can be cancelled from the meeting toolbar after nav
     '@tauri-apps/api/core': { invoke: async (command, args) => { calls.push([command, args]); return command === 'active_speaker_diarization_command' ? 'synthetic-meeting' : undefined; } },
     '@tauri-apps/api/event': { listen: async () => () => {} },
     sonner: { toast: { error() {}, success() {}, info() {} } },
-    '@/lib/analytics': { default: { trackButtonClick() {} } },
     './RetranscribeDialog': { RetranscribeDialog: 'RetranscribeDialog' },
     './SpeakerDiarizationDialog': { SpeakerDiarizationDialog: 'SpeakerDiarizationDialog' },
   });

@@ -4,7 +4,6 @@ import { getMeetingContext } from '@/lib/meetingContext';
 import { meetingDraft, reportSaveError } from '@/lib/meetingDrafts';
 import { motion } from 'framer-motion';
 import type { MeetingDetails, MeetingSummary, TranscriptSegmentData } from '@/types';
-import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
@@ -410,11 +409,6 @@ export default function PageContent({
       else setFindOpenRequest(value => value + 1);
     },
   });
-
-  // Track page view
-  useEffect(() => {
-    Analytics.trackPageView('meeting_details');
-  }, []);
 
   // Ctrl/⌘+G — generate / regenerate the summary (dispatched by AppShortcuts).
   useEffect(() => {

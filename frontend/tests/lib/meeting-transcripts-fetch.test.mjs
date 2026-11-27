@@ -79,7 +79,6 @@ function caller(kind, failOffset = -1) {
     '@tauri-apps/api/core': { invoke },
     '@tauri-apps/plugin-dialog': { confirm: async () => true },
     sonner: { toast: { error: message => errors.push(message), info() {}, success() {}, warning() {} } },
-    '@/lib/analytics': { trackCopy: async () => {}, trackSummaryGenerationStarted: async () => {}, trackCustomPromptUsed: async () => {} },
     '@/lib/meetingTranscripts': { fetchAllMeetingTranscripts },
     '@/lib/meeting-summary': loadTsModule(sourcePath('lib/meeting-summary')),
     '@/lib/summary-job-status': loadTsModule(sourcePath('lib/summary-job-status')),

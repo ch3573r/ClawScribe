@@ -1,7 +1,6 @@
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { readNoticePreference, refreshBehaviorSettings } from '@/lib/behaviorSettings';
 
@@ -45,7 +44,6 @@ export async function showRecordingNotification(): Promise<void> {
                   await invoke('set_recording_notification_preference', { enabled: false });
                   await refreshBehaviorSettings();
                 }
-                Analytics.trackButtonClick('recording_notification_acknowledged', 'toast');
                 toast.dismiss(toastId);
               }}
               className="h-auto whitespace-normal w-full px-3 py-1.5 bg-primary text-primary-foreground text-xs rounded hover:bg-primary/90 transition-colors font-medium hover:text-primary-foreground"

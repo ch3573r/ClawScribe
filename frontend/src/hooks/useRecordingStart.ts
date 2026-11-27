@@ -2,7 +2,6 @@ import { useCallback } from 'react';
 import { useTranscriptionConfig } from '@/contexts/ConfigContext';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
-import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import { offerSpeakerDetectionCancellation } from '@/lib/speakerDetectionCancellation';
 import {
@@ -90,7 +89,6 @@ export function useStartRecordingSession(setIsMeetingActive?: (active: boolean) 
       );
       if (choice) consumeNextCalendarChoice(choice);
       setIsMeetingActive?.(true);
-      Analytics.trackButtonClick('start_recording', source);
       void showRecordingNotification();
       // Calendar I/O begins only once native capture is running. The write is
       // scoped to that session; stopping or a correction can win the race.
@@ -107,7 +105,6 @@ export function useStartRecordingSession(setIsMeetingActive?: (active: boolean) 
       return sessionId;
     } catch (error) {
       setStatus(RecordingStatus.ERROR, 'Could not start the recording.');
-      Analytics.trackButtonClick('start_recording_error', source);
       // A delayed retry requires a new native request and fresh call evidence.
       if (!requestId) await offerSpeakerDetectionCancellation(error, () => start(source, undefined, title)).catch(() => {});
       throw error;

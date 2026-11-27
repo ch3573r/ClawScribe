@@ -251,7 +251,6 @@ async function page(attribution, segments, updatedSegments, { playback, toastErr
       MEETING_SERIES_TEMPLATE_CHANGED: 'attendance-change',
       getMeetingCalendar: async () => ({ attendees }),
     },
-    '@/lib/analytics': { trackPageView() {} },
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       assert.equal(command, 'resolve_meeting_audio_file');
       assert.equal(args.meetingId, 'synthetic-meeting');

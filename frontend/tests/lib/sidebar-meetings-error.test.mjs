@@ -20,7 +20,6 @@ function setup(t, meetingsReply, recording = { isRecording: false }, recordingMo
     react: hooks.react,
     'react/jsx-runtime': { jsx, jsxs: jsx },
     'next/navigation': { usePathname: () => '/settings', useRouter: () => ({ push: noop }) },
-    '@/lib/analytics': { __esModule: true, default: { trackBackendConnection() {}, trackButtonClick() {} } },
     '@tauri-apps/api/core': { invoke: async command => {
       if (command === 'api_get_meetings') return meetingsReply();
       if (command === 'list_meeting_tags') return [];

@@ -239,7 +239,6 @@ test('a joined call keeps the saved devices and leaves a separate manual calenda
       resolveRecordingCalendar: () => assert.fail('A joined call already has its own invitation'),
     },
     '@/lib/recordingNotification': { showRecordingNotification: noop },
-    '@/lib/analytics': { __esModule: true, default: { trackButtonClick: noop } },
   });
   await hooks.render(useStartRecordingSession)('calendar_call', 'native-claim');
   await flush();
@@ -518,7 +517,6 @@ test('capture starts before calendar lookup and a late match cannot bind the rep
     } } },
     '@/lib/recordingNotification': { showRecordingNotification: noop },
     '@/lib/speakerDetectionCancellation': { offerSpeakerDetectionCancellation: async () => {} },
-    '@/lib/analytics': { __esModule: true, default: { trackButtonClick: noop } },
   });
   t.after(() => hooks.unmount());
   for (const status of ['loading', 'error']) {
@@ -575,7 +573,6 @@ test('sign-out during startup keeps a stale Microsoft calendar subject out of th
       return native.promise;
     } } },
     '@/lib/recordingNotification': { showRecordingNotification: noop },
-    '@/lib/analytics': { __esModule: true, default: { trackButtonClick: noop } },
   });
   t.after(() => hooks.unmount());
   const started = hooks.render(useStartRecordingSession)('sidebar_direct');

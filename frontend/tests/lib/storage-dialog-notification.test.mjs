@@ -118,7 +118,6 @@ function setupStartFailure(t) {
       RecordingStatus: { STARTING: 'STARTING', ERROR: 'ERROR' },
     },
     '@/services/recordingService': { recordingService: { startRecordingWithDevices: async () => 'id' } },
-    '@/lib/analytics': { default: { trackButtonClick: () => {} } },
     '@/lib/recordingNotification': { showRecordingNotification: async () => {} },
     '@/lib/speakerDetectionCancellation': { offerSpeakerDetectionCancellation: async () => {} },
     '@/lib/meetingCalendar': {

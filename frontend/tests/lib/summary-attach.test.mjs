@@ -19,7 +19,6 @@ function setup(start) {
     } },
     '@tauri-apps/plugin-dialog': { confirm: async () => true },
     sonner: { toast: { error: noop, info: noop, warning: noop, success: title => events.toasts.push(title) } },
-    '@/lib/analytics': { trackSummaryGenerationCompleted: async () => {}, trackSummaryGenerationStarted: async () => {}, trackCustomPromptUsed: async () => {} },
     '@/lib/meetingTranscripts': { fetchAllMeetingTranscripts: async () => [] },
     '@/lib/transcriptFormatting': { formatTranscriptLine: () => '' },
     '@/lib/meetingDrafts': { confirmSummaryRegeneration: async () => true },
