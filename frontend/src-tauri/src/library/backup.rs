@@ -951,7 +951,7 @@ fn unpack(
     existing_ids: &HashSet<String>,
 ) -> Result<(Manifest, tempfile::TempDir), String> {
     let file = File::open(path).map_err(failure)?;
-    unpack_archive(file, root, |id, _| {
+    unpack_archive(file, root, None, |id, _| {
         if existing_ids.contains(id) {
             Extract::Skip
         } else {
@@ -971,6 +971,7 @@ enum Extract {
 fn unpack_archive(
     mut file: File,
     root: &Path,
+    scratch_volume: Option<&Path>,
     mut extract: impl FnMut(&str, bool) -> Extract,
 ) -> Result<(Manifest, tempfile::TempDir), String> {
     let mut zip = zip::ZipArchive::new(file.try_clone().map_err(failure)?).map_err(failure)?;
@@ -1068,7 +1069,7 @@ fn unpack_archive(
     let mut total = 0u64;
     let mut central_headers = Vec::with_capacity(zip.len());
     let mut local_headers = HashSet::with_capacity(zip.len());
-    let mut empty_entries = HashSet::new();
+    let mut sizes = HashMap::new();
     for i in 0..zip.len() {
         let entry = zip.by_index(i).map_err(failure)?;
         if !expected.remove(entry.name())
@@ -1082,8 +1083,8 @@ fn unpack_archive(
         if entry.name() == "manifest.json" {
             continue;
         }
-        if entry.size() == 0 {
-            empty_entries.insert(entry.name().to_owned());
+        if entry.name().starts_with("recordings/") {
+            sizes.insert(entry.name().to_owned(), entry.size());
         }
         total = total
             .checked_add(entry.size())
@@ -1097,37 +1098,53 @@ fn unpack_archive(
     archive_exports::validate(&manifest)?;
     // Verify every original before creating any stage or publishing any rows.
     archive_documents::verify_zip(&mut zip, &documents)?;
+    let mut extraction_bytes = total;
+    let mut recordings = Vec::new();
+    for (index, names) in &manifest.files {
+        let id = manifest.tables["meetings"][*index]["id"].as_str().unwrap();
+        let has_audio = names.iter().any(|name| {
+            archive_audio_file(name) && sizes[&format!("recordings/{index}/{name}")] != 0
+        });
+        let selection = extract(id, has_audio);
+        let mut files = Vec::new();
+        for name in names {
+            let entry = format!("recordings/{index}/{name}");
+            let size = sizes[&entry];
+            let include = match selection {
+                Extract::All => true,
+                Extract::Audio | Extract::AudioWithMarkers => {
+                    (archive_audio_file(name) && size != 0)
+                        || (selection == Extract::AudioWithMarkers && repair::marker_file(name))
+                }
+                Extract::Skip => false,
+            };
+            if include {
+                files.push((name, entry));
+            } else {
+                extraction_bytes -= size;
+            }
+        }
+        if selection != Extract::Skip {
+            recordings.push((index, files));
+        }
+    }
+    if let Some(volume) = scratch_volume {
+        encryption::check_extraction_space(
+            volume,
+            crate::audio::disk_space::free_space_volume(root),
+            extraction_bytes,
+        )?;
+    }
     std::fs::create_dir_all(root).map_err(failure)?;
     let stage = tempfile::Builder::new()
         .prefix("restored-")
         .tempdir_in(root)
         .map_err(failure)?;
     records::extract(&mut zip, stage.path(), &manifest.table_records)?;
-    for (index, names) in &manifest.files {
-        let id = manifest.tables["meetings"][*index]["id"].as_str().unwrap();
-        let has_audio = names.iter().any(|name| {
-            archive_audio_file(name)
-                && !empty_entries.contains(&format!("recordings/{index}/{name}"))
-        });
-        let selection = extract(id, has_audio);
-        if selection == Extract::Skip {
-            continue;
-        }
+    for (index, files) in recordings {
         let folder = stage.path().join(index.to_string());
         std::fs::create_dir(&folder).map_err(failure)?;
-        for name in names {
-            let entry = format!("recordings/{index}/{name}");
-            let include = match selection {
-                Extract::All => true,
-                Extract::Audio | Extract::AudioWithMarkers => {
-                    (archive_audio_file(name) && !empty_entries.contains(&entry))
-                        || (selection == Extract::AudioWithMarkers && repair::marker_file(name))
-                }
-                Extract::Skip => false,
-            };
-            if !include {
-                continue;
-            }
+        for (name, entry) in files {
             let mut source = zip.by_name(&entry).map_err(failure)?;
             let size = source.size();
             let mut destination = File::create(folder.join(name)).map_err(failure)?;
@@ -2536,7 +2553,7 @@ async fn restore_archive(
     profile: Option<(&Path, &Path)>,
 ) -> Result<BackupReport, String> {
     let scratch = profile.map_or_else(|| root.clone(), |(_, scratch)| scratch.to_path_buf());
-    let file =
+    let (file, scratch_volume) =
         tokio::task::spawn_blocking(move || encryption::open_zip(&path, &scratch, passphrase))
             .await
             .map_err(failure)??;
@@ -2545,15 +2562,16 @@ async fn restore_archive(
     drop(connection);
     let (manifest, stage, plan) = tokio::task::spawn_blocking(move || {
         let mut plan = repair::Plan::new(folders, roots);
-        let (manifest, stage) = unpack_archive(file, &root, |id, has_audio| {
-            if !plan.has_meeting(id) {
-                Extract::All
-            } else if has_audio {
-                plan.select_audio(id)
-            } else {
-                Extract::Skip
-            }
-        })?;
+        let (manifest, stage) =
+            unpack_archive(file, &root, scratch_volume.as_deref(), |id, has_audio| {
+                if !plan.has_meeting(id) {
+                    Extract::All
+                } else if has_audio {
+                    plan.select_audio(id)
+                } else {
+                    Extract::Skip
+                }
+            })?;
         Ok::<_, String>((manifest, stage, plan))
     })
     .await

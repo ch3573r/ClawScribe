@@ -455,6 +455,27 @@ async fn remove_prepared(
     candidate: Candidate,
     job: Arc<OwnedSemaphorePermit>,
 ) -> Result<u64, &'static str> {
+    remove_prepared_with(
+        pool,
+        roots,
+        request,
+        rows,
+        candidate,
+        job,
+        platform::remove_audio,
+    )
+    .await
+}
+
+async fn remove_prepared_with(
+    pool: &SqlitePool,
+    roots: &[PathBuf],
+    request: &AudioRemovalRequest,
+    rows: &[ArchiveFolder],
+    candidate: Candidate,
+    job: Arc<OwnedSemaphorePermit>,
+    unlink: impl FnOnce(&Path, &File) -> io::Result<()> + Send + 'static,
+) -> Result<u64, &'static str> {
     if candidate.revision != request.revision {
         return Err(CHANGED);
     }
@@ -466,47 +487,74 @@ async fn remove_prepared(
     check_removal(&mut tx, request, rows).await?;
     // Persist the confirmed removal intent before unlinking. Even if the app
     // exits just after unlink, an older backup must not bring the file back.
-    sqlx::query("UPDATE meetings SET saved_audio_removed_by_user = 1 WHERE id = ?")
-        .bind(&request.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| "Could not save the audio removal choice.")?;
+    let newly_marked = sqlx::query(
+        "UPDATE meetings SET saved_audio_removed_by_user = 1
+         WHERE id = ? AND saved_audio_removed_by_user = 0",
+    )
+    .bind(&request.id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| "Could not save the audio removal choice.")?
+    .rows_affected()
+        != 0;
     tx.commit()
         .await
         .map_err(|_| "Could not save the audio removal choice.")?;
 
-    let mut tx = pool
-        .begin_with("BEGIN IMMEDIATE")
+    let reviewed_path = candidate.path.clone();
+    let delete_job = job.clone();
+    let result = async {
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| lock_error)?;
+        let current = check_removal(&mut tx, request, rows).await?;
+        let roots = roots.to_vec();
+        let (tx, result) = tokio::task::spawn_blocking(move || {
+            // Keep the reservation and permit until the delete handle closes.
+            let _job = delete_job;
+            let result = (|| {
+                let folder = safe_folder(Path::new(&current.folder_path), &roots)?;
+                let path = owned_audio_path(&folder, &current.id)?;
+                if path != candidate.path
+                    || audio_revision(&candidate.file, &path, &current.id)?.1 != candidate.revision
+                {
+                    return Err(CHANGED);
+                }
+                unlink(&candidate.path, &candidate.file).map_err(|_| {
+                    "Could not remove the saved audio. Close any player using it and try again."
+                })?;
+                Ok(candidate.bytes)
+            })();
+            drop(candidate);
+            (tx, result)
+        })
         .await
-        .map_err(|_| lock_error)?;
-    let current = check_removal(&mut tx, request, rows).await?;
+        .map_err(|_| "Could not finish removing saved audio.")?;
+        let _ = tx.rollback().await;
+        result
+    }
+    .await;
 
-    let roots = roots.to_vec();
-    let result = tokio::task::spawn_blocking(move || {
-        // Keep the reservation and job permit until after the delete handle
-        // closes, including when the invoking task is cancelled.
-        let _job = job;
-        let result = (|| {
-            let folder = safe_folder(Path::new(&current.folder_path), &roots)?;
-            let path = owned_audio_path(&folder, &current.id)?;
-            if path != candidate.path
-                || audio_revision(&candidate.file, &path, &current.id)?.1 != candidate.revision
-            {
-                return Err(CHANGED);
-            }
-            platform::remove_audio(&candidate.path, &candidate.file).map_err(|_| {
-                "Could not remove the saved audio. Close any player using it and try again."
-            })?;
-            Ok(candidate.bytes)
-        })();
-        drop(candidate);
-        (tx, result)
-    })
-    .await
-    .map_err(|_| "Could not finish removing saved audio.")?;
-    let (tx, result) = result;
-    // The transaction reserves the writer and makes no database changes.
-    let _ = tx.rollback().await;
+    if newly_marked && result.is_err() {
+        let roots = roots.to_vec();
+        let still_saved = tokio::task::spawn_blocking(move || {
+            reviewed_path
+                .parent()
+                .is_some_and(|parent| safe_folder(parent, &roots).is_ok())
+                && fs::symlink_metadata(&reviewed_path)
+                    .is_ok_and(|metadata| metadata.is_file() && !linked(&metadata))
+        })
+        .await
+        .unwrap_or(false);
+        if still_saved {
+            sqlx::query("UPDATE meetings SET saved_audio_removed_by_user = 0 WHERE id = ?")
+                .bind(&request.id)
+                .execute(pool)
+                .await
+                .map_err(|_| "Could not clear the failed audio removal choice.")?;
+        }
+    }
     result
 }
 
@@ -611,7 +659,14 @@ pub(crate) async fn remove_archive_audio(
         return Err(CHANGED.into());
     }
     let roots = crate::audio::recording_preferences::recording_roots(&app).await;
-    remove_selected(state.db_manager.pool().clone(), roots, requests).await
+    // An accepted removal must finish its database bookkeeping if the view closes.
+    tokio::spawn(remove_selected(
+        state.db_manager.pool().clone(),
+        roots,
+        requests,
+    ))
+    .await
+    .map_err(|_| "Could not finish removing saved audio.")?
 }
 
 #[derive(Default, Serialize)]

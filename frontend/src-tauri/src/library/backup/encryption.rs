@@ -92,7 +92,7 @@ pub(super) fn open_zip(
     path: &Path,
     scratch: &Path,
     passphrase: Option<Zeroizing<String>>,
-) -> Result<File, String> {
+) -> Result<(File, Option<PathBuf>), String> {
     let mut input = File::open(path).map_err(super::failure)?;
     let mut header = [0; HEADER_SIZE];
     let mut magic = Vec::with_capacity(MAGIC.len());
@@ -109,7 +109,7 @@ pub(super) fn open_zip(
             return Err("The encrypted backup header is invalid.".into());
         }
         input.rewind().map_err(super::failure)?;
-        return Ok(input);
+        return Ok((input, None));
     }
     header[..MAGIC.len()].copy_from_slice(MAGIC);
     input
@@ -159,27 +159,44 @@ pub(super) fn open_zip(
         // local file rather than a plaintext copy next to the selected backup.
         let output = match &mut zip {
             Some(output) => output,
-            None => {
-                check_space(free_space_volume(&scratch).map(|(_, free)| free), estimate)?;
-                zip.insert(scratch_file(&scratch)?)
-            }
+            None => zip.insert(restore_scratch_file(&scratch, estimate)?),
         };
-        output.write_all(&buffer).map_err(super::failure)?;
+        output.0.write_all(&buffer).map_err(super::failure)?;
         buffer.zeroize();
     }
     if total + buffer.len() as u64 != estimate {
         return Err(AUTHENTICATION_FAILED.into());
     }
-    let mut zip = match zip {
+    let (mut zip, volume) = match zip {
         Some(zip) => zip,
-        None => {
-            check_space(free_space_volume(&scratch).map(|(_, free)| free), estimate)?;
-            scratch_file(&scratch)?
-        }
+        None => restore_scratch_file(&scratch, estimate)?,
     };
     zip.write_all(&buffer).map_err(super::failure)?;
     zip.rewind().map_err(super::failure)?;
-    Ok(zip)
+    Ok((zip, Some(volume)))
+}
+
+fn restore_scratch_file(scratch: &Path, estimate: u64) -> Result<(File, PathBuf), String> {
+    let (volume, free) = free_space_volume(scratch)
+        .ok_or("Could not verify free disk space for the temporary backup.")?;
+    check_space(Some(free), estimate)?;
+    Ok((scratch_file(scratch)?, volume))
+}
+
+pub(super) fn check_extraction_space(
+    scratch_volume: &Path,
+    restore_volume: Option<(PathBuf, u64)>,
+    bytes: u64,
+) -> Result<(), String> {
+    if let Some((volume, free)) = restore_volume {
+        if volume == scratch_volume {
+            // This free-space reading already accounts for the temporary ZIP.
+            check_space(Some(free), bytes).map_err(|_| {
+                "Not enough free disk space to extract this encrypted backup. Free up space and try again."
+            })?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn scratch_file(scratch: &Path) -> Result<File, String> {
@@ -250,5 +267,28 @@ mod tests {
             check_space(Some(START_FLOOR_BYTES + 8), 9).unwrap_err(),
             SCRATCH_FULL
         );
+    }
+
+    #[test]
+    fn shared_restore_volume_reserves_space_for_extraction_after_decryption() {
+        let scratch = Path::new("system");
+        assert!(check_extraction_space(
+            scratch,
+            Some((scratch.into(), START_FLOOR_BYTES + 50)),
+            51,
+        )
+        .is_err());
+        assert!(check_extraction_space(
+            scratch,
+            Some((scratch.into(), START_FLOOR_BYTES + 50)),
+            50,
+        )
+        .is_ok());
+        assert!(check_extraction_space(
+            scratch,
+            Some(("other".into(), START_FLOOR_BYTES + 50)),
+            51,
+        )
+        .is_ok());
     }
 }

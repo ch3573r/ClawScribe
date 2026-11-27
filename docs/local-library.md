@@ -445,9 +445,10 @@ ClawScribe asks for the passphrase when you choose an encrypted archive to
 restore. Keep the passphrase somewhere safe. ClawScribe does not store it or
 have a way to recover it. Encryption uses Argon2id key derivation and
 authenticated XChaCha20-Poly1305 in chunks. Encrypted operations check local
-disk space before writing a temporary ZIP. ClawScribe removes the temporary ZIP
-at the end of the operation and clears leftover scratch files at startup and
-before encrypted operations.
+disk space before writing a temporary ZIP. Restore also checks room to extract
+the selected files when they share the same drive as that ZIP. ClawScribe removes
+the temporary ZIP at the end of the operation and clears leftover scratch files
+at startup and before encrypted operations.
 Plain ZIP backups still work. Scheduled backups use plain ZIP, so keep
 unencrypted archives in trusted storage.
 
@@ -464,7 +465,8 @@ Restore adds meetings whose IDs are absent from the library. Select **Repair
 missing audio for existing meetings** before choosing the archive to also copy
 missing audio for matching meetings. Restore reports repaired meetings and
 unavailable recording locations. Reconnect unavailable storage and retry repair.
-ClawScribe skips audio with a recorded removal choice. Restore keeps existing
+ClawScribe skips audio with a recorded removal choice. Repair may bring back
+audio you removed before this version. Restore keeps existing
 audio, transcripts, notes, and other meeting data. For a missing or empty
 recording folder on available storage, ClawScribe attaches a new app-owned
 folder. An existing folder must be a verified, unshared ClawScribe recording

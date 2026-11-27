@@ -1,5 +1,5 @@
 'use client';
-import { useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,7 @@ const audioExcludedNotice = 'This backup does not include recording audio.';
 const passphraseRequired = 'Enter the passphrase for this backup.';
 
 export function LibraryBackup() {
+  const repairNoteId = useId();
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState('');
   const [encrypt, setEncrypt] = useState(false);
@@ -174,15 +175,18 @@ export function LibraryBackup() {
             </label>
             {confirmation && !passphrasesMatch && <p role="status" className="text-sm text-destructive">Passphrases must match.</p>}
           </>}
+          <div className="space-y-1">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <Checkbox checked={repairMissingAudio} disabled={!!busy || unavailable} aria-describedby={repairNoteId}
+                onCheckedChange={checked => setRepairMissingAudio(checked === true)} />
+              Repair missing audio for existing meetings
+            </label>
+            <p id={repairNoteId} className="text-sm text-muted-foreground">This may also bring back audio you removed before this version.</p>
+          </div>
           <div className="flex flex-wrap gap-2">
             <Button type="submit" disabled={!!busy || unavailable || !canSave}>Save backup</Button>
             <Button type="button" variant="outline" disabled={!!busy || unavailable} onClick={() => run(true)}>Choose archive to restore</Button>
           </div>
-          <label className="flex items-center gap-2 text-sm font-medium">
-            <Checkbox checked={repairMissingAudio} disabled={!!busy || unavailable}
-              onCheckedChange={checked => setRepairMissingAudio(checked === true)} />
-            Repair missing audio for existing meetings
-          </label>
         </form>
       )}
       {busy && <p role="status" className="text-sm">{busy} Keep ClawScribe open until this finishes.</p>}

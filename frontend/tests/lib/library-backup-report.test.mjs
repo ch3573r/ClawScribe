@@ -24,7 +24,7 @@ for (const restore of [false, true]) {
       { meeting_id: 'missing', title: 'Missing recording', recovery_files_excluded: false, audio_unavailable: true, recording_folder_missing: true },
     ] };
     const { LibraryBackup } = loadTsModule('src/components/LibraryBackup.tsx', {
-      react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+      react: { ...hooks.react, useId: () => 'repair-note' }, 'react/jsx-runtime': { jsx, jsxs: jsx },
       '@/components/ui/button': { Button: 'button' },
       '@/components/ui/checkbox': { Checkbox: 'checkbox' },
       '@/components/ui/input': { Input: 'input' },
@@ -113,7 +113,7 @@ test('encrypted backup confirms the passphrase and restore prompts only after ar
   const archive = 'synthetic.clawbackup';
   const phrase = ['synthetic', 'sample'].join(' ');
   const { LibraryBackup } = loadTsModule('src/components/LibraryBackup.tsx', {
-    react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    react: { ...hooks.react, useId: () => 'repair-note' }, 'react/jsx-runtime': { jsx, jsxs: jsx },
     '@/components/ui/button': { Button: 'button' },
     '@/components/ui/checkbox': { Checkbox: 'checkbox' },
     '@/components/ui/input': { Input: 'input' },
@@ -148,6 +148,12 @@ test('encrypted backup confirms the passphrase and restore prompts only after ar
   assert.ok(render().filter(node => node.type === 'input').every(node => node.props.value === ''));
 
   const repair = find('checkbox');
+  const nodes = render();
+  const restoreButton = nodes.findIndex(node => node.type === 'button' && text(node) === 'Choose archive to restore');
+  const repairControl = nodes.findIndex(node => node.type === 'checkbox');
+  assert.ok(repairControl < restoreButton);
+  const repairNote = nodes.find(node => node.type === 'p' && node.props.id === repair.props['aria-describedby']);
+  assert.match(text(repairNote), /may also bring back audio you removed before this version/i);
   assert.equal(repair.props.checked, false);
   repair.props.onCheckedChange(true);
   await find('button', 'Choose archive to restore').props.onClick();
