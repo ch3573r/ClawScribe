@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.69.0-preview.1
+
+- Recording: Stop reports when nothing was recording and saves during a stalled device reconnect; capture processing runs off the audio thread with one shared clock, drift correction without clicks and silence for gaps; crashes leave a short log report.
+- Import and Enhance: no stuck dialog, background jobs survive navigation, cloud uploads need destination approval, fallback uses your local engine, Hosted Whisper handles long meetings.
+- Library: 30-day Trash, Archive search with Load more, passphrase-encrypted backups, optional missing-audio repair on restore, SRT and WebVTT export.
+- Opt-in local speaker profiles, close-to-tray setting, launch at Windows sign-in.
+- Security: per-file asset access, sanitized Microsoft sign-in errors, legacy token cleanup, bundled FFmpeg only, 18 unused commands removed.
+- Windows GPU prerelease for manual evaluation. Stable updates remain on 0.67.0. Runtime/updater version: 0.69.0. See the [preview notes](docs/releases/0.69.0-preview.1.md).
+
 ## 0.68.2-preview.1
 
 - Codex and OpenAI-compatible summaries list every explicit commitment as an action, including short first-person ones, name the speaker as owner only when the transcript identifies them, and keep each action's source tag so it links to its transcript passage.

@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "clawscribe"
-version = "0.68.2-preview.1"
+version = "0.69.0-preview.1"
 dependencies = [
  "anyhow",
  "argon2",
