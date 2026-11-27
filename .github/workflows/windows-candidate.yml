@@ -78,4 +78,6 @@ jobs:
       publish: false
       draft-release: true
       capture-smoke-confirmed: false
+      # validate typechecked and tested the frontend at this same commit.
+      frontend-validated: true
     secrets: inherit
