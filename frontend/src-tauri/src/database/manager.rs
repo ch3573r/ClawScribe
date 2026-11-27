@@ -99,11 +99,19 @@ impl DatabaseManager {
         if remove_abandoned_snapshot_staging(Path::new(tauri_db_path)).is_err() {
             log::warn!("Could not remove abandoned pre-migration database staging files");
         }
-        if backup_before_migrations(&pool, Path::new(tauri_db_path), &migrator)
-            .await
-            .is_err()
-        {
-            log::warn!("Could not create the pre-migration database backup; continuing startup");
+        match backup_before_migrations(&pool, Path::new(tauri_db_path), &migrator).await {
+            Ok(MigrationBackup::Ready) => {}
+            Ok(MigrationBackup::PublishFailed(error)) => {
+                log::warn!(
+                    "Could not publish the pre-migration database backup; migrations were deferred"
+                );
+                return Err(sqlx::Error::Io(error));
+            }
+            Err(_) => {
+                log::warn!(
+                    "Could not create the pre-migration database backup; continuing startup"
+                );
+            }
         }
         Self::reconcile_line_ending_checksums(&pool, &migrator).await?;
         migrator.run(&pool).await?;
@@ -337,11 +345,16 @@ fn connection_options(path: &Path) -> SqliteConnectOptions {
         .foreign_keys(true)
 }
 
+enum MigrationBackup {
+    Ready,
+    PublishFailed(std::io::Error),
+}
+
 async fn backup_before_migrations(
     pool: &SqlitePool,
     database: &Path,
     migrator: &sqlx::migrate::Migrator,
-) -> Result<()> {
+) -> Result<MigrationBackup> {
     let ledger: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )
@@ -354,7 +367,7 @@ async fn backup_before_migrations(
         .fetch_one(pool)
         .await?;
         if user_tables == 0 {
-            return Ok(());
+            return Ok(MigrationBackup::Ready);
         }
     }
     let applied: Vec<i64> = if ledger > 0 {
@@ -368,7 +381,7 @@ async fn backup_before_migrations(
         .iter()
         .all(|migration| applied.contains(&migration.version))
     {
-        return Ok(());
+        return Ok(MigrationBackup::Ready);
     }
     let root = database.parent().unwrap_or(Path::new(".")).join("backups");
     fs::create_dir_all(&root).map_err(sqlx::Error::Io)?;
@@ -376,19 +389,18 @@ async fn backup_before_migrations(
     let old_version = applied.iter().max().copied().unwrap_or(0);
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%9f");
     let target = root.join(format!("meeting_minutes-{old_version}-{stamp}.sqlite"));
-    // Reserve a new rollback path. Once SQLite finishes the copy, a privacy
-    // scrub failure must leave the backup available to recover the library.
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&target)?;
-    if let Err(error) = sqlx::query("VACUUM INTO ?")
-        .bind(target.to_string_lossy().as_ref())
+    let staged = tempfile::Builder::new()
+        .prefix(".meeting_minutes-staged-")
+        .suffix(".sqlite")
+        .tempfile_in(&root)?
+        .into_temp_path();
+    sqlx::query("VACUUM INTO ?")
+        .bind(staged.to_string_lossy().as_ref())
         .execute(pool)
-        .await
-    {
-        let _ = fs::remove_file(&target);
-        return Err(error);
+        .await?;
+    if let Err(error) = publish_migration_snapshot(staged, &target) {
+        // Keep older snapshots and leave the source database at its old schema.
+        return Ok(MigrationBackup::PublishFailed(error));
     }
     if scrub_snapshot_profiles(&target).await.is_err() {
         log::warn!("Could not scrub saved voices from the new pre-migration database backup; keeping the rollback copy");
@@ -411,7 +423,19 @@ async fn backup_before_migrations(
     for (_, path) in backups.into_iter().skip(2) {
         fs::remove_file(path).map_err(sqlx::Error::Io)?;
     }
-    Ok(())
+    Ok(MigrationBackup::Ready)
+}
+
+fn publish_migration_snapshot(staged: tempfile::TempPath, target: &Path) -> std::io::Result<()> {
+    // SQLite has closed the destination. Flush it before the same-directory
+    // rename makes it visible to recovery and retention.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&staged)?
+        .sync_all()?;
+    staged
+        .persist_noclobber(target)
+        .map_err(|error| error.error)
 }
 
 fn verify_snapshot_directory(root: &Path) -> std::io::Result<()> {
@@ -431,7 +455,7 @@ fn remove_abandoned_snapshot_staging(database: &Path) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     }
-    // Only exact staging names from earlier builds and their SQLite sidecars qualify.
+    // Only exact staging names and their SQLite sidecars qualify.
     let pattern = regex::Regex::new(STAGED_SNAPSHOT_NAME).expect("staging filename pattern");
     let mut result = Ok(());
     for entry in fs::read_dir(root)? {
@@ -957,10 +981,17 @@ mod tests {
         migrator.run(&pool).await.unwrap();
         let backup_dir = dir.path().join("backups");
         assert_eq!(fs::read_dir(&backup_dir).unwrap().count(), 1);
+        let leftover = backup_dir.join(".meeting_minutes-staged-Leftover123.sqlite");
+        fs::write(&leftover, b"partial snapshot").unwrap();
+        stamp_snapshot(
+            &leftover,
+            std::time::SystemTime::now() + Duration::from_secs(24 * 60 * 60),
+        )
+        .unwrap();
         backup_before_migrations(&pool, &path, &migrator)
             .await
             .unwrap();
-        assert_eq!(fs::read_dir(&backup_dir).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&backup_dir).unwrap().count(), 2);
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)").execute(&pool).await.unwrap();
         for _ in 0..3 {
             backup_before_migrations(&pool, &path, &migrator)
@@ -968,6 +999,9 @@ mod tests {
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        assert_eq!(fs::read(&leftover).unwrap(), b"partial snapshot");
+        remove_abandoned_snapshot_staging(&path).unwrap();
+        assert!(!leftover.exists());
         assert_eq!(fs::read_dir(&backup_dir).unwrap().count(), 2);
         for entry in fs::read_dir(&backup_dir).unwrap() {
             let snapshot = SqlitePool::connect(entry.unwrap().path().to_str().unwrap())

@@ -621,8 +621,10 @@ meetings. Each new snapshot keeps the newest two, and startup cleanup removes
 snapshots older than 14 days. Retention can last longer while the app is closed
 or cleanup fails. Portable backups are separate, unencrypted archives. Meeting
 deletion does not remove these archives or copies exported elsewhere.
-ClawScribe scrubs speaker profiles and pending voice matches from new
-pre-migration snapshots. If a scrub fails, ClawScribe keeps the rollback copy
-and retries at startup and when deleting a profile or turning off speaker profiles.
+ClawScribe syncs each pre-migration snapshot in a staging file and renames it
+into place before removing speaker profiles and pending voice matches. If the
+sync or rename fails, startup defers the migration. If a scrub fails, ClawScribe
+keeps the rollback copy and retries at startup and when deleting a profile or
+turning off speaker profiles.
 Scrubbing preserves the snapshot's original expiration date. Startup removes
 abandoned snapshot staging files.
