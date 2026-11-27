@@ -31,6 +31,11 @@ pub(crate) async fn restore_trashed_meeting<R: Runtime>(
     }
     let _ = app.emit("library-changed", ());
     crate::audio::import::queue::notify(&app);
+    tauri::async_runtime::spawn(crate::summary::automatic::resume_after_restore(
+        app,
+        state.db_manager.pool().clone(),
+        meeting_id,
+    ));
     Ok(())
 }
 

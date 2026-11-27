@@ -326,7 +326,7 @@ mod tests {
         );
         assert_eq!(
             SummaryProcessesRepository::automatic_resume_candidates_after(
-                &pool, "approved", None, "", false,
+                &pool, "approved", None, "", false, None,
             )
             .await
             .unwrap(),
@@ -342,7 +342,7 @@ mod tests {
             .unwrap();
         assert!(
             SummaryProcessesRepository::automatic_resume_candidates_after(
-                &pool, "approved", None, "", false,
+                &pool, "approved", None, "", false, None,
             )
             .await
             .unwrap()
@@ -374,24 +374,50 @@ mod tests {
                     .unwrap()
                 );
             }
+            sqlx::query(
+                "INSERT INTO meetings(id,title,created_at,updated_at)
+                         VALUES('other','Another meeting',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert!(
+                SummaryProcessesRepository::defer_automatic_process_for_exit(
+                    &pool, "other", "import", "approved"
+                )
+                .await
+                .unwrap()
+            );
             assert!(MeetingsRepository::move_to_trash(&pool, meeting, true)
                 .await
                 .unwrap());
-            let candidates =
-                || SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved", None);
+            let candidates = |only_meeting: Option<&'static str>| {
+                SummaryProcessesRepository::automatic_resume_candidates_after(
+                    &pool,
+                    "approved",
+                    None,
+                    "",
+                    false,
+                    only_meeting,
+                )
+            };
             let claim = || {
                 SummaryProcessesRepository::claim_automatic_resume(
                     &pool, meeting, "approved", false,
                 )
             };
-            assert!(candidates().await.unwrap().is_empty());
+            assert!(candidates(Some(meeting)).await.unwrap().is_empty());
+            assert_eq!(
+                candidates(None).await.unwrap(),
+                [("other".to_owned(), "approved".to_owned())]
+            );
             assert!(!claim().await.unwrap());
 
             assert!(MeetingsRepository::restore_from_trash(&pool, meeting)
                 .await
                 .unwrap());
             assert_eq!(
-                candidates().await.unwrap(),
+                candidates(Some(meeting)).await.unwrap(),
                 [(meeting.to_owned(), "approved".to_owned())]
             );
             assert!(claim().await.unwrap());
@@ -426,6 +452,7 @@ mod tests {
                     None,
                     "",
                     allowed,
+                    None,
                 )
                 .await
                 .unwrap()
@@ -883,7 +910,7 @@ impl SummaryProcessesRepository {
         fingerprint: &str,
         profile: Option<&str>,
     ) -> Result<Vec<(String, String)>, sqlx::Error> {
-        Self::automatic_resume_candidates_after(pool, fingerprint, profile, "", false).await
+        Self::automatic_resume_candidates_after(pool, fingerprint, profile, "", false, None).await
     }
 
     pub(crate) async fn automatic_resume_candidates_after(
@@ -892,10 +919,12 @@ impl SummaryProcessesRepository {
         profile: Option<&str>,
         after: &str,
         local: bool,
+        only_meeting: Option<&str>,
     ) -> Result<Vec<(String, String)>, sqlx::Error> {
         sqlx::query_as("SELECT meeting_id, automatic_request_fingerprint FROM summary_processes
             WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint IN (?1, ?2 || ':' || ?1)
-            AND meeting_id > ?3 AND meeting_id IN (SELECT id FROM active_meetings) AND (
+            AND meeting_id > ?3 AND meeting_id IN (SELECT id FROM active_meetings)
+            AND (?9 IS NULL OR meeting_id = ?9) AND (
                 (status = 'failed' AND automatic_resume_attempted = 0 AND error = ?4)
                 OR (status = 'cancelled' AND result IS NULL AND (
                     (?5 AND error IN (?6, ?7, ?8)) OR (automatic_resume_attempted = 0 AND error = ?8)
@@ -905,6 +934,7 @@ impl SummaryProcessesRepository {
             .bind(crate::summary::automatic::PAUSED_FOR_INFERENCE)
             .bind(crate::summary::service::RECORDING_INTERRUPTED_SUMMARY)
             .bind(crate::summary::automatic::PAUSED_FOR_EXIT)
+            .bind(only_meeting)
             .fetch_all(pool).await
     }
 

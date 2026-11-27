@@ -65,7 +65,7 @@ pub(crate) async fn remember(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO retranscription_notes_retry (meeting_id, profile, publication)
-        SELECT id, ?, ? FROM active_meetings WHERE id = ? AND recording_source IS NOT 'import'
+        SELECT id, ?, ? FROM meetings WHERE id = ? AND recording_source IS NOT 'import'
         ON CONFLICT(meeting_id) DO UPDATE SET
         profile = excluded.profile, publication = excluded.publication",
     )
@@ -77,14 +77,17 @@ pub(crate) async fn remember(
     Ok(())
 }
 
-pub(crate) fn wake<R: Runtime>(app: &AppHandle<R>, meeting: String) {
+pub(crate) fn wake<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting: String,
+) -> tauri::async_runtime::JoinHandle<()> {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let pool = app.state::<AppState>().db_manager.pool().clone();
         if dispatch(&app, &pool, &meeting).await.is_err() {
             log::warn!("Could not dispatch notes after retranscription");
         }
-    });
+    })
 }
 
 async fn dispatch<R: Runtime>(
@@ -192,10 +195,10 @@ mod tests {
         use crate::database::repositories::meeting::MeetingsRepository;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let meeting = "review-test";
-        publish(&pool).await;
         assert!(MeetingsRepository::move_to_trash(&pool, meeting, false)
             .await
             .unwrap());
+        publish(&pool).await;
         consume(&pool, meeting, || Ok(Some("local".into())), async {
             panic!("Notes must wait while the meeting is in Trash");
         })
