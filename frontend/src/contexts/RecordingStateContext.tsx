@@ -1,7 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { recordingService, type RecordingStoppedPayload } from '@/services/recordingService';
+import { recordingService, type RecordingState as NativeRecordingState, type RecordingStoppedPayload } from '@/services/recordingService';
 import { knowledgeService } from '@/services/knowledgeService';
 import { recordingIdentity, compareGeneration, sameIdentity, type RecordingIdentity } from '@/lib/recording-identity';
 import { invoke } from '@tauri-apps/api/core';
@@ -172,6 +172,16 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     setState(prev => ({ ...prev, status, statusMessage: message, verificationError: null }));
   }, []);
 
+  const clearStopping = useCallback((outcome: NativeRecordingState['last_stop_outcome']) => {
+    if (outcome?.library_save_failed) {
+      setStatus(RecordingStatus.ERROR, outcome.message);
+    } else {
+      setStatus(RecordingStatus.IDLE);
+    }
+    setElapsedSeconds(0);
+    setState(prev => ({ ...prev, sessionId: null, isRecording: false, isPaused: false, isActive: false }));
+  }, [setStatus]);
+
   const reconcileNothingToStop = useCallback(async (result: unknown) => {
     if (result !== false) return false;
     const revision = lifecycleRevision.current;
@@ -180,13 +190,18 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       return null;
     });
     // A newer lifecycle event owns the UI if it arrived during the state read.
-    if (!backend?.is_recording && revision === lifecycleRevision.current && lifecycleStatus.current === RecordingStatus.STOPPING) {
-      setStatus(RecordingStatus.IDLE);
-      setElapsedSeconds(0);
-      setState(prev => ({ ...prev, sessionId: null, isRecording: false, isPaused: false, isActive: false }));
+    if (revision !== lifecycleRevision.current || lifecycleStatus.current !== RecordingStatus.STOPPING) return true;
+    if (!backend?.is_recording) {
+      clearStopping(backend?.last_stop_outcome);
+    } else if (!backend.is_stopping) {
+      setStatus(RecordingStatus.RECORDING);
+      setState(prev => ({
+        ...prev, sessionId: backend.session_id ?? null, isRecording: true,
+        isPaused: backend.is_paused, isActive: backend.is_active,
+      }));
     }
     return true;
-  }, [setStatus]);
+  }, [clearStopping, setStatus]);
 
   useEffect(() => {
     let active = true;
@@ -233,6 +248,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         }
         if (backend.is_recording) startPolling();
         else stopPolling();
+        if (!backend.is_recording && lifecycleStatus.current === RecordingStatus.STOPPING) {
+          clearStopping(backend.last_stop_outcome);
+        }
         const status = backend.is_recording && lifecycleStatus.current === RecordingStatus.IDLE
           ? RecordingStatus.RECORDING : lifecycleStatus.current;
         lifecycleStatus.current = status;
@@ -414,7 +432,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       stopPolling();
       unsubscribers.forEach(unsubscribe => unsubscribe());
     };
-  }, [setStatus]);
+  }, [clearStopping, setStatus]);
 
   // NEW: Computed helpers from status
   useEffect(() => {

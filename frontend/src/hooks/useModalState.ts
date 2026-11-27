@@ -117,10 +117,10 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
   // Set up transcription error listener for model loading failures
   useEffect(() => {
     let active = true;
-    const subscription = listen<{ userMessage: string, actionable: boolean }>('transcription-error', ({ payload }) => {
+    const subscription = listen<{ userMessage: string, actionable: boolean, warningEmitted?: boolean }>('transcription-error', ({ payload }) => {
       if (!active) return;
       if (payload.actionable) showModal('modelSelector', payload.userMessage);
-      else toast.error('', { description: payload.userMessage, duration: 5000 });
+      else if (!payload.warningEmitted) toast.error('', { description: payload.userMessage, duration: 5000 });
     });
     void subscription.catch(() => { if (active) console.error('Could not subscribe to transcription errors'); });
     return () => {

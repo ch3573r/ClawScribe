@@ -2,7 +2,6 @@
 
 import React, { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { appDataDir } from '@tauri-apps/api/path';
 import { toast } from 'sonner';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
@@ -39,9 +38,7 @@ export function RecordingPostProcessingProvider({ children }: { children: React.
       if (!current.isRecording || current.isStopping) return;
       current.setStatus(RecordingStatus.STOPPING);
       try {
-        const dataDir = await appDataDir();
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const stopped = await recordingService.stopRecording(`${dataDir}/recording-${timestamp}.wav`);
+        const stopped = await recordingService.stopRecording();
         if (stopped === false && !await current.reconcileNothingToStop(stopped)) {
           throw new Error('Could not verify whether the recording stopped. Try again.');
         }

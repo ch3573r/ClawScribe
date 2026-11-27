@@ -298,6 +298,9 @@ child loop and the supervisor.
   cancellation the child is killed and reaped.
 - After a crash or timeout the supervisor starts a new child, reloads the model
   and retries the segment once. A cancelled call is never retried.
+- Panics before app logging starts and in headless worker processes write a
+  sanitized report to `crash.log` in the app log folder. The supervisor notes
+  when a child that it reaped left a report.
 - A crash or timeout while DirectML was in use turns DirectML off for every
   later Parakeet load in this app session, in the child and in the app, and the
   beta settings page reports it.

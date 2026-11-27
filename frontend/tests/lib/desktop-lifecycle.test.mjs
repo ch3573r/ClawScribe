@@ -58,6 +58,21 @@ for (const event of ['chunk-drop-warning', 'transcription-error']) {
   });
 }
 
+test('Home avoids a second toast for a transcription error already reported as a warning', async t => {
+  const app = withListeners(t);
+  const errors = [];
+  const { useModalState } = loadTsModule('src/hooks/useModalState', {
+    ...app.mocks,
+    sonner: { toast: { error: (...args) => errors.push(args) } },
+  });
+  app.render(useModalState);
+  await flush();
+  const onError = app.registered.find(({ name }) => name === 'transcription-error').callback;
+  onError({ payload: { actionable: false, userMessage: 'Duplicate', warningEmitted: true } });
+  onError({ payload: { actionable: false, userMessage: 'Unreported error' } });
+  assert.deepEqual(errors.map(([, options]) => options.description), ['Unreported error']);
+});
+
 test('recording controls label Stop and release both registrations when unmounted during setup', async t => {
   const app = withListeners(t, 'transcription-error');
   const { RecordingControls } = loadTsModule('src/components/RecordingControls', {
@@ -91,7 +106,6 @@ test('Home can start another recording after a concurrent Stop finishes first', 
   } };
   const { RecordingControls } = loadTsModule('src/components/RecordingControls', {
     ...app.mocks,
-    '@tauri-apps/api/path': { appDataDir: async () => 'synthetic-data' },
     '@/lib/analytics': { trackButtonClick: noop },
     '@/services/recordingService': { recordingService: { stopRecording: () => pending.promise } },
     sonner: { toast: { error: (...args) => errors.push(args) } },
