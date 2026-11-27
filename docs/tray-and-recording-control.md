@@ -132,8 +132,8 @@ save the current session, including a paused session. Windows can sleep while
 the save is pending. The save can continue after wake, and the old session
 does not restart automatically. Sleep during active capture flags a possible
 gap in the saved audio. If an audio device is still reconnecting when you stop,
-ClawScribe closes capture and saves the available recording. It can release
-the old stream handles once the driver responds.
+ClawScribe closes capture, releases the other source, and saves the available
+recording. It releases the reconnecting stream once the driver responds.
 You can generate notes from the saved meeting. A wake notice reopens recording
 admission. It cannot identify which recording was running if Windows did not
 deliver a sleep notice.

@@ -20,7 +20,17 @@ fn main() {
     // Download and bundle FFmpeg binary at build-time
     ffmpeg::ensure_ffmpeg_binary();
 
-    tauri_build::build()
+    tauri_build::build();
+
+    // Tauri links the Windows resource into the desktop binary only. The
+    // library test executable also needs its Common Controls v6 manifest
+    // when it instantiates the Tauri mock app.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        let out_dir = std::env::var("OUT_DIR").expect("Cargo provides OUT_DIR");
+        println!("cargo:rustc-link-search=native={out_dir}");
+    }
 }
 
 /// Whisper's Vulkan backend links `vulkan-1.dll`. Left in the normal import

@@ -469,15 +469,37 @@ impl AudioStreamManager {
         device: Arc<AudioDevice>,
         device_type: DeviceType,
     ) -> Result<()> {
-        let stream = match device_type {
-            DeviceType::Microphone => self.microphone_stream.take(),
-            DeviceType::System => self.system_stream.take(),
-        };
         self.state.clear_active_device(&device_type);
-        if let Some(stream) = stream {
+        if let Some(stream) = self.take_source(&device_type) {
             let _ = stream.stop();
         }
-        self.start_source(device, device_type, None).await
+        // Closing the previous stream or opening its replacement can block in
+        // the driver. Stop closes capture independently of both calls.
+        if self.state.is_recording() {
+            self.start_source(device, device_type.clone(), None).await?;
+        }
+        if !self.state.is_recording() {
+            self.state.clear_active_device(&device_type);
+            if let Some(stream) = self.take_source(&device_type) {
+                let _ = stream.stop();
+            }
+        }
+        Ok(())
+    }
+
+    fn take_source(&mut self, source: &DeviceType) -> Option<AudioStream> {
+        self.source_slot(source).take()
+    }
+
+    pub(super) fn move_source_to(&mut self, source: &DeviceType, target: &mut Self) {
+        *target.source_slot(source) = self.take_source(source);
+    }
+
+    fn source_slot(&mut self, source: &DeviceType) -> &mut Option<AudioStream> {
+        match source {
+            DeviceType::Microphone => &mut self.microphone_stream,
+            DeviceType::System => &mut self.system_stream,
+        }
     }
 
     pub fn source_active(&self, device_type: &DeviceType) -> bool {

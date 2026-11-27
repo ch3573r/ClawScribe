@@ -16,6 +16,7 @@ export interface RecordingState {
   recording_mode?: 'live' | 'audio_only';
   is_recording: boolean;
   is_stopping?: boolean;
+  last_stop_outcome?: Pick<RecordingStoppedPayload, 'library_save_failed' | 'message'> | null;
   is_paused: boolean;
   is_active: boolean;
   recording_duration: number | null;

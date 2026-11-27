@@ -28,6 +28,15 @@ test('Stop takes the recording for finalization without waiting on a driver reco
   assert.match(stop, /stop_streams_and_force_flush\(\)\.await/);
 });
 
+test('reconnect takes only the requested source and checks for Stop after open', () => {
+  const commands = readFileSync(new URL('../../src-tauri/src/audio/recording_commands.rs', import.meta.url), 'utf8');
+  const streams = readFileSync(new URL('../../src-tauri/src/audio/stream.rs', import.meta.url), 'utf8');
+  assert.ok(commands.includes('manager.take_reconnect_stream(&source)'));
+  const reconnect = streams.slice(streams.indexOf('pub async fn reconnect_source'), streams.indexOf('pub fn source_active'));
+  assert.ok(reconnect.includes('self.start_source'));
+  assert.ok(reconnect.indexOf('self.start_source') < reconnect.lastIndexOf('self.state.is_recording()'));
+});
+
 test('a drain timeout reports actual audio retention after finalization', () => {
   const source = readFileSync(new URL('../../src-tauri/src/audio/recording_commands.rs', import.meta.url), 'utf8');
   const stop = source.slice(source.indexOf('async fn stop_recording_session'), source.indexOf('/// Check if recording is active'));
@@ -44,10 +53,11 @@ test('the main window listens for transcription warnings with a shared toast ID'
 
 test('the desktop binary installs the panic hook before entering the app runtime', () => {
   const main = readFileSync(new URL('../../src-tauri/src/main.rs', import.meta.url), 'utf8');
-  assert.match(main, /std::panic::set_hook/);
-  assert.match(main, /log::error!/);
-  assert.match(main, /Backtrace::force_capture/);
-  assert.match(main, /fn main\(\) \{\s*install_panic_hook\(\);/);
+  const crash = readFileSync(new URL('../../src-tauri/src/crash_report.rs', import.meta.url), 'utf8');
+  assert.match(crash, /std::panic::set_hook/);
+  assert.match(crash, /log::error!/);
+  assert.match(crash, /Backtrace::force_capture/);
+  assert.match(main, /fn main\(\) \{\s*app_lib::crash_report::install_panic_hook\(\);/);
 });
 
 test('worker dispatch accounts for a chunk only once a slot is reserved', () => {

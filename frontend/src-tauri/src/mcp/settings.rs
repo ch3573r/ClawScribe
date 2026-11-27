@@ -4,7 +4,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tauri::{AppHandle, Manager};
 
@@ -138,10 +138,12 @@ pub(crate) async fn test_mcp_server(app: AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     const FAILED: &str = "The local MCP server did not respond as expected.";
+    let started = SystemTime::now();
     let mut child = command.spawn().map_err(|_| FAILED)?;
+    let pid = child.id().ok_or(FAILED)?;
     let input = child.stdout.take().ok_or(FAILED)?;
     let output = child.stdin.take().ok_or(FAILED)?;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
         super::probe_stdio(
             tokio::io::BufReader::new(input),
             output,
@@ -159,8 +161,15 @@ pub(crate) async fn test_mcp_server(app: AppHandle) -> Result<(), String> {
             .ok_or(FAILED)
     })
     .await
-    .map_err(|_| "The local MCP server test timed out.")?
-    .map_err(str::to_owned)
+    .map_err(|_| "The local MCP server test timed out.")
+    .and_then(|response| response)
+    .map_err(str::to_owned);
+    if result.is_err() {
+        tokio::task::spawn_blocking(move || {
+            crate::crash_report::report_child_panic("Local MCP server", pid, started);
+        });
+    }
+    result
 }
 
 #[cfg(test)]

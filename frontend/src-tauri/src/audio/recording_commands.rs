@@ -25,7 +25,11 @@ use super::{
 
 // Import transcription modules
 use super::transcription;
-use super::{recording_state::RecordingState, stream::AudioStreamManager};
+use super::{
+    recording_manager::source_types,
+    recording_state::{DeviceType as RecordingDeviceType, RecordingState},
+    stream::AudioStreamManager,
+};
 
 pub(crate) mod floating;
 
@@ -761,6 +765,16 @@ struct ActiveRecording {
 
 static ACTIVE_CAPTURE: Mutex<Option<ActiveRecording>> = Mutex::new(None);
 
+#[derive(Serialize)]
+struct LastStopOutcome {
+    library_save_failed: bool,
+    message: &'static str,
+}
+
+// Read and written while ACTIVE_CAPTURE is locked so the idle snapshot
+// includes the outcome of the session that just stopped.
+static LAST_STOP_OUTCOME: Mutex<Option<LastStopOutcome>> = Mutex::new(None);
+
 pub(crate) fn active_capture(
     session_id: &str,
 ) -> Option<Arc<super::recording_state::RecordingState>> {
@@ -840,7 +854,12 @@ fn publish_active_recording(
         }
     };
     let folder = active.folder.clone();
-    *ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(active);
+    let mut capture = ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
+    LAST_STOP_OUTCOME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    *capture = Some(active);
     folder
 }
 
@@ -2134,6 +2153,19 @@ async fn stop_recording_session<R: Runtime>(
         _ => (None, 0),
     };
     let library_save_failed = meeting_id.is_none();
+    let message = if library_save_failed {
+        "Recording stopped. Open Interrupted recordings to recover the meeting."
+    } else if audio_save_failed {
+        "Recording stopped; audio recovery is needed"
+    } else if capture_incomplete {
+        "Recording stopped; available audio was saved with capture gaps"
+    } else if transcription_incomplete && audio_saved {
+        "Recording stopped; some queued audio still needs retranscription"
+    } else if transcription_incomplete {
+        "Recording stopped with an incomplete transcript. No audio was saved."
+    } else {
+        "Recording saved to the library"
+    };
     if let Some(remaining) = drain_timed_out {
         let warning = transcription_drain_warning(remaining, audio_saved, audio_save_failed);
         let _ = app.emit("transcription-warning", warning);
@@ -2146,13 +2178,18 @@ async fn stop_recording_session<R: Runtime>(
     floating_outcome.remember_outcome(floating_session);
 
     // Release the recording job only after the outcome is persisted.
-    let stopped_title = ACTIVE_CAPTURE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .and_then(|active| active.meeting_name)
-        .or(meeting_name_str);
-    IS_RECORDING.store(false, Ordering::SeqCst);
+    let stopped_title = {
+        let mut active = ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
+        *LAST_STOP_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(LastStopOutcome {
+            library_save_failed,
+            message,
+        });
+        IS_RECORDING.store(false, Ordering::SeqCst);
+        active
+            .take()
+            .and_then(|active| active.meeting_name)
+            .or(meeting_name_str)
+    };
 
     // Step 5: Complete shutdown
     let _ = app.emit(
@@ -2168,19 +2205,7 @@ async fn stop_recording_session<R: Runtime>(
     let emitted = app.emit(
         "recording-stopped",
         serde_json::json!({
-            "message": if library_save_failed {
-                "Recording stopped. Open Interrupted recordings to recover the meeting."
-            } else if audio_save_failed {
-                "Recording stopped; audio recovery is needed"
-            } else if capture_incomplete {
-                "Recording stopped; available audio was saved with capture gaps"
-            } else if transcription_incomplete && audio_saved {
-                "Recording stopped; some queued audio still needs retranscription"
-            } else if transcription_incomplete {
-                "Recording stopped with an incomplete transcript. No audio was saved."
-            } else {
-                "Recording saved to the library"
-            },
+            "message": message,
             "folder_path": folder_path_str,
             "session_id": stopped_live_identity.as_ref().map(|identity| &identity.session_id),
             "recording_generation": stopped_live_identity.as_ref().map(|identity| identity.recording_generation),
@@ -2395,9 +2420,9 @@ pub async fn is_recording_paused() -> bool {
 /// Get detailed recording state
 #[tauri::command]
 pub async fn get_recording_state() -> serde_json::Value {
+    let active = ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
     let is_recording = IS_RECORDING.load(Ordering::SeqCst);
     let is_stopping = is_stopping();
-    let active = ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(sink) = active.as_ref().map(|active| &active.sink) {
         let state = &sink.capture;
         serde_json::json!({
@@ -2414,9 +2439,11 @@ pub async fn get_recording_state() -> serde_json::Value {
             "current_pause_duration": state.get_current_pause_duration()
         })
     } else {
+        let last_stop_outcome = LAST_STOP_OUTCOME.lock().unwrap_or_else(|e| e.into_inner());
         serde_json::json!({
             "is_recording": is_recording,
             "is_stopping": is_stopping,
+            "last_stop_outcome": last_stop_outcome.as_ref(),
             "session_id": null,
             "recording_generation": null,
             "recording_mode": if LIVE_TRANSCRIPTION.load(Ordering::SeqCst) { "live" } else { "audio_only" },
@@ -2730,15 +2757,21 @@ async fn reconnect_device(
     session_id: String,
 ) -> Result<super::recording_manager::ReconnectResult, String> {
     let handle = tokio::runtime::Handle::current();
-    let outcome = with_reconnect_streams(RECONNECT_TIMEOUT, &session_id, move |state, streams| {
-        super::com_anchor::ensure_device_enumerator();
-        handle.block_on(RecordingManager::reconnect_streams(
-            state,
-            streams,
-            &device_name,
-            monitor_type,
-        ))
-    })
+    let (source, _) = source_types(monitor_type);
+    let outcome = with_reconnect_streams(
+        RECONNECT_TIMEOUT,
+        &session_id,
+        source,
+        move |state, streams| {
+            super::com_anchor::ensure_device_enumerator();
+            handle.block_on(RecordingManager::reconnect_streams(
+                state,
+                streams,
+                &device_name,
+                monitor_type,
+            ))
+        },
+    )
     .await?;
     outcome.map_err(|_| "Could not check the audio device. Try reconnecting again.".into())
 }
@@ -2792,6 +2825,7 @@ const AUDIO_DEVICE_NOT_RESPONDING: &str =
 async fn with_reconnect_streams<T: Send + 'static>(
     limit: std::time::Duration,
     session_id: &str,
+    source: RecordingDeviceType,
     work: impl FnOnce(&RecordingState, &mut AudioStreamManager) -> T + Send + 'static,
 ) -> Result<T, String> {
     let (state, mut streams) = {
@@ -2812,7 +2846,7 @@ async fn with_reconnect_streams<T: Send + 'static>(
             return Err("A device reconnection is already in progress.".into());
         }
         *started = Some((state.clone(), Instant::now()));
-        (state, manager.take_streams())
+        (state, manager.take_reconnect_stream(&source))
     };
     let task = tokio::task::spawn_blocking(move || {
         let result =
@@ -2833,7 +2867,7 @@ async fn with_reconnect_streams<T: Send + 'static>(
                 if result.is_err() {
                     state.mark_capture_incomplete();
                 }
-                manager.restore_streams(streams);
+                manager.restore_reconnect_stream(&source, streams);
                 true
             } else {
                 false
@@ -3005,6 +3039,143 @@ mod reconnect_tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+    use tauri::Listener;
+
+    const RECONNECT_SOURCE: RecordingDeviceType = RecordingDeviceType::System;
+
+    #[tokio::test]
+    async fn stop_persists_and_emits_once_while_reconnect_is_blocked() {
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("test.sqlite");
+        let db_manager = crate::database::manager::DatabaseManager::new_isolated(
+            database.to_str().unwrap(),
+            root.path().join("absent.sqlite").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        let pool = db_manager.pool().clone();
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier =
+            format!("net.example.clawscribe.test.{}", uuid::Uuid::new_v4());
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .manage(crate::knowledge::KnowledgeState::default())
+            .manage(crate::state::AppState { db_manager })
+            .build(context)
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let received = events.clone();
+        app.listen("recording-stopped", move |event| {
+            received
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+        let _restore = Restore(take_recording_for_stop());
+        let _flags = RestoreStopGlobals::take();
+        let mut manager = RecordingManager::new();
+        let (startup, sink) = prepare_live_recording(
+            &app.state::<crate::knowledge::KnowledgeState>(),
+            &mut manager,
+            false,
+        )
+        .unwrap();
+        let audio = manager.start_audio_fixture(root.path().to_owned());
+        let recording_id = manager.recording_id().unwrap().to_owned();
+        let folder = manager.get_meeting_folder().unwrap();
+        audio
+            .send(super::super::recording_state::AudioChunk {
+                data: vec![0.05; 4_800],
+                sample_rate: 48_000,
+                timestamp: 0.0,
+                chunk_id: 0,
+                device_type: RecordingDeviceType::Microphone,
+            })
+            .await
+            .unwrap();
+        drop(audio);
+        startup.commit();
+        store_recording_manager(manager);
+        publish_active_recording(&sink, None);
+
+        let (release, wait) = mpsc::channel::<()>();
+        let id = sink.session_id.clone();
+        let stalled = tokio::spawn(async move {
+            with_reconnect_streams(
+                Duration::from_secs(30),
+                &id,
+                RECONNECT_SOURCE,
+                move |_, _| {
+                    wait.recv().unwrap();
+                },
+            )
+            .await
+        });
+        until(|| reconnect_age(&sink.capture).is_some()).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            stop_recording_session(app.handle().clone(), None, None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Ok(true));
+        assert!(!stalled.is_finished());
+        assert!(!sink.capture.is_recording());
+        assert!(RECORDING_MANAGER.lock().unwrap().is_none());
+        assert_eq!(
+            get_recording_state().await["last_stop_outcome"]["library_save_failed"],
+            false
+        );
+        {
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["meeting_id"], recording_id);
+            assert_eq!(events[0]["library_save_failed"], false);
+            assert_eq!(events[0]["audio_saved"], true);
+        }
+        assert!(folder.join("audio.mp4").is_file());
+
+        release.send(()).unwrap();
+        assert_eq!(
+            stalled.await.unwrap().unwrap_err(),
+            "The recording session has ended."
+        );
+        assert!(RECORDING_MANAGER.lock().unwrap().is_none());
+        assert_eq!(events.lock().unwrap().len(), 1);
+        let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM meetings WHERE id = ?")
+            .bind(recording_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    struct RestoreStopGlobals(Option<ActiveRecording>, Option<LastStopOutcome>, bool, bool);
+    impl RestoreStopGlobals {
+        fn take() -> Self {
+            Self(
+                ACTIVE_CAPTURE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take(),
+                LAST_STOP_OUTCOME
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take(),
+                IS_RECORDING.swap(true, Ordering::SeqCst),
+                LIVE_TRANSCRIPTION.swap(false, Ordering::SeqCst),
+            )
+        }
+    }
+    impl Drop for RestoreStopGlobals {
+        fn drop(&mut self) {
+            *ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner()) = self.0.take();
+            *LAST_STOP_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = self.1.take();
+            IS_RECORDING.store(self.2, Ordering::SeqCst);
+            LIVE_TRANSCRIPTION.store(self.3, Ordering::SeqCst);
+        }
+    }
 
     /// Restores the process-wide recording manager after a test.
     struct Restore(Option<RecordingManager>);
@@ -3054,21 +3225,31 @@ mod reconnect_tests {
         let (release, wait) = mpsc::channel::<()>();
         let id = sink.session_id.clone();
         let first = tokio::spawn(async move {
-            with_reconnect_streams(Duration::from_secs(5), &id, move |_, _| {
-                // Stop can still reach the pipeline and saver.
-                let manager = RECORDING_MANAGER
-                    .try_lock()
-                    .unwrap_or_else(|_| panic!("manager lock held"));
-                assert!(manager.is_some());
-                drop(manager);
-                wait.recv().unwrap();
-                7
-            })
+            with_reconnect_streams(
+                Duration::from_secs(5),
+                &id,
+                RECONNECT_SOURCE,
+                move |_, _| {
+                    // Stop can still reach the pipeline and saver.
+                    let manager = RECORDING_MANAGER
+                        .try_lock()
+                        .unwrap_or_else(|_| panic!("manager lock held"));
+                    assert!(manager.is_some());
+                    drop(manager);
+                    wait.recv().unwrap();
+                    7
+                },
+            )
             .await
         });
         until(|| reconnect_age(&sink.capture).is_some()).await;
-        let second =
-            with_reconnect_streams(Duration::from_secs(5), &sink.session_id, |_, _| ()).await;
+        let second = with_reconnect_streams(
+            Duration::from_secs(5),
+            &sink.session_id,
+            RECONNECT_SOURCE,
+            |_, _| (),
+        )
+        .await;
         assert_eq!(
             second.unwrap_err(),
             "A device reconnection is already in progress."
@@ -3082,9 +3263,12 @@ mod reconnect_tests {
     async fn a_stale_session_cannot_reconnect_the_current_recording() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (_restore, _sink) = install_manager();
-        let result = with_reconnect_streams(Duration::from_secs(5), "stale-session", |_, _| {
-            panic!("a stale session must not run device work")
-        })
+        let result = with_reconnect_streams(
+            Duration::from_secs(5),
+            "stale-session",
+            RECONNECT_SOURCE,
+            |_, _| panic!("a stale session must not run device work"),
+        )
         .await;
         assert_eq!(result.unwrap_err(), "The recording session has ended.");
     }
@@ -3093,9 +3277,12 @@ mod reconnect_tests {
     async fn a_failing_or_panicking_reconnection_still_returns_the_stream_handles() {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (_restore, sink) = install_manager();
-        let failed = with_reconnect_streams(Duration::from_secs(5), &sink.session_id, |_, _| {
-            Err::<(), _>("device unavailable")
-        })
+        let failed = with_reconnect_streams(
+            Duration::from_secs(5),
+            &sink.session_id,
+            RECONNECT_SOURCE,
+            |_, _| Err::<(), _>("device unavailable"),
+        )
         .await;
         assert_eq!(failed.unwrap().unwrap_err(), "device unavailable");
         assert!(reconnect_age(&sink.capture).is_none());
@@ -3105,9 +3292,12 @@ mod reconnect_tests {
         sink.capture.set_warning_callback(move |message| {
             reported.lock().unwrap().push(message.to_owned());
         });
-        let panicked = with_reconnect_streams(Duration::from_secs(5), &sink.session_id, |_, _| {
-            panic!("synthetic device panic")
-        })
+        let panicked = with_reconnect_streams(
+            Duration::from_secs(5),
+            &sink.session_id,
+            RECONNECT_SOURCE,
+            |_, _| panic!("synthetic device panic"),
+        )
         .await;
         assert_eq!(
             panicked.unwrap_err(),
@@ -3116,11 +3306,14 @@ mod reconnect_tests {
         assert!(sink.capture.capture_incomplete());
         assert_eq!(warnings.lock().unwrap().len(), 1);
         assert!(reconnect_age(&sink.capture).is_none());
-        assert!(
-            with_reconnect_streams(Duration::from_secs(5), &sink.session_id, |_, _| ())
-                .await
-                .is_ok()
-        );
+        assert!(with_reconnect_streams(
+            Duration::from_secs(5),
+            &sink.session_id,
+            RECONNECT_SOURCE,
+            |_, _| ()
+        )
+        .await
+        .is_ok());
     }
 
     #[tokio::test]
@@ -3142,9 +3335,12 @@ mod reconnect_tests {
         let (release, wait) = mpsc::channel::<()>();
         let id = sink.session_id.clone();
         let stalled = tokio::spawn(async move {
-            with_reconnect_streams(Duration::from_secs(5), &id, move |_, _| {
-                wait.recv().unwrap()
-            })
+            with_reconnect_streams(
+                Duration::from_secs(5),
+                &id,
+                RECONNECT_SOURCE,
+                move |_, _| wait.recv().unwrap(),
+            )
             .await
         });
         until(|| reconnect_age(&sink.capture).is_some()).await;
@@ -3161,9 +3357,12 @@ mod reconnect_tests {
         let (release_new, wait_new) = mpsc::channel::<()>();
         let id = new_sink.session_id.clone();
         let next = tokio::spawn(async move {
-            with_reconnect_streams(Duration::from_secs(5), &id, move |_, _| {
-                wait_new.recv().unwrap()
-            })
+            with_reconnect_streams(
+                Duration::from_secs(5),
+                &id,
+                RECONNECT_SOURCE,
+                move |_, _| wait_new.recv().unwrap(),
+            )
             .await
         });
         until(|| reconnect_age(&new_sink.capture).is_some()).await;
@@ -3189,11 +3388,15 @@ mod reconnect_tests {
         let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let (_restore, sink) = install_manager();
         let (release, wait) = mpsc::channel::<()>();
-        let result =
-            with_reconnect_streams(Duration::from_millis(50), &sink.session_id, move |_, _| {
+        let result = with_reconnect_streams(
+            Duration::from_millis(50),
+            &sink.session_id,
+            RECONNECT_SOURCE,
+            move |_, _| {
                 wait.recv().unwrap();
-            })
-            .await;
+            },
+        )
+        .await;
         assert_eq!(result.unwrap_err(), AUDIO_DEVICE_NOT_RESPONDING);
         assert!(reconnect_age(&sink.capture).is_some());
         assert!(sink.capture.is_recording());
@@ -3233,9 +3436,14 @@ mod reconnect_tests {
         let (release, wait) = mpsc::channel::<()>();
         let reconnect_id = id.clone();
         let reconnect = tokio::spawn(async move {
-            with_reconnect_streams(Duration::from_secs(5), &reconnect_id, move |_, _| {
-                wait.recv().unwrap();
-            })
+            with_reconnect_streams(
+                Duration::from_secs(5),
+                &reconnect_id,
+                RECONNECT_SOURCE,
+                move |_, _| {
+                    wait.recv().unwrap();
+                },
+            )
             .await
         });
         until(|| reconnect_age(&capture).is_some()).await;

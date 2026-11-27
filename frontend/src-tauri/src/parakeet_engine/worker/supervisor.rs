@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const LOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const WAIT_SLICE: Duration = Duration::from_millis(20);
@@ -67,6 +67,7 @@ struct Exchange {
 
 struct RunningChild {
     process: Child,
+    started: SystemTime,
     job: Option<job::Job>,
     requests: Option<mpsc::Sender<Exchange>>,
     io_thread: Option<JoinHandle<()>>,
@@ -86,10 +87,12 @@ impl RunningChild {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
+        let started = SystemTime::now();
         let process = command.spawn().map_err(|_| WorkerError::Spawn)?;
         // Install ownership immediately so every subsequent error kills and reaps.
         let mut running = Self {
             process,
+            started,
             job: Some(job),
             requests: None,
             io_thread: None,
@@ -180,6 +183,7 @@ impl RunningChild {
         if !reaped {
             log::warn!("Parakeet worker did not exit within the cleanup deadline");
         }
+        crate::crash_report::report_child_panic("Parakeet worker", self.process.id(), self.started);
         reaped
     }
 }

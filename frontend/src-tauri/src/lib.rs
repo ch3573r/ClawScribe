@@ -2,6 +2,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
 // Removed unused import
 
+// The desktop binary gets this resource from tauri-build. Link it into the
+// MSVC library tests too so the mock runtime can load Common Controls v6.
+#[cfg(all(test, windows, target_env = "msvc"))]
+#[link(name = "resource", kind = "static", modifiers = "-bundle")]
+extern "C" {}
+
 // Performance optimization: Conditional logging macros for hot paths
 #[cfg(debug_assertions)]
 macro_rules! perf_debug {
@@ -29,6 +35,8 @@ pub mod audio;
 pub mod behavior_settings;
 pub mod cli_control;
 pub mod config;
+#[doc(hidden)]
+pub mod crash_report;
 pub(crate) mod credentials;
 pub mod database;
 pub mod diagnostics;
@@ -654,7 +662,7 @@ pub fn run() {
 
     builder
         // File + stdout + webview logging. The file lives in the app log dir
-        // (Windows: %APPDATA%\net.rismondo.openclaw.clawscribe\logs\ClawScribe.log).
+        // (Windows: %LOCALAPPDATA%\net.rismondo.openclaw.clawscribe\logs\ClawScribe.log).
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)

@@ -131,6 +131,31 @@ test('a state poll clears stopping if the completion event was missed', async t 
   assert.equal(view.render().status, 'idle');
 });
 
+test('a missed Stop failure still tells the user how to recover the recording', async t => {
+  const view = createView();
+  t.after(() => view.unmount());
+  view.render();
+  await flush();
+  view.requests[0].resolve(recording);
+  await flush();
+  const message = 'Recording stopped. Open Interrupted recordings to recover the meeting.';
+  const outcome = { is_recording: false, last_stop_outcome: { library_save_failed: true, message } };
+  view.render().setStatus('stopping');
+  view.tick();
+  view.requests[1].resolve(outcome);
+  await flush();
+  assert.equal(view.render().status, 'error');
+  assert.equal(view.render().statusMessage, message);
+  assert.equal(view.render().sessionId, null);
+
+  view.render().setStatus('stopping');
+  const duplicate = view.render().reconcileNothingToStop(false);
+  view.requests[2].resolve(outcome);
+  assert.equal(await duplicate, true);
+  assert.equal(view.render().status, 'error');
+  assert.equal(view.render().statusMessage, message);
+});
+
 test('elapsed ticks update the clock without changing the lifecycle context value', async () => {
   const view = createView();
   view.render();
