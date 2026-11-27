@@ -4,12 +4,16 @@ import test from 'node:test';
 
 test('native Stop commits its authoritative transcript before notifying the webview', () => {
   const source = readFileSync(new URL('../../src-tauri/src/audio/recording_commands.rs', import.meta.url), 'utf8');
-  const stop = source.slice(source.indexOf('async fn stop_recording_session'), source.indexOf('/// Check if recording is active'));
+  const stop = source.slice(source.indexOf('async fn stop_recording_session'), source.indexOf('async fn stop_audio_capture'));
   // Poison-tolerant lock; rustfmt may wrap the chain across lines.
-  const jobRelease = stop.search(/RECORDING_JOB\s*\.lock\(\)\s*\.unwrap_or_else\(\|e\| e\.into_inner\(\)\)\s*\.take\(\)/);
+  const jobRelease = stop.search(/\.recording_job\s*\.lock\(\)\s*\.unwrap_or_else\(\|e\| e\.into_inner\(\)\)\s*\.take\(\)/);
   assert.ok(jobRelease > 0);
-  assert.ok(stop.indexOf('manager.library_transcripts()') < stop.indexOf('save_recording_handoff'));
-  assert.ok(stop.indexOf('save_recording_handoff') < stop.indexOf('"recording-stopped"'));
+  const snapshot = source.slice(source.indexOf('fn snapshot_stopped_transcript'), source.indexOf('async fn unload_recording_model'));
+  const commit = source.slice(source.indexOf('async fn commit_stopped_recording'), source.indexOf('/// Dispatch only after library registration'));
+  assert.match(snapshot, /manager\.library_transcripts\(\)/);
+  assert.match(commit, /save_recording_handoff\(/);
+  assert.ok(stop.indexOf('snapshot_stopped_transcript(') < stop.indexOf('commit_stopped_recording('));
+  assert.ok(stop.indexOf('commit_stopped_recording(') < stop.indexOf('"recording-stopped"'));
   assert.ok(stop.indexOf('"recording-stopped"') < jobRelease);
   assert.ok(jobRelease < stop.indexOf('_stop_state.close()'));
   assert.ok(stop.indexOf('_stop_state.close()') < stop.indexOf('crate::tray::start_after_save'));
@@ -39,9 +43,10 @@ test('reconnect takes only the requested source and checks for Stop after open',
 
 test('a drain timeout reports actual audio retention after finalization', () => {
   const source = readFileSync(new URL('../../src-tauri/src/audio/recording_commands.rs', import.meta.url), 'utf8');
-  const stop = source.slice(source.indexOf('async fn stop_recording_session'), source.indexOf('/// Check if recording is active'));
-  assert.ok(stop.indexOf('report.audio_path.is_some()') > stop.indexOf('.save_recording_only('));
-  assert.ok(stop.indexOf('report.audio_path.is_some()') < stop.indexOf('transcription_drain_warning(remaining,'));
+  const stop = source.slice(source.indexOf('async fn stop_recording_session'), source.indexOf('async fn stop_audio_capture'));
+  const finalize = source.slice(source.indexOf('async fn finalize_recording_files'), source.indexOf('async fn commit_stopped_recording'));
+  assert.match(finalize, /\.save_recording_only\([\s\S]*audio_saved = report\.audio_path\.is_some\(\)/);
+  assert.match(stop, /finalize_recording_files\([\s\S]*transcription_drain_warning\(remaining, audio_saved, audio_save_failed\)/);
 });
 
 test('the main window listens for transcription warnings with a shared toast ID', () => {
