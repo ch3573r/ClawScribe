@@ -45,6 +45,12 @@ pub enum DeviceType {
     System,
 }
 
+impl DeviceType {
+    fn capture_index(&self) -> usize {
+        usize::from(*self == Self::System)
+    }
+}
+
 /// Audio chunk with metadata for processing
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
@@ -176,6 +182,7 @@ pub struct RecordingState {
 
     // Audio pipeline
     audio_sender: Mutex<Option<mpsc::Sender<AudioChunk>>>,
+    queued_capture_samples: [AtomicU64; 2],
 
     // Memory optimization
     buffer_pool: AudioBufferPool,
@@ -227,6 +234,9 @@ impl RecordingState {
         self.capture_cutoff_ns.store(start_ns, Ordering::SeqCst);
         self.capture_start_notified.store(false, Ordering::Relaxed);
         self.capture_lost_through.store(0, Ordering::Relaxed);
+        for queued in &self.queued_capture_samples {
+            queued.store(0, Ordering::Relaxed);
+        }
         *self.recording_start.lock().unwrap() = Some(start);
         *self.recording_end.lock().unwrap() = None;
         self.recent_errors.lock().unwrap().clear();
@@ -430,11 +440,21 @@ impl RecordingState {
             if let Some(progress) = progress.upgrade() {
                 let end = progress.admitted_end.load(Ordering::Acquire);
                 let pending = progress.pending_packets.load(Ordering::Acquire);
-                let index = usize::from(*device == DeviceType::System);
+                let index = device.capture_index();
                 active[index] |= pending > 0 || (end > 0 && clock < end.saturating_add(grace));
             }
         }
+        // Read this after worker progress. A worker publishes queued audio
+        // before releasing protection for its pending capture packet.
+        for (source, queued) in active.iter_mut().zip(&self.queued_capture_samples) {
+            *source |= queued.load(Ordering::Acquire) > 0;
+        }
         active
+    }
+
+    pub(super) fn receive_capture_samples(&self, chunk: &AudioChunk) -> u64 {
+        self.queued_capture_samples[chunk.device_type.capture_index()]
+            .fetch_sub(chunk.data.len() as u64, Ordering::AcqRel)
     }
 
     pub fn mark_source_missing(&self, device: Arc<AudioDevice>, device_type: DeviceType) {
@@ -583,16 +603,20 @@ impl RecordingState {
         sender: &mpsc::Sender<AudioChunk>,
         chunk: AudioChunk,
     ) -> Result<()> {
-        match sender.try_send(chunk) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(chunk)) => {
+        match sender.try_reserve() {
+            Ok(permit) => {
+                self.queued_capture_samples[chunk.device_type.capture_index()]
+                    .fetch_add(chunk.data.len() as u64, Ordering::Release);
+                permit.send(chunk);
+            }
+            Err(mpsc::error::TrySendError::Full(())) => {
                 let end = (chunk.timestamp * f64::from(chunk.sample_rate)).round() as u64
                     + chunk.data.len() as u64;
                 self.record_capture_gap_end(end);
                 self.record_sample_loss(chunk.data.len());
                 return Ok(());
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(mpsc::error::TrySendError::Closed(())) => {
                 self.mark_capture_incomplete();
                 self.stop_recording();
                 self.report_warning("The audio processor stopped unexpectedly. Press Stop to save the available recording.");
@@ -904,6 +928,7 @@ impl Default for RecordingState {
             disconnected_devices: Mutex::new(Vec::new()),
             source_failure_revision: AtomicU64::new(0),
             audio_sender: Mutex::new(None),
+            queued_capture_samples: Default::default(),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
             recoverable_error_count: AtomicU32::new(0),

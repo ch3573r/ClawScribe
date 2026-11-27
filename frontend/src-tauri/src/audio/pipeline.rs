@@ -31,6 +31,7 @@ const RESAMPLER_CHUNK_SIZE: usize = 512;
 const TRANSCRIPTION_QUEUE_WARNING_THRESHOLD: u32 = 3;
 const MICROPHONE_STREAM_WARNING: &str =
     "The selected microphone is not sending audio. Check the microphone connection and recording devices.";
+const CAPTURE_BACKLOG_WARNING: &str = "Audio processing fell behind. Live updates may be delayed.";
 
 #[derive(Default)]
 struct MicrophoneStreamWatch {
@@ -343,13 +344,11 @@ impl AudioMixerRingBuffer {
     fn extract_window(
         &mut self,
         idle_clock: u64,
-        allow_padding: bool,
         protected: [bool; 2],
     ) -> Option<(u64, Vec<f32>, Vec<f32>)> {
         let end = self.cursor + self.window_size_samples as u64;
         let ready = self.mic.end >= end && self.system.end >= end;
-        let can_pad = allow_padding
-            && (!protected[0] || self.mic.end >= end)
+        let can_pad = (!protected[0] || self.mic.end >= end)
             && (!protected[1] || self.system.end >= end)
             && self.mic.end.max(self.system.end).max(idle_clock) >= end + self.source_grace_samples;
         (ready || can_pad).then(|| self.take_window(self.window_size_samples))
@@ -1120,6 +1119,7 @@ impl AudioPipeline {
 
         let mut system_audio_silence = SystemAudioSilenceTracker::default();
         let mut microphone_stream = MicrophoneStreamWatch::default();
+        let mut warned_about_backlog = false;
 
         // Speaker attribution ("Me" = mic, "Participants" = system). We compare
         // each source's energy *relative to its own rolling noise floor* (an
@@ -1148,6 +1148,11 @@ impl AudioPipeline {
             .await
             {
                 Ok(Some(chunk)) => {
+                    let queued_samples = self.state.receive_capture_samples(&chunk);
+                    if !warned_about_backlog && queued_samples >= 2 * u64::from(self.sample_rate) {
+                        self.state.report_warning(CAPTURE_BACKLOG_WARNING);
+                        warned_about_backlog = true;
+                    }
                     // PERFORMANCE OPTIMIZATION: Eliminate per-chunk logging overhead
                     // Logging in hot paths causes severe performance degradation
                     self.processed_chunks += 1;
@@ -1216,8 +1221,8 @@ impl AudioPipeline {
                 .capture_seconds(now)
                 .map_or(0, |seconds| (seconds * f64::from(self.sample_rate)) as u64);
             // Packetless loopback can advance on idle ticks. A source with
-            // admitted input or recent callbacks gets time to deliver its DSP
-            // output. Take the queue check after reading worker progress.
+            // admitted input, queued DSP output or recent callbacks keeps its
+            // place on the clock. Drain the active source when the other is idle.
             let idle_clock = if idle
                 && (self.state.get_microphone_device().is_some()
                     || self.state.get_system_device().is_some())
@@ -1226,15 +1231,17 @@ impl AudioPipeline {
             } else {
                 0
             };
+            // During pause or Stop, the admitted sample positions still show
+            // how long the other source has been silent.
+            let latest_capture = self.ring_buffer.mic.end.max(self.ring_buffer.system.end);
             loop {
-                let protected = self
-                    .state
-                    .sources_with_pending_capture(clock, self.ring_buffer.source_grace_samples);
-                let Some((start, mic, system)) = self.ring_buffer.extract_window(
-                    idle_clock,
-                    self.receiver.is_empty(),
-                    protected,
-                ) else {
+                let protected = self.state.sources_with_pending_capture(
+                    clock.max(latest_capture),
+                    self.ring_buffer.source_grace_samples,
+                );
+                let Some((start, mic, system)) =
+                    self.ring_buffer.extract_window(idle_clock, protected)
+                else {
                     break;
                 };
                 self.process_mixed_window(start, &mic, &system).await?;
@@ -1863,9 +1870,9 @@ mod queue_failure_tests {
     fn mixer_continues_when_only_one_source_delivers() {
         let mut mixer = AudioMixerRingBuffer::new(48_000);
         mixer.add_samples(DeviceType::System, 0, vec![0.5; 28_800]);
-        assert!(mixer.extract_window(0, true, [false; 2]).is_none());
+        assert!(mixer.extract_window(0, [false; 2]).is_none());
         mixer.add_samples(DeviceType::System, 28_800, vec![0.5; 19_200]);
-        let (start, mic, system) = mixer.extract_window(0, true, [false; 2]).unwrap();
+        let (start, mic, system) = mixer.extract_window(0, [false; 2]).unwrap();
         assert_eq!(start, 0);
         assert_eq!(mic, vec![0.0; 28_800]);
         assert_eq!(system, vec![0.5; 28_800]);
@@ -1879,7 +1886,7 @@ mod queue_failure_tests {
         samples.extend(vec![0.25; mixer.max_buffer_size]);
         assert_eq!(mixer.add_samples(DeviceType::System, 0, samples), 7);
         assert_eq!(mixer.system.buffered, mixer.max_buffer_size);
-        let (_, _, system) = mixer.extract_window(0, true, [false; 2]).unwrap();
+        let (_, _, system) = mixer.extract_window(0, [false; 2]).unwrap();
         assert_eq!(system[..7], [0.0; 7]);
         assert_eq!(system[7], 0.25);
         assert_eq!(mixer.mic.buffered, 0);
@@ -1890,7 +1897,7 @@ mod queue_failure_tests {
         let mut mixer = AudioMixerRingBuffer::new(1_000);
         mixer.add_samples(DeviceType::System, 0, vec![0.1; 1_000]);
         assert_eq!(
-            mixer.extract_window(0, true, [false; 2]).unwrap().1,
+            mixer.extract_window(0, [false; 2]).unwrap().1,
             vec![0.0; 600]
         );
         assert_eq!(
@@ -1900,7 +1907,7 @@ mod queue_failure_tests {
         mixer.add_samples(DeviceType::Microphone, 700, vec![0.3; 100]);
         mixer.add_samples(DeviceType::System, 1_000, vec![0.1; 600]);
 
-        let (start, mic, system) = mixer.extract_window(0, true, [false; 2]).unwrap();
+        let (start, mic, system) = mixer.extract_window(0, [false; 2]).unwrap();
         assert_eq!(start, 600);
         assert_eq!(mic[..10], [0.2; 10]);
         assert_eq!(mic[10..100], [0.0; 90]);
@@ -1916,12 +1923,12 @@ mod queue_failure_tests {
     #[test]
     fn packetless_capture_advances_after_the_same_window_grace_period() {
         let mut mixer = AudioMixerRingBuffer::new(1_000);
-        assert!(mixer.extract_window(999, true, [false; 2]).is_none());
-        let (start, mic, system) = mixer.extract_window(1_000, true, [false; 2]).unwrap();
+        assert!(mixer.extract_window(999, [false; 2]).is_none());
+        let (start, mic, system) = mixer.extract_window(1_000, [false; 2]).unwrap();
         assert_eq!(start, 0);
         assert_eq!(mic, vec![0.0; 600]);
         assert_eq!(mic, system);
-        assert!(mixer.extract_window(1_000, true, [false; 2]).is_none());
+        assert!(mixer.extract_window(1_000, [false; 2]).is_none());
     }
 
     #[test]
@@ -1938,18 +1945,18 @@ mod queue_failure_tests {
         let mut mixer = AudioMixerRingBuffer::new(1_000);
         mixer.add_samples(DeviceType::System, 0, vec![0.25; 800]);
         let protected = state.sources_with_pending_capture(800, mixer.source_grace_samples);
-        assert!(mixer.extract_window(800, true, protected).is_none());
+        assert!(mixer.extract_window(800, protected).is_none());
         // A worker that has already admitted samples keeps the cursor behind
         // its pending output even if the wall clock runs past the grace period.
         let protected = state.sources_with_pending_capture(1_050, mixer.source_grace_samples);
-        assert!(mixer.extract_window(1_050, true, protected).is_none());
+        assert!(mixer.extract_window(1_050, protected).is_none());
 
         assert_eq!(
             mixer.add_samples(DeviceType::Microphone, 0, vec![0.5; 600]),
             0
         );
         mic_progress.pending_packets.store(0, Ordering::Release);
-        let (start, mic, system) = mixer.extract_window(1_050, true, protected).unwrap();
+        let (start, mic, system) = mixer.extract_window(1_050, protected).unwrap();
         assert_eq!(start, 0);
         assert_eq!(mic, vec![0.5; 600]);
         assert_eq!(system, vec![0.25; 600]);
@@ -2053,6 +2060,115 @@ mod queue_failure_tests {
             .finish()
             .await;
         pipeline.transcription_sender.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_five_second_mic_backlog_is_mixed_without_losing_admitted_samples() {
+        assert_capture_backlog_is_preserved(500, None).await;
+    }
+
+    #[tokio::test]
+    async fn a_five_second_mic_backlog_drains_after_loopback_goes_idle() {
+        assert_capture_backlog_is_preserved(500, Some(0)).await;
+    }
+
+    #[tokio::test]
+    async fn a_mic_backlog_waits_for_system_audio_already_in_the_queue() {
+        assert_capture_backlog_is_preserved(120, Some(120)).await;
+    }
+
+    async fn assert_capture_backlog_is_preserved(
+        packets: usize,
+        system_queue_index: Option<usize>,
+    ) {
+        use super::super::device_detection::InputDeviceKind;
+        use super::super::recording_state::CaptureProgress;
+        use super::super::transcription::queue::{recording_audio_queue, transcription_queue};
+        use std::sync::atomic::Ordering;
+
+        const PACKET_SAMPLES: usize = 480;
+        let folder = tempfile::tempdir().unwrap();
+        let (recording, mut saved, _) = recording_audio_queue(folder.path()).unwrap();
+        let (speech, _transcripts, _) = transcription_queue().unwrap();
+        let (sender, receiver) = mpsc::channel(packets + 1);
+        let state = RecordingState::new();
+        state.set_audio_sender(sender);
+        state.start_recording().unwrap();
+
+        let mut pipeline = AudioPipeline::new(
+            receiver,
+            speech,
+            state.clone(),
+            0,
+            CAPTURE_SAMPLE_RATE,
+            "Fixture microphone".into(),
+            InputDeviceKind::Unknown,
+            "Fixture loopback".into(),
+            InputDeviceKind::Unknown,
+            Ok(None),
+        )
+        .unwrap();
+        pipeline.recording_sender_for_mixed =
+            Some(BufferedSpool::new(recording, state.clone(), true));
+
+        // Keep the silent loopback's progress registered through drain, as if
+        // the native stream has yet to finish releasing its callback.
+        let system_progress = Arc::new(CaptureProgress::default());
+        if system_queue_index.is_some() {
+            system_progress
+                .admitted_end
+                .store(PACKET_SAMPLES as u64, Ordering::Release);
+            state.register_capture_progress(DeviceType::System, &system_progress);
+        }
+
+        // The task has not started receiving, as if it were stalled under load.
+        for packet in 0..=packets {
+            if system_queue_index == Some(packet) {
+                state
+                    .send_audio_chunk(AudioChunk {
+                        data: vec![0.5; PACKET_SAMPLES],
+                        sample_rate: CAPTURE_SAMPLE_RATE,
+                        timestamp: 0.0,
+                        chunk_id: 0,
+                        device_type: DeviceType::System,
+                    })
+                    .unwrap();
+            }
+            if packet == packets {
+                break;
+            }
+            state
+                .send_audio_chunk(AudioChunk {
+                    data: vec![0.25; PACKET_SAMPLES],
+                    sample_rate: CAPTURE_SAMPLE_RATE,
+                    timestamp: packet as f64 / 100.0,
+                    chunk_id: packet as u64,
+                    device_type: DeviceType::Microphone,
+                })
+                .unwrap();
+        }
+        state.stop_recording();
+        pipeline.run().await.unwrap();
+
+        assert!(!state.capture_incomplete());
+        let mut pcm = Vec::new();
+        while let Some(chunk) = saved.recv().await.unwrap() {
+            pcm.extend(chunk.chunk.data);
+        }
+        assert_eq!(pcm.len(), packets * PACKET_SAMPLES);
+        let prefix = if system_queue_index.is_some() {
+            PACKET_SAMPLES
+        } else {
+            0
+        };
+        assert!(pcm[..prefix].iter().all(|&sample| sample == 0.75));
+        assert!(pcm[prefix..].iter().all(|&sample| sample == 0.25));
+        if packets >= 200 {
+            assert_eq!(
+                state.health.lock().unwrap().warnings,
+                [CAPTURE_BACKLOG_WARNING]
+            );
+        }
     }
 
     #[test]
