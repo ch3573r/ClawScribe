@@ -22,6 +22,7 @@ import { LibraryBackup } from "@/components/LibraryBackup";
 import { ArchiveMeetingRows, useArchiveMetadata } from "@/components/Archive/ArchiveMeetingRows";
 import { ArchiveStorageButton } from "@/components/Archive/ArchiveStorageButton";
 import { ArchiveBulkActions, type BulkAction } from "@/components/Archive/ArchiveBulkActions";
+import { MeetingTrash } from "@/components/Archive/MeetingTrash";
 import type { ArchiveMeeting } from "@/components/Archive/ArchiveAudioRemoval";
 import { OpenMeetingActions } from "@/components/Archive/OpenMeetingActions";
 import { archiveDateKey, archiveReview, archiveSeriesChoices, formatArchiveDate, parseArchiveDate } from "@/lib/archive-review";
@@ -58,7 +59,7 @@ import {
 type SortMode = "newest" | "oldest" | "title";
 const noProjectFilter: ProjectFilter = { tags: [], untagged: false, mode: "any" };
 // Keep this view's filters in memory when a meeting route replaces it.
-let archiveView = { tab: "archive" as "archive" | "memory" | "actions", memoryProject: noProjectFilter, query: "", from: "", to: "", series: "", attentionOnly: false, sortMode: "newest" as SortMode, projectFilter: noProjectFilter, searchMode: "keyword" as SearchMode };
+let archiveView = { tab: "archive" as "archive" | "memory" | "actions" | "trash", memoryProject: noProjectFilter, query: "", from: "", to: "", series: "", attentionOnly: false, sortMode: "newest" as SortMode, projectFilter: noProjectFilter, searchMode: "keyword" as SearchMode };
 
 export default function MeetingsPage() {
   const router = useRouter();
@@ -98,14 +99,14 @@ export default function MeetingsPage() {
   useEffect(() => receiveMatchScope(askAboutMatches), [askAboutMatches]);
   useEffect(() => {
     const navigate = (target: unknown) => {
-      if (target === "archive" || target === "memory" || target === "actions") setTab(target);
+      if (target === "archive" || target === "memory" || target === "actions" || target === "trash") setTab(target);
     };
     const onTab = (event: Event) => navigate((event as CustomEvent).detail);
     if (typeof window === "undefined") return;
     if (window.location?.href) {
       const url = new URL(window.location.href);
       const target = url.searchParams.get("tab");
-      if (target === "archive" || target === "memory" || target === "actions") {
+      if (target === "archive" || target === "memory" || target === "actions" || target === "trash") {
         navigate(target);
         url.searchParams.delete("tab");
         window.history.replaceState(window.history.state, "", url);
@@ -130,7 +131,7 @@ export default function MeetingsPage() {
   const invalidDates = !!from && !!to && from > to;
   const scope = hasScope ? libraryScope(restrictMeetings ? [...scopedIds] : [], !restrictMeetings, projectFilter, from, to) : undefined;
   const searchActive = tab === "archive" && !invalidDates && (!restrictMeetings || scopedIds.size > 0);
-  const { results, searching: literalSearching, error: searchError } = useLibrarySearch(query, searchActive, scope, false, meetings);
+  const { results, searching: literalSearching, error: searchError, loadMore, loadingMore, moreError } = useLibrarySearch(query, searchActive, scope, false, meetings);
   const { semanticReady, index } = useKnowledgeIndexStatus(tab === "archive");
   const mode = semanticReady ? searchMode : "keyword";
   const scopeKey = JSON.stringify(scope ?? libraryScope([], true, noProjectFilter));
@@ -255,12 +256,16 @@ export default function MeetingsPage() {
             <TabsTrigger ref={archiveTab} value="archive" id="meetings-archive-tab" aria-controls="meetings-archive-panel">Archive</TabsTrigger>
             <TabsTrigger value="memory" id="meetings-memory-tab" aria-controls="meeting-memory-panel">Meeting memory</TabsTrigger>
             <TabsTrigger value="actions" id="meetings-actions-tab" aria-controls="meetings-actions-panel">Open actions</TabsTrigger>
+            <TabsTrigger value="trash" id="meetings-trash-tab" aria-controls="meetings-trash-panel">Trash</TabsTrigger>
           </TabsList>
           <TabsContent value="memory" forceMount id="meeting-memory-panel" hidden={tab !== "memory"} className={tab === "memory" ? "m-0 min-h-0 flex-1" : "hidden"}>
             <KnowledgeArchive key={matchSession?.key ?? 0} initialMatches={matchSession?.scope} active={tab === "memory"} meetings={memoryMeetings} meetingTitles={meetings} projectFilter={memoryProject} setProjectFilter={setMemoryProject} projectControl={<ProjectFilterMenu filter={memoryProject} setFilter={setMemoryProject} />} />
           </TabsContent>
           <TabsContent value="actions" id="meetings-actions-panel" className="m-0 min-h-0 flex-1 overflow-y-auto">
             <OpenMeetingActions />
+          </TabsContent>
+          <TabsContent value="trash" id="meetings-trash-panel" className="m-0 min-h-0 flex-1 overflow-y-auto">
+            <MeetingTrash />
           </TabsContent>
           <TabsContent value="archive" forceMount id="meetings-archive-panel" hidden={tab !== "archive"} className={tab === "archive" ? "m-0 min-h-0 flex-1 space-y-4 overflow-y-auto" : "hidden"}>
         {meetings.length > 0 && (
@@ -337,7 +342,7 @@ export default function MeetingsPage() {
           {searching && <p role="status" className="text-sm text-muted-foreground">Searching saved meetings…</p>}
           {searchError && <p role="alert" className="text-sm text-destructive">{searchError}</p>}
           {(hybrid.error || hybrid.data?.mode === "keyword") && <p role="status" className="text-sm text-muted-foreground">Hybrid search is unavailable for this query. Showing keyword matches.</p>}
-          {results?.limited && <p role="status" className="mb-3 text-sm text-muted-foreground">Search reached its limit. Try more specific text or narrow the filters.</p>}
+          {results?.limited && <p role="status" className="mb-3 text-sm text-muted-foreground">Some sources could not be searched in full. Narrow the date or project filters to look for more matches.</p>}
           {meetingsError && meetings.length > 0 && (
             <div role="alert" className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-error-border/30 bg-error px-4 py-3 text-sm text-error-foreground">
               <span>Could not refresh your meetings. The list may be out of date.</span>
@@ -345,7 +350,7 @@ export default function MeetingsPage() {
             </div>
           )}
           {matchIds.length > 0 && <Button variant="outline" size="sm" className="mb-3" onClick={() => askAboutMatches({ ids: matchIds, project: projectFilter, from, to, question: query.trim(), notes: noteSelection.references(matchIds.flatMap(id => excerpts.get(id)?.saved ?? [])) })}>Ask about these results</Button>}
-          {!invalidDates && !searching && !searchError && (!hasQuery || visibleMeetings.length > 0 || !results?.limited) && <PageSection className="min-w-0 rounded-lg border border-border bg-card shadow-sm" aria-label={hasQuery ? "Matching meetings" : "Saved meetings"}>
+          {!invalidDates && !searching && !searchError && (!hasQuery || visibleMeetings.length > 0 || (!results?.limited && !results?.saved_next)) && <PageSection className="min-w-0 rounded-lg border border-border bg-card shadow-sm" aria-label={hasQuery ? "Matching meetings" : "Saved meetings"}>
             {hasQuery && visibleMeetings.length > 0 && <h2 className="border-b border-border px-6 py-3 text-sm font-semibold">Matching meetings</h2>}
             {visibleMeetings.length > 0 ? (
               <ArchiveMeetingRows
@@ -385,6 +390,13 @@ export default function MeetingsPage() {
               </div>
             )}
           </PageSection>}
+          {results?.saved_next && <div className="mt-3 space-y-2">
+            <p role="status" className="text-sm text-muted-foreground">More saved summaries, notes, or bookmarks are available to search.</p>
+            {moreError && <p role="alert" className="text-sm text-destructive">{moreError}</p>}
+            <Button variant="outline" size="sm" disabled={loadingMore} onClick={() => void loadMore()}>
+              {loadingMore ? "Searching…" : "Load more"}
+            </Button>
+          </div>}
 
         </div>
           </TabsContent>

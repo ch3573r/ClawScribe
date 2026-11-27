@@ -11,6 +11,7 @@ pub mod pending_recording_notes;
 pub(crate) mod recording_calendar;
 pub(crate) mod saved_text;
 pub mod summary_bookmarks;
+pub(crate) mod trash;
 
 use crate::exports::metadata::{export_timestamp, Header};
 use crate::state::AppState;
@@ -86,7 +87,7 @@ pub(crate) async fn cleanup_orphaned_bookmarks(pool: &SqlitePool) -> Result<(), 
 
 #[tauri::command]
 pub async fn list_meeting_tags(app: AppHandle) -> Result<Vec<MeetingTag>, String> {
-    sqlx::query_as("SELECT meeting_id, tag FROM meeting_tags ORDER BY tag COLLATE NOCASE")
+    sqlx::query_as("SELECT meeting_id, tag FROM meeting_tags JOIN active_meetings m ON m.id=meeting_id ORDER BY tag COLLATE NOCASE")
         .fetch_all(app.state::<AppState>().db_manager.pool())
         .await
         .map_err(|_| "Could not load project tags.".into())
@@ -112,11 +113,12 @@ pub async fn set_meeting_tags(
         .begin()
         .await
         .map_err(|_| "Could not save tags.")?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?)")
-        .bind(&meeting_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| "Could not read meeting.")?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM active_meetings WHERE id = ?)")
+            .bind(&meeting_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| "Could not read meeting.")?;
     if !exists {
         return Err("Meeting no longer exists.".into());
     }
@@ -166,11 +168,12 @@ async fn add_tags_to_meetings(
         .collect::<Result<Vec<_>, _>>()?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(|_| SAVE)?;
     for id in ids {
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?)")
-            .bind(&id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|_| SAVE)?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM active_meetings WHERE id = ?)")
+                .bind(&id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|_| SAVE)?;
         if !exists {
             return Err(
                 "A selected meeting is no longer in the library. Select the meetings again.".into(),

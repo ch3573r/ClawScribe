@@ -1944,6 +1944,14 @@ async fn import_manifest_and_repair(
                 {
                     row.insert("saved_audio_removed_by_user".into(), Value::from(1));
                 }
+                if let Some(value) = row.get_mut("deleted_at").filter(|value| !value.is_null()) {
+                    let date = value.as_str().ok_or("Invalid archived Trash timestamp.")?;
+                    chrono::NaiveDateTime::parse_from_str(date, "%Y-%m-%d %H:%M:%S")
+                        .map_err(|_| "Invalid archived Trash timestamp.")?;
+                    // Give a restored copy time for review, even from an old archive.
+                    *value =
+                        Value::String(chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                }
                 if let Some(revision) = row.remove("summary_content_revision") {
                     let revision = revision
                         .as_i64()
@@ -2723,6 +2731,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archive_round_trip_preserves_trash_and_restarts_retention() {
+        use crate::database::repositories::meeting::MeetingsRepository;
+        let source = crate::database::transcript_edits::tests::fixture().await;
+        assert!(
+            MeetingsRepository::move_to_trash(&source, "review-test", false)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE meetings SET deleted_at='2025-01-01 00:00:00' WHERE id='review-test'")
+            .execute(&source)
+            .await
+            .unwrap();
+        let (manifest, folders) = snapshot(&source).await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("backup.zip");
+        write_archive(&archive, manifest, folders).unwrap();
+        let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, manifest, stage)
+            .await
+            .unwrap();
+        assert!(MeetingsRepository::get_meetings(&destination)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            MeetingsRepository::trash(&destination).await.unwrap().len(),
+            1
+        );
+        assert!(MeetingsRepository::expired_trash_ids(&destination)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            MeetingsRepository::restore_from_trash(&destination, "review-test")
+                .await
+                .unwrap()
+        );
+        let restored = MeetingsRepository::get_meeting(&destination, "review-test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.transcripts.len(), 2);
+    }
+
+    #[tokio::test]
     async fn upgrade_drops_legacy_delivery_history_and_preserves_the_meeting() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -3315,6 +3370,16 @@ mod tests {
                 ..sqlx::migrate::Migrator::DEFAULT
             };
             shipped.run(&pool).await.unwrap();
+            // The current readers use visibility views. Keep them in the
+            // connection-local schema so the fixture still exports and
+            // upgrades the original on-disk schema.
+            sqlx::raw_sql(
+                "CREATE TEMP VIEW active_meetings AS SELECT rowid, * FROM meetings;
+                 CREATE TEMP VIEW visible_knowledge_requests AS SELECT * FROM knowledge_requests;",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
         } else {
             sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         }

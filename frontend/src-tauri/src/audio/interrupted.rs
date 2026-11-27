@@ -166,6 +166,7 @@ pub struct RecoveryCacheEntry {
 
 #[derive(sqlx::FromRow)]
 struct RecoveryOwner {
+    in_trash: bool,
     id: String,
     folder: Option<String>,
     created_at_ms: Option<i64>,
@@ -703,7 +704,7 @@ async fn registered_rows(pool: &sqlx::SqlitePool) -> Result<Vec<(String, String)
 
 async fn pending_audio_ids(pool: &sqlx::SqlitePool) -> Result<HashSet<String>, String> {
     sqlx::query_scalar::<_, String>(
-        "SELECT meetings.id FROM meetings JOIN recording_outcomes ON meeting_id = meetings.id
+        "SELECT m.id FROM active_meetings m JOIN recording_outcomes ON meeting_id = m.id
          WHERE folder_path IS NULL AND recording_source = 'recording' AND audio_save_failed = 1",
     )
     .fetch_all(pool)
@@ -989,10 +990,19 @@ pub async fn find_interrupted_recordings<R: tauri::Runtime>(
         );
         result.recording_active |= active_cache_unknown;
         result.active_cache_id = active_cache_id;
+        let trashed: HashSet<_> = owners
+            .iter()
+            .filter(|owner| owner.in_trash)
+            .map(|owner| owner.id.as_str())
+            .collect();
         result.recordings.retain(|recording| {
-            !cache
-                .unverified_folders
-                .contains(&folder_key(Path::new(&recording.folder)))
+            !recording
+                .registered_meeting_id
+                .as_deref()
+                .is_some_and(|id| trashed.contains(id))
+                && !cache
+                    .unverified_folders
+                    .contains(&folder_key(Path::new(&recording.folder)))
         });
         result.resolved_cache_ids = cache.resolved;
         result.detached_cache_ids = cache.detached;
@@ -1044,9 +1054,9 @@ async fn apply_recovery_titles(pool: &sqlx::SqlitePool, recordings: &mut [Interr
 async fn recovery_owners(pool: &sqlx::SqlitePool) -> Result<Vec<RecoveryOwner>, String> {
     sqlx::query_as(
         "SELECT id, folder_path AS folder, CAST(ROUND(unixepoch(created_at, 'subsec') * 1000) AS INTEGER) AS created_at_ms,
-                NULL AS deleted_at_ms, 0 AS is_deleted FROM meetings
+                NULL AS deleted_at_ms, 0 AS is_deleted, deleted_at IS NOT NULL AS in_trash FROM meetings
          UNION ALL
-         SELECT meeting_id, folder_path, meeting_created_at_ms, deleted_at_ms, 1
+         SELECT meeting_id, folder_path, meeting_created_at_ms, deleted_at_ms, 1, 0
          FROM recording_library_deletions d WHERE NOT EXISTS (SELECT 1 FROM meetings WHERE id=d.meeting_id)",
     ).fetch_all(pool).await.map_err(|_| "Could not read the library's recovery status.".into())
 }
@@ -1232,6 +1242,15 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
 
     use crate::database::transcript_edits;
     let pool = state.db_manager.pool();
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM active_meetings WHERE id=?)")
+            .bind(&meeting_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| "Could not read the saved meeting.")?;
+    if !exists {
+        return Err("This meeting is unavailable for recording repair.".into());
+    }
     if registered_path.is_some()
         && transcript_edits::import_file_stage(pool, &meeting_id)
             .await?
@@ -1318,7 +1337,7 @@ async fn commit_repaired_audio(
         "UPDATE meetings SET folder_path = COALESCE(folder_path, ?),
          recording_source = COALESCE(recording_source, ?),
          recording_duration_s = COALESCE(recording_duration_s, ?)
-         WHERE id = ? AND folder_path IS ?
+         WHERE id = ? AND deleted_at IS NULL AND folder_path IS ?
          AND (? IS NOT NULL OR (
             NOT EXISTS (SELECT 1 FROM meetings AS owner WHERE owner.folder_path = ? COLLATE NOCASE)
             AND EXISTS (SELECT 1 FROM recording_outcomes WHERE meeting_id = meetings.id AND audio_save_failed = 1)
@@ -2439,6 +2458,18 @@ mod tests {
             "a transcript alone should not offer audio repair"
         );
         std::fs::write(folder.join("audio.mp4"), b"Synthetic audio").unwrap();
+        use crate::database::repositories::meeting::MeetingsRepository;
+        assert!(MeetingsRepository::move_to_trash(&pool, id, true)
+            .await
+            .unwrap());
+        assert!(recovery_owners(&pool).await.unwrap()[0].in_trash);
+        let while_trashed = pending_audio_ids(&pool).await.unwrap();
+        assert!(scan_with_pending_audio(&scan_input, &while_trashed)
+            .recordings
+            .is_empty());
+        assert!(MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
         let scan = scan_with_pending_audio(&scan_input, &pending);
         assert_eq!(scan.recordings.len(), 1);
         assert_eq!(

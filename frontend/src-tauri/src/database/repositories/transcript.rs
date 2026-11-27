@@ -55,7 +55,7 @@ mod recording_save_tests {
             .unwrap();
         }
         let saved: (String, String) =
-            sqlx::query_as("SELECT title, calendar_link FROM meetings WHERE id = ?")
+            sqlx::query_as("SELECT title, calendar_link FROM active_meetings WHERE id = ?")
                 .bind(id)
                 .fetch_one(&pool)
                 .await
@@ -96,7 +96,7 @@ mod recording_save_tests {
             .unwrap();
         }
         let (created, updated): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) =
-            sqlx::query_as("SELECT created_at, updated_at FROM meetings WHERE id = ?")
+            sqlx::query_as("SELECT created_at, updated_at FROM active_meetings WHERE id = ?")
                 .bind(id)
                 .fetch_one(&pool)
                 .await
@@ -201,7 +201,7 @@ mod recording_save_tests {
             id
         );
         let (title, folder, saved_link, source, duration): (String, String, String, String, f64) =
-            sqlx::query_as("SELECT title, folder_path, calendar_link, recording_source, recording_duration_s FROM meetings WHERE id = ?")
+            sqlx::query_as("SELECT title, folder_path, calendar_link, recording_source, recording_duration_s FROM active_meetings WHERE id = ?")
                 .bind(id)
                 .fetch_one(&pool)
                 .await

@@ -108,6 +108,11 @@ impl LiteralQuery {
         Self::context(&found)
     }
 
+    pub(super) fn matches(&self, text: &str) -> bool {
+        let folded = literal_fold(text);
+        self.patterns.iter().all(|pattern| folded.contains(pattern))
+    }
+
     // Prefer a window with several terms when they're nearby. A distant term
     // still qualifies the row, without yielding an unbounded excerpt.
     fn context(found: &[Option<(usize, usize)>]) -> Option<(usize, usize)> {
@@ -447,13 +452,13 @@ async fn search_query(
                 (
                     "m.rowid,m.id AS meeting_id,m.rowid AS meeting_rowid,NULL AS transcript_id,
                   0 AS speaker_present,NULL AS start_seconds,NULL AS revision,NULL AS generation",
-                    "meetings m",
+                    "active_meetings m",
                     "m.rowid",
                 )
             } else {
                 ("t.rowid,m.id AS meeting_id,m.rowid AS meeting_rowid,t.id AS transcript_id,
                   t.speaker IS NOT NULL AS speaker_present,t.audio_start_time AS start_seconds,s.revision,s.generation",
-                 "transcripts t JOIN meetings m ON m.id=t.meeting_id LEFT JOIN knowledge_sources s ON s.meeting_id=m.id", "t.rowid")
+                 "transcripts t JOIN active_meetings m ON m.id=t.meeting_id LEFT JOIN knowledge_sources s ON s.meeting_id=m.id", "t.rowid")
             };
             let statement = if anchor.is_some() {
                 let index = if title {

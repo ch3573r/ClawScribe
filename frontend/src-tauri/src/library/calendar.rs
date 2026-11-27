@@ -279,13 +279,14 @@ pub(crate) async fn read_snapshot(
     pool: &SqlitePool,
     meeting_id: &str,
 ) -> Result<(Option<CalendarLink>, ProviderTitle), String> {
-    let stored =
-        sqlx::query_scalar::<_, Option<String>>("SELECT calendar_link FROM meetings WHERE id = ?")
-            .bind(meeting_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| "Could not load the calendar link.".to_string())?
-            .flatten();
+    let stored = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT calendar_link FROM active_meetings WHERE id = ?",
+    )
+    .bind(meeting_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| "Could not load the calendar link.".to_string())?
+    .flatten();
     Ok(summary_snapshot(stored.as_deref()))
 }
 
@@ -311,12 +312,13 @@ pub(crate) async fn knowledge_title(
     title: &str,
     clipped: bool,
 ) -> Option<String> {
-    let stored =
-        sqlx::query_scalar::<_, Option<String>>("SELECT calendar_link FROM meetings WHERE id = ?")
-            .bind(meeting_id)
-            .fetch_optional(pool)
-            .await
-            .ok()?;
+    let stored = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT calendar_link FROM active_meetings WHERE id = ?",
+    )
+    .bind(meeting_id)
+    .fetch_optional(pool)
+    .await
+    .ok()?;
     stored_title_policy(stored.flatten().as_deref()).for_clipped(title.to_owned(), clipped)
 }
 
@@ -908,7 +910,7 @@ pub(crate) mod tests {
             .unwrap();
         clear_microsoft(&pool).await.unwrap();
         let cleared: String =
-            sqlx::query_scalar("SELECT calendar_link FROM meetings WHERE id = 'malformed'")
+            sqlx::query_scalar("SELECT calendar_link FROM active_meetings WHERE id = 'malformed'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();

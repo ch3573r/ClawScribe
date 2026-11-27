@@ -351,7 +351,7 @@ async fn is_local_recording(
     roots: &[std::path::PathBuf],
 ) -> Result<bool, String> {
     let row: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT recording_source, folder_path FROM meetings WHERE id = ?")
+        sqlx::query_as("SELECT recording_source, folder_path FROM active_meetings WHERE id = ?")
             .bind(meeting)
             .fetch_optional(pool)
             .await
@@ -421,6 +421,24 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
         return;
     }
     publication::resume(&app, &pool).await;
+    resume_automatic_notes(app, pool, None).await;
+}
+
+pub(crate) async fn resume_after_restore<R: Runtime>(
+    app: AppHandle<R>,
+    pool: SqlitePool,
+    meeting: String,
+) {
+    // Let any pending retranscription publication claim its job first.
+    let _ = publication::wake(&app, meeting.clone()).await;
+    resume_automatic_notes(app, pool, Some(meeting)).await;
+}
+
+async fn resume_automatic_notes<R: Runtime>(
+    app: AppHandle<R>,
+    pool: SqlitePool,
+    only_meeting: Option<String>,
+) {
     if get_automatic_summary_preference(app.clone()).await != Ok(true) {
         return;
     }
@@ -449,6 +467,7 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
             profile.as_deref(),
             &after,
             local,
+            only_meeting.as_deref(),
         )
         .await
         else {
@@ -484,7 +503,7 @@ pub(crate) async fn resume_at_startup<R: Runtime>(app: AppHandle<R>, pool: Sqlit
                 Err(_) => log::warn!("Could not resume automatic notes"),
             }
         }
-        if !local {
+        if only_meeting.is_some() || !local {
             // Retain the existing bound on automatically retried external requests.
             return;
         }
@@ -793,7 +812,7 @@ async fn prepare<R: Runtime>(
 ) -> Result<(super::commands::MeetingSummaryContext, Option<String>), String> {
     let context = crate::library::context::read(pool, meeting_id).await?;
     let folder: Option<String> =
-        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+        sqlx::query_scalar("SELECT folder_path FROM active_meetings WHERE id = ?")
             .bind(meeting_id)
             .fetch_one(pool)
             .await
@@ -826,7 +845,7 @@ async fn notify_ready<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool, meeting
         let manager = state.read().await;
         if let Some(manager) = manager.as_ref() {
             let title: Option<String> =
-                sqlx::query_scalar("SELECT title FROM meetings WHERE id = ?")
+                sqlx::query_scalar("SELECT title FROM active_meetings WHERE id = ?")
                     .bind(meeting)
                     .fetch_optional(pool)
                     .await
@@ -887,7 +906,7 @@ mod tests {
         for local in [true, false] {
             assert_eq!(
                 SummaryProcessesRepository::automatic_resume_candidates_after(
-                    &pool, "approved", None, "", local,
+                    &pool, "approved", None, "", local, None,
                 )
                 .await
                 .unwrap(),
@@ -943,7 +962,7 @@ mod tests {
         drop(job);
         SummaryService::wait_for_exit_pauses().await;
         let candidates = SummaryProcessesRepository::automatic_resume_candidates_after(
-            &pool, "approved", None, "", true,
+            &pool, "approved", None, "", true, None,
         )
         .await
         .unwrap();

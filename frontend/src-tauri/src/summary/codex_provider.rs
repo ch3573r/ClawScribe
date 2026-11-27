@@ -2278,7 +2278,7 @@ pub(crate) async fn ensure_meeting_output_dir(
     app_data: &Path,
 ) -> Result<PathBuf, String> {
     let folder: Option<String> =
-        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+        sqlx::query_scalar("SELECT folder_path FROM active_meetings WHERE id = ?")
             .bind(meeting)
             .fetch_one(pool)
             .await

@@ -48,9 +48,9 @@ ClawScribe records the confirmed removal so that backup repair skips that audio.
 
 Use **Bulk actions** to add project tags to the selection, export a Markdown
 or Word file per meeting, start a Meeting memory conversation with those
-meetings selected, or delete them. Export asks where to save each file. Cancel
-a save dialog to stop the batch. Deleting requires confirmation and keeps
-recording files on disk unless you also select their removal. Opening a scoped
+meetings selected, or move them to Trash. Export asks where to save each file.
+Cancel a save dialog to stop the batch. Recording files stay on disk through
+Trash retention. Opening a scoped
 Meeting memory conversation leaves the question and sending under your control.
 
 ## Open actions and saved live answers
@@ -156,11 +156,12 @@ open the marker in the meeting, where you can play from its recording time. A ch
 deleted source prompts a new search. **Back to archive** restores your search,
 filters and sort order for the current app session.
 
-Queries accept up to 256 characters. The desktop shows up to 50 matches
-per source type. Saved summaries, notes and bookmark labels are checked
-locally with a 512 KiB limit per stored entry. Searches reaching a size, row,
-result or time limit display a notice. Browse or narrow the query and filters to search
-a smaller set. Literal search uses a local substring index to find candidates,
+Queries accept up to 256 characters. The first page shows up to 50 matches
+per source type. Choose **Load more** to continue searching saved summaries,
+notes and bookmarks. ClawScribe checks the editor's visible text before
+applying the result limit. It searches saved entries up to 512 KiB each.
+If another search limit leaves some sources unchecked, Archive displays a notice.
+Date and project filters search a smaller set. Literal search uses a local substring index to find candidates,
 then checks the saved text and its exact offset. Short searches and terms without
 an indexable substring use a bounded scan. No download or answer provider is required.
 Select **Hybrid** beside Archive search to also find passages with similar
@@ -563,17 +564,23 @@ library, choose **Return to original library**, then quit and reopen ClawScribe.
 The recovery workspace stays on disk. If the original library still fails to
 open, **Open recovery library** reopens the previous workspace when available.
 
-## Deleting meetings
+## Moving meetings to Trash
 
-Choose **Delete meeting** in an archive row’s menu or use the sidebar delete
-button. The confirmation names the meeting and lets you choose whether to
-remove its recording files.
+Choose **Move to Trash** in an archive row’s menu, in the bulk actions, or
+from the sidebar. The meeting disappears from Archive, search, export, Meeting
+memory, and the local assistant. Its transcript, notes, and recording files
+stay on disk during retention. Open **Meetings → Trash** to restore it or
+delete it permanently. ClawScribe checks for expired meetings at startup and
+while running and permanently deletes them after 30 days.
 
-Deletion removes the meeting's database records, including transcript revisions,
+Portable backups include meetings in Trash and any recording files included
+by the backup settings. Restoring a copy from backup puts it back in Trash
+with a fresh 30-day window. An existing local meeting keeps its current state.
+
+Permanent deletion removes the meeting's database records, including transcript revisions,
 previous summaries, context, notes, chat, tags, and bookmarks. App-managed export
 history, Codex scratch runs, outputs under app data, and cached transcript recovery
-copies are also removed where possible. Unsaved title and summary edits for the
-deleted meeting are discarded.
+copies are also removed where possible.
 References used only by this meeting are deleted, including extracted text and
 original files, even when recording files are kept. References shared with another
 meeting remain available there. Answers that depended on a deleted reference are
@@ -581,15 +588,15 @@ invalidated and their saved content is cleared. Startup also cleans abandoned re
 when recording and imports are idle; unknown reference files are kept for at least
 24 hours before cleanup. Portable backups include only attached references.
 
-**Also delete the recording files** is on by default. It removes the whole
-recording folder, including audio, transcript copies, metadata, recovery originals,
+The confirmation when moving a meeting to Trash lets you choose whether to
+remove its recording files at permanent deletion. That removes the whole
+verified recording folder, including audio, transcript copies, metadata, recovery originals,
 and generated documents. The folder must be inside the configured save location,
 a supported default recording location, or app-data `restored-recordings`; it must
-contain an app recording marker, have no links or junctions in its path, and not
+contain a matching recording marker, have no links or junctions in its path, and not
 overlap another meeting's folder. Folders failing these checks or file deletion
-are kept. Uncheck the option to keep
-the folder and its contents. While recording or transcription is running, only
-deletion with this option off is allowed.
+are kept. Uncheck the option to keep the folder and its contents.
+Permanent deletion waits for recording, transcription, export, or backup work to finish.
 
 If file cleanup could not finish, open **Meetings → Archive → Storage**. Under
 **Pending file cleanup**, review the item and the reason it was kept. Close apps

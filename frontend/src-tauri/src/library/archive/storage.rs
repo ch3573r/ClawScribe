@@ -40,6 +40,7 @@ const FOLDER_CLAIMS_CHANGED: &str =
 struct ArchiveFolder {
     id: String,
     folder_path: String,
+    active: bool,
     has_transcript: bool,
     needs_recovery: bool,
 }
@@ -47,7 +48,8 @@ struct ArchiveFolder {
 const FOLDER_CLAIMS_QUERY: &str = "SELECT id, folder_path FROM meetings
     WHERE folder_path IS NOT NULL AND TRIM(folder_path) <> '' ORDER BY id";
 
-const FOLDERS_QUERY: &str = "SELECT m.id, m.folder_path,
+// Preserve ownership of retained recordings, including folders claimed by Trash.
+const FOLDERS_QUERY: &str = "SELECT m.id, m.folder_path, m.deleted_at IS NULL AS active,
     EXISTS(SELECT 1 FROM transcripts t WHERE t.meeting_id = m.id) AS has_transcript,
     (COALESCE(o.audio_save_failed, 0) OR COALESCE(o.transcription_incomplete, 0) OR
      COALESCE(o.capture_incomplete, 0) OR COALESCE(o.recording_files_incomplete, 0) OR
@@ -323,7 +325,7 @@ fn inspect_candidate(
 ) -> Result<Candidate, &'static str> {
     let row = rows
         .iter()
-        .find(|row| row.id == id)
+        .find(|row| row.active && row.id == id)
         .ok_or("This meeting has no saved recording folder.")?;
     if row.needs_recovery {
         return Err(RECOVERY_PENDING);
@@ -433,7 +435,7 @@ async fn check_removal(
     {
         return Err(FOLDER_CLAIMS_CHANGED);
     }
-    let current: ArchiveFolder = sqlx::query_as(&format!("{FOLDERS_QUERY} AND m.id = ?"))
+    let current: ArchiveFolder = sqlx::query_as(&format!("{FOLDERS_QUERY} AND m.deleted_at IS NULL AND m.id = ?"))
         .bind(&request.id)
         .fetch_one(db)
         .await
@@ -930,7 +932,7 @@ async fn read_storage_folders(
     before: Option<i64>,
 ) -> Result<(Vec<StorageFolder>, Option<String>), String> {
     let mut folders: Vec<StorageFolder> = sqlx::query_as(
-        "SELECT rowid AS cursor, SUBSTR(title, 1, 256) AS title, folder_path FROM meetings
+        "SELECT rowid AS cursor, SUBSTR(title, 1, 256) AS title, folder_path FROM active_meetings
          WHERE rowid < ? ORDER BY rowid DESC LIMIT ?",
     )
     .bind(before.unwrap_or(i64::MAX))

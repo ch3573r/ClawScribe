@@ -389,7 +389,7 @@ async fn meeting_prompt_context(
     mut prompt: String,
 ) -> Result<(Option<String>, String), String> {
     let row = sqlx::query(
-        "SELECT title, created_at, recording_duration_s, calendar_link FROM meetings WHERE id = ?",
+        "SELECT title, created_at, recording_duration_s, calendar_link FROM active_meetings WHERE id = ?",
     )
     .bind(meeting)
     .fetch_optional(pool)

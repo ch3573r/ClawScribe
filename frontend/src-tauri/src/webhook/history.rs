@@ -32,7 +32,7 @@ pub(super) async fn claim(
     sqlx::query(
         "INSERT INTO webhook_deliveries (id, event, meeting_id, completion_key, started_at)
          SELECT ?, ?, ?, ?, ?
-         WHERE ? IS NULL OR EXISTS (SELECT 1 FROM meetings WHERE id = ?)
+         WHERE ? IS NULL OR EXISTS (SELECT 1 FROM active_meetings WHERE id = ?)
          ON CONFLICT (event, meeting_id, completion_key) DO NOTHING",
     )
     .bind(id)

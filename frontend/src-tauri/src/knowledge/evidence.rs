@@ -64,7 +64,10 @@ pub async fn resolve(
             return outcome(EvidenceStatus::Invalid);
         }
         let source = sqlx::query(
-            "SELECT revision,generation FROM knowledge_sources WHERE id=? AND kind='document'",
+            "SELECT revision,generation FROM knowledge_sources s WHERE id=? AND kind='document'
+             AND EXISTS(SELECT 1 FROM knowledge_documents d JOIN knowledge_document_attachments a
+                        ON a.document_id=d.id JOIN active_meetings m ON m.id=a.meeting_id
+                        WHERE d.source_id=s.id)",
         )
         .bind(&reference.source_id)
         .fetch_optional(pool)
@@ -121,7 +124,7 @@ pub async fn resolve(
     {
         return outcome(EvidenceStatus::Invalid);
     }
-    let source=sqlx::query("SELECT revision,generation,metadata_revision FROM knowledge_sources WHERE id=? AND meeting_id=? AND kind='meeting'")
+    let source=sqlx::query("SELECT revision,generation,metadata_revision FROM knowledge_sources WHERE id=? AND meeting_id=(SELECT id FROM active_meetings WHERE id=?) AND kind='meeting'")
         .bind(&reference.source_id).bind(meeting_id).fetch_optional(pool).await?;
     let Some(source) = source else {
         return outcome(EvidenceStatus::Missing);
@@ -169,7 +172,7 @@ pub async fn resolve(
     // revision/generation predicate closes edits between materialization and
     // position lookup without reading transcript bodies or scanning in the UI.
     let position: Option<i64> = sqlx::query_scalar(
-        "SELECT position FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY audio_start_time,id)-1 AS position FROM transcripts WHERE meeting_id=?) WHERE id=? AND EXISTS(SELECT 1 FROM knowledge_sources WHERE id=? AND meeting_id=? AND revision=? AND generation=?)",
+        "SELECT position FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY audio_start_time,id)-1 AS position FROM transcripts WHERE meeting_id=(SELECT id FROM active_meetings WHERE id=?)) WHERE id=? AND EXISTS(SELECT 1 FROM knowledge_sources WHERE id=? AND meeting_id=? AND revision=? AND generation=?)",
     )
     .bind(meeting_id)
     .bind(&selected.transcript_id)

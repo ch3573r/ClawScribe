@@ -45,7 +45,7 @@ pub async fn publish(
     let mut tx = cancellable(cancel, pool.begin()).await?;
     let exists: bool = cancellable(
         cancel,
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id=?)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM active_meetings WHERE id=?)")
             .bind(meeting)
             .fetch_one(&mut *tx),
     )
@@ -211,6 +211,7 @@ const ATTACHMENT_SELECT: &str = "SELECT d.id,d.display_name,d.format,d.file_size
          WHEN (SELECT enabled FROM knowledge_settings WHERE singleton=1)=0 THEN 'disabled'
          ELSE 'pending' END AS indexing_status
     FROM knowledge_document_attachments a JOIN knowledge_documents d ON d.id=a.document_id
+    JOIN active_meetings m ON m.id=a.meeting_id
     JOIN knowledge_sources s ON s.id=d.source_id LEFT JOIN knowledge_index_jobs j ON j.source_id=s.id";
 fn attachment(row: &sqlx::sqlite::SqliteRow) -> Result<DocumentAttachment, DocumentError> {
     Ok(DocumentAttachment {

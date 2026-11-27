@@ -84,7 +84,7 @@ pub(crate) async fn freeze_scope_rows(
         ""
     };
     let statement = format!(
-        "SELECT m.id,m.created_at,{tags} AS tags FROM meetings m
+        "SELECT m.id,m.created_at,{tags} AS tags FROM active_meetings m
          {restriction} ORDER BY m.id"
     );
     let mut query = sqlx::query(&statement);

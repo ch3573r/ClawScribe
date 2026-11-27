@@ -69,7 +69,7 @@ pub(super) async fn load_saved(
     meeting_id: &str,
 ) -> Result<Option<SavedActions>, String> {
     let raw: Option<Option<String>> =
-        sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = ?")
+        sqlx::query_scalar("SELECT reviewed_actions FROM active_meetings WHERE id = ?")
             .bind(meeting_id)
             .fetch_optional(pool)
             .await
@@ -204,7 +204,7 @@ fn revision(raw: Option<&str>) -> String {
 
 async fn editor(pool: &SqlitePool, meeting_id: &str) -> Result<ActionReview, String> {
     let raw: Option<String> =
-        sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = ?")
+        sqlx::query_scalar("SELECT reviewed_actions FROM active_meetings WHERE id = ?")
             .bind(meeting_id)
             .fetch_optional(pool)
             .await
@@ -696,7 +696,7 @@ async fn save_checked(
         .await
         .map_err(|_| "Could not save meeting actions.")?;
     let previous: Option<String> =
-        sqlx::query_scalar("SELECT reviewed_actions FROM meetings WHERE id = ?")
+        sqlx::query_scalar("SELECT reviewed_actions FROM active_meetings WHERE id = ?")
             .bind(meeting_id)
             .fetch_optional(&mut *transaction)
             .await

@@ -172,7 +172,7 @@ async fn resolve_meeting_audio_file(
 }
 
 const SAVED_AUDIO_FOLDER_QUERY: &str =
-    "SELECT folder_path FROM meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''";
+    "SELECT folder_path FROM active_meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''";
 
 async fn saved_audio_folder(
     pool: &sqlx::SqlitePool,
@@ -785,7 +785,13 @@ pub fn run() {
             if let Some(state) = _app.try_state::<state::AppState>() {
                 let pool = state.db_manager.pool().clone();
                 let app = _app.handle().clone();
-                tauri::async_runtime::spawn(summary::automatic::resume_at_startup(app, pool));
+                tauri::async_runtime::spawn(summary::automatic::resume_at_startup(
+                    app.clone(),
+                    pool.clone(),
+                ));
+                if !database::recovery::startup_recovery_active() {
+                    tauri::async_runtime::spawn(library::trash::purge_expired(app, pool));
+                }
             }
 
             Ok(())
@@ -889,6 +895,9 @@ pub fn run() {
             library::file_cleanup::list_pending_meeting_file_cleanup,
             library::file_cleanup::retry_meeting_file_cleanup,
             library::file_cleanup::keep_pending_meeting_files,
+            library::trash::list_trashed_meetings,
+            library::trash::restore_trashed_meeting,
+            library::trash::purge_trashed_meeting,
             library::archive::storage::inspect_archive_audio,
             library::archive::storage::remove_archive_audio,
             updates::get_update_channel,
