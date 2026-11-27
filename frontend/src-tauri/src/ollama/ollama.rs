@@ -4,14 +4,36 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::Mutex;
 use tauri::{command, AppHandle, Emitter, Runtime};
-use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout, Duration};
 
-// Global set to track models currently being downloaded
-static DOWNLOADING_MODELS: Lazy<Arc<RwLock<HashSet<String>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(HashSet::new())));
+static DOWNLOADING_MODELS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+struct ModelDownload<'a>(&'a str);
+
+impl<'a> ModelDownload<'a> {
+    fn acquire(model_name: &'a str) -> Result<Self, String> {
+        let mut downloading = DOWNLOADING_MODELS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !downloading.insert(model_name.to_owned()) {
+            return Err(format!("Model {model_name} is already being downloaded"));
+        }
+        Ok(Self(model_name))
+    }
+}
+
+impl Drop for ModelDownload<'_> {
+    fn drop(&mut self) {
+        // No lock is held while downloading. Dropping a cancelled future
+        // releases the entry just like a normal return.
+        DOWNLOADING_MODELS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(self.0);
+    }
+}
 
 // Error categorization for better error handling and user feedback
 #[derive(Debug)]
@@ -79,7 +101,9 @@ fn validate_endpoint_url(url: &str) -> Result<(), OllamaError> {
         ));
     }
 
-    Ok(())
+    url::Url::parse(url)
+        .map(|_| ())
+        .map_err(|_| OllamaError::InvalidEndpoint("URL must include a valid host".to_owned()))
 }
 
 #[command]
@@ -260,28 +284,53 @@ pub async fn pull_ollama_model<R: Runtime>(
     model_name: String,
     endpoint: Option<String>,
 ) -> Result<(), String> {
-    // Check if model is already being downloaded
-    {
-        let downloading = DOWNLOADING_MODELS.read().await;
-        if downloading.contains(&model_name) {
-            log::warn!(
-                "Model {} is already being downloaded, ignoring duplicate request",
-                model_name
+    pull_model(&model_name, endpoint.as_deref(), |event, payload| {
+        let _ = app_handle.emit(event, payload);
+    })
+    .await
+}
+
+async fn pull_model(
+    model_name: &str,
+    endpoint: Option<&str>,
+    emit: impl Fn(&str, serde_json::Value),
+) -> Result<(), String> {
+    let base_url = endpoint
+        .filter(|url| !url.is_empty())
+        .unwrap_or("http://localhost:11434");
+    validate_endpoint_url(base_url).map_err(|error| error.to_string())?;
+    let _download = ModelDownload::acquire(model_name)?;
+
+    let result = download_model(model_name, base_url, |progress| {
+        emit(
+            "ollama-model-download-progress",
+            serde_json::json!({ "modelName": model_name, "progress": progress }),
+        );
+    })
+    .await;
+    match &result {
+        Ok(()) => {
+            emit(
+                "ollama-model-download-complete",
+                serde_json::json!({ "modelName": model_name }),
             );
-            return Err(format!("Model {} is already being downloaded", model_name));
+            log::info!("Ollama model {model_name} downloaded successfully");
         }
+        Err(error) => emit(
+            "ollama-model-download-error",
+            serde_json::json!({ "modelName": model_name, "error": error }),
+        ),
     }
+    result
+}
 
-    // Mark model as downloading
-    {
-        let mut downloading = DOWNLOADING_MODELS.write().await;
-        downloading.insert(model_name.clone());
-        log::info!("Started download tracking for model: {}", model_name);
-    }
-
+async fn download_model(
+    model_name: &str,
+    base_url: &str,
+    report_progress: impl Fn(u8),
+) -> Result<(), String> {
     let client = Client::new();
-    let base_url = endpoint.as_deref().unwrap_or("http://localhost:11434");
-    let url = format!("{}/api/pull", base_url);
+    let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
 
     let payload = serde_json::json!({
         "name": model_name,
@@ -298,37 +347,16 @@ pub async fn pull_ollama_model<R: Runtime>(
             if e.is_timeout() {
                 format!("Download timed out. The model may be large, please try using the Ollama CLI: ollama pull {}", model_name)
             } else if e.is_connect() {
-                format!("Cannot connect to {}. Please check if the Ollama server is running.", base_url)
+                "Cannot connect to the Ollama server. Check if it is running.".to_owned()
             } else {
-                format!("Failed to download model: {}", e)
+                format!("Failed to download model: {}", e.without_url())
             }
         })?;
 
     if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-
-        // Remove from downloading set on error
-        {
-            let mut downloading = DOWNLOADING_MODELS.write().await;
-            downloading.remove(&model_name);
-        }
-
-        // Emit error event
-        let _ = app_handle.emit(
-            "ollama-model-download-error",
-            serde_json::json!({
-                "modelName": model_name,
-                "error": format!("HTTP {}: {}", status, error_text)
-            }),
-        );
-
         return Err(format!(
-            "Failed to pull model (HTTP {}): {}",
-            status, error_text
+            "Failed to pull model (HTTP {}).",
+            response.status()
         ));
     }
 
@@ -338,25 +366,8 @@ pub async fn pull_ollama_model<R: Runtime>(
     let mut last_progress = 0u8;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            let error_msg = format!("Failed to read stream: {}", e);
-
-            // Remove from downloading set on stream error
-            let model_name_clone = model_name.clone();
-            tokio::spawn(async move {
-                let mut downloading = DOWNLOADING_MODELS.write().await;
-                downloading.remove(&model_name_clone);
-            });
-
-            let _ = app_handle.emit(
-                "ollama-model-download-error",
-                serde_json::json!({
-                    "modelName": model_name,
-                    "error": error_msg
-                }),
-            );
-            error_msg
-        })?;
+        let chunk =
+            chunk.map_err(|error| format!("Failed to read stream: {}", error.without_url()))?;
 
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -377,26 +388,17 @@ pub async fn pull_ollama_model<R: Runtime>(
                     json.get("total").and_then(|v| v.as_u64()),
                 ) {
                     if total > 0 {
-                        let progress = ((completed as f64 / total as f64) * 100.0) as u8;
-
-                        // Only emit if progress changed significantly (reduces event spam)
-                        if progress != last_progress
-                            && (progress - last_progress >= 1 || progress == 100)
-                        {
+                        let progress =
+                            (u128::from(completed.min(total)) * 100 / u128::from(total)) as u8;
+                        // Ollama reports per-layer progress, which can restart at zero.
+                        if progress > last_progress {
                             log::info!(
                                 "Ollama download progress for {}: {}%",
                                 model_name,
                                 progress
                             );
 
-                            let _ = app_handle.emit(
-                                "ollama-model-download-progress",
-                                serde_json::json!({
-                                    "modelName": model_name,
-                                    "progress": progress
-                                }),
-                            );
-
+                            report_progress(progress);
                             last_progress = progress;
                         }
                     }
@@ -404,43 +406,79 @@ pub async fn pull_ollama_model<R: Runtime>(
 
                 // Check for error status
                 if let Some(error) = json.get("error").and_then(|v| v.as_str()) {
-                    let error_msg = format!("Ollama error: {}", error);
-
-                    // Remove from downloading set on Ollama error
-                    {
-                        let mut downloading = DOWNLOADING_MODELS.write().await;
-                        downloading.remove(&model_name);
-                    }
-
-                    let _ = app_handle.emit(
-                        "ollama-model-download-error",
-                        serde_json::json!({
-                            "modelName": model_name,
-                            "error": error_msg
-                        }),
-                    );
-                    return Err(error_msg);
+                    return Err(format!("Ollama error: {error}"));
                 }
             }
         }
     }
 
-    // Remove from downloading set before emitting completion
-    {
-        let mut downloading = DOWNLOADING_MODELS.write().await;
-        downloading.remove(&model_name);
-        log::info!("Removed {} from downloading set", model_name);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpSocket};
+
+    #[tokio::test]
+    async fn pull_can_retry_after_connection_failure() {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let endpoint = format!("http://{}", socket.local_addr().unwrap());
+
+        for _ in 0..2 {
+            let error = pull_model("test-retry", Some(&endpoint), |_, _| {})
+                .await
+                .unwrap_err();
+            assert!(error.contains("Cannot connect"), "{error}");
+        }
     }
 
-    // Emit completion event
-    let _ = app_handle.emit(
-        "ollama-model-download-complete",
-        serde_json::json!({
-            "modelName": model_name
-        }),
-    );
+    #[tokio::test]
+    async fn pull_rejects_invalid_endpoints() {
+        for endpoint in ["file:///ollama", "http://"] {
+            let error = pull_model("test-endpoint", Some(endpoint), |_, _| {})
+                .await
+                .unwrap_err();
+            assert!(error.starts_with("Invalid endpoint"), "{error}");
+        }
+    }
 
-    log::info!("Ollama model {} downloaded successfully", model_name);
+    #[tokio::test]
+    async fn pull_progress_stays_monotonic_when_a_new_layer_starts() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            let body = concat!(
+                "{\"completed\":60,\"total\":100}\n",
+                "{\"completed\":5,\"total\":100}\n",
+                "{\"completed\":75,\"total\":100}\n",
+                "{\"completed\":100,\"total\":100}\n",
+                "{\"status\":\"success\"}\n",
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
 
-    Ok(())
+        let progress = RefCell::new(Vec::new());
+        pull_model("test-progress", Some(&endpoint), |event, payload| {
+            if event == "ollama-model-download-progress" {
+                progress
+                    .borrow_mut()
+                    .push(payload["progress"].as_u64().unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(progress.into_inner(), [60, 75, 100]);
+    }
 }

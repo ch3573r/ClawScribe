@@ -8,6 +8,7 @@ use crate::exports::ledger::require_remote_ids;
 use crate::exports::transport::{GraphRequest, GraphTransport};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
+const MAX_DESTINATION_PAGES: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +48,8 @@ pub struct ToDoListInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GraphListResponse<T> {
     value: Vec<T>,
+    #[serde(rename = "@odata.nextLink")]
+    next_link: Option<String>,
 }
 
 fn get_request(url: String) -> GraphRequest {
@@ -60,22 +63,40 @@ fn get_request(url: String) -> GraphRequest {
     }
 }
 
-fn map_outcome<T: serde::de::DeserializeOwned>(outcome: GraphOutcome) -> Result<Vec<T>, String> {
-    match outcome {
-        GraphOutcome::Success(resp) => {
-            let list: GraphListResponse<T> = serde_json::from_str(&resp.body)
-                .map_err(|e| format!("Failed to parse Graph response: {e}"))?;
-            Ok(list.value)
+async fn list_destinations<I: serde::de::DeserializeOwned, T: GraphTransport, S: Sleeper>(
+    client: &GraphClient<T, S>,
+    token: &str,
+    mut url: String,
+) -> Result<Vec<I>, String> {
+    let graph_origin = url::Url::parse(GRAPH_BASE)
+        .expect("Graph base URL")
+        .origin();
+    let mut items = Vec::new();
+    for _ in 0..MAX_DESTINATION_PAGES {
+        let outcome = client.execute(&get_request(url), token).await;
+        let page: GraphListResponse<I> = map_response(outcome, "Graph response")?;
+        items.extend(page.value);
+        let Some(next_link) = page.next_link else {
+            return Ok(items);
+        };
+        // Validate where the bearer token will be sent. Use Graph's original
+        // link for the request because the continuation query is opaque.
+        let next =
+            url::Url::parse(&next_link).map_err(|_| "Microsoft returned an invalid next page.")?;
+        if next.origin() != graph_origin
+            || !next.path().starts_with("/v1.0/")
+            || !next.username().is_empty()
+            || next.password().is_some()
+            || next.fragment().is_some()
+        {
+            return Err("Microsoft returned a next page outside the Graph API.".into());
         }
-        GraphOutcome::Failed(kind, detail) => Err(match detail {
-            Some(d) => format!("Graph error ({}): {d}", kind.code()),
-            None => format!("Graph error: {}", kind.code()),
-        }),
-        GraphOutcome::Unknown(msg) => Err(format!("Network error: {msg}")),
+        url = next_link;
     }
+    Err("Microsoft returned too many destination pages to load the complete list.".into())
 }
 
-fn map_single<T: serde::de::DeserializeOwned>(
+fn map_response<T: serde::de::DeserializeOwned>(
     outcome: GraphOutcome,
     what: &str,
 ) -> Result<T, String> {
@@ -86,7 +107,19 @@ fn map_single<T: serde::de::DeserializeOwned>(
             Some(d) => format!("Graph error ({}): {d}", kind.code()),
             None => format!("Graph error: {}", kind.code()),
         }),
-        GraphOutcome::Unknown(msg) => Err(format!("Network error: {msg}")),
+        GraphOutcome::Unknown(_) => Err("Could not reach Microsoft Graph. Try again.".into()),
+    }
+}
+
+fn map_created<T: serde::de::DeserializeOwned>(
+    outcome: GraphOutcome,
+    what: &str,
+) -> Result<T, String> {
+    match outcome {
+        GraphOutcome::Unknown(_) => Err(
+            "Microsoft did not confirm creation. Check the destination before trying again.".into(),
+        ),
+        outcome => map_response(outcome, what),
     }
 }
 
@@ -107,10 +140,8 @@ pub async fn list_notebooks<T: GraphTransport, S: Sleeper>(
     // otherwise it rejects the request — which previously surfaced as an empty
     // picker. Keep the query minimal and let the service apply its default
     // ordering rather than risk that constraint.
-    let request = get_request(format!(
-        "{GRAPH_BASE}/me/onenote/notebooks?$select=id,displayName&$top=50"
-    ));
-    map_outcome(client.execute(&request, token).await)
+    let url = format!("{GRAPH_BASE}/me/onenote/notebooks?$select=id,displayName&$top=50");
+    list_destinations(client, token, url).await
 }
 
 /// Create a new section in a notebook and return it.
@@ -254,7 +285,10 @@ pub async fn create_notebook<T: GraphTransport, S: Sleeper>(
         correlation_id: uuid::Uuid::new_v4().to_string(),
         headers: Vec::new(),
     };
-    map_single(client.execute(&request, token).await, "created notebook")
+    map_created(
+        client.execute_create(&request, token).await,
+        "created notebook",
+    )
 }
 
 pub async fn list_sections<T: GraphTransport, S: Sleeper>(
@@ -265,18 +299,20 @@ pub async fn list_sections<T: GraphTransport, S: Sleeper>(
     require_remote_ids(&[notebook_id])?;
     let url =
         graph_url_with_path_segments(&["me", "onenote", "notebooks", notebook_id, "sections"]);
-    let request = get_request(format!("{url}?$select=id,displayName&$top=100"));
-    map_outcome(client.execute(&request, token).await)
+    list_destinations(
+        client,
+        token,
+        format!("{url}?$select=id,displayName&$top=100"),
+    )
+    .await
 }
 
 pub async fn list_plans<T: GraphTransport, S: Sleeper>(
     client: &GraphClient<T, S>,
     token: &str,
 ) -> Result<Vec<PlanInfo>, String> {
-    let request = get_request(format!(
-        "{GRAPH_BASE}/me/planner/plans?$select=id,title&$top=50"
-    ));
-    map_outcome(client.execute(&request, token).await)
+    let url = format!("{GRAPH_BASE}/me/planner/plans?$select=id,title&$top=50");
+    list_destinations(client, token, url).await
 }
 
 pub async fn list_buckets<T: GraphTransport, S: Sleeper>(
@@ -286,8 +322,7 @@ pub async fn list_buckets<T: GraphTransport, S: Sleeper>(
 ) -> Result<Vec<BucketInfo>, String> {
     require_remote_ids(&[plan_id])?;
     let url = graph_url_with_path_segments(&["planner", "plans", plan_id, "buckets"]);
-    let request = get_request(format!("{url}?$select=id,name&$top=100"));
-    map_outcome(client.execute(&request, token).await)
+    list_destinations(client, token, format!("{url}?$select=id,name&$top=100")).await
 }
 
 pub async fn list_todo_lists<T: GraphTransport, S: Sleeper>(
@@ -297,8 +332,7 @@ pub async fn list_todo_lists<T: GraphTransport, S: Sleeper>(
     // Microsoft To Do list enumeration is touchy with OData query parameters
     // on some accounts. Use the documented plain endpoint; the default payload
     // already includes id, displayName, and wellknownListName.
-    let request = get_request(format!("{GRAPH_BASE}/me/todo/lists"));
-    map_outcome(client.execute(&request, token).await)
+    list_destinations(client, token, format!("{GRAPH_BASE}/me/todo/lists")).await
 }
 
 fn normalized_todo_list_name(value: &str) -> String {
@@ -335,7 +369,10 @@ pub async fn create_todo_list<T: GraphTransport, S: Sleeper>(
         correlation_id: uuid::Uuid::new_v4().to_string(),
         headers: Vec::new(),
     };
-    map_single(client.execute(&request, token).await, "created To Do list")
+    map_created(
+        client.execute_create(&request, token).await,
+        "created To Do list",
+    )
 }
 
 /// Create a new bucket within a plan and return it. Requires `Tasks.ReadWrite`,
@@ -361,7 +398,10 @@ pub async fn create_bucket<T: GraphTransport, S: Sleeper>(
         correlation_id: uuid::Uuid::new_v4().to_string(),
         headers: Vec::new(),
     };
-    map_single(client.execute(&request, token).await, "created bucket")
+    map_created(
+        client.execute_create(&request, token).await,
+        "created bucket",
+    )
 }
 
 #[cfg(test)]
@@ -408,6 +448,107 @@ mod tests {
         let plans = list_plans(&c, "token").await.unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].title, "Sprint 42");
+    }
+
+    #[tokio::test]
+    async fn list_plans_follows_opaque_continuation_urls() {
+        let transport = MockGraphTransport::new();
+        let next = format!("{GRAPH_BASE}/me/planner/plans?$skiptoken=part%2Btwo%2F%3D");
+        transport.queue_default([GraphResponse::success(
+            200,
+            serde_json::json!({
+                "value": [{"id": "plan-1", "title": "First"}],
+                "@odata.nextLink": &next,
+            })
+            .to_string(),
+        )]);
+        transport.queue_for_url(
+            &next,
+            [GraphResponse::success(
+                200,
+                r#"{"value":[{"id":"plan-2","title":"Second"}]}"#,
+            )],
+        );
+        let c = client(transport);
+        let plans = list_plans(&c, "token").await.unwrap();
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| plan.id.as_str())
+                .collect::<Vec<_>>(),
+            ["plan-1", "plan-2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_continuations_outside_graph() {
+        let transport = MockGraphTransport::new();
+        transport.queue_default([GraphResponse::success(
+            200,
+            r#"{"value":[],"@odata.nextLink":"https://example.com/v1.0/me/todo/lists"}"#,
+        )]);
+        let c = client(transport);
+        assert!(list_todo_lists(&c, "token").await.is_err());
+        assert_eq!(c.transport().recorded().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn incomplete_listing_does_not_trigger_todo_list_creation() {
+        let transport = MockGraphTransport::new();
+        let first = format!("{GRAPH_BASE}/me/todo/lists");
+        let page = GraphResponse::success(
+            200,
+            serde_json::json!({"value": [], "@odata.nextLink": &first}).to_string(),
+        );
+        transport.queue_for_url(&first, std::iter::repeat_n(page, 20));
+        let c = client(transport);
+        assert!(create_todo_list(&c, "token", "Meeting actions")
+            .await
+            .is_err());
+        let requests = c.transport().recorded();
+        assert_eq!(requests.len(), 20);
+        assert!(requests.iter().all(|request| request.method == "GET"));
+    }
+
+    #[tokio::test]
+    async fn destination_creates_do_not_retry_an_unconfirmed_post() {
+        let transport = MockGraphTransport::new();
+        transport.queue_for_url(
+            &format!("{GRAPH_BASE}/me/onenote/notebooks"),
+            [
+                GraphResponse::failure(503, None),
+                GraphResponse::success(201, r#"{"id":"notebook-1","displayName":"Notes"}"#),
+            ],
+        );
+        transport.queue_for_url(
+            &format!("{GRAPH_BASE}/planner/buckets"),
+            [
+                GraphResponse::failure(503, None),
+                GraphResponse::success(201, r#"{"id":"bucket-1","name":"Actions"}"#),
+            ],
+        );
+        transport.queue_for_url(
+            &format!("{GRAPH_BASE}/me/todo/lists"),
+            [
+                GraphResponse::success(200, r#"{"value":[]}"#),
+                GraphResponse::failure(503, None),
+                GraphResponse::success(201, r#"{"id":"list-1","displayName":"Tasks"}"#),
+            ],
+        );
+        let c = client(transport);
+        assert!(create_notebook(&c, "token", "Notes").await.is_err());
+        assert!(create_bucket(&c, "token", "plan-1", "Actions")
+            .await
+            .is_err());
+        assert!(create_todo_list(&c, "token", "Tasks").await.is_err());
+        let requests = c.transport().recorded();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.method == "POST")
+                .count(),
+            3
+        );
     }
 
     #[tokio::test]
@@ -481,23 +622,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_todo_list_reuses_existing_normalized_name() {
+    async fn create_todo_list_reuses_existing_normalized_name_on_later_page() {
         let transport = MockGraphTransport::new();
-        transport.queue_default([GraphResponse::success(
-            200,
-            r#"{"value":[{"id":"td-1","displayName":"Meeting actions","wellknownListName":"none"}]}"#,
-        )]);
+        let next = format!("{GRAPH_BASE}/me/todo/lists?$skiptoken=next");
+        transport.queue_default([
+            GraphResponse::success(
+                200,
+                serde_json::json!({
+                    "value": [{"id": "td-2", "displayName": "Personal"}],
+                    "@odata.nextLink": &next,
+                })
+                .to_string(),
+            ),
+            GraphResponse::success(
+                200,
+                r#"{"value":[{"id":"td-1","displayName":"Meeting actions","wellknownListName":"none"}]}"#,
+            ),
+        ]);
         let c = client(transport);
         let list = create_todo_list(&c, "token", "  meeting   ACTIONS ")
             .await
             .unwrap();
         assert_eq!(list.id, "td-1");
         assert_eq!(list.display_name, "Meeting actions");
-        assert_eq!(
-            c.transport()
-                .calls_for(&format!("{GRAPH_BASE}/me/todo/lists")),
-            1
-        );
+        let requests = c.transport().recorded();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].url, next);
+        assert!(requests.iter().all(|request| request.method == "GET"));
     }
 
     #[tokio::test]

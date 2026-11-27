@@ -177,8 +177,13 @@ See [todo-export.md](todo-export.md).
 - `403`: show consent, tenant policy, or access-denied guidance.
 - `404`: selected destination no longer exists or is not visible.
 - `429`: respect `Retry-After` and avoid duplicate exports.
-- `503`: bounded retry, then surface service unavailable.
+- `503`: retry reads within the retry limit. If a destination create is
+  unconfirmed, check Microsoft 365 for the destination before submitting again.
 - OneNote `10008`: skip section listing and use create-new/saved-ID flows.
+
+Destination pickers follow up to 20 Graph pages. If more pages remain, the
+picker reports that the complete list could not be loaded. To Do list creation
+also stops when it cannot finish checking for an existing list with that name.
 
 Graph failures should not delete local meeting artifacts.
 

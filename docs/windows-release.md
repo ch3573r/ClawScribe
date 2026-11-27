@@ -538,8 +538,9 @@ checks are cached for 24 hours and concurrent requests share one check per
 channel. Installation requires a user action.
 
 The preview channel considers the stable update and the newest eligible Windows
-x64 release in GitHub's 100 most recent release entries. It compares numeric
-runtime versions, rather than publication order or version strings. Drafts,
+x64 release in GitHub's 100 most recent release entries. It ranks candidates by
+numeric runtime version. For equal runtime versions, it prefers stable releases
+and orders preview tags by semantic version precedence. Drafts,
 incomplete asset uploads, empty assets, and releases without the Windows setup
 and updater manifest are excluded. Discovery uses GitHub's public API without
 credentials, with bounded response size and timeouts. Rate limits and network
