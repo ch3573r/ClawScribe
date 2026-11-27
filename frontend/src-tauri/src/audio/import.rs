@@ -682,6 +682,9 @@ async fn run_import<R: Runtime>(
                 language.as_deref(),
                 &IMPORT_CANCELLED,
                 options.cloud_destination.as_deref(),
+                |progress, message| {
+                    emit_progress(&app, "transcribing", 15 + 60 * progress / 100, message)
+                },
             )
             .await;
             if IMPORT_CANCELLED.load(Ordering::Acquire) {
@@ -1062,7 +1065,7 @@ async fn prepare_cloud_import_timing_grid<R: Runtime>(
     audio_path: &Path,
     cloud_segments: &[TranscribedSegment],
 ) -> Result<(f64, Vec<TranscribedSegment>)> {
-    emit_progress(app, "decoding", 20, "Preparing cloud transcript timing...");
+    emit_progress(app, "decoding", 75, "Preparing cloud transcript timing...");
 
     if IMPORT_CANCELLED.load(Ordering::SeqCst) {
         return Err(anyhow!("Import cancelled"));

@@ -1,5 +1,7 @@
 pub mod azure_speech;
 pub mod openai_whisper;
+mod whisper_audio;
+pub(crate) use whisper_audio::transcribe_whisper_file;
 
 use crate::api::{TranscriptWord, TranscriptWordTimestampSource};
 use crate::audio::batch_audio::{audio_decoder_command, unless_cancelled};
@@ -7,7 +9,6 @@ use crate::audio::common::TranscribedSegment;
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
 use anyhow::anyhow;
-use async_trait::async_trait;
 use log::info;
 use serde::Serialize;
 use std::fmt;
@@ -23,6 +24,7 @@ pub const PROVIDER_AZURE_SPEECH: &str = "mai-transcribe";
 pub const DEFAULT_CLOUD_WHISPER_MODEL: &str = "whisper-1";
 pub const DEFAULT_AZURE_SPEECH_MODEL: &str = "azure-speech";
 const OPENAI_HOSTED_WHISPER_MAX_UPLOAD_BYTES: u64 = 25_000_000;
+const CUSTOM_WHISPER_MAX_UPLOAD_BYTES: u64 = 500_000_000;
 /// Conservative upload cap retained for bounded audio conversion and uploads.
 const AZURE_SPEECH_MAX_UPLOAD_BYTES: u64 = 300_000_000;
 /// Containers sent directly; other media retain the existing PCM conversion path.
@@ -129,17 +131,6 @@ impl fmt::Display for CloudTranscriptionError {
 
 impl std::error::Error for CloudTranscriptionError {}
 
-#[async_trait]
-pub trait CloudTranscriptionProvider {
-    async fn transcribe_file(
-        &self,
-        audio: Vec<u8>,
-        file_name: &str,
-        mime_type: &str,
-        language: Option<&str>,
-    ) -> Result<Vec<CloudTranscriptSegment>, CloudTranscriptionError>;
-}
-
 pub fn is_cloud_provider(provider: Option<&str>) -> bool {
     matches!(
         provider,
@@ -202,6 +193,7 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
     language: Option<&str>,
     cancelled: &AtomicBool,
     import_destination: Option<&str>,
+    progress: impl Fn(u32, &str),
 ) -> Result<CloudTranscriptionOutcome, CloudTranscriptionError> {
     let app_state = app
         .try_state::<AppState>()
@@ -223,7 +215,7 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
             ));
         }
     }
-    let api_key = SettingsRepository::get_transcript_api_key(pool, provider)
+    let api_key = SettingsRepository::cloud_transcript_key_for_config(pool, provider, &config)
         .await
         .map_err(|e| CloudTranscriptionError::auth_config(format!("Cloud credential error: {e}")))?
         .filter(|key| !key.trim().is_empty())
@@ -255,36 +247,9 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
                 model.clone(),
             )
             .with_http_opt_in(config.cloud_http_opt_in(provider));
-            let cloud_segments = unless_cancelled(
-                async {
-                    let audio_size_bytes = tokio::fs::metadata(audio_path)
-                        .await
-                        .map_err(|_| {
-                            CloudTranscriptionError::auth_config("Could not inspect audio file")
-                        })?
-                        .len();
-                    validate_provider_upload_size(
-                        PROVIDER_CLOUD_WHISPER,
-                        Some(base_url),
-                        audio_size_bytes,
-                    )?;
-                    let audio = tokio::fs::read(audio_path).await.map_err(|_| {
-                        CloudTranscriptionError::auth_config("Could not read audio file")
-                    })?;
-                    check_import_upload_opt_in(import_destination.is_some())?;
-                    client
-                        .transcribe_file(
-                            audio,
-                            upload_filename(audio_path),
-                            mime_type_for_path(audio_path),
-                            language,
-                        )
-                        .await
-                },
-                cancelled,
-            )
-            .await
-            .ok_or_else(cloud_cancelled)??;
+            let cloud_segments =
+                transcribe_whisper_file(&client, audio_path, language, cancelled, true, progress)
+                    .await?;
             Ok(CloudTranscriptionOutcome {
                 provider: PROVIDER_CLOUD_WHISPER.to_string(),
                 model,
@@ -606,16 +571,26 @@ pub(crate) fn validate_provider_upload_size(
     endpoint_or_base_url: Option<&str>,
     file_size_bytes: u64,
 ) -> Result<(), CloudTranscriptionError> {
-    if provider == PROVIDER_CLOUD_WHISPER
-        && endpoint_or_base_url
-            .map(is_official_openai_api_url)
-            .unwrap_or(true)
-        && file_size_bytes > OPENAI_HOSTED_WHISPER_MAX_UPLOAD_BYTES
-    {
-        return Err(CloudTranscriptionError::upload_too_large(format!(
-            "OpenAI Hosted Whisper accepts audio uploads up to 25 MB; this file is {}",
-            format_megabytes(file_size_bytes)
-        )));
+    if provider == PROVIDER_CLOUD_WHISPER {
+        let hosted = endpoint_or_base_url.is_none_or(is_official_openai_api_url);
+        let (limit, description) = if hosted {
+            (
+                OPENAI_HOSTED_WHISPER_MAX_UPLOAD_BYTES,
+                "OpenAI Hosted Whisper",
+            )
+        } else {
+            (
+                CUSTOM_WHISPER_MAX_UPLOAD_BYTES,
+                "ClawScribe for custom Whisper endpoints",
+            )
+        };
+        if file_size_bytes > limit {
+            return Err(CloudTranscriptionError::upload_too_large(format!(
+                "The upload limit for {description} is {}. Choose a smaller audio file or use local transcription. This file is {}.",
+                format_megabytes(limit),
+                format_megabytes(file_size_bytes)
+            )));
+        }
     }
 
     if provider == PROVIDER_AZURE_SPEECH && file_size_bytes > AZURE_SPEECH_MAX_UPLOAD_BYTES {
@@ -1266,7 +1241,7 @@ mod tests {
         let audio = directory.path().join("synthetic.wav");
         tokio::fs::write(&audio, [0_u8; 44]).await.unwrap();
         let whisper_error = whisper
-            .transcribe_file(vec![0; 44], "synthetic.wav", "audio/wav", None)
+            .transcribe_path(&audio, None, false)
             .await
             .unwrap_err();
         let mai_error = transcribe_azure_file(&mai, &audio, None, &AtomicBool::new(false), false)
@@ -1320,36 +1295,36 @@ mod tests {
                     .unwrap();
                 assert!(old.cloud_http_opt_in(PROVIDER_CLOUD_WHISPER));
             }
-            assert!(SettingsRepository::save_transcript_provider_config(
+            assert!(SettingsRepository::save_hosted_transcript_config(
                 &pool,
                 PROVIDER_CLOUD_WHISPER,
-                Some("http://model.example.com"),
-                None,
+                DEFAULT_CLOUD_WHISPER_MODEL,
+                "http://model.example.com",
                 None,
                 true,
-                false,
+                None,
             )
             .await
             .is_err());
-            SettingsRepository::save_transcript_provider_config(
+            SettingsRepository::save_hosted_transcript_config(
                 &pool,
                 PROVIDER_CLOUD_WHISPER,
-                Some("http://model.local"),
-                None,
+                DEFAULT_CLOUD_WHISPER_MODEL,
+                "http://model.local",
                 None,
                 true,
-                false,
+                None,
             )
             .await
             .unwrap();
-            SettingsRepository::save_transcript_provider_config(
+            SettingsRepository::save_hosted_transcript_config(
                 &pool,
                 PROVIDER_AZURE_SPEECH,
-                None,
-                Some("https://speech.example.com"),
+                DEFAULT_AZURE_SPEECH_MODEL,
+                "https://speech.example.com",
                 None,
                 false,
-                false,
+                None,
             )
             .await
             .unwrap();
@@ -1464,6 +1439,16 @@ mod tests {
             250_000_000,
         )
         .is_ok());
+        let error = validate_provider_upload_size(
+            PROVIDER_CLOUD_WHISPER,
+            Some("https://example.test/v1"),
+            500_000_001,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.category(),
+            CloudFallbackReasonCategory::UploadTooLarge
+        );
         assert!(validate_provider_upload_size(
             PROVIDER_AZURE_SPEECH,
             Some("https://example.cognitiveservices.azure.com"),
@@ -1586,9 +1571,8 @@ mod tests {
 pub(crate) mod live_smoke {
     use super::{
         azure_speech::AzureSpeechProvider, cloud_segments_to_transcribed_segments,
-        mime_type_for_path, openai_whisper::OpenAiWhisperProvider, transcribe_azure_file,
-        validate_provider_upload_size, CloudTranscriptSegment, CloudTranscriptionProvider,
-        CloudWordPolicy, DEFAULT_CLOUD_WHISPER_MODEL, PROVIDER_CLOUD_WHISPER,
+        openai_whisper::OpenAiWhisperProvider, transcribe_azure_file, transcribe_whisper_file,
+        CloudTranscriptSegment, CloudWordPolicy, DEFAULT_CLOUD_WHISPER_MODEL,
     };
     use crate::api::TranscriptWordTimestampSource;
     use std::{
@@ -1617,11 +1601,6 @@ pub(crate) mod live_smoke {
             "{ENV_AUDIO} must point to a non-empty audio file"
         );
 
-        let file_name = audio_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("smoke-audio.wav");
-        let mime_type = mime_type_for_path(&audio_path);
         let language = optional_env(ENV_LANGUAGE);
         let language = language.as_deref();
         let mut providers_run = 0;
@@ -1632,21 +1611,22 @@ pub(crate) mod live_smoke {
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
             let model = optional_env(ENV_OPENAI_MODEL)
                 .unwrap_or_else(|| DEFAULT_CLOUD_WHISPER_MODEL.into());
-            validate_provider_upload_size(PROVIDER_CLOUD_WHISPER, Some(&base_url), metadata.len())
-                .unwrap();
             let provider = OpenAiWhisperProvider::new(base_url, api_key, model);
-            let audio = tokio::fs::read(&audio_path)
-                .await
-                .unwrap_or_else(|error| panic!("failed to read {ENV_AUDIO}: {error}"));
-            let segments = transcribe_or_panic(
-                "Hosted Whisper",
+            let segments = transcribe_whisper_file(
                 &provider,
-                audio,
-                file_name,
-                mime_type,
+                &audio_path,
                 language,
+                &AtomicBool::new(false),
+                false,
+                |_, message| println!("{message}"),
             )
-            .await;
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Hosted Whisper smoke failed: category={}, error={error}",
+                    error.category().as_str()
+                )
+            });
 
             assert_basic_segments("Hosted Whisper", &segments);
             assert_hosted_whisper_word_timestamps(&segments);
@@ -1692,25 +1672,6 @@ pub(crate) mod live_smoke {
             providers_run > 0,
             "set {ENV_OPENAI_API_KEY} and/or both {ENV_AZURE_ENDPOINT} + {ENV_AZURE_API_KEY}"
         );
-    }
-
-    async fn transcribe_or_panic<P: CloudTranscriptionProvider>(
-        label: &str,
-        provider: &P,
-        audio: Vec<u8>,
-        file_name: &str,
-        mime_type: &str,
-        language: Option<&str>,
-    ) -> Vec<CloudTranscriptSegment> {
-        provider
-            .transcribe_file(audio, file_name, mime_type, language)
-            .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{label} smoke transcription failed: category={}, error={error}",
-                    error.category().as_str()
-                )
-            })
     }
 
     fn assert_basic_segments(label: &str, segments: &[CloudTranscriptSegment]) {

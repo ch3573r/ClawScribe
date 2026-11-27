@@ -6,9 +6,8 @@ use tauri::{AppHandle, Emitter, Runtime};
 use crate::credentials::SecretStatus;
 use crate::{
     audio::transcription::cloud::{
-        azure_speech::AzureSpeechProvider, mime_type_for_path,
-        openai_whisper::OpenAiWhisperProvider, transcribe_azure_file,
-        validate_provider_upload_size, CloudTranscriptSegment, CloudTranscriptionProvider,
+        azure_speech::AzureSpeechProvider, openai_whisper::OpenAiWhisperProvider,
+        transcribe_azure_file, transcribe_whisper_file, CloudTranscriptSegment,
         DEFAULT_AZURE_SPEECH_MODEL, DEFAULT_CLOUD_WHISPER_MODEL, PROVIDER_AZURE_SPEECH,
         PROVIDER_CLOUD_WHISPER,
     },
@@ -602,77 +601,41 @@ pub async fn api_save_transcript_config<R: Runtime>(
     let pool = state.db_manager.pool();
 
     let allow_unencrypted = allow_unencrypted.unwrap_or(false);
-    match provider.as_str() {
-        PROVIDER_CLOUD_WHISPER => crate::openai::secret_destination::validate_secret_destination(
-            clean_optional(base_url.as_deref()).unwrap_or("https://api.openai.com/v1"),
-            allow_unencrypted,
-        )?,
-        PROVIDER_AZURE_SPEECH => crate::openai::secret_destination::validate_secret_destination(
-            clean_optional(endpoint.as_deref()).unwrap_or(""),
-            allow_unencrypted,
-        )?,
-        _ => {}
-    }
-    let clean_base_url = base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let clean_endpoint = endpoint
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let clean_region = region
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let new_key = api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    // Refuse before anything is written: a bad new key, or a stored key that
-    // would follow a changed address without being entered again.
-    if let Some(problem) = new_key.and_then(crate::credentials::new_secret_problem) {
-        return Err(problem.to_string());
-    }
-    if let Err(e) = SettingsRepository::require_key_for_new_destination(
-        pool,
-        &provider,
-        clean_base_url,
-        clean_endpoint,
-        new_key.is_some(),
-    )
-    .await
-    {
-        return Err(e.to_string());
-    }
-    if let Err(e) = SettingsRepository::save_transcript_config(pool, &provider, &model).await {
-        log_error!("Failed to save transcript config");
-        return Err(e.to_string());
-    }
-
-    // The new key goes first: the address saved next is then the one the new
-    // key was entered for, and a failed key save leaves the old address alone.
-    if let Some(key) = new_key {
-        log_info!("API key provided, saving for transcript provider...");
-        if let Err(e) = SettingsRepository::save_transcript_api_key(pool, &provider, key).await {
-            log_error!("Failed to save transcript API key");
-            return Err(e.to_string());
+    let destination = match provider.as_str() {
+        PROVIDER_CLOUD_WHISPER => {
+            Some(clean_optional(base_url.as_deref()).unwrap_or("https://api.openai.com/v1"))
         }
-    }
-
-    if let Err(e) = SettingsRepository::save_transcript_provider_config(
-        pool,
-        &provider,
-        clean_base_url,
-        clean_endpoint,
-        clean_region,
-        allow_unencrypted,
-        new_key.is_some(),
-    )
-    .await
-    {
-        log_error!("Failed to save transcript provider config");
-        return Err(e.to_string());
+        PROVIDER_AZURE_SPEECH => Some(clean_optional(endpoint.as_deref()).unwrap_or("")),
+        _ => None,
+    };
+    let new_key = clean_optional(api_key.as_deref());
+    if let Some(address) = destination {
+        SettingsRepository::save_hosted_transcript_config(
+            pool,
+            &provider,
+            &model,
+            address,
+            clean_optional(region.as_deref()),
+            allow_unencrypted,
+            new_key,
+        )
+        .await
+        .map_err(|error| {
+            log_error!("Failed to save hosted transcription configuration");
+            error.to_string()
+        })?;
+    } else {
+        if let Some(problem) = new_key.and_then(crate::credentials::new_secret_problem) {
+            return Err(problem.to_string());
+        }
+        SettingsRepository::save_transcript_config(pool, &provider, &model)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(key) = new_key {
+            SettingsRepository::save_transcript_api_key(pool, &provider, key)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
     }
 
     log_info!("Successfully saved transcript configuration.");
@@ -788,8 +751,7 @@ async fn test_transcript_provider_with(
     audio_path: &Path,
     language: Option<String>,
 ) -> Result<TranscriptProviderTestResult, String> {
-    let audio_size_bytes =
-        crate::audio::transcription::cloud::validate_test_audio_path(audio_path).await?;
+    crate::audio::transcription::cloud::validate_test_audio_path(audio_path).await?;
     let pool = state.db_manager.pool();
     let saved_config = SettingsRepository::get_transcript_config(pool)
         .await
@@ -841,18 +803,19 @@ async fn test_transcript_provider_with(
     )?;
     let api_key = match clean_optional(api_key.as_deref()).map(str::to_string) {
         Some(key) => key,
-        None => SettingsRepository::get_transcript_api_key(pool, &provider)
-            .await
-            .map_err(|e| format!("Failed to read saved cloud transcription key: {e}"))?
-            .and_then(|value| clean_string(Some(value)))
-            .ok_or_else(|| "Cloud transcription API key is missing".to_string())?,
+        None => SettingsRepository::cloud_transcript_key_for_config(
+            pool,
+            &provider,
+            saved_config
+                .as_ref()
+                .ok_or("Cloud transcription is not configured")?,
+        )
+        .await
+        .map_err(|e| format!("Failed to read saved cloud transcription key: {e}"))?
+        .and_then(|value| clean_string(Some(value)))
+        .ok_or_else(|| "Cloud transcription API key is missing".to_string())?,
     };
 
-    let file_name = audio_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("test-audio.wav");
-    let mime_type = mime_type_for_path(audio_path);
     let language = clean_optional(language.as_deref());
 
     match provider.as_str() {
@@ -860,31 +823,24 @@ async fn test_transcript_provider_with(
             let base_url = destination;
             let model = clean_string(Some(model))
                 .unwrap_or_else(|| DEFAULT_CLOUD_WHISPER_MODEL.to_string());
-            validate_provider_upload_size(
-                PROVIDER_CLOUD_WHISPER,
-                Some(&base_url),
-                audio_size_bytes,
+            let provider_client = OpenAiWhisperProvider::new(base_url, api_key, model.clone())
+                .with_http_opt_in(allow_unencrypted);
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let segments = transcribe_whisper_file(
+                &provider_client,
+                audio_path,
+                language,
+                &cancelled,
+                false,
+                |_, _| {},
             )
+            .await
             .map_err(|error| {
                 format!(
                     "Hosted Whisper test failed ({}): {error}",
                     error.category().as_str()
                 )
             })?;
-            let audio = tokio::fs::read(audio_path)
-                .await
-                .map_err(|e| format!("Failed to read test audio file: {e}"))?;
-            let provider_client = OpenAiWhisperProvider::new(base_url, api_key, model.clone())
-                .with_http_opt_in(allow_unencrypted);
-            let segments = provider_client
-                .transcribe_file(audio, file_name, mime_type, language)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "Hosted Whisper test failed ({}): {error}",
-                        error.category().as_str()
-                    )
-                })?;
             build_cloud_test_result(PROVIDER_CLOUD_WHISPER, &model, &segments, true)
         }
         PROVIDER_AZURE_SPEECH => {
@@ -931,7 +887,10 @@ fn build_cloud_test_result(
         .iter()
         .map(|segment| segment.words.as_ref().map_or(0, Vec::len))
         .sum::<usize>();
-    if expect_word_timestamps && word_timestamp_count == 0 {
+    let requires_local_timing_grid = segments
+        .iter()
+        .any(|segment| segment.requires_local_timing_grid);
+    if expect_word_timestamps && word_timestamp_count == 0 && !requires_local_timing_grid {
         return Err(
             "Hosted Whisper returned text but no word timestamps; diarization would lose real word timing"
                 .to_string(),
@@ -943,16 +902,34 @@ fn build_cloud_test_result(
         model: model.to_string(),
         segment_count: segments.len(),
         word_timestamp_count,
-        requires_local_timing_grid: segments
-            .iter()
-            .any(|segment| segment.requires_local_timing_grid),
+        requires_local_timing_grid,
         preview_text: preview_text(segments),
     })
 }
 
 #[cfg(test)]
-mod azure_provider_test_results {
+mod cloud_provider_test_results {
     use super::*;
+
+    #[test]
+    fn hosted_whisper_test_accepts_text_that_uses_local_timing() {
+        let segments = [CloudTranscriptSegment {
+            text: "Ja.".into(),
+            start_seconds: 0.0,
+            end_seconds: 0.0,
+            words: None,
+            requires_local_timing_grid: true,
+        }];
+        let result = build_cloud_test_result(
+            PROVIDER_CLOUD_WHISPER,
+            DEFAULT_CLOUD_WHISPER_MODEL,
+            &segments,
+            true,
+        )
+        .unwrap();
+        assert!(result.requires_local_timing_grid);
+        assert_eq!(result.word_timestamp_count, 0);
+    }
 
     #[test]
     fn standard_speech_test_accepts_real_words_and_phrase_only_responses() {

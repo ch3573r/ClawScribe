@@ -268,6 +268,15 @@ async fn run_retranscription<R: Runtime>(
                 language.as_deref(),
                 &RETRANSCRIPTION_CANCELLED,
                 None,
+                |progress, message| {
+                    emit_progress(
+                        &app,
+                        &meeting_id,
+                        "transcribing",
+                        5 + 70 * progress / 100,
+                        message,
+                    )
+                },
             )
             .await;
             if RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire) {
@@ -644,7 +653,7 @@ async fn prepare_cloud_retranscription_timing_grid<R: Runtime>(
         app,
         meeting_id,
         "decoding",
-        10,
+        75,
         "Preparing cloud transcript timing...",
     );
 

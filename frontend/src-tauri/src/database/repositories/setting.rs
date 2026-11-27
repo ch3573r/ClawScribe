@@ -254,118 +254,134 @@ impl SettingsRepository {
         Ok(())
     }
 
-    pub async fn save_transcript_provider_config(
+    pub(crate) async fn save_hosted_transcript_config(
         pool: &SqlitePool,
         provider: &str,
-        base_url: Option<&str>,
-        endpoint: Option<&str>,
+        model: &str,
+        address: &str,
         region: Option<&str>,
         allow_unencrypted: bool,
-        key_supplied: bool,
-    ) -> std::result::Result<(), sqlx::Error> {
-        // A stored key goes only to the address it was saved for. A new address
-        // needs the key entered again (`key_supplied`), never silently reused.
-        Self::require_key_for_new_destination(pool, provider, base_url, endpoint, key_supplied)
-            .await?;
-        match provider {
-            "cloud-whisper" => {
-                crate::openai::secret_destination::validate_secret_destination(
-                    base_url.unwrap_or("https://api.openai.com/v1"),
-                    allow_unencrypted,
-                )
-                .map_err(sqlx::Error::Protocol)?;
-                sqlx::query(
-                    r#"
-                    INSERT INTO transcript_settings (id, provider, model, cloudWhisperBaseUrl, cloudWhisperAllowUnencrypted)
-                    VALUES ('1', 'cloud-whisper', 'whisper-1', $1, $2)
-                    ON CONFLICT(id) DO UPDATE SET
-                        cloudWhisperBaseUrl = $1, cloudWhisperAllowUnencrypted = $2
-                    "#,
-                )
-                .bind(base_url)
-                .bind(allow_unencrypted)
-                .execute(pool)
-                .await?;
-            }
-            "mai-transcribe" => {
-                crate::openai::secret_destination::validate_secret_destination(
-                    endpoint.unwrap_or(""),
-                    allow_unencrypted,
-                )
-                .map_err(sqlx::Error::Protocol)?;
-                sqlx::query(
-                    r#"
-                    INSERT INTO transcript_settings (id, provider, model, maiTranscribeEndpoint, maiTranscribeRegion, maiTranscribeAllowUnencrypted)
-                    VALUES ('1', 'mai-transcribe', 'azure-speech', $1, $2, $3)
-                    ON CONFLICT(id) DO UPDATE SET
-                        maiTranscribeEndpoint = $1,
-                        maiTranscribeRegion = $2, maiTranscribeAllowUnencrypted = $3
-                    "#,
-                )
-                .bind(endpoint)
-                .bind(region)
-                .bind(allow_unencrypted)
-                .execute(pool)
-                .await?;
-            }
-            _ => {}
-        }
-
-        Ok(())
+        new_key: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        Self::save_hosted_transcript_config_with(
+            &platform_store(),
+            pool,
+            provider,
+            model,
+            address,
+            region,
+            allow_unencrypted,
+            new_key,
+        )
+        .await
     }
 
-    /// Refuses to point a stored hosted-transcription key at a different
-    /// address unless a new key comes with it.
-    pub(crate) async fn require_key_for_new_destination(
+    async fn save_hosted_transcript_config_with(
+        store: &Store,
         pool: &SqlitePool,
         provider: &str,
-        base_url: Option<&str>,
-        endpoint: Option<&str>,
-        key_supplied: bool,
-    ) -> std::result::Result<(), sqlx::Error> {
-        let (key_column, address_column, requested, default) = match provider {
+        model: &str,
+        address: &str,
+        region: Option<&str>,
+        allow_unencrypted: bool,
+        new_key: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        let (key_column, address_column, opt_in_column, model, default) = match provider {
             "cloud-whisper" => (
                 "cloudWhisperApiKey",
                 "cloudWhisperBaseUrl",
-                base_url,
+                "cloudWhisperAllowUnencrypted",
+                model,
                 Some(DEFAULT_CLOUD_WHISPER_BASE_URL),
             ),
             "mai-transcribe" => (
                 "maiTranscribeApiKey",
                 "maiTranscribeEndpoint",
-                endpoint,
+                "maiTranscribeAllowUnencrypted",
+                "azure-speech",
                 None,
             ),
-            _ => return Ok(()),
+            _ => {
+                return Err(sqlx::Error::Protocol(
+                    "Unsupported hosted transcription provider".into(),
+                ))
+            }
         };
-        if key_supplied {
-            return Ok(());
+        crate::openai::secret_destination::validate_secret_destination(address, allow_unencrypted)
+            .map_err(sqlx::Error::Protocol)?;
+        let new_key = new_key.map(str::trim).filter(|key| !key.is_empty());
+        if let Some(problem) = new_key.and_then(new_secret_problem) {
+            return Err(sqlx::Error::Protocol(problem.into()));
         }
         let stored: Option<(Option<String>, Option<String>)> = sqlx::query_as(&format!(
             "SELECT {key_column}, {address_column} FROM transcript_settings WHERE id = '1'"
         ))
         .fetch_optional(pool)
         .await?;
-        let Some((key, address)) = stored else {
-            return Ok(());
-        };
-        if key.as_deref().is_none_or(str::is_empty) {
-            return Ok(());
-        }
-        let saved = address.filter(|value| !value.trim().is_empty());
-        let saved = saved.as_deref().or(default);
-        let requested = requested
+        let (old_key, old_address) = stored.unwrap_or_default();
+        let saved = old_address
+            .as_deref()
             .filter(|value| !value.trim().is_empty())
             .or(default);
-        match (saved, requested) {
-            (Some(saved), Some(requested)) if !keeps_destination(saved, requested) => {
-                Err(sqlx::Error::Protocol(KEY_REQUIRED_FOR_NEW_ADDRESS.into()))
-            }
-            // A key with no address it was saved for is bound to none: a new
-            // address needs the key entered again.
-            (None, Some(_)) => Err(sqlx::Error::Protocol(KEY_REQUIRED_FOR_NEW_ADDRESS.into())),
-            _ => Ok(()),
+        if new_key.is_none()
+            && old_key.as_deref().is_some_and(|key| !key.is_empty())
+            && !saved.is_some_and(|saved| keeps_destination(saved, address))
+        {
+            return Err(sqlx::Error::Protocol(KEY_REQUIRED_FOR_NEW_ADDRESS.into()));
         }
+
+        // A keyless edit can reuse only the pair it validated. A key change
+        // stages the secret first, then publishes its reference with the address.
+        let apply = |reference: Option<String>| {
+            let old_key = old_key.as_deref();
+            let old_address = old_address.as_deref();
+            async move {
+                let result = sqlx::query(&format!(
+                    r#"
+                    INSERT INTO transcript_settings
+                        (id, provider, model, {key_column}, {address_column}, {opt_in_column}, maiTranscribeRegion)
+                    VALUES ('1', ?1, ?2, ?3, ?4, ?5, ?6)
+                    ON CONFLICT(id) DO UPDATE SET
+                        provider = excluded.provider, model = excluded.model,
+                        {key_column} = excluded.{key_column},
+                        {address_column} = excluded.{address_column},
+                        {opt_in_column} = excluded.{opt_in_column},
+                        maiTranscribeRegion = CASE WHEN excluded.provider = 'mai-transcribe'
+                            THEN excluded.maiTranscribeRegion ELSE transcript_settings.maiTranscribeRegion END
+                    WHERE transcript_settings.{key_column} IS ?7 AND transcript_settings.{address_column} IS ?8
+                    "#,
+                ))
+                .bind(provider)
+                .bind(model)
+                .bind(reference)
+                .bind(address)
+                .bind(allow_unencrypted)
+                .bind(region)
+                .bind(old_key)
+                .bind(old_address)
+                .execute(pool)
+                .await?;
+                Ok::<_, sqlx::Error>(result.rows_affected() == 1)
+            }
+        };
+        if let Some(key) = new_key {
+            crate::credentials::commit_replacement(
+                store,
+                &format!("transcript_settings/{key_column}"),
+                key,
+                old_key.clone(),
+                |reference| async move {
+                    apply(Some(reference))
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+            )
+            .await
+            .map_err(sqlx::Error::Protocol)?;
+        } else if !apply(old_key.clone()).await? {
+            return Err(sqlx::Error::Protocol(CHANGED.into()));
+        }
+        Ok(())
     }
 
     pub async fn save_transcript_api_key(
@@ -473,6 +489,41 @@ impl SettingsRepository {
         provider: &str,
     ) -> std::result::Result<Option<String>, sqlx::Error> {
         Self::get_transcript_api_key_with(&platform_store(), pool, provider).await
+    }
+
+    /// Resolves only the credential reference from the same row as the destination.
+    pub(crate) async fn cloud_transcript_key_for_config(
+        pool: &SqlitePool,
+        provider: &str,
+        config: &TranscriptSetting,
+    ) -> Result<Option<String>, sqlx::Error> {
+        Self::cloud_transcript_key_for_config_with(&platform_store(), pool, provider, config).await
+    }
+
+    async fn cloud_transcript_key_for_config_with(
+        store: &Store,
+        pool: &SqlitePool,
+        provider: &str,
+        config: &TranscriptSetting,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let (column, stored) = match provider {
+            "cloud-whisper" => (
+                "cloudWhisperApiKey",
+                config.cloud_whisper_api_key.as_deref(),
+            ),
+            "mai-transcribe" => (
+                "maiTranscribeApiKey",
+                config.mai_transcribe_api_key.as_deref(),
+            ),
+            _ => return Ok(None),
+        };
+        let Some(stored) = stored.filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        open_or_migrate_setting(store, pool, "transcript_settings", column, stored)
+            .await?
+            .map(Some)
+            .ok_or_else(|| sqlx::Error::Protocol(CHANGED.into()))
     }
 
     pub(crate) async fn get_transcript_api_key_with(
@@ -1014,7 +1065,6 @@ async fn read_protected_setting(
     table: &str,
     column: &str,
 ) -> Result<Option<String>, sqlx::Error> {
-    let scope = format!("{table}/{column}");
     for _ in 0..3 {
         let stored = sqlx::query_scalar::<_, Option<String>>(&format!(
             "SELECT {column} FROM {table} WHERE id = '1'"
@@ -1025,22 +1075,40 @@ async fn read_protected_setting(
         let Some(stored) = stored.filter(|value| !value.is_empty()) else {
             return Ok(None);
         };
-        if crate::credentials::is_protected(&stored) {
-            return open_in(store, &scope, &stored).await.map(Some);
-        }
-        let protected = seal_in(store, &scope, &stored).await?;
-        let updated = sqlx::query(&format!(
-            "UPDATE {table} SET {column} = ? WHERE id = '1' AND {column} = ?"
-        ))
-        .bind(&protected)
-        .bind(&stored)
-        .execute(pool)
-        .await?;
-        if updated.rows_affected() == 1 {
-            return open_in(store, &scope, &protected).await.map(Some);
+        if let Some(key) = open_or_migrate_setting(store, pool, table, column, &stored).await? {
+            return Ok(Some(key));
         }
     }
     Err(sqlx::Error::Protocol(CHANGED.into()))
+}
+
+async fn open_or_migrate_setting(
+    store: &Store,
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    stored: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let scope = format!("{table}/{column}");
+    if crate::credentials::is_protected(stored) {
+        return open_in(store, &scope, stored).await.map(Some);
+    }
+    let reference = seal_in(store, &scope, stored).await?;
+    let updated = sqlx::query(&format!(
+        "UPDATE {table} SET {column} = ? WHERE id = '1' AND {column} = ?"
+    ))
+    .bind(&reference)
+    .bind(stored)
+    .execute(pool)
+    .await;
+    if updated
+        .as_ref()
+        .is_ok_and(|result| result.rows_affected() == 1)
+    {
+        return open_in(store, &scope, &reference).await.map(Some);
+    }
+    forget_in(store, &scope, reference).await;
+    updated.map(|_| None)
 }
 
 /// Migrate independent providers without making local recording depend on any
@@ -1494,37 +1562,117 @@ mod secret_tests {
     }
 
     #[tokio::test]
+    async fn hosted_transcription_save_keeps_old_pair_on_failure_and_reads_one_revision() {
+        let pool = pool().await;
+        let (memory, store) = fixture();
+        let old_url = "https://api.example.com/v1";
+        let new_url = "https://other.example.com/v1";
+        let save = |url, model, key| {
+            SettingsRepository::save_hosted_transcript_config_with(
+                &store,
+                &pool,
+                "cloud-whisper",
+                model,
+                url,
+                None,
+                false,
+                Some(key),
+            )
+        };
+        save(old_url, "old-model", KEY_ONE).await.unwrap();
+        let snapshot = SettingsRepository::get_transcript_config(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER block_updates BEFORE UPDATE OF cloudWhisperBaseUrl ON transcript_settings
+             BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(save(new_url, "new-model", KEY_TWO).await.is_err());
+        let persisted = SettingsRepository::get_transcript_config(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.cloud_whisper_base_url.as_deref(), Some(old_url));
+        assert_eq!(persisted.model, "old-model");
+        assert_eq!(
+            SettingsRepository::cloud_transcript_key_for_config_with(
+                &store,
+                &pool,
+                "cloud-whisper",
+                &persisted
+            )
+            .await
+            .unwrap()
+            .as_deref(),
+            Some(KEY_ONE)
+        );
+        assert_eq!(memory.entries(), 1);
+
+        sqlx::query("DROP TRIGGER block_updates")
+            .execute(&pool)
+            .await
+            .unwrap();
+        save(new_url, "new-model", KEY_TWO).await.unwrap();
+        assert!(
+            SettingsRepository::cloud_transcript_key_for_config_with(
+                &store,
+                &pool,
+                "cloud-whisper",
+                &snapshot
+            )
+            .await
+            .is_err(),
+            "an earlier destination must not resolve the replacement key"
+        );
+        let current = SettingsRepository::get_transcript_config(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.cloud_whisper_base_url.as_deref(), Some(new_url));
+        assert_eq!(current.model, "new-model");
+        assert_eq!(
+            SettingsRepository::cloud_transcript_key_for_config_with(
+                &store,
+                &pool,
+                "cloud-whisper",
+                &current
+            )
+            .await
+            .unwrap()
+            .as_deref(),
+            Some(KEY_TWO)
+        );
+        assert_eq!(memory.entries(), 1);
+    }
+
+    #[tokio::test]
     async fn the_hosted_transcription_key_stays_with_its_address() {
         let pool = pool().await;
         let (_memory, store) = fixture();
-        let a = Some("https://api.example.com/v1");
-        SettingsRepository::save_transcript_provider_config(
-            &pool,
-            "cloud-whisper",
-            a,
-            None,
-            None,
-            false,
-            false,
-        )
-        .await
-        .unwrap();
-        SettingsRepository::save_transcript_api_key_with(&store, &pool, "cloud-whisper", KEY_ONE)
+        let save = |address, key| {
+            SettingsRepository::save_hosted_transcript_config_with(
+                &store,
+                &pool,
+                "cloud-whisper",
+                "whisper-1",
+                address,
+                None,
+                false,
+                key,
+            )
+        };
+        save("https://api.example.com/v1", Some(KEY_ONE))
             .await
             .unwrap();
         let before = column(&pool, "transcript_settings", "cloudWhisperBaseUrl").await;
 
-        let error = SettingsRepository::save_transcript_provider_config(
-            &pool,
-            "cloud-whisper",
-            Some("https://other.example.com/v1"),
-            None,
-            None,
-            false,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let error = save("https://other.example.com/v1", None)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("Enter the key again"));
         assert_eq!(
             column(&pool, "transcript_settings", "cloudWhisperBaseUrl").await,
@@ -1532,30 +1680,12 @@ mod secret_tests {
         );
 
         // Other case and a trailing slash are the same address.
-        SettingsRepository::save_transcript_provider_config(
-            &pool,
-            "cloud-whisper",
-            Some("HTTPS://API.example.com/V1/"),
-            None,
-            None,
-            false,
-            false,
-        )
-        .await
-        .unwrap();
+        save("HTTPS://API.example.com/V1/", None).await.unwrap();
 
         // A new address with a newly entered key is accepted.
-        SettingsRepository::save_transcript_provider_config(
-            &pool,
-            "cloud-whisper",
-            Some("https://other.example.com/v1"),
-            None,
-            None,
-            false,
-            true,
-        )
-        .await
-        .unwrap();
+        save("https://other.example.com/v1", Some(KEY_TWO))
+            .await
+            .unwrap();
         assert_eq!(
             column(&pool, "transcript_settings", "cloudWhisperBaseUrl")
                 .await
@@ -1568,38 +1698,29 @@ mod secret_tests {
     async fn the_mai_key_stays_with_its_endpoint() {
         let pool = pool().await;
         let (_memory, store) = fixture();
-        let a = Some("https://mai.example.com/transcribe");
-        SettingsRepository::save_transcript_provider_config(
-            &pool,
-            "mai-transcribe",
-            None,
-            a,
-            Some("west"),
-            false,
-            false,
-        )
-        .await
-        .unwrap();
-        SettingsRepository::save_transcript_api_key_with(&store, &pool, "mai-transcribe", KEY_ONE)
+        let a = "https://mai.example.com/transcribe";
+        let save = |address, key| {
+            SettingsRepository::save_hosted_transcript_config_with(
+                &store,
+                &pool,
+                "mai-transcribe",
+                "azure-speech",
+                address,
+                Some("west"),
+                false,
+                key,
+            )
+        };
+        save(a, Some(KEY_ONE)).await.unwrap();
+        let error = save("https://elsewhere.example.com/transcribe", None)
             .await
-            .unwrap();
-        let error = SettingsRepository::save_transcript_provider_config(
-            &pool,
-            "mai-transcribe",
-            None,
-            Some("https://elsewhere.example.com/transcribe"),
-            Some("west"),
-            false,
-            false,
-        )
-        .await
-        .unwrap_err();
+            .unwrap_err();
         assert!(error.to_string().contains("Enter the key again"));
         assert_eq!(
             column(&pool, "transcript_settings", "maiTranscribeEndpoint")
                 .await
                 .as_deref(),
-            a
+            Some(a)
         );
     }
 
@@ -1652,35 +1773,26 @@ mod secret_tests {
         SettingsRepository::save_transcript_api_key_with(&store, &pool, "mai-transcribe", KEY_ONE)
             .await
             .unwrap();
-        let address = Some("https://mai.example.com/transcribe");
-        let error = SettingsRepository::save_transcript_provider_config(
-            &pool,
-            "mai-transcribe",
-            None,
-            address,
-            Some("west"),
-            false,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let save = |key| {
+            SettingsRepository::save_hosted_transcript_config_with(
+                &store,
+                &pool,
+                "mai-transcribe",
+                "azure-speech",
+                "https://mai.example.com/transcribe",
+                Some("west"),
+                false,
+                key,
+            )
+        };
+        let error = save(None).await.unwrap_err();
         assert!(error.to_string().contains("Enter the key again"));
         assert_eq!(
             column(&pool, "transcript_settings", "maiTranscribeEndpoint").await,
             None
         );
         // With the key entered again for the new address it is accepted.
-        SettingsRepository::save_transcript_provider_config(
-            &pool,
-            "mai-transcribe",
-            None,
-            address,
-            Some("west"),
-            false,
-            true,
-        )
-        .await
-        .unwrap();
+        save(Some(KEY_ONE)).await.unwrap();
     }
 
     #[tokio::test]
