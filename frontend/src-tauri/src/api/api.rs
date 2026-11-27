@@ -1276,6 +1276,7 @@ pub async fn api_update_transcript_speakers_matching<R: Runtime>(
     meeting_id: String,
     from_speaker: Option<String>,
     speaker: Option<String>,
+    remember_voice: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let from_speaker = normalize_speaker_label(from_speaker);
     let speaker = normalize_speaker_label(speaker);
@@ -1286,6 +1287,7 @@ pub async fn api_update_transcript_speakers_matching<R: Runtime>(
         &meeting_id,
         from_speaker.as_deref(),
         speaker.as_deref(),
+        remember_voice.unwrap_or(false),
     )
     .await
     {
@@ -1300,6 +1302,12 @@ pub async fn api_update_transcript_speakers_matching<R: Runtime>(
         }
         Err(e) => {
             log_error!("Failed to update matching speaker labels in meeting");
+            if remember_voice == Some(true) {
+                return match e {
+                    sqlx::Error::Protocol(message) => Err(message),
+                    _ => Err("Could not rename the speaker and save the voice profile. Please try again.".into()),
+                };
+            }
             Err(format!("Failed to update matching speaker labels: {}", e))
         }
     }

@@ -1256,7 +1256,8 @@ pub(crate) mod tests {
             &pool,
             meeting,
             None,
-            Some("Edited")
+            Some("Edited"),
+            false
         )
         .await
         .unwrap_err()

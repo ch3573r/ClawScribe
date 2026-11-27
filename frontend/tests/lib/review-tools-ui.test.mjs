@@ -614,6 +614,24 @@ test('activating a row bookmark pre-fills its time and restores focus to that ro
 // ---------------------------------------------------------------------------
 // Meeting page: shortcut wiring
 // ---------------------------------------------------------------------------
+test('speaker rename stays available when the voice-options command returns no result', async () => {
+  const hooks = createHookHarness();
+  const { SpeakerVoiceOptionsProvider } = loadTsModule('src/components/MeetingDetails/SpeakerVoiceOptions.tsx', {
+    react: { ...hooks.react, createContext: () => ({ Provider: 'VoiceOptions' }) },
+    'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@tauri-apps/api/core': { invoke: async () => null },
+    '@tauri-apps/api/event': { listen: async () => () => {} },
+  });
+  const render = () => hooks.render(() => SpeakerVoiceOptionsProvider({ meetingId: 'meeting' }));
+  try {
+    render();
+    await flush();
+    assert.equal(render().props.value.length, 0);
+  } finally {
+    hooks.unmount();
+  }
+});
+
 async function meetingPage({ audioReady = true } = {}) {
   const previousLog = console.log, previousWindow = globalThis.window, previousDocument = globalThis.document;
   console.log = () => {};
@@ -651,6 +669,7 @@ async function meetingPage({ audioReady = true } = {}) {
     'next/link': { default: 'a', __esModule: true },
     '@/components/Knowledge/EvidenceRoute': { EvidenceRoute: 'EvidenceRoute' },
     '@/components/MeetingDetails/SpeakerLaneTimeline': { SpeakerLaneTimeline: 'SpeakerLaneTimeline' },
+    '@/components/MeetingDetails/SpeakerVoiceOptions': { SpeakerVoiceOptionsProvider: 'SpeakerVoiceOptionsProvider' },
   });
   const props = { meeting: { id: 'synthetic-meeting', folder_path: 'synthetic-folder' }, summaryData: null, segments: [], timelineSegments: [], totalCount: 0,
     onRevealTranscript: async (id, index) => { calls.push(['reveal', id, index]); } };

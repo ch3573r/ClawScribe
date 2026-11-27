@@ -443,12 +443,22 @@ impl TranscriptsRepository {
         meeting_id: &str,
         from_speaker: Option<&str>,
         speaker: Option<&str>,
+        remember_voice: bool,
     ) -> Result<u64, SqlxError> {
         let mut conn = pool.acquire().await?;
         let mut transaction = conn.begin().await?;
         crate::database::transcript_edits::assert_editable(&mut transaction, meeting_id)
             .await
             .map_err(SqlxError::Protocol)?;
+        if remember_voice {
+            crate::speaker_profiles::remember_voice(
+                &mut transaction,
+                meeting_id,
+                from_speaker,
+                speaker,
+            )
+            .await?;
+        }
         crate::summary::sources::preserve_legacy_speaker_links(&mut transaction, meeting_id)
             .await?;
         let now = Utc::now();

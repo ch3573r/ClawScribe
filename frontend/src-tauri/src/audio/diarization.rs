@@ -1,6 +1,7 @@
 use crate::api::{TranscriptWord, TranscriptWordTimestampSource};
 use crate::audio::decoder::decode_audio_file;
 use crate::database::transcript_edits::SyncedFiles;
+use crate::speaker_profiles::{self, DetectionSamples};
 use crate::state::AppState;
 use crate::summary::language_detection::detect_summary_language;
 use crate::summary::metadata::{
@@ -263,6 +264,8 @@ struct DiarizationMappingAttempt {
     profile: DiarizationProfile,
     provider: &'static str,
     turns: Vec<DiarizationTurn>,
+    raw_turns: Vec<DiarizationTurn>,
+    speaker_map: BTreeMap<usize, usize>,
     mapped_segments: Vec<TranscriptSegment>,
     prepared_speaker_count: usize,
     quality: MappedDiarizationQuality,
@@ -1021,7 +1024,7 @@ fn transcript_segment_duration(segment: &TranscriptSegment) -> Option<f64> {
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
 }
 
-fn set_transcript_segment_speaker(segment: &mut TranscriptSegment, speaker: &str) {
+pub(crate) fn set_transcript_segment_speaker(segment: &mut TranscriptSegment, speaker: &str) {
     let speaker = speaker.to_string();
     segment.speaker = Some(speaker.clone());
     if let Some(words) = segment.word_timestamps.as_mut() {
@@ -1565,9 +1568,15 @@ impl SherpaOfflineDiarizer {
 }
 
 fn compact_diarization_speakers(turns: Vec<DiarizationTurn>) -> Vec<DiarizationTurn> {
+    compact_diarization_speakers_with_map(turns).0
+}
+
+fn compact_diarization_speakers_with_map(
+    turns: Vec<DiarizationTurn>,
+) -> (Vec<DiarizationTurn>, BTreeMap<usize, usize>) {
     let mut remapped_speakers = BTreeMap::<usize, usize>::new();
 
-    turns
+    let compacted = turns
         .into_iter()
         .map(|mut turn| {
             let compacted_speaker = match remapped_speakers.get(&turn.speaker).copied() {
@@ -1581,14 +1590,22 @@ fn compact_diarization_speakers(turns: Vec<DiarizationTurn>) -> Vec<DiarizationT
             turn.speaker = compacted_speaker;
             turn
         })
-        .collect()
+        .collect();
+    (compacted, remapped_speakers)
 }
 
+#[cfg(test)]
 fn prepare_diarization_turns_for_mapping(
     _sample_count: usize,
     turns: &[DiarizationTurn],
     _explicit_num_speakers: Option<i32>,
 ) -> Vec<DiarizationTurn> {
+    prepare_diarization_turns_with_map(turns).0
+}
+
+fn prepare_diarization_turns_with_map(
+    turns: &[DiarizationTurn],
+) -> (Vec<DiarizationTurn>, BTreeMap<usize, usize>) {
     let mut prepared = turns
         .iter()
         .filter(|turn| is_valid_interval(turn.start_time, turn.end_time))
@@ -1607,7 +1624,7 @@ fn prepare_diarization_turns_for_mapping(
     });
 
     prepared = resolve_overlapping_diarization_turns(prepared);
-    compact_diarization_speakers(collapse_adjacent_diarization_turns(prepared))
+    compact_diarization_speakers_with_map(collapse_adjacent_diarization_turns(prepared))
 }
 
 fn resolve_overlapping_diarization_turns(turns: Vec<DiarizationTurn>) -> Vec<DiarizationTurn> {
@@ -2109,6 +2126,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("Application database is not initialized"))?;
     let pool = app_state.db_manager.pool().clone();
+    let profile_generation = speaker_profiles::capture_generation(&pool).await;
 
     let stored_segments = sqlx::query_as::<_, StoredTranscriptSegment>(
         "SELECT id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker, word_timestamps_json
@@ -2320,6 +2338,61 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         )));
     }
 
+    let mut mapped_segments = attempt.mapped_segments;
+    let capture = if let (Some(generation), Some(model_hash)) = (
+        profile_generation,
+        attempt
+            .model_paths
+            .embedding_descriptor
+            .and_then(|model| model.expected_sha256),
+    ) {
+        check_diarization_cancelled(&meeting_id)?;
+        let targets: BTreeSet<&str> = mapped_segments
+            .iter()
+            .filter_map(|row| row.speaker.as_deref())
+            .collect();
+        let preserved: BTreeSet<&str> = stored_segments
+            .iter()
+            .filter_map(|row| row.speaker.as_deref())
+            .filter(|_| preserve_existing_labels)
+            .collect();
+        let mut lanes = attempt.speaker_map;
+        lanes.retain(|_, label| {
+            let label = speaker_label(*label);
+            targets.contains(label.as_str()) && !preserved.contains(label.as_str())
+        });
+        let path = attempt.model_paths.embedding_model.clone();
+        let cancelled = diarization_cancel_flag();
+        let raw_turns = attempt.raw_turns;
+        if !lanes.is_empty() {
+            emit_progress(
+                &app,
+                &meeting_id,
+                "matching_voices",
+                78,
+                "Checking local speaker profiles...",
+            );
+            tokio::task::spawn_blocking(move || {
+                speaker_profiles::extract_detection_samples(
+                    generation,
+                    model_hash.into(),
+                    &path,
+                    raw_turns,
+                    lanes,
+                    &samples,
+                    &cancelled,
+                )
+            })
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     emit_progress(
         &app,
         &meeting_id,
@@ -2328,13 +2401,13 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         "Applying speaker labels to transcripts...",
     );
 
-    let mapped_segments = attempt.mapped_segments;
     let roots = super::recording_preferences::recording_roots(&app).await;
     let (updated_segments, synced) = save_diarization_labels(
         &pool,
         &meeting_id,
         &stored_segments,
-        &mapped_segments,
+        &mut mapped_segments,
+        capture,
         &roots,
         |folder| crate::summary::automatic::publication::profile_for_folder(&app, folder),
     )
@@ -2383,7 +2456,8 @@ async fn save_diarization_labels(
     pool: &sqlx::SqlitePool,
     meeting_id: &str,
     stored_segments: &[StoredTranscriptSegment],
-    mapped_segments: &[TranscriptSegment],
+    mapped_segments: &mut [TranscriptSegment],
+    profile_capture: Option<DetectionSamples>,
     roots: &[PathBuf],
     notes_profile: impl FnOnce(&Path) -> Result<Option<String>, String>,
 ) -> Result<(usize, Option<SyncedFiles>)> {
@@ -2392,7 +2466,7 @@ async fn save_diarization_labels(
     // with the archived revision so a later restore does not turn it "unknown".
     let files_provenance =
         crate::database::transcript_edits::file_provenance(pool, meeting_id, roots).await;
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let current: Vec<StoredTranscriptSegment> = sqlx::query_as(
         "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY COALESCE(audio_start_time, 999999999.0), timestamp, id"
     ).bind(meeting_id).fetch_all(&mut *tx).await?;
@@ -2401,6 +2475,9 @@ async fn save_diarization_labels(
     {
         return Err(anyhow!("The transcript changed while speakers were being detected. Run speaker detection again."));
     }
+    let voice_cache =
+        speaker_profiles::finish_detection(&mut tx, meeting_id, mapped_segments, profile_capture)
+            .await?;
     let updated_segments = count_changed_transcript_segments(stored_segments, mapped_segments);
     if updated_segments > 0 {
         let previous: Vec<crate::database::models::Transcript> =
@@ -2427,7 +2504,7 @@ async fn save_diarization_labels(
             .iter()
             .map(|row| (row.id.as_str(), row.original_transcript.as_deref()))
             .collect();
-        for mapped in mapped_segments {
+        for mapped in mapped_segments.iter() {
             let word_timestamps_json = mapped
                 .word_timestamps
                 .as_ref()
@@ -2468,6 +2545,9 @@ async fn save_diarization_labels(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    if crate::audio::diarization::is_diarizing_meeting(meeting_id) {
+        speaker_profiles::offer_detection_sample(voice_cache);
+    }
     let synced = crate::database::transcript_edits::sync_file_with_profile(
         pool,
         meeting_id,
@@ -2560,16 +2640,16 @@ async fn run_diarization_mapping_attempt<R: Runtime>(
         provider,
         clustering_threshold,
     );
-    let mut turns =
+    let raw_turns =
         run_sherpa_diarization_with_fallback(app, meeting_id, config, samples, &mut profile)
             .await?;
 
-    if turns.is_empty() {
+    if raw_turns.is_empty() {
         return Err(anyhow!(
             "No speaker turns were detected in this meeting audio"
         ));
     }
-    turns = prepare_diarization_turns_for_mapping(sample_count, &turns, explicit_num_speakers);
+    let (turns, speaker_map) = prepare_diarization_turns_with_map(&raw_turns);
     let prepared_speaker_count = speaker_count_from_turns(&turns);
     let (mut mapped_segments, mut mapping_diagnostics) =
         map_diarization_to_transcript_segments_with_diagnostics(
@@ -2640,6 +2720,8 @@ async fn run_diarization_mapping_attempt<R: Runtime>(
         profile,
         provider,
         turns,
+        raw_turns,
+        speaker_map,
         mapped_segments,
         prepared_speaker_count,
         quality,
@@ -4296,7 +4378,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_reaches_native_work_preserves_rows_and_releases_the_job() {
         let _lock = super::super::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
-        let (pool, stored, mapped) = label_save_fixture().await;
+        let (pool, stored, mut mapped) = label_save_fixture().await;
         let meeting = "diarization-cancel-test";
         sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Synthetic cancellation', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(meeting).execute(&pool).await.unwrap();
         sqlx::query("UPDATE transcripts SET meeting_id = ?")
@@ -4327,11 +4409,13 @@ mod tests {
         cancel_speaker_diarization_command(meeting.into()).unwrap();
         assert!(native.await.unwrap().is_err());
         assert!(
-            save_diarization_labels(&pool, meeting, &stored, &mapped, &[], |_| Ok(None))
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("cancelled")
+            save_diarization_labels(&pool, meeting, &stored, &mut mapped, None, &[], |_| Ok(
+                None
+            ))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled")
         );
         let current: Vec<StoredTranscriptSegment> =
             sqlx::query_as("SELECT * FROM transcripts ORDER BY audio_start_time, timestamp, id")
@@ -4374,7 +4458,7 @@ mod tests {
 
     #[tokio::test]
     async fn committed_labels_succeed_even_when_the_file_mirror_needs_retry() {
-        let (pool, stored, mapped) = label_save_fixture().await;
+        let (pool, stored, mut mapped) = label_save_fixture().await;
         let directory = tempfile::tempdir().unwrap();
         let missing_folder = directory.path().join("unavailable");
         sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = 'review-test'")
@@ -4382,10 +4466,17 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let (updated, synced) =
-            save_diarization_labels(&pool, "review-test", &stored, &mapped, &[], |_| Ok(None))
-                .await
-                .unwrap();
+        let (updated, synced) = save_diarization_labels(
+            &pool,
+            "review-test",
+            &stored,
+            &mut mapped,
+            None,
+            &[],
+            |_| Ok(None),
+        )
+        .await
+        .unwrap();
         assert_eq!(updated, 2);
         assert!(synced.is_none());
         let labels: i64 =
@@ -4415,7 +4506,7 @@ mod tests {
 
     #[tokio::test]
     async fn speaker_detection_can_restore_the_exact_previous_rows() {
-        let (pool, mut stored, mapped) = label_save_fixture().await;
+        let (pool, mut stored, mut mapped) = label_save_fixture().await;
         sqlx::query("UPDATE transcripts SET speaker = 'Original speaker', original_transcript = 'Original draft' WHERE id = 'a'").execute(&pool).await.unwrap();
         stored[0].speaker = Some("Original speaker".into());
         let before: Vec<crate::database::models::Transcript> =
@@ -4423,9 +4514,17 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        save_diarization_labels(&pool, "review-test", &stored, &mapped, &[], |_| Ok(None))
-            .await
-            .unwrap();
+        save_diarization_labels(
+            &pool,
+            "review-test",
+            &stored,
+            &mut mapped,
+            None,
+            &[],
+            |_| Ok(None),
+        )
+        .await
+        .unwrap();
         let original: Option<String> =
             sqlx::query_scalar("SELECT original_transcript FROM transcripts WHERE id = 'a'")
                 .fetch_one(&pool)
@@ -4465,9 +4564,17 @@ mod tests {
         second_piece.id = "a-split-2".into();
         second_piece.text = "Second piece".into();
         mapped.push(second_piece);
-        save_diarization_labels(&pool, "review-test", &stored, &mapped, &[], |_| Ok(None))
-            .await
-            .unwrap();
+        save_diarization_labels(
+            &pool,
+            "review-test",
+            &stored,
+            &mut mapped,
+            None,
+            &[],
+            |_| Ok(None),
+        )
+        .await
+        .unwrap();
         let pieces: Vec<Option<String>> = sqlx::query_scalar(
             "SELECT original_transcript FROM transcripts WHERE id LIKE 'a-split-%'",
         )
@@ -4479,15 +4586,22 @@ mod tests {
 
     #[tokio::test]
     async fn speaker_save_rejects_a_changed_snapshot_without_overwriting_the_edit() {
-        let (pool, stored, mapped) = label_save_fixture().await;
+        let (pool, stored, mut mapped) = label_save_fixture().await;
         sqlx::query("UPDATE transcripts SET transcript = 'Reviewed correction' WHERE id = 'a'")
             .execute(&pool)
             .await
             .unwrap();
-        let error =
-            save_diarization_labels(&pool, "review-test", &stored, &mapped, &[], |_| Ok(None))
-                .await
-                .unwrap_err();
+        let error = save_diarization_labels(
+            &pool,
+            "review-test",
+            &stored,
+            &mut mapped,
+            None,
+            &[],
+            |_| Ok(None),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error.to_string(), "The transcript changed while speakers were being detected. Run speaker detection again.");
         let rows: Vec<StoredTranscriptSegment> =
             sqlx::query_as("SELECT * FROM transcripts ORDER BY id")
@@ -4501,12 +4615,20 @@ mod tests {
 
     #[tokio::test]
     async fn speaker_save_applies_labels_when_the_snapshot_matches() {
-        let (pool, stored, mapped) = label_save_fixture().await;
+        let (pool, stored, mut mapped) = label_save_fixture().await;
         assert_eq!(
-            save_diarization_labels(&pool, "review-test", &stored, &mapped, &[], |_| Ok(None))
-                .await
-                .unwrap()
-                .0,
+            save_diarization_labels(
+                &pool,
+                "review-test",
+                &stored,
+                &mut mapped,
+                None,
+                &[],
+                |_| Ok(None)
+            )
+            .await
+            .unwrap()
+            .0,
             2
         );
         let rows: Vec<StoredTranscriptSegment> =
@@ -4622,6 +4744,8 @@ mod tests {
             model_paths,
             provider: "cpu",
             turns,
+            raw_turns: Vec::new(),
+            speaker_map: BTreeMap::new(),
             mapped_segments,
             prepared_speaker_count,
             quality,
@@ -5282,6 +5406,8 @@ mod tests {
             model_paths,
             provider: "cpu",
             turns,
+            raw_turns: Vec::new(),
+            speaker_map: BTreeMap::new(),
             mapped_segments,
             prepared_speaker_count: 7,
             quality,

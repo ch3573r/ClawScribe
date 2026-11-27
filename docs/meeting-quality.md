@@ -396,6 +396,32 @@ If labels save to the database but the recording-folder transcript copy cannot
 be updated, the app reports a pending file warning. **Retry file update** writes
 the saved database transcript when that folder is available again.
 
+### Speaker profiles
+
+In **Settings → Transcription**, turn on **Use speaker profiles** to allow
+matching between meetings. Run **Detect speakers** in a saved meeting and open
+the rename control for a detected speaker. Enter the person’s name, check
+**Remember this voice on this device**, then rename the speaker. This option is
+available when detection finds enough clear, solo speech. Run detection again
+if the sample is unavailable. Choose **Replace** in the detection dialog to
+collect samples for speakers who already have labels. Unconfirmed samples from the latest successful
+detection stay in memory until the next successful detection, app exit, or
+disabling speaker profiles.
+
+In later meetings, the rename control offers a suggested name when a saved voice
+is a strong, distinct match using the same voice model. Review the suggestion
+before renaming. **Apply matched names automatically** is a separate setting
+that applies strong matches during **Detect speakers**. To check a result,
+listen to the corresponding passage and correct the label or restore the
+previous transcript.
+
+ClawScribe stores the saved voice characteristics in the local app database and
+never uploads them. Disabling profiles pauses matching and removes pending
+suggestions. Use **Delete** in **Settings → Transcription** to remove a person’s
+saved voice data. Edit applied names directly in the transcript. See
+[Backup and restore](local-library.md#backup-and-restore) for what moves between
+devices.
+
 ### Measuring speaker detection
 
 Keep evaluation audio, models and generated results outside the repository.

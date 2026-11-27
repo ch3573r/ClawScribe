@@ -2,6 +2,12 @@ import type { MeetingCalendarAttendee } from "@/lib/meetingCalendar";
 
 type SpeakerRow = { speaker?: string | null; timestamp?: number };
 
+export interface SpeakerVoiceOption {
+  speaker: string;
+  canRemember: boolean;
+  suggestedName: string | null;
+}
+
 export interface SpeakerDetails {
   name: string | null;
   count: number;
@@ -88,4 +94,12 @@ export function getSpeakerRename(catalog: readonly SpeakerDetails[], from: strin
     merge: other,
     changed: name !== null && name !== current,
   };
+}
+
+export function canRememberSpeaker(
+  option: Pick<SpeakerVoiceOption, "canRemember"> | undefined,
+  rename: ReturnType<typeof getSpeakerRename>,
+): boolean {
+  return Boolean(option?.canRemember && rename.changed && !rename.merge && rename.name
+    && !/^(?:me|participants|unlabeled|speaker \d+)$/i.test(rename.name));
 }

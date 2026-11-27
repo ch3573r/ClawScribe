@@ -13,6 +13,7 @@ import { SavedMeetingAttendance } from '@/components/MeetingAttendance';
 import { EvidenceRoute } from '@/components/Knowledge/EvidenceRoute';
 import { SavedSearchRoute } from '@/components/MeetingDetails/SavedSearchRoute';
 import { SpeakerLaneTimeline } from '@/components/MeetingDetails/SpeakerLaneTimeline';
+import { SpeakerVoiceOptionsProvider } from '@/components/MeetingDetails/SpeakerVoiceOptions';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 
 // Custom hooks
@@ -79,7 +80,7 @@ export default function PageContent({
   onRefetchTranscripts?: () => Promise<void>;
   onPatchTranscriptText?: (patches: TranscriptTextPatch[]) => void;
   onUpdateTranscriptSpeaker?: (transcriptId: string, speaker: string | null) => Promise<void>;
-  onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null) => Promise<number>;
+  onApplySpeakerToMatching?: (fromSpeaker: string | null | undefined, speaker: string | null, rememberVoice?: boolean) => Promise<number>;
   // Pagination props
   segments?: TranscriptSegmentData[];
   timelineSegments?: TranscriptSegmentData[];
@@ -230,8 +231,8 @@ export default function PageContent({
   const showSpeakerAttribution = useSpeakerLabelVisibility(meeting.id, hasSpeakerAttribution);
   const [highlightedSpeaker, setHighlightedSpeaker] = useState<string | null | undefined>(undefined);
   const clearSpeakerHighlight = useCallback(() => setHighlightedSpeaker(undefined), []);
-  const renameSpeaker = useCallback(async (from: string | null | undefined, to: string | null) => {
-    const updated = await onApplySpeakerToMatching?.(from, to) ?? 0;
+  const renameSpeaker = useCallback(async (from: string | null | undefined, to: string | null, rememberVoice?: boolean) => {
+    const updated = await onApplySpeakerToMatching?.(from, to, rememberVoice) ?? 0;
     if (updated > 0) {
       setHighlightedSpeaker(current => current === speakerLabel(from) ? speakerLabel(to) : current);
     }
@@ -429,6 +430,7 @@ export default function PageContent({
       transition={{ duration: 0.3, ease: 'easeOut' }}
       className="meeting-details-review custom-scrollbar flex h-full flex-col bg-background"
     >
+      <SpeakerVoiceOptionsProvider meetingId={meeting.id}>
       {fromArchive && <div className="shrink-0 px-4 pt-2">
         <Button variant="ghost" size="sm" asChild><Link href="/meetings"><ChevronLeft />{archiveAction === 'actions' ? 'Back to open actions' : 'Back to archive'}</Link></Button>
       </div>}
@@ -566,6 +568,7 @@ export default function PageContent({
         />
       </div>
 
+      </SpeakerVoiceOptionsProvider>
     </motion.div>
   );
 }

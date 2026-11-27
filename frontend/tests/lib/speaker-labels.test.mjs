@@ -13,6 +13,17 @@ test('new speaker names collapse whitespace and reject empty or oversized names'
   assert.equal(normalizeSpeakerName('a'.repeat(65)), null);
 });
 
+test('only a new person name can be remembered from an eligible speaker lane', () => {
+  const { buildSpeakerCatalog, getSpeakerRename, canRememberSpeaker } = load();
+  const catalog = buildSpeakerCatalog([{ speaker: 'Speaker 1' }, { speaker: 'Grace' }]);
+  const eligible = { canRemember: true, suggestedName: null };
+  assert.equal(canRememberSpeaker(eligible, getSpeakerRename(catalog, 'Speaker 1', 'Ada')), true);
+  for (const name of ['Speaker 1', 'speaker 12', 'Participants', ' Me ', 'Unlabeled', 'grace', '']) {
+    assert.equal(canRememberSpeaker(eligible, getSpeakerRename(catalog, 'Speaker 1', name)), false, name);
+  }
+  assert.equal(canRememberSpeaker(undefined, getSpeakerRename(catalog, 'Speaker 1', 'Ada')), false);
+});
+
 test('catalog orders speakers by time, counts all loaded rows and keeps unlabeled rows neutral', () => {
   const { buildSpeakerCatalog, getSpeakerColor } = load();
   const catalog = buildSpeakerCatalog([

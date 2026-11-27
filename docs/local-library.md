@@ -430,6 +430,8 @@ backup schedules, and unfinished recording recovery spools stay with the source
 profile. Missing recording folders are reported by meeting title without
 blocking the backup. The archive includes their meeting data, and restore
 leaves their recording folder unset.
+Speaker profiles, pending voice matches, and their settings stay on the source
+device. Applied speaker names travel with the transcript.
 Unreadable folders and folder links still stop backup with a named error.
 Nonempty `.audio-spool` and `.checkpoints` directories
 remain on the source computer. They do not block backup: available saved audio,

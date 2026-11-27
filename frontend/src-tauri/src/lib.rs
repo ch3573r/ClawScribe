@@ -54,6 +54,7 @@ pub mod parakeet_engine;
 pub mod power;
 pub mod self_test;
 pub mod shortcuts;
+mod speaker_profiles;
 pub mod start_request;
 pub mod state;
 pub mod summary;
@@ -1133,6 +1134,10 @@ pub fn run() {
             api::api_get_meeting_transcript_timeline,
             api::api_update_transcript_speaker,
             api::api_update_transcript_speakers_matching,
+            speaker_profiles::get_speaker_profile_settings,
+            speaker_profiles::set_speaker_profile_preferences,
+            speaker_profiles::delete_speaker_profile,
+            speaker_profiles::get_meeting_speaker_voice_options,
             api::api_save_meeting_title,
             api::api_save_transcript,
             api::save_offline_recording_transcript,
