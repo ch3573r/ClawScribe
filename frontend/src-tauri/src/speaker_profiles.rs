@@ -408,9 +408,33 @@ async fn save_voice(
     Ok(())
 }
 
-pub(crate) fn offer_detection_sample(cache: Option<DetectionCache>) {
+fn offer_detection_sample(cache: Option<DetectionCache>) {
     let mut available = AVAILABLE.lock().unwrap_or_else(|err| err.into_inner());
     available.detection = cache.filter(|run| run.generation >= available.minimum_generation);
+}
+
+pub(crate) async fn offer_detection_sample_for_meeting(
+    pool: &SqlitePool,
+    meeting: &str,
+    cache: Option<DetectionCache>,
+) {
+    use crate::database::repositories::meeting::{MeetingsRepository, FILE_PUBLICATION_LOCK};
+
+    let _publication = FILE_PUBLICATION_LOCK.lock().await;
+    if matches!(MeetingsRepository::is_active(pool, meeting).await, Ok(true)) {
+        offer_detection_sample(cache);
+    }
+}
+
+pub(crate) fn forget_detection_sample(meeting: &str) {
+    let mut available = AVAILABLE.lock().unwrap_or_else(|err| err.into_inner());
+    if available
+        .detection
+        .as_ref()
+        .is_some_and(|run| run.meeting == meeting)
+    {
+        available.detection = None;
+    }
 }
 
 pub(crate) async fn finish_detection(

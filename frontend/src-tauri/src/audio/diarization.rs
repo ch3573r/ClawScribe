@@ -2554,7 +2554,8 @@ async fn save_diarization_labels(
         .await?;
     tx.commit().await?;
     if crate::audio::diarization::is_diarizing_meeting(meeting_id) {
-        speaker_profiles::offer_detection_sample(voice_outcome.cache);
+        speaker_profiles::offer_detection_sample_for_meeting(pool, meeting_id, voice_outcome.cache)
+            .await;
     }
     let synced = crate::database::transcript_edits::sync_file_with_profile(
         pool,
