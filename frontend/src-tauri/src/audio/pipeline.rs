@@ -941,7 +941,7 @@ pub struct AudioPipeline {
     // Recording sender for pre-mixed audio
     recording_sender_for_mixed: Option<BufferedSpool>,
     recording_buffer: Vec<f32>,
-    recording_buffer_timestamp: f64,
+    recording_buffer_start: u64,
     queue_write_failures: QueueWriteFailureTracker,
     // Live input levels for the UI meters, folded from the chunks seen here.
     levels: super::recording_levels::LevelMeter,
@@ -1011,7 +1011,7 @@ impl AudioPipeline {
             ring_buffer,
             mixer,
             recording_buffer: Vec::new(),
-            recording_buffer_timestamp: 0.0,
+            recording_buffer_start: 0,
             recording_sender_for_mixed: None, // Will be set by manager
             queue_write_failures: QueueWriteFailureTracker::default(),
             levels: super::recording_levels::LevelMeter::new(std::time::Instant::now()),
@@ -1205,8 +1205,7 @@ impl AudioPipeline {
         system: &[f32],
     ) -> Result<()> {
         let mixed = self.mixer.mix_window(mic, system);
-        self.preserve_mixed_audio(&mixed, start as f64 / f64::from(self.sample_rate))
-            .await?;
+        self.preserve_mixed_audio(&mixed, start).await?;
         if self.vad_processor.is_none() {
             return Ok(());
         }
@@ -1287,12 +1286,12 @@ impl AudioPipeline {
         attribution.0
     }
 
-    async fn preserve_mixed_audio(&mut self, samples: &[f32], timestamp: f64) -> Result<()> {
+    async fn preserve_mixed_audio(&mut self, samples: &[f32], start: u64) -> Result<()> {
         if self.recording_sender_for_mixed.is_none() {
             return Ok(());
         }
         if self.recording_buffer.is_empty() {
-            self.recording_buffer_timestamp = timestamp;
+            self.recording_buffer_start = start;
         }
         self.recording_buffer.extend_from_slice(samples);
         // Batch one second per durable write; syncing every mixer frame is too expensive.
@@ -1307,14 +1306,15 @@ impl AudioPipeline {
             return Ok(());
         }
         if let Some(sender) = &self.recording_sender_for_mixed {
+            let start = self.recording_buffer_start;
             let chunk = AudioChunk {
                 data: std::mem::take(&mut self.recording_buffer),
                 sample_rate: self.sample_rate,
-                timestamp: self.recording_buffer_timestamp,
-                chunk_id: self.chunk_id_counter,
+                timestamp: start as f64 / f64::from(self.sample_rate),
+                chunk_id: start,
                 device_type: DeviceType::Microphone,
             };
-            if sender.send(chunk).await.is_err() {
+            if sender.send_capture(chunk, start).await.is_err() {
                 self.state.mark_capture_incomplete();
             }
         }
@@ -1875,7 +1875,7 @@ mod queue_failure_tests {
         pipeline.recording_sender_for_mixed =
             Some(BufferedSpool::new(recording, pipeline.state.clone(), true));
         pipeline
-            .preserve_mixed_audio(&vec![0.1; 4800], 0.0)
+            .preserve_mixed_audio(&vec![0.1; 4800], 0)
             .await
             .unwrap();
         pipeline.flush_remaining_audio().await.unwrap();

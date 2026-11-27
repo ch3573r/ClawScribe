@@ -19,6 +19,7 @@ use tokio::sync::Notify;
 const QUEUE_MAGIC: &[u8; 4] = b"CSQ1";
 const HEADER_BYTES: u64 = 4 + 4 + 8 + 8 + 1 + 8;
 const MAX_SAMPLES_PER_CHUNK: usize = 16_000 * 120;
+const CAPTURE_TIMELINE_END: &str = ".timeline-end";
 static ACTIVE_SPOOLS: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -177,15 +178,24 @@ pub struct TranscriptionQueueReceiver {
     next_read: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChunkKind {
+    Audio = 0,
+    ClearSpeechSource = 0x80,
+    // For new mixed capture chunks, the ID is the exact starting sample.
+    PositionedCapture = 0x40,
+}
+
 /// A bounded handoff keeps filesystem latency out of the capture/mixing task.
 /// One worker owns the disk producer, preserving sequence order.
 pub(crate) struct BufferedSpool {
-    sender: Option<tokio::sync::mpsc::Sender<(AudioChunk, bool)>>,
+    sender: Option<tokio::sync::mpsc::Sender<(AudioChunk, ChunkKind)>>,
     worker: Option<tokio::task::JoinHandle<()>>,
     metrics: Arc<TranscriptionMetrics>,
     state: Arc<crate::audio::recording_state::RecordingState>,
     capture: bool,
     warned: Arc<AtomicBool>,
+    capture_end: Arc<AtomicU64>,
 }
 
 impl BufferedSpool {
@@ -201,9 +211,25 @@ impl BufferedSpool {
         let warned = Arc::new(AtomicBool::new(false));
         let worker_state = state.clone();
         let worker_warned = warned.clone();
+        let capture_end = Arc::new(AtomicU64::new(0));
+        let worker_end = capture_end.clone();
         let worker = tokio::spawn(async move {
-            while let Some((chunk, clear_source)) = receiver.recv().await {
-                if writer.send_with_source(chunk, clear_source).await.is_err() {
+            while let Some((chunk, kind)) = receiver.recv().await {
+                if writer.send_entry(chunk, kind).await.is_err() {
+                    Self::report_loss(&worker_state, capture, &worker_warned);
+                }
+            }
+            let end = worker_end.load(Ordering::Acquire);
+            if end > 0 {
+                let directory = writer.shared.spool_dir.clone();
+                if !matches!(
+                    tokio::task::spawn_blocking(move || publish_capture_timeline_end(
+                        &directory, end
+                    ))
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    writer.shared.metrics.mark_failed();
                     Self::report_loss(&worker_state, capture, &worker_warned);
                 }
             }
@@ -215,6 +241,7 @@ impl BufferedSpool {
             state,
             capture,
             warned,
+            capture_end,
         }
     }
 
@@ -239,8 +266,17 @@ impl BufferedSpool {
         self.metrics.mark_failed();
     }
 
+    #[cfg(test)]
     pub async fn send(&self, chunk: AudioChunk) -> io::Result<()> {
         self.send_with_source(chunk, false).await
+    }
+
+    pub(crate) async fn send_capture(&self, mut chunk: AudioChunk, start: u64) -> io::Result<()> {
+        chunk.chunk_id = start;
+        // Record the submitted end even when this chunk cannot enter the queue.
+        self.capture_end
+            .store(start + chunk.data.len() as u64, Ordering::Release);
+        self.send_entry(chunk, ChunkKind::PositionedCapture).await
     }
 
     pub(crate) async fn send_with_source(
@@ -248,10 +284,19 @@ impl BufferedSpool {
         chunk: AudioChunk,
         clear_source: bool,
     ) -> io::Result<()> {
+        let kind = if clear_source {
+            ChunkKind::ClearSpeechSource
+        } else {
+            ChunkKind::Audio
+        };
+        self.send_entry(chunk, kind).await
+    }
+
+    async fn send_entry(&self, chunk: AudioChunk, kind: ChunkKind) -> io::Result<()> {
         if self
             .sender
             .as_ref()
-            .is_some_and(|sender| sender.try_send((chunk, clear_source)).is_ok())
+            .is_some_and(|sender| sender.try_send((chunk, kind)).is_ok())
         {
             return Ok(());
         }
@@ -425,10 +470,10 @@ fn cleanup_stale_spools(spool_root: &Path) {
 
 impl TranscriptionQueueSender {
     pub async fn send(&self, chunk: AudioChunk) -> io::Result<()> {
-        self.send_with_source(chunk, false).await
+        self.send_entry(chunk, ChunkKind::Audio).await
     }
 
-    async fn send_with_source(&self, chunk: AudioChunk, clear_source: bool) -> io::Result<()> {
+    async fn send_entry(&self, chunk: AudioChunk, kind: ChunkKind) -> io::Result<()> {
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -453,7 +498,7 @@ impl TranscriptionQueueSender {
             .retain_files
             .then(|| self.shared.spool_dir.join(".incomplete"));
         let written = tokio::task::spawn_blocking(move || {
-            let result = write_chunk(&temp_path, &final_path, &chunk, clear_source);
+            let result = write_chunk(&temp_path, &final_path, &chunk, kind);
             if let (Err(_), Some(path)) = (&result, incomplete) {
                 let _ = fs::write(path, b"capture incomplete");
             }
@@ -516,12 +561,9 @@ impl TranscriptionQueueReceiver {
         let path = queue_path(&self.shared.spool_dir, self.next_read);
         let spool_bytes = fs::metadata(&path).map(|metadata| metadata.len())?;
         let read_path = path.clone();
-        let (chunk, clear_source) =
-            tokio::task::spawn_blocking(move || read_chunk_with_source(&read_path))
-                .await
-                .map_err(|error| {
-                    io::Error::other(format!("queue reader task failed: {error}"))
-                })??;
+        let (chunk, kind) = tokio::task::spawn_blocking(move || read_entry(&read_path))
+            .await
+            .map_err(|error| io::Error::other(format!("queue reader task failed: {error}")))??;
         if !self.shared.retain_files {
             fs::remove_file(path)?;
         }
@@ -529,7 +571,7 @@ impl TranscriptionQueueReceiver {
         let audio_ms = chunk_audio_ms(&chunk);
         Ok(QueuedAudioChunk {
             chunk,
-            clear_source,
+            clear_source: kind == ChunkKind::ClearSpeechSource,
             audio_ms,
             spool_bytes,
         })
@@ -553,7 +595,7 @@ fn write_chunk(
     temp_path: &Path,
     final_path: &Path,
     chunk: &AudioChunk,
-    clear_source: bool,
+    kind: ChunkKind,
 ) -> io::Result<()> {
     let file = File::create(temp_path)?;
     let mut writer = BufWriter::new(file);
@@ -561,13 +603,12 @@ fn write_chunk(
     writer.write_all(&chunk.sample_rate.to_le_bytes())?;
     writer.write_all(&chunk.timestamp.to_le_bytes())?;
     writer.write_all(&chunk.chunk_id.to_le_bytes())?;
-    // The low bit retains the historical channel encoding. The high bit marks a
-    // confident single-source VAD segment. Raw recovery spools never set it.
+    // The low bit retains the historical channel encoding.
     let device = match chunk.device_type {
         DeviceType::Microphone => 0,
         DeviceType::System => 1,
     };
-    writer.write_all(&[device | if clear_source { 0x80 } else { 0 }])?;
+    writer.write_all(&[device | kind as u8])?;
     writer.write_all(
         &u64::try_from(chunk.data.len())
             .unwrap_or(u64::MAX)
@@ -593,10 +634,29 @@ fn retry_publish(mut publish: impl FnMut() -> io::Result<()>) -> io::Result<()> 
 }
 
 pub(crate) fn read_chunk(path: &Path) -> io::Result<AudioChunk> {
-    read_chunk_with_source(path).map(|(chunk, _)| chunk)
+    read_entry(path).map(|(chunk, _)| chunk)
 }
 
-fn read_chunk_with_source(path: &Path) -> io::Result<(AudioChunk, bool)> {
+pub(crate) fn read_capture_chunk(path: &Path) -> io::Result<(AudioChunk, Option<u64>)> {
+    let (chunk, kind) = read_entry(path)?;
+    let position = (kind == ChunkKind::PositionedCapture).then_some(chunk.chunk_id);
+    Ok((chunk, position))
+}
+
+fn publish_capture_timeline_end(directory: &Path, end: u64) -> io::Result<()> {
+    let temporary = directory.join(".timeline-end.pending");
+    let mut file = File::create(&temporary)?;
+    file.write_all(&end.to_le_bytes())?;
+    file.sync_data()?;
+    drop(file);
+    retry_publish(|| fs::rename(&temporary, directory.join(CAPTURE_TIMELINE_END)))
+}
+
+pub(crate) fn capture_timeline_end(directory: &Path) -> Option<u64> {
+    read_u64(&mut File::open(directory.join(CAPTURE_TIMELINE_END)).ok()?).ok()
+}
+
+fn read_entry(path: &Path) -> io::Result<(AudioChunk, ChunkKind)> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut magic = [0u8; 4];
@@ -613,8 +673,18 @@ fn read_chunk_with_source(path: &Path) -> io::Result<(AudioChunk, bool)> {
     let chunk_id = read_u64(&mut reader)?;
     let mut device = [0u8; 1];
     reader.read_exact(&mut device)?;
-    let clear_source = device[0] & 0x80 != 0;
-    let device_type = match device[0] & 0x7f {
+    let kind = match device[0] & 0xc0 {
+        0 => ChunkKind::Audio,
+        0x80 => ChunkKind::ClearSpeechSource,
+        0x40 => ChunkKind::PositionedCapture,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid audio spool flags",
+            ))
+        }
+    };
+    let device_type = match device[0] & 0x3f {
         0 => DeviceType::Microphone,
         1 => DeviceType::System,
         _ => {
@@ -643,7 +713,7 @@ fn read_chunk_with_source(path: &Path) -> io::Result<(AudioChunk, bool)> {
             chunk_id,
             device_type,
         },
-        clear_source,
+        kind,
     ))
 }
 
@@ -673,7 +743,10 @@ mod tests {
     async fn multiple_queued_segments_retain_their_own_source_certainty() {
         let root = tempfile::tempdir().unwrap();
         let (writer, mut reader, _) = transcription_queue_in(root.path()).unwrap();
-        writer.send_with_source(chunk(1), true).await.unwrap();
+        writer
+            .send_entry(chunk(1), ChunkKind::ClearSpeechSource)
+            .await
+            .unwrap();
         writer.send(chunk(2)).await.unwrap();
         assert!(reader.recv().await.unwrap().unwrap().clear_source);
         assert!(!reader.recv().await.unwrap().unwrap().clear_source);
@@ -730,17 +803,24 @@ mod tests {
         let mut buffered = BufferedSpool::new(writer, state.clone(), true);
         // On the current-thread executor the worker cannot run until we yield.
         for id in 0..60 {
-            buffered.send(chunk(id)).await.unwrap();
+            buffered.send_capture(chunk(id), id * 3).await.unwrap();
         }
-        assert!(buffered.send(chunk(60)).await.is_err());
+        assert!(buffered.send_capture(chunk(60), 180).await.is_err());
         assert!(state.is_recording() && state.capture_incomplete());
         for id in 0..60 {
-            assert_eq!(receiver.recv().await.unwrap().unwrap().chunk.chunk_id, id);
+            assert_eq!(
+                receiver.recv().await.unwrap().unwrap().chunk.chunk_id,
+                id * 3
+            );
         }
-        buffered.send(chunk(61)).await.unwrap();
-        assert_eq!(receiver.recv().await.unwrap().unwrap().chunk.chunk_id, 61);
+        buffered.send_capture(chunk(61), 183).await.unwrap();
+        assert_eq!(receiver.recv().await.unwrap().unwrap().chunk.chunk_id, 183);
         buffered.finish().await;
         assert!(receiver.recv().await.unwrap().is_none());
+        assert_eq!(
+            capture_timeline_end(&folder.path().join(".audio-spool")),
+            Some(186)
+        );
         assert_eq!(metrics.snapshot().failed_chunks, 1);
     }
 
