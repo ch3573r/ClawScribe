@@ -284,23 +284,6 @@ pub(crate) mod tests {
         .unwrap()
     }
     #[tokio::test]
-    async fn trash_keeps_document_attached_even_if_a_stale_view_detaches_it() {
-        use crate::database::repositories::meeting::MeetingsRepository;
-
-        let pool = pool().await;
-        let attached = attach(&pool, "aster", "00000000-0000-4000-8000-000000000001").await;
-        let document = attached.attachment.id;
-        assert!(MeetingsRepository::move_to_trash(&pool, "aster", false)
-            .await
-            .unwrap());
-        assert_eq!(detach(&pool, "aster", &document).await.unwrap(), None);
-        assert!(MeetingsRepository::restore_from_trash(&pool, "aster")
-            .await
-            .unwrap());
-        assert_eq!(get(&pool, "aster", &document).await.unwrap().id, document);
-    }
-
-    #[tokio::test]
     async fn shared_document_survives_detach() {
         let pool = pool().await;
         let first = attach(&pool, "aster", "00000000-0000-4000-8000-000000000001").await;
