@@ -119,6 +119,13 @@ try {
     & $testExecutable --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Native library tests failed." }
 
+    $whisperFixture = "audio::transcription::cloud::whisper_audio::tests::ffmpeg_creates_compact_parts_and_reports_actual_boundaries"
+    if ("${whisperFixture}: test" -notin $tests) {
+        throw "The Hosted Whisper FFmpeg fixture is missing."
+    }
+    & $testExecutable $whisperFixture --exact --ignored
+    if ($LASTEXITCODE -ne 0) { throw "Hosted Whisper FFmpeg validation failed." }
+
     if ($env:CLAWSCRIBE_MEASURE_MAI -eq "true") {
         $fixture = "audio::transcription::cloud::tests::mai_conversion_and_upload_stream_measurements"
         $listing = & $testExecutable $fixture --exact --ignored --list

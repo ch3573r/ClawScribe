@@ -1,11 +1,13 @@
 use super::{
-    classify_status_with_body, should_retry_status, CloudTranscriptSegment, CloudTranscriptWord,
-    CloudTranscriptionError, CloudTranscriptionProvider,
+    classify_status_with_body, should_retry_status, validate_provider_upload_size,
+    CloudTranscriptSegment, CloudTranscriptWord, CloudTranscriptionError, PROVIDER_CLOUD_WHISPER,
 };
-use async_trait::async_trait;
 use reqwest::multipart::{Form, Part};
 use serde::Deserialize;
+use std::path::Path;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio_util::io::ReaderStream;
 
 const MAX_ATTEMPTS: usize = 3;
 
@@ -38,20 +40,30 @@ impl OpenAiWhisperProvider {
         transcription_endpoint(&self.base_url)
     }
 
-    fn form(
+    pub(super) fn is_openai_hosted(&self) -> bool {
+        super::is_official_openai_api_url(&self.base_url)
+    }
+
+    async fn form(
         &self,
-        audio: bytes::Bytes,
-        file_name: &str,
-        mime_type: &str,
+        path: &Path,
         language: Option<&str>,
     ) -> Result<Form, CloudTranscriptionError> {
-        // Bytes clones are refcounted, so retries never duplicate the audio
-        // buffer (uploads can be hundreds of MB). stream_with_length keeps a
-        // Content-Length header instead of switching to chunked encoding.
-        let length = audio.len() as u64;
-        let part = Part::stream_with_length(reqwest::Body::from(audio), length)
-            .file_name(file_name.to_string())
-            .mime_str(mime_type)
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|_| audio_read_error())?;
+        let metadata = file.metadata().await.map_err(|_| audio_read_error())?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(audio_read_error());
+        }
+        let length = metadata.len();
+        validate_provider_upload_size(PROVIDER_CLOUD_WHISPER, Some(&self.base_url), length)?;
+        // Reopen per attempt and send a known length for compatibility with
+        // endpoints that reject chunked transfer encoding.
+        let stream = ReaderStream::with_capacity(file.take(length), 64 * 1024);
+        let part = Part::stream_with_length(reqwest::Body::wrap_stream(stream), length)
+            .file_name(super::upload_filename(path).to_string())
+            .mime_str(super::mime_type_for_path(path))
             .map_err(|e| {
                 CloudTranscriptionError::auth_config(format!("Invalid audio MIME type: {e}"))
             })?;
@@ -66,31 +78,28 @@ impl OpenAiWhisperProvider {
         }
         Ok(form)
     }
-}
-
-#[async_trait]
-impl CloudTranscriptionProvider for OpenAiWhisperProvider {
-    async fn transcribe_file(
+    pub(super) async fn transcribe_path(
         &self,
-        audio: Vec<u8>,
-        file_name: &str,
-        mime_type: &str,
+        audio_path: &Path,
         language: Option<&str>,
+        consent_required: bool,
     ) -> Result<Vec<CloudTranscriptSegment>, CloudTranscriptionError> {
-        let audio = bytes::Bytes::from(audio);
+        let endpoint = self.endpoint();
         for attempt in 1..=MAX_ATTEMPTS {
+            let form = self.form(audio_path, language).await?;
             let client = crate::openai::secret_destination::secret_client(
                 reqwest::Client::builder(),
-                &self.endpoint(),
+                &endpoint,
                 self.allow_unencrypted,
             )
             .await
             .map_err(CloudTranscriptionError::auth_config)?;
+            super::check_import_upload_opt_in(consent_required)?;
             let response = client
-                .post(self.endpoint())
+                .post(&endpoint)
                 .timeout(Duration::from_secs(30 * 60))
                 .bearer_auth(&self.api_key)
-                .multipart(self.form(audio.clone(), file_name, mime_type, language)?)
+                .multipart(form)
                 .send()
                 .await;
 
@@ -132,6 +141,10 @@ impl CloudTranscriptionProvider for OpenAiWhisperProvider {
             "OpenAI-compatible transcription failed after retries",
         ))
     }
+}
+
+fn audio_read_error() -> CloudTranscriptionError {
+    CloudTranscriptionError::auth_config("Could not read audio file for Hosted Whisper")
 }
 
 pub fn transcription_endpoint(base_url: &str) -> String {
@@ -181,9 +194,14 @@ pub(crate) fn parse_verbose_transcription(
     payload: OpenAiVerboseTranscription,
 ) -> Result<Vec<CloudTranscriptSegment>, CloudTranscriptionError> {
     let words = payload.words.unwrap_or_default();
+    let api_segments = payload.segments.unwrap_or_default();
+    let has_text = payload.text.is_some();
     let mut segments = Vec::new();
 
-    if let Some(api_segments) = payload.segments {
+    if api_segments
+        .iter()
+        .any(|segment| !segment.text.trim().is_empty())
+    {
         for segment in api_segments {
             let segment_words = words
                 .iter()
@@ -236,11 +254,12 @@ pub(crate) fn parse_verbose_transcription(
             start_seconds: 0.0,
             end_seconds: 0.0,
             words: None,
-            requires_local_timing_grid: false,
+            requires_local_timing_grid: true,
         });
     }
 
-    if segments.is_empty() {
+    // An explicit empty transcript can be a silent part of a longer recording.
+    if segments.is_empty() && !has_text {
         return Err(CloudTranscriptionError::auth_config(
             "OpenAI-compatible transcription response did not contain transcript segments",
         ));
@@ -287,6 +306,20 @@ mod tests {
             transcription_endpoint("https://api.example.com/v1/audio/transcriptions"),
             "https://api.example.com/v1/audio/transcriptions"
         );
+    }
+
+    #[test]
+    fn text_only_responses_request_local_timing_even_with_an_empty_segments_array() {
+        for json in [
+            r#"{"text":"hello"}"#,
+            r#"{"text":"hello","segments":[],"words":[]}"#,
+        ] {
+            let segments =
+                parse_verbose_transcription(serde_json::from_str(json).unwrap()).unwrap();
+            assert_eq!(segments.len(), 1);
+            assert_eq!(segments[0].text, "hello");
+            assert!(segments[0].requires_local_timing_grid);
+        }
     }
 
     #[test]
@@ -344,8 +377,11 @@ mod tests {
         let provider =
             OpenAiWhisperProvider::new(base_url, "test-key".to_string(), "whisper-1".to_string());
 
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("audio.wav");
+        tokio::fs::write(&audio, b"synthetic-audio").await.unwrap();
         let segments = provider
-            .transcribe_file(b"abc".to_vec(), "audio.wav", "audio/wav", Some("en-US"))
+            .transcribe_path(&audio, Some("en-US"), false)
             .await
             .unwrap();
         let request = request_handle.await.unwrap();
@@ -353,6 +389,10 @@ mod tests {
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].words.as_ref().unwrap()[0].text, "hello");
         assert!(request.starts_with("POST /audio/transcriptions "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("\r\ncontent-length: "));
+        assert!(request.contains("synthetic-audio"));
         assert!(request.contains(r#"name="file""#));
         assert!(request.contains(r#"name="model""#));
         assert!(request.contains("whisper-1"));
@@ -372,8 +412,11 @@ mod tests {
         let provider =
             OpenAiWhisperProvider::new(base_url, "test-key".to_string(), "whisper-1".to_string());
 
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("audio.wav");
+        tokio::fs::write(&audio, b"synthetic-audio").await.unwrap();
         let error = provider
-            .transcribe_file(b"abc".to_vec(), "audio.wav", "audio/wav", None)
+            .transcribe_path(&audio, None, false)
             .await
             .unwrap_err();
         let _ = request_handle.await.unwrap();
