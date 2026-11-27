@@ -14,13 +14,13 @@ function find(tree, predicate) {
   return predicate(tree) ? tree : find(tree.props?.children, predicate);
 }
 
-test("successful bulk deletion discards pending editor drafts and resets the active meeting", async t => {
+test("moving meetings to Trash saves pending editor drafts and resets the active meeting", async t => {
   const hooks = createHookHarness();
   t.after(hooks.unmount);
   const calls = [];
   const invoke = async (command, args) => {
     calls.push([command, args]);
-    return { cleanup_pending: false };
+    return {};
   };
   const drafts = loadTsModule("src/lib/meetingDrafts.ts", { "@tauri-apps/api/core": { invoke }, sonner: {} });
   const meeting = { id: "deleted", title: "Meeting" };
@@ -39,8 +39,7 @@ test("successful bulk deletion discards pending editor drafts and resets the act
       setCurrentMeeting: update => { current = update(current); }, setMeetings() {},
     }) },
     "@/contexts/RecordingStateContext": { useRecordingState: () => ({}) },
-    "@/lib/meetingDrafts": drafts, "@/lib/library": {}, "@/lib/storage-dialog-controller": {},
-    "@/services/indexedDBService": { indexedDBService: { deleteMeeting: async () => {} } },
+    "@/lib/meetingDrafts": drafts, "@/lib/library": {},
     "./archive-bulk-export": {},
   });
   const tree = hooks.render(() => ArchiveBulkActions({
@@ -49,8 +48,11 @@ test("successful bulk deletion discards pending editor drafts and resets the act
   find(tree, node => node.type === "form").props.onSubmit({ preventDefault() {} });
   await flush();
   assert.equal(draft.dirty(), false);
-  assert.equal(calls.at(-1)[0], "api_set_summary_edits_pending");
-  assert.equal(calls.at(-1)[1].pending, false);
+  const save = calls.findIndex(([command]) => command === "api_save_meeting_title");
+  const move = calls.findIndex(([command]) => command === "api_delete_meeting");
+  assert.ok(save >= 0 && move > save);
+  assert.deepEqual({ ...calls[save][1] }, { meetingId: meeting.id, title: "Pending title" });
+  assert.equal(calls.findLast(([command]) => command === "api_set_summary_edits_pending")[1].pending, false);
   assert.equal(current, null);
 });
 

@@ -55,7 +55,7 @@ async fn archive_rows(pool: &SqlitePool) -> Result<Vec<ArchiveRow>, String> {
                 m.recording_duration_s AS duration_seconds,
                 CASE WHEN length(m.calendar_link) <= 262144 THEN m.calendar_link END calendar_link,
                 m.title, m.created_at
-         FROM meetings m LEFT JOIN summary_processes s ON s.meeting_id = m.id
+         FROM active_meetings m LEFT JOIN summary_processes s ON s.meeting_id = m.id
          LEFT JOIN recording_outcomes o ON o.meeting_id = m.id
          ORDER BY julianday(m.created_at) DESC, m.id",
     )

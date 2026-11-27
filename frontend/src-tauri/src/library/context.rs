@@ -2,13 +2,15 @@ use crate::state::AppState;
 use sqlx::SqlitePool;
 
 pub(crate) async fn read(pool: &SqlitePool, meeting: &str) -> Result<String, String> {
-    sqlx::query_scalar::<_, Option<String>>("SELECT summary_context FROM meetings WHERE id = ?")
-        .bind(meeting)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| "Could not load meeting context".to_string())?
-        .map(|context| context.unwrap_or_default())
-        .ok_or_else(|| "Meeting not found".to_string())
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT summary_context FROM active_meetings WHERE id = ?",
+    )
+    .bind(meeting)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| "Could not load meeting context".to_string())?
+    .map(|context| context.unwrap_or_default())
+    .ok_or_else(|| "Meeting not found".to_string())
 }
 
 pub(crate) async fn write(

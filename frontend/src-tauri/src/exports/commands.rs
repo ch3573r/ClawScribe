@@ -338,6 +338,12 @@ pub(super) async fn load_ledger<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
 ) -> Result<ExportLedger, String> {
+    let state = app.state::<crate::state::AppState>();
+    sqlx::query_scalar::<_, i64>("SELECT 1 FROM active_meetings WHERE id=?")
+        .bind(meeting_id)
+        .fetch_one(state.db_manager.pool())
+        .await
+        .map_err(|_| "The meeting is unavailable for export.")?;
     let directory = export_ledger_dir(app, meeting_id)?;
     let meeting_id = meeting_id.to_owned();
     tokio::task::spawn_blocking(move || ExportLedger::load_or_new(&directory, &meeting_id))

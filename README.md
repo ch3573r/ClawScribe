@@ -208,10 +208,14 @@ and bookmarks from the sidebar or **Meetings → Archive**. Search for several
 terms in any order or put an exact phrase in quotes. Results are grouped by
 meeting and highlight matches in the saved text. Open a source in its meeting
 or play a timed transcript result. The Archive keeps the current search,
-project, date and attention filters when you return. Choose **Hybrid** to add
+project, date and attention filters when you return. Choose **Load more** to
+continue searching saved summaries, notes, and bookmarks. Choose **Hybrid** to add
 semantic transcript matches when the local semantic index is ready. Use
-**Select meetings** for bulk tagging, local export, deletion, or to scope a
+**Select meetings** for bulk tagging, local export, moving to Trash, or to scope a
 Meeting memory conversation.
+
+Use **Meetings → Trash** to restore a removed meeting within 30 days or delete
+it permanently. Recording files stay on disk during retention.
 
 Read and correct the transcript while the speaker timeline loads. The text
 stays available when the recording is missing. Use **Find and replace** to
@@ -471,7 +475,7 @@ with another meeting, or failing ownership checks are kept. Review retained
 files and retry cleanup in **Meetings → Archive → Storage**. Staged cleanup
 stays pending while its storage location is unavailable.
 Pre-migration database snapshots and separate backup archives can retain deleted
-meetings. See [local library tools](docs/local-library.md#deleting-meetings).
+meetings. See [local library tools](docs/local-library.md#moving-meetings-to-trash).
 
 The recordings folder picker saves the verified target of a link or junction.
 For an older linked setting, choose the folder again in **Settings → Recording**.

@@ -19,7 +19,7 @@ pub(super) async fn load(
     let row = sqlx::query(
         "SELECT title, created_at, recording_duration_s, calendar_link,
                 CASE WHEN ? THEN reviewed_actions END AS reviewed_actions
-         FROM meetings WHERE id = ?",
+         FROM active_meetings WHERE id = ?",
     )
     .bind(switches.include_summary)
     .bind(&meeting_id)

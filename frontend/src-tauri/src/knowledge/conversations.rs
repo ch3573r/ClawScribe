@@ -284,7 +284,7 @@ pub(crate) async fn reserve_cancellable(
         }
     }
     if let ConversationOwner::Meeting(id) = &request.owner {
-        sqlx::query("INSERT INTO knowledge_owners(id,kind,meeting_id) SELECT ?,'meeting',id FROM meetings WHERE id=? ON CONFLICT(id) DO NOTHING")
+        sqlx::query("INSERT INTO knowledge_owners(id,kind,meeting_id) SELECT ?,'meeting',id FROM active_meetings WHERE id=? ON CONFLICT(id) DO NOTHING")
             .bind(&owner).bind(id).execute(&mut *tx).await.map_err(failure)?;
     }
     let exists: bool =
@@ -486,7 +486,7 @@ pub async fn finish(
     Ok(reply)
 }
 async fn reply_in(connection: &mut SqliteConnection, id: &str) -> Result<AssistantReply, String> {
-    let row=sqlx::query("SELECT m.id,m.content,r.provider,r.model,r.retrieval_mode,r.restored FROM knowledge_messages m JOIN knowledge_requests r ON r.id=m.request_id WHERE r.id=? AND m.role='assistant'").bind(id).fetch_one(&mut *connection).await.map_err(failure)?;
+    let row=sqlx::query("SELECT m.id,m.content,r.provider,r.model,r.retrieval_mode,r.restored FROM knowledge_messages m JOIN visible_knowledge_requests r ON r.id=m.request_id WHERE r.id=? AND m.role='assistant'").bind(id).fetch_one(&mut *connection).await.map_err(failure)?;
     let references = sqlx::query(
         "SELECT reference_json,display_json FROM knowledge_request_evidence WHERE request_id=? ORDER BY ordinal",
     )
@@ -584,7 +584,7 @@ pub async fn history(
 ) -> Result<Vec<HistoryMessage>, String> {
     let key = owner_key(owner)?;
     let mut connection = pool.acquire().await.map_err(failure)?;
-    let rows=sqlx::query("SELECT m.id,m.request_id,m.role,m.content,m.created_at,r.status FROM knowledge_messages m JOIN knowledge_requests r ON r.id=m.request_id WHERE r.owner_id=? ORDER BY m.created_at,m.id").bind(key).fetch_all(&mut *connection).await.map_err(failure)?;
+    let rows=sqlx::query("SELECT m.id,m.request_id,m.role,m.content,m.created_at,r.status FROM knowledge_messages m JOIN visible_knowledge_requests r ON r.id=m.request_id WHERE r.owner_id=? ORDER BY m.created_at,m.id").bind(key).fetch_all(&mut *connection).await.map_err(failure)?;
     let mut messages = Vec::new();
     for row in rows {
         let role: String = row.get("role");
@@ -608,7 +608,7 @@ pub async fn history(
     }
     if let ConversationOwner::Meeting(id) = owner {
         let rows = sqlx::query(
-            "SELECT id,role,content,created_at FROM ai_chat_messages WHERE meeting_id=?",
+            "SELECT id,role,content,created_at FROM ai_chat_messages WHERE meeting_id=(SELECT id FROM active_meetings WHERE id=?)",
         )
         .bind(id)
         .fetch_all(&mut *connection)

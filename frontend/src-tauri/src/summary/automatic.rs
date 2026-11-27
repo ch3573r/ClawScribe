@@ -351,7 +351,7 @@ async fn is_local_recording(
     roots: &[std::path::PathBuf],
 ) -> Result<bool, String> {
     let row: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT recording_source, folder_path FROM meetings WHERE id = ?")
+        sqlx::query_as("SELECT recording_source, folder_path FROM active_meetings WHERE id = ?")
             .bind(meeting)
             .fetch_optional(pool)
             .await
@@ -793,7 +793,7 @@ async fn prepare<R: Runtime>(
 ) -> Result<(super::commands::MeetingSummaryContext, Option<String>), String> {
     let context = crate::library::context::read(pool, meeting_id).await?;
     let folder: Option<String> =
-        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+        sqlx::query_scalar("SELECT folder_path FROM active_meetings WHERE id = ?")
             .bind(meeting_id)
             .fetch_one(pool)
             .await
@@ -826,7 +826,7 @@ async fn notify_ready<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool, meeting
         let manager = state.read().await;
         if let Some(manager) = manager.as_ref() {
             let title: Option<String> =
-                sqlx::query_scalar("SELECT title FROM meetings WHERE id = ?")
+                sqlx::query_scalar("SELECT title FROM active_meetings WHERE id = ?")
                     .bind(meeting)
                     .fetch_optional(pool)
                     .await

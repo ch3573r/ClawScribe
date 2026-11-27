@@ -45,7 +45,7 @@ impl Header {
             .map_err(|_| "Could not read meeting details.")?;
         let (created, duration, calendar_link): (String, Option<f64>, Option<String>) =
             sqlx::query_as(
-                "SELECT created_at, recording_duration_s, calendar_link FROM meetings WHERE id = ?",
+                "SELECT created_at, recording_duration_s, calendar_link FROM active_meetings WHERE id = ?",
             )
             .bind(meeting_id)
             .fetch_one(&mut *tx)

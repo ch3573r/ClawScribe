@@ -145,7 +145,6 @@ fn read_options(app_data: &Path) -> Result<SqliteConnectOptions, &'static str> {
         .filename(path)
         .read_only(true)
         .create_if_missing(false)
-        .pragma("query_only", "ON")
         .pragma("trusted_schema", "OFF")
         .busy_timeout(Duration::from_secs(2))
         .disable_statement_logging())
@@ -155,6 +154,9 @@ async fn connect(app_data: &Path) -> Result<SqliteConnection, &'static str> {
     let mut conn = SqliteConnection::connect_with(&read_options(app_data)?)
         .await
         .map_err(|_| DB_ERROR)?;
+    prepare_read_connection(&mut conn)
+        .await
+        .map_err(|_| DB_ERROR)?;
     // A literal search can visit every transcript in a large library.
     let deadline = Instant::now() + Duration::from_secs(10);
     conn.lock_handle()
@@ -162,6 +164,28 @@ async fn connect(app_data: &Path) -> Result<SqliteConnection, &'static str> {
         .map_err(|_| DB_ERROR)?
         .set_progress_handler(1000, move || Instant::now() < deadline);
     Ok(conn)
+}
+
+async fn prepare_read_connection(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    legacy_active_view(conn).await?;
+    sqlx::query("PRAGMA query_only=ON").execute(conn).await?;
+    Ok(())
+}
+
+// The local assistant can open a library before the desktop app migrates it.
+// Only the writable TEMP schema is used and all tool queries run query-only.
+async fn legacy_active_view(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    let has_trash: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('meetings') WHERE name='deleted_at')",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if !has_trash {
+        sqlx::query("CREATE TEMP VIEW active_meetings AS SELECT rowid, * FROM main.meetings")
+            .execute(conn)
+            .await?;
+    }
+    Ok(())
 }
 
 pub(super) async fn call(
@@ -334,6 +358,7 @@ async fn related_passages(
     drop(conn);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
+        .after_connect(|conn, _| Box::pin(prepare_read_connection(conn)))
         .connect_with(read_options(app_data).ok()?)
         .await
         .ok()?;
@@ -375,7 +400,7 @@ async fn limited_metadata(conn: &mut SqliteConnection, id: &str) -> Result<Value
     let (title, created_at, duration, link): (String, String, Option<f64>, Option<String>) = sqlx::query_as(
         "SELECT substr(title,1,1024), substr(created_at,1,64), recording_duration_s,
                 CASE WHEN length(CAST(calendar_link AS BLOB)) <= ?2 THEN calendar_link ELSE 'null' END
-         FROM meetings WHERE id = ?1",
+         FROM active_meetings WHERE id = ?1",
     )
     .bind(id).bind(MAX_STORED_JSON)
     .fetch_optional(conn).await.map_err(|_| DB_ERROR)?.ok_or(NOT_FOUND)?;
@@ -395,7 +420,7 @@ async fn reviewed_actions(
     let (stored, oversized): (Option<String>, bool) = sqlx::query_as(
         "SELECT CASE WHEN length(CAST(reviewed_actions AS BLOB)) <= ?2 THEN reviewed_actions END,
                 coalesce(length(CAST(reviewed_actions AS BLOB)),0) > ?2
-         FROM meetings WHERE id = ?1",
+         FROM active_meetings WHERE id = ?1",
     )
     .bind(id)
     .bind(MAX_STORED_JSON)
@@ -437,7 +462,7 @@ async fn list_open_actions(
     let mut meetings = sqlx::query_as::<_, (String, String, Option<String>)>(
         "SELECT substr(id,1,256), substr(title,1,512),
                 CASE WHEN length(CAST(reviewed_actions AS BLOB)) <= ? THEN reviewed_actions END
-         FROM meetings WHERE reviewed_actions IS NOT NULL AND reviewed_actions != '[]'
+         FROM active_meetings WHERE reviewed_actions IS NOT NULL AND reviewed_actions != '[]'
          ORDER BY julianday(created_at) DESC, id",
     )
     .bind(MAX_STORED_JSON)
@@ -485,6 +510,7 @@ async fn follow_through_reads_only_open_actions_and_filtered_metadata_for_the_re
     .execute(&mut conn)
     .await
     .unwrap();
+    legacy_active_view(&mut conn).await.unwrap();
     let raw = json!([
         {"id":uuid::Uuid::from_u128(1).to_string(),"title":"Open item","owner":"Dana","dueDate":"2026-12-02","done":false,"sourceKey":"12ab"},
         {"id":uuid::Uuid::from_u128(2).to_string(),"title":"Closed item","done":true}
@@ -612,7 +638,7 @@ async fn list_meetings(
     };
     let meetings = sqlx::query_as::<_, Meeting>(
         "SELECT substr(m.id,1,256) id, substr(m.title,1,1024) title, substr(m.created_at,1,64) created_at,
-                substr(m.updated_at,1,64) updated_at FROM meetings m
+                substr(m.updated_at,1,64) updated_at FROM active_meetings m
          WHERE (?3 IS NULL OR m.id IN (SELECT value FROM json_each(?3)))
          ORDER BY m.created_at DESC, m.id ASC LIMIT ?1 OFFSET ?2",
     )
@@ -649,7 +675,7 @@ async fn search_meetings(
         ""
     };
     let meeting_sql = format!("SELECT meetings.rowid,substr(id,1,256) id,substr(title,1,1024) title,
-        substr(created_at,1,64) created_at,substr(updated_at,1,64) updated_at FROM meetings {candidates}
+        substr(created_at,1,64) created_at,substr(updated_at,1,64) updated_at FROM active_meetings AS meetings {candidates}
         ORDER BY meetings.created_at DESC,meetings.id ASC LIMIT 64 OFFSET ?1");
     let transcript_filter = if anchor.is_some() {
         // Probe the index for this segment. Materializing the global hit list
@@ -809,7 +835,7 @@ async fn meeting(
                 substr(n.notes_markdown,?3+1,?4) notes,
                 CASE WHEN n.notes_markdown IS NULL AND length(CAST(n.notes_json AS BLOB))<=?2 THEN n.notes_json END blocks,
                 (n.notes_markdown IS NULL AND coalesce(length(CAST(n.notes_json AS BLOB)),0)>?2) notes_oversize
-         FROM meetings m LEFT JOIN summary_processes s ON s.meeting_id=m.id
+         FROM active_meetings m LEFT JOIN summary_processes s ON s.meeting_id=m.id
          LEFT JOIN meeting_notes n ON n.meeting_id=m.id WHERE m.id=?1",
     )
     .bind(id)
@@ -942,7 +968,7 @@ async fn transcript(
         end: Option<f64>,
     }
     let mut tx = conn.begin().await.map_err(|_| DB_ERROR)?;
-    if sqlx::query("SELECT 1 FROM meetings WHERE id=?")
+    if sqlx::query("SELECT 1 FROM active_meetings WHERE id=?")
         .bind(id)
         .fetch_optional(&mut *tx)
         .await
@@ -1121,7 +1147,7 @@ async fn audio(
     let folder = sqlx::query_scalar::<_, Option<String>>(
         "SELECT CASE WHEN length(m.folder_path)<=32767 AND NOT EXISTS (
              SELECT 1 FROM meetings o WHERE o.id<>m.id AND o.folder_path=m.folder_path COLLATE NOCASE
-         ) THEN m.folder_path END FROM meetings m WHERE m.id=?",
+         ) THEN m.folder_path END FROM active_meetings m WHERE m.id=?",
     )
     .bind(id)
     .fetch_optional(conn)
@@ -1198,6 +1224,32 @@ mod tests {
             .execute(&mut reader)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn local_assistant_omits_trashed_meeting_text_and_metadata() {
+        let (root, mut writer) = fixture().await;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261127000000_meeting_trash.sql"
+        ))
+        .execute(&mut writer)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE meetings SET deleted_at=CURRENT_TIMESTAMP WHERE id='a'")
+            .execute(&mut writer)
+            .await
+            .unwrap();
+
+        let list = run(root.path(), "list_meetings", json!({})).await;
+        assert_eq!(list["meetings"].as_array().unwrap().len(), 1);
+        assert_eq!(list["meetings"][0]["id"], "b");
+        let matches = run(root.path(), "search_meetings", json!({"query":"Corrected"})).await;
+        assert!(matches["meetings"].as_array().unwrap().is_empty());
+        let args = json!({"meeting_id":"a"});
+        assert_eq!(
+            call(root.path(), "get_transcript", args.as_object().unwrap()).await,
+            Err(NOT_FOUND)
+        );
     }
 
     #[tokio::test]

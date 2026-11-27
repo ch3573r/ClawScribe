@@ -199,7 +199,7 @@ export function ArchiveMeetingRows({
             removalOpener.current = document.getElementById(menuId);
             setRemoval([meeting]);
           }}>Review saved audio</DropdownMenuItem>}
-          <DropdownMenuItem className="text-destructive" onSelect={() => setDeleteTarget(meeting)}>Delete meeting…</DropdownMenuItem>
+          <DropdownMenuItem className="text-destructive" onSelect={() => setDeleteTarget(meeting)}>Move to Trash…</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
       </div>
@@ -231,7 +231,7 @@ export function ArchiveMeetingRows({
               <DropdownMenuItem onSelect={() => onBulk("tag", bulkCandidates, bulkOpener.current)}>Bulk tag…</DropdownMenuItem>
               <DropdownMenuItem onSelect={() => onBulk("export", bulkCandidates, bulkOpener.current)}>Bulk export…</DropdownMenuItem>
               <DropdownMenuItem onSelect={() => onAsk(bulkCandidates.map(meeting => meeting.id))}>Ask in Meeting memory</DropdownMenuItem>
-              <DropdownMenuItem className="text-destructive" onSelect={() => onBulk("delete", bulkCandidates, bulkOpener.current)}>Bulk delete…</DropdownMenuItem>
+              <DropdownMenuItem className="text-destructive" onSelect={() => onBulk("delete", bulkCandidates, bulkOpener.current)}>Move to Trash…</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </>}

@@ -10,17 +10,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 import { addTag } from "@/lib/library";
-import { discardMeetingDraft } from "@/lib/meetingDrafts";
-import { indexedDBService } from "@/services/indexedDBService";
-import { openStorageDialog } from "@/lib/storage-dialog-controller";
+import { meetingDraft } from "@/lib/meetingDrafts";
 import type { ArchiveMeeting } from "./ArchiveAudioRemoval";
 import { exportArchiveMeeting, type LocalExportFormat } from "./archive-bulk-export";
 
 export type BulkAction = "tag" | "delete" | "export";
-const labels = { tag: "Add project tags", delete: "Delete meetings", export: "Export meetings" };
+const labels = { tag: "Add project tags", delete: "Move to Trash", export: "Export meetings" };
 const description = {
   tag: "Add tags to each selected meeting. Existing tags stay in place. Separate tags with commas.",
-  delete: "Permanently remove the selected meetings, transcripts, and notes from ClawScribe.",
+  delete: "Move the selected meetings to Trash. You can restore them for 30 days.",
   export: "Save a file with the saved notes and transcript for each meeting. Choose each path in the save dialog. Cancel a save dialog to stop the batch.",
 };
 
@@ -39,7 +37,7 @@ export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onRet
   const [format, setFormat] = useState<LocalExportFormat>("markdown");
   const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
-  const [result, setResult] = useState<{ count: number; stopped: boolean; failures: { title: string; message: string }[]; cleanup: boolean; cacheFailure: boolean } | null>(null);
+  const [result, setResult] = useState<{ count: number; stopped: boolean; failures: { title: string; message: string }[] } | null>(null);
   const pending = useRef(false);
   const active = useRef(true);
   const cancel = useRef<HTMLButtonElement>(null);
@@ -54,7 +52,7 @@ export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onRet
     setError("");
     setProgress("Starting…");
     const deleted: string[] = [];
-    const summary = { count: 0, stopped: false, failures: [] as { title: string; message: string }[], cleanup: false, cacheFailure: false };
+    const summary = { count: 0, stopped: false, failures: [] as { title: string; message: string }[] };
     try {
       if (action === "tag") {
         const tags = addTag([], tag, projectTags);
@@ -69,14 +67,11 @@ export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onRet
             if (action === "export") {
               if (!await exportArchiveMeeting(meeting, format)) { summary.stopped = true; break; }
             } else {
-              const outcome = await invoke<{ cleanup_pending: boolean }>("api_delete_meeting", { meetingId: meeting.id, deleteFiles });
-              discardMeetingDraft(meeting.id);
-              summary.cleanup ||= outcome.cleanup_pending;
+              await meetingDraft(meeting.id).drain();
+              await invoke("api_delete_meeting", { meetingId: meeting.id, deleteFiles });
               deleted.push(meeting.id);
               setMeetings(rows => rows.filter(row => row.id !== meeting.id));
               setCurrentMeeting(current => current?.id === meeting.id ? null : current);
-              try { await indexedDBService.deleteMeeting(meeting.id); }
-              catch { summary.cacheFailure = true; }
             }
             summary.count++;
           } catch (cause) {
@@ -110,7 +105,7 @@ export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onRet
         {!result && action === "delete" && <label className="flex items-start gap-2 text-sm">
           <Checkbox className="mt-0.5" checked={deleteFiles} disabled={!!progress}
             onCheckedChange={checked => setDeleteFiles(checked === true)} />
-          <span>Also remove verified recording files. Leave this unchecked to keep the files on disk.</span>
+          <span>Also remove verified recording files when the meetings are permanently deleted.</span>
         </label>}
         {!result && action === "export" && <div className="space-y-2 text-sm">
           <label htmlFor="archive-bulk-format">File format</label>
@@ -121,14 +116,12 @@ export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onRet
         </div>}
         {progress && <p role="status" className="text-sm text-muted-foreground">{progress}</p>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-        {action === "delete" && recordingBusy && !result && <p role="status" className="text-sm text-muted-foreground">Finish the recording before deleting meetings.</p>}
+        {action === "delete" && recordingBusy && !result && <p role="status" className="text-sm text-muted-foreground">Finish the recording before moving meetings to Trash.</p>}
         {result && <div className="space-y-2 text-sm">
-          <p role="status">{result.count} of {meetings.length} {action === "delete" ? "deleted" : action === "tag" ? "tagged" : "exported"}.{result.stopped ? " Export stopped." : ""}</p>
+          <p role="status">{result.count} of {meetings.length} {action === "delete" ? "moved to Trash" : action === "tag" ? "tagged" : "exported"}.{result.stopped ? " Export stopped." : ""}</p>
           {result.failures.length > 0 && <ul aria-label="Meetings that could not be processed" className="list-disc space-y-1 pl-5 text-destructive">
             {result.failures.map((failure, index) => <li key={index}>{failure.title || "Untitled meeting"}. {failure.message}</li>)}
           </ul>}
-          {result.cleanup && <Button type="button" variant="outline" onClick={() => { onClose(); window.setTimeout(openStorageDialog, 0); }}>Review pending file cleanup</Button>}
-          {result.cacheFailure && <p>Some cached recovery copies could not be removed.</p>}
         </div>}
         <DialogFooter>
           {result ? <Button type="button" onClick={onClose}>Done</Button> : <>

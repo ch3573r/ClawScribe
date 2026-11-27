@@ -151,7 +151,7 @@ async fn read_snapshot<T: Send + 'static>(
                 context.setup(sqlx::query_as("SELECT b.rowid,d.rowid AS meeting_rowid,1 AS speaker_null,1 AS words_null,NULL AS audio_start_time,NULL AS audio_end_time,NULL AS duration,1 AS document,b.page,b.paragraph FROM knowledge_document_blocks b JOIN knowledge_documents d ON d.id=b.document_id JOIN knowledge_sources s ON s.id=d.source_id WHERE b.id=? AND s.id=? AND s.revision=? AND s.generation=? AND (?='' OR EXISTS(SELECT 1 FROM knowledge_document_attachments a WHERE a.document_id=d.id AND a.meeting_id=?))")
                     .bind(&selected.transcript_id).bind(&selected.source_id).bind(selected.revision).bind(selected.generation).bind(&selected.meeting_id).bind(&selected.meeting_id).fetch_optional(&mut *tx)).await?.ok_or(KnowledgeError::Superseded)?
             } else {
-                context.setup(sqlx::query_as("SELECT t.rowid,m.rowid AS meeting_rowid,t.speaker IS NULL AS speaker_null,t.word_timestamps_json IS NULL AS words_null,t.audio_start_time,t.audio_end_time,t.duration FROM transcripts t JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN meetings m ON m.id=t.meeting_id WHERE t.id=? AND t.meeting_id=? AND s.id=? AND s.revision=? AND s.generation=?")
+                context.setup(sqlx::query_as("SELECT t.rowid,m.rowid AS meeting_rowid,t.speaker IS NULL AS speaker_null,t.word_timestamps_json IS NULL AS words_null,t.audio_start_time,t.audio_end_time,t.duration FROM transcripts t JOIN knowledge_sources s ON s.meeting_id=t.meeting_id JOIN active_meetings m ON m.id=t.meeting_id WHERE t.id=? AND t.meeting_id=? AND s.id=? AND s.revision=? AND s.generation=?")
                     .bind(&selected.transcript_id).bind(&selected.meeting_id).bind(&selected.source_id).bind(selected.revision).bind(selected.generation).fetch_optional(&mut *tx)).await?.ok_or(KnowledgeError::Superseded)?
             };
             let result={
@@ -854,7 +854,14 @@ pub fn evidence(
     })
 }
 pub async fn next_job(pool: &SqlitePool) -> Result<Option<SourceJob>, KnowledgeError> {
-    Ok(sqlx::query_as("SELECT j.source_id,COALESCE(s.meeting_id,'') AS meeting_id,j.revision,j.generation FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id AND s.revision=j.revision AND s.generation=j.generation WHERE (s.kind='meeting' OR (s.kind='document' AND EXISTS(SELECT 1 FROM knowledge_documents d WHERE d.source_id=s.id))) AND j.attempts<3 AND j.paused=0 ORDER BY j.attempts,j.source_id LIMIT 1").fetch_optional(pool).await?)
+    Ok(sqlx::query_as("SELECT j.source_id,COALESCE(s.meeting_id,'') AS meeting_id,j.revision,j.generation
+        FROM knowledge_index_jobs j JOIN knowledge_sources s ON s.id=j.source_id AND s.revision=j.revision AND s.generation=j.generation
+        WHERE (EXISTS(SELECT 1 FROM active_meetings m WHERE m.id=s.meeting_id)
+               OR (s.kind='document' AND EXISTS(SELECT 1 FROM knowledge_documents d
+                   JOIN knowledge_document_attachments a ON a.document_id=d.id
+                   JOIN active_meetings m ON m.id=a.meeting_id WHERE d.source_id=s.id)))
+          AND j.attempts<3 AND j.paused=0
+        ORDER BY j.attempts,j.source_id LIMIT 1").fetch_optional(pool).await?)
 }
 pub async fn current(pool: &SqlitePool, job: &SourceJob) -> Result<bool, KnowledgeError> {
     Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM knowledge_sources s JOIN knowledge_index_jobs j ON j.source_id=s.id WHERE s.id=? AND s.revision=? AND s.generation=? AND j.generation=s.generation AND j.paused=0").bind(&job.source_id).bind(job.revision).bind(job.generation).fetch_one(pool).await? == 1)

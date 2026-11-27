@@ -69,6 +69,47 @@ test('library search debounces literal Unicode, sends the current scope and skip
   assert.equal(calls.length, 1);
 });
 
+test('archive load more preserves other sources and discards pages from an older query', async t => {
+  const time = clock();
+  const hooks = createHookHarness();
+  t.after(time.restore);
+  t.after(hooks.unmount);
+  const next = [null, '17', null];
+  let finishPage;
+  const { useLibrarySearch } = loadTsModule('src/hooks/useLibrarySearch.ts', {
+    react: hooks.react,
+    '@tauri-apps/api/core': { invoke: async (_command, args) => {
+      if (args.savedCursor) {
+        assert.deepEqual(Array.from(args.savedCursor), next);
+        return new Promise(resolve => { finishPage = resolve; });
+      }
+      return {
+        titles: [{ id: args.query }], passages: [], saved: [{ text: args.query }],
+        limited: false, saved_next: next,
+      };
+    } },
+  });
+  const render = text => hooks.render(() => useLibrarySearch(text, true));
+  render('first');
+  await time.fire();
+  const load = render('first').loadMore();
+  assert.equal(render('first').loadingMore, true);
+  finishPage({ titles: [], passages: [], saved: [{ text: 'older' }], limited: false, saved_next: null });
+  await load;
+  assert.deepEqual(Array.from(render('first').results.saved, hit => hit.text), ['first', 'older']);
+  assert.equal(render('first').results.titles[0].id, 'first');
+
+  render('second');
+  await time.fire();
+  const superseded = render('second').loadMore();
+  render('third');
+  await time.fire();
+  finishPage({ saved: [{ text: 'stale' }], limited: false, saved_next: null });
+  await superseded;
+  assert.deepEqual(Array.from(render('third').results.saved, hit => hit.text), ['third']);
+  assert.equal(render('third').loadingMore, false);
+});
+
 const deferredRun = () => {
   const calls = [];
   return { calls, run: query => new Promise((resolve, reject) => calls.push({ query, resolve, reject })) };

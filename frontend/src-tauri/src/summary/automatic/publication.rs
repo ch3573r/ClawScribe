@@ -65,7 +65,7 @@ pub(crate) async fn remember(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO retranscription_notes_retry (meeting_id, profile, publication)
-        SELECT id, ?, ? FROM meetings WHERE id = ? AND recording_source IS NOT 'import'
+        SELECT id, ?, ? FROM active_meetings WHERE id = ? AND recording_source IS NOT 'import'
         ON CONFLICT(meeting_id) DO UPDATE SET
         profile = excluded.profile, publication = excluded.publication",
     )

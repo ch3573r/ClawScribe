@@ -611,10 +611,13 @@ impl SummaryProcessesRepository {
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<Option<SummaryProcess>, sqlx::Error> {
-        sqlx::query_as::<_, SummaryProcess>("SELECT * FROM summary_processes WHERE meeting_id = ?")
-            .bind(meeting_id)
-            .fetch_optional(pool)
-            .await
+        sqlx::query_as::<_, SummaryProcess>(
+            "SELECT * FROM summary_processes WHERE meeting_id=?1 AND NOT EXISTS(
+                 SELECT 1 FROM meetings WHERE id=?1 AND deleted_at IS NOT NULL)",
+        )
+        .bind(meeting_id)
+        .fetch_optional(pool)
+        .await
     }
 
     pub async fn update_meeting_summary(
@@ -624,7 +627,7 @@ impl SummaryProcessesRepository {
     ) -> Result<bool, sqlx::Error> {
         let mut transaction = pool.begin().await?;
 
-        let meeting_exists: bool = sqlx::query("SELECT 1 FROM meetings WHERE id = ?")
+        let meeting_exists: bool = sqlx::query("SELECT 1 FROM active_meetings WHERE id = ?")
             .bind(meeting_id)
             .fetch_optional(&mut *transaction)
             .await?
@@ -735,7 +738,7 @@ impl SummaryProcessesRepository {
                     ))
                 ) THEN json_extract(p.metadata, '$.partial_notes') END END AS current_partial_notes
             FROM summary_processes p LEFT JOIN meetings m ON m.id = p.meeting_id
-            WHERE p.meeting_id = ? AND (m.id IS NOT NULL OR EXISTS (
+            WHERE p.meeting_id = ? AND m.deleted_at IS NULL AND (m.id IS NOT NULL OR EXISTS (
                 SELECT 1 FROM transcript_chunks t WHERE t.meeting_id = p.meeting_id
             ))
         "#).bind(meeting_id).fetch_optional(pool).await?;
@@ -812,8 +815,8 @@ impl SummaryProcessesRepository {
             SELECT id, ?1, ?2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
                 CASE WHEN ?2 IS NULL THEN CURRENT_TIMESTAMP END,
                 CASE WHEN ?2 IS NOT NULL THEN CURRENT_TIMESTAMP END, ?3,
-                COALESCE((SELECT profile || ':' FROM retranscription_notes_retry WHERE meeting_id = meetings.id), '') || ?4
-            FROM meetings WHERE id = ?5
+                COALESCE((SELECT profile || ':' FROM retranscription_notes_retry WHERE meeting_id = m.id), '') || ?4
+            FROM active_meetings m WHERE id = ?5
             ON CONFLICT(meeting_id) DO UPDATE SET status = excluded.status, error = excluded.error,
                 start_time = excluded.start_time, updated_at = excluded.updated_at, end_time = excluded.end_time,
                 automatic_origin = excluded.automatic_origin, automatic_request_fingerprint = excluded.automatic_request_fingerprint,
@@ -891,7 +894,7 @@ impl SummaryProcessesRepository {
         // reason — is preserved by the WHERE guard on the DO UPDATE.
         sqlx::query(r#"
             INSERT INTO summary_processes (meeting_id, status, error, created_at, updated_at, end_time, automatic_origin)
-            SELECT id, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ? FROM meetings WHERE id = ?
+            SELECT id, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ? FROM active_meetings WHERE id = ?
             ON CONFLICT(meeting_id) DO UPDATE SET
                 status = excluded.status, error = excluded.error,
                 updated_at = excluded.updated_at, end_time = excluded.end_time,

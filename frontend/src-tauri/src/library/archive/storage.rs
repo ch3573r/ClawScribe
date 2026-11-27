@@ -53,7 +53,7 @@ const FOLDERS_QUERY: &str = "SELECT m.id, m.folder_path,
      COALESCE(o.capture_incomplete, 0) OR COALESCE(o.recording_files_incomplete, 0) OR
      COALESCE(o.recovery_files_elsewhere, 0) OR
      EXISTS(SELECT 1 FROM transcript_file_sync f WHERE f.meeting_id = m.id)) AS needs_recovery
-    FROM meetings m LEFT JOIN recording_outcomes o ON m.id = o.meeting_id
+    FROM active_meetings m LEFT JOIN recording_outcomes o ON m.id = o.meeting_id
     WHERE m.folder_path IS NOT NULL AND TRIM(m.folder_path) <> ''";
 
 async fn folders(pool: &SqlitePool) -> Result<Vec<ArchiveFolder>, String> {
@@ -831,7 +831,7 @@ async fn read_storage_folders(
     before: Option<i64>,
 ) -> Result<(Vec<StorageFolder>, Option<String>), String> {
     let mut folders: Vec<StorageFolder> = sqlx::query_as(
-        "SELECT rowid AS cursor, SUBSTR(title, 1, 256) AS title, folder_path FROM meetings
+        "SELECT rowid AS cursor, SUBSTR(title, 1, 256) AS title, folder_path FROM active_meetings
          WHERE rowid < ? ORDER BY rowid DESC LIMIT ?",
     )
     .bind(before.unwrap_or(i64::MAX))

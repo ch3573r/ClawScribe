@@ -1034,46 +1034,22 @@ pub async fn api_delete_meeting<R: Runtime>(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     delete_files: bool,
-) -> Result<serde_json::Value, String> {
+) -> Result<(), String> {
     let _work = crate::updates::admit_work()?;
-    let recording_job = claim_meeting_deletion_job(delete_files)?.map(std::sync::Arc::new);
-    log_info!("Deleting local meeting");
-
-    let pool = state.db_manager.pool();
-    let deleted = MeetingsRepository::delete_from_library(pool, &meeting_id, delete_files)
-        .await
-        .map_err(|_| "Could not delete the meeting from the library.")?
-        .ok_or("The meeting was not found or was already deleted.")?;
-    let _ = app.emit("library-meeting-deleted", &meeting_id);
+    {
+        let _export = crate::exports::commands::EXPORT_LOCK
+            .try_lock()
+            .map_err(|_| "Finish the active export before moving meetings to Trash.")?;
+        if !MeetingsRepository::move_to_trash(state.db_manager.pool(), &meeting_id, delete_files)
+            .await
+            .map_err(|_| "Could not move the meeting to Trash.")?
+        {
+            return Err("The meeting was not found or is already in Trash.".into());
+        }
+    }
+    let _ = app.emit("library-meeting-trashed", &meeting_id);
     crate::audio::import::queue::forget_deleted_meeting(&app, &meeting_id).await;
-
-    let locations = crate::library::file_cleanup::CleanupLocations::for_app(&app).await;
-    let mut cleanup_pending = false;
-    for id in deleted.cleanup_ids {
-        let result =
-            crate::library::file_cleanup::attempt(pool, &locations, id, recording_job.clone())
-                .await;
-        cleanup_pending |= !matches!(result, Ok(None));
-    }
-    if cleanup_pending {
-        log_warn!("Some deleted meeting files are pending cleanup");
-    }
-    Ok(serde_json::json!({
-        "status": "success",
-        "folder_path": deleted.folder,
-        "cleanup_pending": cleanup_pending
-    }))
-}
-
-fn claim_meeting_deletion_job(
-    delete_files: bool,
-) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, String> {
-    if !delete_files {
-        return Ok(None);
-    }
-    crate::audio::inference::claim_job().map(Some).map_err(|_| {
-        "Recording files can't be deleted while a recording or transcription runs. Uncheck 'Also delete the recording files' or try again when it finishes.".into()
-    })
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1081,26 +1057,21 @@ mod meeting_deletion_tests {
     use super::*;
 
     #[tokio::test]
-    async fn database_only_deletion_is_allowed_during_inference() {
+    async fn moving_to_trash_preserves_data_during_inference() {
         let _test_lock = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let _busy = crate::audio::inference::claim_job().unwrap();
-        let error = claim_meeting_deletion_job(true).unwrap_err();
-        assert!(error.contains("Uncheck 'Also delete the recording files'"));
-        assert!(MeetingsRepository::get_meeting(&pool, "review-test")
-            .await
-            .unwrap()
-            .is_some());
-        let _job = claim_meeting_deletion_job(false).unwrap();
-        assert!(MeetingsRepository::delete_meeting(&pool, "review-test")
-            .await
-            .unwrap());
+        assert!(
+            MeetingsRepository::move_to_trash(&pool, "review-test", true)
+                .await
+                .unwrap()
+        );
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE id = 'review-test'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(count, 1);
     }
 }
 
@@ -1778,7 +1749,7 @@ pub async fn open_meeting_folder<R: Runtime>(
 
     // Get meeting with folder_path
     let meeting: Option<MeetingModel> = sqlx::query_as(
-        "SELECT id, title, created_at, updated_at, folder_path FROM meetings WHERE id = ?",
+        "SELECT id, title, created_at, updated_at, folder_path FROM active_meetings WHERE id = ?",
     )
     .bind(&meeting_id)
     .fetch_optional(pool)
