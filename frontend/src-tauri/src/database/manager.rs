@@ -7,7 +7,8 @@ use tauri::Manager;
 
 pub(super) const DATABASE_FILENAME: &str = "meeting_minutes.sqlite";
 const SNAPSHOT_NAME: &str = r"^meeting_minutes-\d+-\d{8}T\d{15}\.sqlite$";
-const STAGED_SNAPSHOT_PREFIX: &str = ".meeting_minutes-staged-";
+const STAGED_SNAPSHOT_NAME: &str =
+    r"^\.meeting_minutes-staged-[a-zA-Z0-9]+\.sqlite(?:-journal|-wal|-shm)?$";
 
 pub(super) fn database_exists(root: &Path) -> Result<bool> {
     let inspect = |name: &str| -> std::io::Result<bool> {
@@ -95,6 +96,9 @@ impl DatabaseManager {
             .await?;
 
         let migrator = sqlx::migrate!("./migrations");
+        if remove_abandoned_snapshot_staging(Path::new(tauri_db_path)).is_err() {
+            log::warn!("Could not remove abandoned pre-migration database staging files");
+        }
         if backup_before_migrations(&pool, Path::new(tauri_db_path), &migrator)
             .await
             .is_err()
@@ -124,7 +128,7 @@ impl DatabaseManager {
         if migrate_credentials {
             crate::database::repositories::setting::migrate_provider_credentials(&pool).await;
         }
-        // SQLite owns WAL recovery/checkpointing. Never delete WAL/SHM ourselves.
+        // SQLite owns WAL recovery and checkpointing for the live database.
         sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&pool)
             .await?;
@@ -372,19 +376,23 @@ async fn backup_before_migrations(
     let old_version = applied.iter().max().copied().unwrap_or(0);
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%9f");
     let target = root.join(format!("meeting_minutes-{old_version}-{stamp}.sqlite"));
-    // Publish only after private tables are scrubbed. A staged file left by a
-    // crash is also recognized by the startup and profile-deletion scrubber.
-    let staged = tempfile::Builder::new()
-        .prefix(STAGED_SNAPSHOT_PREFIX)
-        .suffix(".sqlite")
-        .tempfile_in(&root)?
-        .into_temp_path();
-    sqlx::query("VACUUM INTO ?")
-        .bind(staged.to_string_lossy().as_ref())
+    // Reserve a new rollback path. Once SQLite finishes the copy, a privacy
+    // scrub failure must leave the backup available to recover the library.
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)?;
+    if let Err(error) = sqlx::query("VACUUM INTO ?")
+        .bind(target.to_string_lossy().as_ref())
         .execute(pool)
-        .await?;
-    scrub_snapshot_profiles(&staged).await?;
-    fs::rename(&staged, &target)?;
+        .await
+    {
+        let _ = fs::remove_file(&target);
+        return Err(error);
+    }
+    if scrub_snapshot_profiles(&target).await.is_err() {
+        log::warn!("Could not scrub saved voices from the new pre-migration database backup; keeping the rollback copy");
+    }
     // Only prune our snapshots, after publishing a successful replacement.
     let pattern = regex::Regex::new(SNAPSHOT_NAME).expect("snapshot filename pattern");
     let mut backups = fs::read_dir(&root)
@@ -416,6 +424,35 @@ fn verify_snapshot_directory(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn remove_abandoned_snapshot_staging(database: &Path) -> std::io::Result<()> {
+    let root = database.parent().unwrap_or(Path::new(".")).join("backups");
+    match verify_snapshot_directory(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    // Only exact staging names from earlier builds and their SQLite sidecars qualify.
+    let pattern = regex::Regex::new(STAGED_SNAPSHOT_NAME).expect("staging filename pattern");
+    let mut result = Ok(());
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if pattern.is_match(&entry.file_name().to_string_lossy()) {
+            let path = entry.path();
+            let outcome = fs::symlink_metadata(&path).and_then(|metadata| {
+                if metadata.is_file() && !crate::local_path::is_link(&metadata) {
+                    fs::remove_file(&path)
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = outcome {
+                result = Err(error);
+            }
+        }
+    }
+    result
+}
+
 async fn scrub_speaker_profile_snapshots(database: &Path) -> Result<()> {
     static SCRUB: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = SCRUB.lock().await;
@@ -429,15 +466,7 @@ async fn scrub_speaker_profile_snapshots(database: &Path) -> Result<()> {
     let mut result = Ok(());
     for entry in fs::read_dir(&root)? {
         let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let staged = name
-            .strip_prefix(STAGED_SNAPSHOT_PREFIX)
-            .and_then(|name| name.strip_suffix(".sqlite"))
-            .is_some_and(|name| {
-                !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_alphanumeric())
-            });
-        if published.is_match(&name) || staged {
+        if published.is_match(&entry.file_name().to_string_lossy()) {
             if let Err(error) = scrub_snapshot_profiles(&entry.path()).await {
                 result = Err(error);
             }
@@ -462,44 +491,72 @@ async fn scrub_snapshot_profiles(path: &Path) -> Result<()> {
             }
         }
     }
-    let mut connection = SqliteConnectOptions::new()
+    let options = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(false)
-        .journal_mode(SqliteJournalMode::Delete)
-        .busy_timeout(Duration::from_secs(5))
-        .connect()
-        .await?;
+        .busy_timeout(Duration::from_secs(5));
+    let mut reader = options.clone().read_only(true).connect().await?;
     // Backups predating speaker profiles have neither table.
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('speaker_profile_suggestions', 'speaker_profiles')",
-    ).fetch_all(&mut connection).await?;
-    if tables.is_empty() {
-        return connection.close().await;
-    }
-    sqlx::query("PRAGMA secure_delete = ON")
-        .execute(&mut connection)
-        .await?;
-    let mut tx = connection.begin().await?;
-    let mut deleted = 0;
-    for (table, sql) in [
+    ).fetch_all(&mut reader).await?;
+    let mut deletes = Vec::new();
+    for (table, has_rows, delete) in [
         (
             "speaker_profile_suggestions",
+            "SELECT EXISTS(SELECT 1 FROM speaker_profile_suggestions)",
             "DELETE FROM speaker_profile_suggestions",
         ),
-        ("speaker_profiles", "DELETE FROM speaker_profiles"),
+        (
+            "speaker_profiles",
+            "SELECT EXISTS(SELECT 1 FROM speaker_profiles)",
+            "DELETE FROM speaker_profiles",
+        ),
     ] {
-        if tables.iter().any(|name| name == table) {
-            deleted += sqlx::query(sql).execute(&mut *tx).await?.rows_affected();
+        if tables.iter().any(|name| name == table)
+            && sqlx::query_scalar::<_, bool>(has_rows)
+                .fetch_one(&mut reader)
+                .await?
+        {
+            deletes.push(delete);
         }
     }
-    tx.commit().await?;
-    let free_pages: i64 = sqlx::query_scalar("PRAGMA freelist_count")
-        .fetch_one(&mut connection)
-        .await?;
-    if deleted > 0 || free_pages > 0 {
-        sqlx::query("VACUUM").execute(&mut connection).await?;
+    reader.close().await?;
+    if deletes.is_empty() {
+        return Ok(());
     }
-    connection.close().await
+
+    let file = fs::OpenOptions::new().write(true).open(path)?;
+    let original_mtime = file.metadata()?.modified()?;
+    let scrub = async {
+        let mut connection = options
+            .journal_mode(SqliteJournalMode::Delete)
+            .pragma("secure_delete", "ON")
+            .connect()
+            .await?;
+        let deletion = async {
+            let mut tx = connection.begin().await?;
+            for statement in deletes {
+                sqlx::query(statement).execute(&mut *tx).await?;
+            }
+            tx.commit().await
+        }
+        .await;
+        deletion.and(connection.close().await)
+    }
+    .await;
+    // Scrubbing must not extend the lifetime of a copy, including after a
+    // rollback or a journal-mode change.
+    let restored = file.set_times(fs::FileTimes::new().set_modified(original_mtime));
+    scrub.and(restored.map_err(sqlx::Error::Io))
+}
+
+#[cfg(test)]
+fn stamp_snapshot(path: &Path, modified: std::time::SystemTime) -> std::io::Result<()> {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_times(fs::FileTimes::new().set_modified(modified))
 }
 
 fn prune_expired_snapshots(database: &Path) -> std::io::Result<()> {
@@ -653,6 +710,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scrubbing_a_clean_snapshot_preserves_its_bytes_and_expiration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DATABASE_FILENAME);
+        let backups = dir.path().join("backups");
+        fs::create_dir(&backups).unwrap();
+        let old = backups.join("meeting_minutes-1-20261101T000000000000000.sqlite");
+        let mut connection = SqliteConnectOptions::new()
+            .filename(&old)
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE speaker_profiles (embedding BLOB)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE speaker_profile_suggestions (speaker TEXT)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        let expired = std::time::SystemTime::now() - Duration::from_secs(20 * 24 * 60 * 60);
+        stamp_snapshot(&old, expired).unwrap();
+        let bytes = fs::read(&old).unwrap();
+        let modified = fs::metadata(&old).unwrap().modified().unwrap();
+
+        scrub_speaker_profile_snapshots(&path).await.unwrap();
+
+        assert_eq!(fs::read(&old).unwrap(), bytes);
+        assert_eq!(fs::metadata(&old).unwrap().modified().unwrap(), modified);
+        prune_expired_snapshots(&path).unwrap();
+        assert!(!old.exists());
+    }
+
+    #[tokio::test]
+    async fn a_failed_voice_scrub_keeps_the_published_rollback_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DATABASE_FILENAME);
+        let pool = SqlitePool::connect_with(connection_options(&path).create_if_missing(true))
+            .await
+            .unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+        migrator.run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO speaker_profiles VALUES ('alex', 'model', 'Alex', X'00')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fail_scrub BEFORE DELETE ON speaker_profiles BEGIN SELECT RAISE(ABORT, 'synthetic scrub refusal'); END")
+            .execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)")
+            .execute(&pool).await.unwrap();
+
+        backup_before_migrations(&pool, &path, &migrator)
+            .await
+            .unwrap();
+
+        let backups = dir.path().join("backups");
+        let snapshot = fs::read_dir(backups).unwrap().next().unwrap().unwrap();
+        assert!(regex::Regex::new(SNAPSHOT_NAME)
+            .unwrap()
+            .is_match(&snapshot.file_name().to_string_lossy()));
+        let mut copy = SqliteConnectOptions::new()
+            .filename(snapshot.path())
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+                .fetch_one(&mut copy)
+                .await
+                .unwrap(),
+            "ok"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM speaker_profiles")
+                .fetch_one(&mut copy)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_clears_abandoned_staging_without_blocking_profile_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DATABASE_FILENAME);
+        let legacy = dir.path().join("missing.db");
+        let backups = dir.path().join("backups");
+        fs::create_dir(&backups).unwrap();
+        let staged_files = [
+            backups.join(".meeting_minutes-staged-Ab12.sqlite"),
+            backups.join(".meeting_minutes-staged-Ab12.sqlite-journal"),
+            backups.join(".meeting_minutes-staged-orphan.sqlite-wal"),
+            backups.join(".meeting_minutes-staged-orphan.sqlite-shm"),
+        ];
+        let unrelated = backups.join(".meeting_minutes-staged-user-created.sqlite");
+        for path in staged_files.iter().chain(std::iter::once(&unrelated)) {
+            fs::write(path, b"incomplete SQLite file").unwrap();
+        }
+        // Delete/disable only scrubs published snapshots, even before startup cleanup.
+        scrub_speaker_profile_snapshots(&path).await.unwrap();
+
+        let manager =
+            DatabaseManager::new_isolated(path.to_str().unwrap(), legacy.to_str().unwrap())
+                .await
+                .unwrap();
+        assert!(staged_files.iter().all(|path| !path.exists()));
+        assert!(unrelated.is_file());
+        assert!(manager.finish_speaker_profile_deletion().await);
+        manager.pool.close().await;
+    }
+
+    #[tokio::test]
     async fn migration_snapshots_strip_voice_records_and_old_copies_can_be_scrubbed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(DATABASE_FILENAME);
@@ -703,7 +874,17 @@ mod tests {
                 .windows(embedding.len())
                 .any(|bytes| bytes == embedding));
         }
+        stamp_snapshot(
+            &old,
+            std::time::SystemTime::now() - Duration::from_secs(24 * 60 * 60),
+        )
+        .unwrap();
+        let original_mtime = fs::metadata(&old).unwrap().modified().unwrap();
         scrub_speaker_profile_snapshots(&path).await.unwrap();
+        assert_eq!(
+            fs::metadata(&old).unwrap().modified().unwrap(),
+            original_mtime
+        );
 
         for snapshot in [&published, &old] {
             assert!(!fs::read(snapshot)
