@@ -26,7 +26,7 @@ static LIVE_MAX_SEGMENT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::At
 const LIVE_VAD_REDEMPTION_MS: u32 = 400;
 const TRANSCRIPTION_QUEUE_WARNING_THRESHOLD: u32 = 3;
 const MICROPHONE_STREAM_WARNING: &str =
-    "Microphone samples stopped arriving. Check the microphone connection and recording devices.";
+    "The selected microphone is not sending audio. Check the microphone connection and recording devices.";
 
 #[derive(Default)]
 struct MicrophoneStreamWatch {
@@ -39,7 +39,7 @@ impl MicrophoneStreamWatch {
     fn update(&mut self, now: std::time::Instant, active: bool, received: bool) -> Option<bool> {
         if !active {
             self.last_samples = None;
-        } else if received {
+        } else if received || self.last_samples.is_none() {
             self.last_samples = Some(now);
         }
         let stalled = self.last_samples.is_some_and(|last| {
@@ -1231,7 +1231,7 @@ impl AudioPipeline {
 
             if let Some(stalled) = microphone_stream.update(
                 std::time::Instant::now(),
-                self.state.is_active(),
+                self.state.is_active() && self.state.get_microphone_device().is_some(),
                 microphone_samples,
             ) {
                 if stalled {
@@ -1699,8 +1699,10 @@ mod system_audio_silence_tests {
         let start = std::time::Instant::now();
         let at = |seconds| start + Duration::from_secs(seconds);
         assert_eq!(watch.update(at(0), true, false), None);
-        assert_eq!(watch.update(at(30), true, false), None); // no mic has supplied samples
-        assert_eq!(watch.update(at(31), true, true), None);
+        assert_eq!(watch.update(at(14), true, false), None);
+        assert_eq!(watch.update(at(15), true, false), Some(true));
+        assert_eq!(watch.update(at(30), true, false), None);
+        assert_eq!(watch.update(at(31), true, true), Some(false));
         assert_eq!(watch.update(at(45), true, false), None);
         assert_eq!(watch.update(at(46), true, false), Some(true));
         assert_eq!(watch.update(at(47), true, false), None);
@@ -1708,6 +1710,15 @@ mod system_audio_silence_tests {
         assert_eq!(watch.update(at(63), true, false), Some(true));
         assert_eq!(watch.update(at(64), false, false), Some(false));
         assert_eq!(watch.update(at(600), true, false), None);
+        assert_eq!(watch.update(at(615), true, false), Some(true));
+    }
+
+    #[test]
+    fn a_system_only_recording_does_not_start_the_microphone_timer() {
+        let mut watch = super::MicrophoneStreamWatch::default();
+        let start = std::time::Instant::now();
+        assert_eq!(watch.update(start, false, false), None);
+        assert_eq!(watch.update(start + Duration::from_secs(30), false, false), None);
     }
 
     #[test]
