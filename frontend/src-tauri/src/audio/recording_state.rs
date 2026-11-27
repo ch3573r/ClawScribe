@@ -409,28 +409,38 @@ impl RecordingState {
         if self.is_paused() || !self.is_recording() {
             return Ok(());
         }
-        let sender = self.audio_sender.lock().unwrap().clone();
-        if let Some(sender) = sender {
-            match sender.try_send(chunk) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(chunk)) => {
-                    self.record_sample_loss(chunk.data.len());
-                    return Ok(());
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    self.mark_capture_incomplete();
-                    self.stop_recording();
-                    self.report_warning("The audio processor stopped unexpectedly. Press Stop to save the available recording.");
-                    return Err(anyhow::anyhow!("Audio capture queue closed"));
-                }
+        let sender = self
+            .capture_sender()
+            .ok_or_else(|| anyhow::anyhow!("Audio pipeline not ready"))?;
+        self.send_captured_chunk(&sender, chunk)
+    }
+
+    pub(super) fn capture_sender(&self) -> Option<mpsc::Sender<AudioChunk>> {
+        self.audio_sender.lock().unwrap().clone()
+    }
+
+    pub(super) fn send_captured_chunk(
+        &self,
+        sender: &mpsc::Sender<AudioChunk>,
+        chunk: AudioChunk,
+    ) -> Result<()> {
+        match sender.try_send(chunk) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(chunk)) => {
+                self.record_sample_loss(chunk.data.len());
+                return Ok(());
             }
-            let mut stats = self.stats.lock().unwrap();
-            stats.chunks_processed += 1;
-            stats.last_activity = Some(Instant::now());
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Audio pipeline not ready"))
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.mark_capture_incomplete();
+                self.stop_recording();
+                self.report_warning("The audio processor stopped unexpectedly. Press Stop to save the available recording.");
+                return Err(anyhow::anyhow!("Audio capture queue closed"));
+            }
         }
+        let mut stats = self.stats.lock().unwrap();
+        stats.chunks_processed += 1;
+        stats.last_activity = Some(Instant::now());
+        Ok(())
     }
 
     // Error handling

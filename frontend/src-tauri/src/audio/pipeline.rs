@@ -563,13 +563,27 @@ impl AudioCapture {
         }
     }
 
-    /// Process audio data directly from callback
+    #[cfg(any(test, target_os = "macos"))]
     pub fn process_audio_data(&self, data: &[f32]) {
         let resume_revision = self.state.resume_revision();
         if !self.state.is_active() {
             return;
         }
+        self.process_captured_data(data, resume_revision, |chunk| {
+            if self.state.resume_revision() != resume_revision {
+                return Ok(());
+            }
+            self.state.send_audio_chunk(chunk)
+        });
+    }
 
+    /// Process a packet admitted by the capture callback, even during Stop.
+    pub(super) fn process_captured_data(
+        &self,
+        data: &[f32],
+        resume_revision: u64,
+        send: impl FnOnce(AudioChunk) -> Result<()>,
+    ) {
         // Convert to mono if needed
         let mut mono_data = if self.channels > 1 {
             audio_to_mono(data, self.channels)
@@ -819,10 +833,7 @@ impl AudioCapture {
         // Individual raw streams go only to the transcription pipeline below
 
         // Send to processing pipeline for transcription
-        if self.state.resume_revision() != resume_revision {
-            return;
-        }
-        if let Err(e) = self.state.send_audio_chunk(audio_chunk) {
+        if let Err(e) = send(audio_chunk) {
             // Check if this is the "pipeline not ready" error
             if e.to_string().contains("Audio pipeline not ready") {
                 // This is expected during initialization, just log it as debug

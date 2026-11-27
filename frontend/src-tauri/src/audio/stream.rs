@@ -2,7 +2,13 @@ use anyhow::Result;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, Stream, SupportedStreamConfig};
 use log::{error, info, warn};
+use ringbuf::{
+    traits::{Consumer, Observer, Producer, Split},
+    HeapCons, HeapProd, HeapRb,
+};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::capture::{get_current_backend, AudioCaptureBackend};
@@ -36,6 +42,119 @@ pub struct AudioStream {
 
 // SAFETY: AudioStream contains StreamBackend which we've marked as Send
 unsafe impl Send for AudioStream {}
+
+const PACKET_POOL_SIZE: usize = 32;
+
+struct CapturePacket<T> {
+    samples: Vec<T>,
+    resume_revision: u64,
+}
+
+#[derive(Default)]
+struct CaptureHandoffStatus {
+    copying: AtomicBool,
+    dropped_samples: AtomicUsize,
+}
+
+struct CaptureInput<T> {
+    ready: HeapProd<CapturePacket<T>>,
+    free: HeapCons<Vec<T>>,
+    status: Arc<CaptureHandoffStatus>,
+    packet_capacity: usize,
+}
+
+struct CaptureOutput<T> {
+    ready: HeapCons<CapturePacket<T>>,
+    free: HeapProd<Vec<T>>,
+    status: Arc<CaptureHandoffStatus>,
+}
+
+fn capture_handoff<T>(
+    packet_capacity: usize,
+    packet_count: usize,
+) -> (CaptureInput<T>, CaptureOutput<T>) {
+    let (ready_tx, ready_rx) = HeapRb::new(packet_count).split();
+    let (mut free_tx, free_rx) = HeapRb::new(packet_count).split();
+    for _ in 0..packet_count {
+        let _ = free_tx.try_push(Vec::with_capacity(packet_capacity));
+    }
+    let status = Arc::new(CaptureHandoffStatus::default());
+    (
+        CaptureInput {
+            ready: ready_tx,
+            free: free_rx,
+            status: status.clone(),
+            packet_capacity,
+        },
+        CaptureOutput {
+            ready: ready_rx,
+            free: free_tx,
+            status,
+        },
+    )
+}
+
+impl<T: Copy> CaptureInput<T> {
+    fn copy_samples(&mut self, samples: &[T], resume_revision: u64) {
+        let mut remaining = samples;
+        while !remaining.is_empty() {
+            let Some(mut buffer) = self.free.try_pop() else {
+                self.status
+                    .dropped_samples
+                    .fetch_add(remaining.len(), Ordering::Relaxed);
+                return;
+            };
+            let (packet, rest) = remaining.split_at(remaining.len().min(self.packet_capacity));
+            buffer.extend_from_slice(packet);
+            // Every ready packet uses one of the fixed number of free buffers.
+            let _ = self.ready.try_push(CapturePacket {
+                samples: buffer,
+                resume_revision,
+            });
+            remaining = rest;
+        }
+    }
+}
+
+impl<T: cpal::SizedSample + Copy + Send + 'static> CaptureOutput<T> {
+    fn run(
+        mut self,
+        state: Arc<RecordingState>,
+        capture: AudioCapture,
+        sender: mpsc::Sender<super::recording_state::AudioChunk>,
+        sample_rate: u32,
+        channels: u16,
+        to_f32: impl Fn(T) -> f32,
+    ) {
+        let mut converted = Vec::new();
+        loop {
+            let stopped = !state.is_recording() || !self.ready.write_is_held();
+            // A Stop can race a callback already copying its final packet.
+            let can_exit = stopped && !self.status.copying.load(Ordering::SeqCst);
+            let dropped = self.status.dropped_samples.swap(0, Ordering::Relaxed);
+            if dropped > 0 {
+                state.record_sample_loss(
+                    (dropped * 48_000).div_ceil(usize::from(channels) * sample_rate as usize),
+                );
+            }
+            if let Some(mut packet) = self.ready.try_pop() {
+                converted.clear();
+                converted.extend(packet.samples.iter().copied().map(&to_f32));
+                packet.samples.clear();
+                let _ = self.free.try_push(packet.samples);
+                capture.process_captured_data(&converted, packet.resume_revision, |chunk| {
+                    state.send_captured_chunk(&sender, chunk)
+                });
+            } else if can_exit {
+                return;
+            } else {
+                // The real-time thread only writes to the ring; it never wakes
+                // the worker through a lock or performs an OS wait.
+                std::thread::park_timeout(Duration::from_millis(2));
+            }
+        }
+    }
+}
 
 impl AudioStream {
     /// Create a new audio stream for the given device
@@ -141,7 +260,7 @@ impl AudioStream {
         );
 
         // Build the appropriate stream based on sample format
-        let stream = Self::build_stream(&cpal_device, &config, capture.clone())?;
+        let stream = Self::build_stream(&cpal_device, &config, state, capture)?;
 
         // Start the stream
         stream.play()?;
@@ -260,83 +379,64 @@ impl AudioStream {
     fn build_stream(
         device: &Device,
         config: &SupportedStreamConfig,
+        state: Arc<RecordingState>,
         capture: AudioCapture,
     ) -> Result<Stream> {
-        let config_copy = config.clone();
-
-        let stream = match config.sample_format() {
+        match config.sample_format() {
             cpal::SampleFormat::F32 => {
-                let capture_clone = capture.clone();
-                device.build_input_stream(
-                    &config_copy.into(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        capture.process_audio_data(data);
-                    },
-                    move |err| {
-                        capture_clone.handle_stream_error(err);
-                    },
-                    None,
-                )?
+                Self::build_typed_stream(device, config, state, capture, |sample: f32| sample)
             }
             cpal::SampleFormat::I16 => {
-                let capture_clone = capture.clone();
-                device.build_input_stream(
-                    &config_copy.into(),
-                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        let f32_data: Vec<f32> = data
-                            .iter()
-                            .map(|&sample| sample as f32 / i16::MAX as f32)
-                            .collect();
-                        capture.process_audio_data(&f32_data);
-                    },
-                    move |err| {
-                        capture_clone.handle_stream_error(err);
-                    },
-                    None,
-                )?
+                Self::build_typed_stream(device, config, state, capture, |sample: i16| {
+                    sample as f32 / i16::MAX as f32
+                })
             }
             cpal::SampleFormat::I32 => {
-                let capture_clone = capture.clone();
-                device.build_input_stream(
-                    &config_copy.into(),
-                    move |data: &[i32], _: &cpal::InputCallbackInfo| {
-                        let f32_data: Vec<f32> = data
-                            .iter()
-                            .map(|&sample| sample as f32 / i32::MAX as f32)
-                            .collect();
-                        capture.process_audio_data(&f32_data);
-                    },
-                    move |err| {
-                        capture_clone.handle_stream_error(err);
-                    },
-                    None,
-                )?
+                Self::build_typed_stream(device, config, state, capture, |sample: i32| {
+                    sample as f32 / i32::MAX as f32
+                })
             }
             cpal::SampleFormat::I8 => {
-                let capture_clone = capture.clone();
-                device.build_input_stream(
-                    &config_copy.into(),
-                    move |data: &[i8], _: &cpal::InputCallbackInfo| {
-                        let f32_data: Vec<f32> = data
-                            .iter()
-                            .map(|&sample| sample as f32 / i8::MAX as f32)
-                            .collect();
-                        capture.process_audio_data(&f32_data);
-                    },
-                    move |err| {
-                        capture_clone.handle_stream_error(err);
-                    },
-                    None,
-                )?
+                Self::build_typed_stream(device, config, state, capture, |sample: i8| {
+                    sample as f32 / i8::MAX as f32
+                })
             }
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Unsupported sample format: {:?}",
-                    config.sample_format()
-                ));
-            }
-        };
+            format => Err(anyhow::anyhow!("Unsupported sample format: {format:?}")),
+        }
+    }
 
+    fn build_typed_stream<T: cpal::SizedSample + Copy + Send + 'static>(
+        device: &Device,
+        config: &SupportedStreamConfig,
+        state: Arc<RecordingState>,
+        capture: AudioCapture,
+        to_f32: impl Fn(T) -> f32 + Send + 'static,
+    ) -> Result<Stream> {
+        let sender = state
+            .capture_sender()
+            .ok_or_else(|| anyhow::anyhow!("Audio pipeline not ready"))?;
+        let rate = config.sample_rate().0;
+        let channels = config.channels();
+        let packet_capacity = (rate as usize).div_ceil(10) * usize::from(channels);
+        let (mut input, output) = capture_handoff(packet_capacity, PACKET_POOL_SIZE);
+        let callback_state = state.clone();
+        let error_handler = capture.clone();
+        let stream = device.build_input_stream(
+            &config.clone().into(),
+            move |data: &[T], _: &cpal::InputCallbackInfo| {
+                input.status.copying.store(true, Ordering::SeqCst);
+                let revision = callback_state.resume_revision();
+                if callback_state.is_active() && callback_state.resume_revision() == revision {
+                    input.copy_samples(data, revision);
+                }
+                input.status.copying.store(false, Ordering::SeqCst);
+            },
+            move |err| error_handler.handle_stream_error(err),
+            None,
+        )?;
+        std::thread::Builder::new()
+            .name("audio-capture-dsp".into())
+            .spawn(move || output.run(state, capture, sender, rate, channels, to_f32))?;
         Ok(stream)
     }
 
@@ -540,5 +640,43 @@ impl Drop for AudioStreamManager {
         if let Err(e) = self.stop_streams() {
             error!("Error stopping streams during drop: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_handoff_is_bounded_and_drains_accepted_packets_after_stop() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        let (sender, mut receiver) = mpsc::channel(2);
+        state.set_audio_sender(sender.clone());
+        let capture = AudioCapture::new(
+            Arc::new(AudioDevice::new(
+                "Fixture output".into(),
+                super::super::devices::DeviceType::Output,
+            )),
+            state.clone(),
+            48_000,
+            1,
+            DeviceType::System,
+        );
+        let (mut input, output) = capture_handoff(2, 2);
+        input.copy_samples(&[1_i16, 2, 3, 4, 5, 6], 0);
+
+        // The driver can still own its callback when Stop freezes capture.
+        state.stop_recording();
+        output.run(state.clone(), capture, sender, 48_000, 1, f32::from);
+
+        assert_eq!(receiver.try_recv().unwrap().data, [1.0, 2.0]);
+        assert_eq!(receiver.try_recv().unwrap().data, [3.0, 4.0]);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert!(state.capture_incomplete());
+        assert_eq!(state.health.lock().unwrap().details.dropped_samples, 2);
     }
 }
