@@ -103,15 +103,20 @@ export function meetingDraft(meetingId: string) {
   let draft = drafts.get(meetingId);
   if (!draft) {
     draft = createDraftQueue(async (edits, canWrite) => {
-      if (edits.context !== undefined) await setMeetingContext(meetingId, edits.context);
-      if (!canWrite() || (edits.title === undefined && edits.summary === undefined)) return;
-      const current = await invoke<{ status: string }>('api_get_summary', { meetingId });
-      if (!canWrite()) return;
-      if (busy(current?.status)) throw new Error('Summary generation is still running.');
-      if (edits.title !== undefined) await invoke('api_save_meeting_title', { meetingId, title: edits.title });
-      if (canWrite() && edits.summary !== undefined) {
-        const summary = edits.readSummary ? await edits.readSummary() : edits.summary;
-        if (canWrite()) await invoke('api_save_meeting_summary', { meetingId, summary });
+      try {
+        if (edits.context !== undefined) await setMeetingContext(meetingId, edits.context);
+        if (!canWrite() || (edits.title === undefined && edits.summary === undefined)) return;
+        const current = await invoke<{ status: string }>('api_get_summary', { meetingId });
+        if (!canWrite()) return;
+        if (busy(current?.status)) throw new Error('Summary generation is still running.');
+        if (edits.title !== undefined) await invoke('api_save_meeting_title', { meetingId, title: edits.title });
+        if (canWrite() && edits.summary !== undefined) {
+          const summary = edits.readSummary ? await edits.readSummary() : edits.summary;
+          if (canWrite()) await invoke('api_save_meeting_summary', { meetingId, summary });
+        }
+      } catch (error) {
+        if (error !== 'Meeting not found.') throw error;
+        if (canWrite()) discardMeetingDraft(meetingId);
       }
     }, publishPending);
     drafts.set(meetingId, draft);

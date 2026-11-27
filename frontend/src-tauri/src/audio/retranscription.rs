@@ -851,6 +851,10 @@ async fn commit_retranscription(
     previous_provenance: Option<crate::database::transcript_edits::Provenance>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    use crate::database::repositories::meeting::{MeetingsRepository, NOT_FOUND};
+    if !MeetingsRepository::is_active(&mut *tx, meeting_id).await? {
+        return Err(anyhow!(NOT_FOUND));
+    }
 
     let previous = sqlx::query_as::<_, crate::database::models::Transcript>(
         "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, timestamp",
@@ -1441,6 +1445,21 @@ mod tests {
         ));
         assert!(!cancel_retranscription_command(id));
         *status_lock() = previous;
+    }
+
+    #[tokio::test]
+    async fn trash_prevents_publication_of_running_retranscription() {
+        use crate::database::repositories::meeting::MeetingsRepository;
+
+        let (pool, _) = publication_fixture().await;
+        let id = "review-test";
+        let replacement = create_transcript_segments(&[("new transcript".into(), 0.0, 2000.0)]);
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false).await.unwrap());
+        assert_eq!(commit_retranscription(&pool, id, &replacement, &publication(), false, None)
+            .await.unwrap_err().to_string(), "Meeting not found.");
+        let text: String = sqlx::query_scalar("SELECT transcript FROM transcripts WHERE id = 'a'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(text, "Äpfel project");
     }
 
     #[tokio::test]

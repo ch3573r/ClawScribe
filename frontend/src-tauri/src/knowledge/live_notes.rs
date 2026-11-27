@@ -470,7 +470,7 @@ pub(crate) async fn delete_saved_live_answer(
     meeting_id: String,
     answer_id: String,
 ) -> Result<(), String> {
-    sqlx::query("DELETE FROM saved_live_answers WHERE id = ? AND meeting_id = ?")
+    sqlx::query("DELETE FROM saved_live_answers WHERE id = ? AND meeting_id = (SELECT id FROM active_meetings WHERE id = ?)")
         .bind(answer_id)
         .bind(meeting_id)
         .execute(state.db_manager.pool())

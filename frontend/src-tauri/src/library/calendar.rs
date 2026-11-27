@@ -335,6 +335,29 @@ struct WriteFailure {
     transient: bool,
 }
 
+#[cfg(test)]
+#[tokio::test]
+async fn trash_blocks_calendar_writes_in_both_modes() {
+    use crate::database::repositories::meeting::MeetingsRepository;
+
+    let pool = crate::database::transcript_edits::tests::fixture().await;
+    let id = "review-test";
+    assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+        .await
+        .unwrap());
+    for legacy in [true, false] {
+        assert!(matches!(write_once(&pool, id, "null", legacy).await,
+            Err(failure) if failure.message == "Meeting not found." && !failure.transient));
+    }
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT calendar_link FROM meetings WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, None);
+}
+
 /// Only contention and connection trouble can succeed on a second attempt.
 fn transient(error: &sqlx::Error) -> bool {
     match error {
@@ -355,26 +378,40 @@ async fn write_once(
     legacy: bool,
 ) -> Result<(), WriteFailure> {
     let query = if legacy {
-        "UPDATE meetings SET calendar_link = ? WHERE id = ? AND calendar_link IS NULL"
+        "UPDATE meetings SET calendar_link = COALESCE(calendar_link, ?) WHERE id = ? AND deleted_at IS NULL"
     } else {
-        "UPDATE meetings SET calendar_link = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        "UPDATE meetings SET calendar_link = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
     };
+    let save_error = |error| WriteFailure {
+        message: "Could not save the calendar link.".into(),
+        transient: transient(&error),
+    };
+    let mut tx = pool.begin().await.map_err(save_error)?;
     let result = sqlx::query(query)
         .bind(stored)
         .bind(meeting_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
-        .map_err(|error| WriteFailure {
-            message: "Could not save the calendar link.".into(),
-            transient: transient(&error),
-        })?;
-    if result.rows_affected() == 0 && !legacy {
-        return Err(WriteFailure {
-            message: "Meeting not found.".into(),
-            transient: false,
-        });
+        .map_err(save_error)?;
+    if result.rows_affected() == 0 {
+        // A legacy link for a trashed meeting must remain available for restore.
+        // The existing migration still finishes when its meeting is gone.
+        let trash_or_manual = !legacy
+            || sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ? AND deleted_at IS NOT NULL)",
+            )
+            .bind(meeting_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(save_error)?;
+        if trash_or_manual {
+            return Err(WriteFailure {
+                message: "Meeting not found.".into(),
+                transient: false,
+            });
+        }
     }
-    Ok(())
+    tx.commit().await.map_err(save_error)
 }
 
 /// Retries only transient persistence failures, a few times with a short pause.
@@ -462,6 +499,7 @@ pub(crate) async fn migrate_legacy(
             Ok(stored) => match persist(pool, &entry.meeting_id, &stored, true).await {
                 Ok(()) => LegacyOutcome::Migrated,
                 Err(failure) if failure.transient => LegacyOutcome::Retry,
+                Err(failure) if failure.message == "Meeting not found." => LegacyOutcome::Retry,
                 Err(_) => LegacyOutcome::Failed,
             },
         };

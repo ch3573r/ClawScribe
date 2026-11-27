@@ -165,3 +165,28 @@ test('deleting a meeting retires its draft without failing a quit flush or losin
   assert.equal(deleted.dirty(), false);
   assert.equal(pending.at(-1), false);
 });
+
+for (const field of ['context', 'title', 'summary']) {
+  test(`a trashed meeting's ${field} write retires its draft before the Trash event arrives`, async () => {
+    const calls = [];
+    const { meetingDraft, flushMeetingDrafts } = loadTsModule('src/lib/meetingDrafts.ts', {
+      '@tauri-apps/api/core': { invoke: async (command, args) => {
+        if (command === 'api_get_summary') return { status: 'completed' };
+        if (command === 'api_set_summary_edits_pending') return;
+        calls.push(command);
+        if (args.meetingId === 'trashed') throw 'Meeting not found.';
+      } },
+      '@/lib/meetingContext': { setMeetingContext: async () => {
+        calls.push('set_meeting_context');
+        throw 'Meeting not found.';
+      } },
+      sonner: { toast: { error() { assert.fail('Trash must not trigger a draft save error'); } } },
+    });
+    const draft = meetingDraft('trashed');
+    draft.edit({ [field]: field === 'summary' ? { markdown: 'Draft' } : 'Draft' });
+    meetingDraft('active').edit({ title: 'Keep this change' });
+    await flushMeetingDrafts();
+    assert.equal(draft.state, 'discarded');
+    assert.ok(calls.includes('api_save_meeting_title'));
+  });
+}

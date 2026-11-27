@@ -153,7 +153,8 @@ pub async fn detach(
 ) -> Result<Option<String>, DocumentError> {
     let mut tx = pool.begin().await?;
     let removed = sqlx::query(
-        "DELETE FROM knowledge_document_attachments WHERE meeting_id=? AND document_id=?",
+        "DELETE FROM knowledge_document_attachments
+         WHERE meeting_id = (SELECT id FROM active_meetings WHERE id = ?) AND document_id = ?",
     )
     .bind(meeting)
     .bind(id)
@@ -282,6 +283,23 @@ pub(crate) mod tests {
         .await
         .unwrap()
     }
+    #[tokio::test]
+    async fn trash_keeps_document_attached_even_if_a_stale_view_detaches_it() {
+        use crate::database::repositories::meeting::MeetingsRepository;
+
+        let pool = pool().await;
+        let attached = attach(&pool, "aster", "00000000-0000-4000-8000-000000000001").await;
+        let document = attached.attachment.id;
+        assert!(MeetingsRepository::move_to_trash(&pool, "aster", false)
+            .await
+            .unwrap());
+        assert_eq!(detach(&pool, "aster", &document).await.unwrap(), None);
+        assert!(MeetingsRepository::restore_from_trash(&pool, "aster")
+            .await
+            .unwrap());
+        assert_eq!(get(&pool, "aster", &document).await.unwrap().id, document);
+    }
+
     #[tokio::test]
     async fn shared_document_survives_detach() {
         let pool = pool().await;

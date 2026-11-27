@@ -21,10 +21,10 @@ impl TranscriptChunksRepository {
             meeting_id
         );
         let now = Utc::now();
-        sqlx::query(
+        let updated = sqlx::query(
             r#"
             INSERT INTO transcript_chunks (meeting_id, transcript_text, model, model_name, chunk_size, overlap, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            SELECT id, ?, ?, ?, ?, ?, ? FROM active_meetings WHERE id = ?
             ON CONFLICT(meeting_id) DO UPDATE SET
                 transcript_text = excluded.transcript_text,
                 model = excluded.model,
@@ -34,15 +34,18 @@ impl TranscriptChunksRepository {
                 created_at = excluded.created_at
             "#
         )
-        .bind(meeting_id)
         .bind(text)
         .bind(model)
         .bind(model_name)
         .bind(chunk_size)
         .bind(overlap)
         .bind(now)
+        .bind(meeting_id)
         .execute(pool)
         .await?;
+        if updated.rows_affected() == 0 {
+            return Err(sqlx::Error::Protocol(super::meeting::NOT_FOUND.into()));
+        }
 
         Ok(())
     }

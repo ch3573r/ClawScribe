@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::{database::repositories::meeting::NOT_FOUND, state::AppState};
 use sqlx::SqlitePool;
 
 pub(crate) async fn read(pool: &SqlitePool, meeting: &str) -> Result<String, String> {
@@ -21,9 +21,9 @@ pub(crate) async fn write(
 ) -> Result<(), String> {
     let context = (!context.trim().is_empty()).then_some(context);
     let query = if legacy {
-        "UPDATE meetings SET summary_context = COALESCE(summary_context, ?) WHERE id = ?"
+        "UPDATE meetings SET summary_context = COALESCE(summary_context, ?) WHERE id = ? AND deleted_at IS NULL"
     } else {
-        "UPDATE meetings SET summary_context = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        "UPDATE meetings SET summary_context = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
     };
     let result = sqlx::query(query)
         .bind(context)
@@ -31,8 +31,8 @@ pub(crate) async fn write(
         .execute(pool)
         .await
         .map_err(|_| "Could not save meeting context".to_string())?;
-    if result.rows_affected() == 0 && !legacy {
-        return Err("Meeting not found".into());
+    if result.rows_affected() == 0 {
+        return Err(NOT_FOUND.into());
     }
     Ok(())
 }
@@ -64,6 +64,27 @@ pub async fn set_meeting_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn trash_blocks_context_writes_and_keeps_legacy_context_pending() {
+        use crate::database::repositories::meeting::MeetingsRepository;
+
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let id = "review-test";
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+            .await
+            .unwrap());
+        for legacy in [true, false] {
+            assert_eq!(
+                write(&pool, id, "Draft context", legacy).await.unwrap_err(),
+                NOT_FOUND
+            );
+        }
+        assert!(MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
+        assert_eq!(read(&pool, id).await.unwrap(), "");
+    }
 
     #[tokio::test]
     async fn legacy_context_never_replaces_saved_context_and_clear_is_persisted() {

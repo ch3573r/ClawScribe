@@ -2471,6 +2471,10 @@ async fn save_diarization_labels(
     let files_provenance =
         crate::database::transcript_edits::file_provenance(pool, meeting_id, roots).await;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    use crate::database::repositories::meeting::{MeetingsRepository, NOT_FOUND};
+    if !MeetingsRepository::is_active(&mut *tx, meeting_id).await? {
+        return Err(anyhow!(NOT_FOUND));
+    }
     let current: Vec<StoredTranscriptSegment> = sqlx::query_as(
         "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY COALESCE(audio_start_time, 999999999.0), timestamp, id"
     ).bind(meeting_id).fetch_all(&mut *tx).await?;
@@ -4377,6 +4381,29 @@ mod tests {
             })
             .collect();
         (pool, stored, mapped)
+    }
+
+    #[tokio::test]
+    async fn trash_prevents_publication_of_running_speaker_detection() {
+        use crate::database::repositories::meeting::MeetingsRepository;
+
+        let _lock = super::super::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let (pool, stored, mut mapped) = label_save_fixture().await;
+        let meeting = "review-test";
+        let _run = DiarizationRunGuard::acquire(meeting).unwrap();
+        assert!(MeetingsRepository::move_to_trash(&pool, meeting, false)
+            .await
+            .unwrap());
+        assert!(
+            matches!(save_diarization_labels(&pool, meeting, &stored, &mut mapped, None, &[], |_| Ok(None)).await,
+            Err(error) if error.to_string() == "Meeting not found.")
+        );
+        let labeled: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE speaker IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(labeled, 0);
     }
 
     #[tokio::test]

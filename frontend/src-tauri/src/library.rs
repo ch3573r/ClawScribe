@@ -221,7 +221,7 @@ async fn read_bookmarks(pool: &SqlitePool, meeting_id: &str) -> Result<Vec<Bookm
     attach_bookmarks(pool)
         .await
         .map_err(|_| "Could not load bookmarks.")?;
-    sqlx::query_as("SELECT id, seconds, label FROM meeting_bookmarks WHERE meeting_id = ? ORDER BY seconds, id")
+    sqlx::query_as("SELECT id, seconds, label FROM meeting_bookmarks WHERE meeting_id = (SELECT id FROM active_meetings WHERE id = ?) ORDER BY seconds, id")
         .bind(meeting_id).fetch_all(pool).await.map_err(|_| "Could not load bookmarks.".into())
 }
 
@@ -240,17 +240,37 @@ pub async fn add_meeting_bookmark<R: Runtime>(
     };
     let seconds = seconds.ok_or("Choose a bookmark time.")?;
     validate_bookmark_time(seconds)?;
-    sqlx::query(
-        "INSERT INTO meeting_bookmarks (id, meeting_id, seconds, label) VALUES (?, ?, ?, ?)",
+    save_meeting_bookmark(
+        app.state::<AppState>().db_manager.pool(),
+        &meeting_id,
+        seconds,
+        &label,
+    )
+    .await?;
+    let _ = app.emit("library-changed", ());
+    Ok(())
+}
+
+async fn save_meeting_bookmark(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    seconds: f64,
+    label: &str,
+) -> Result<(), String> {
+    let inserted = sqlx::query(
+        "INSERT INTO meeting_bookmarks (id, meeting_id, seconds, label)
+         SELECT ?, id, ?, ? FROM active_meetings WHERE id = ?",
     )
     .bind(uuid::Uuid::new_v4().to_string())
-    .bind(meeting_id)
     .bind(seconds)
     .bind(label)
-    .execute(app.state::<AppState>().db_manager.pool())
+    .bind(meeting_id)
+    .execute(pool)
     .await
     .map_err(|_| "Could not save bookmark.")?;
-    let _ = app.emit("library-changed", ());
+    if inserted.rows_affected() == 0 {
+        return Err(crate::database::repositories::meeting::NOT_FOUND.into());
+    }
     Ok(())
 }
 
@@ -423,7 +443,8 @@ pub async fn rename_meeting_bookmark(
     label: String,
 ) -> Result<(), String> {
     let label = clean_label(&label, 160)?;
-    let result = sqlx::query("UPDATE meeting_bookmarks SET label = ? WHERE id = ?")
+    let result = sqlx::query("UPDATE meeting_bookmarks SET label = ? WHERE id = ?
+                             AND (meeting_id IS NULL OR meeting_id IN (SELECT id FROM active_meetings))")
         .bind(label)
         .bind(id)
         .execute(app.state::<AppState>().db_manager.pool())
@@ -438,11 +459,14 @@ pub async fn rename_meeting_bookmark(
 
 #[tauri::command]
 pub async fn delete_meeting_bookmark(app: AppHandle, id: String) -> Result<(), String> {
-    sqlx::query("DELETE FROM meeting_bookmarks WHERE id = ?")
-        .bind(id)
-        .execute(app.state::<AppState>().db_manager.pool())
-        .await
-        .map_err(|_| "Could not remove bookmark.")?;
+    sqlx::query(
+        "DELETE FROM meeting_bookmarks WHERE id = ?
+                 AND (meeting_id IS NULL OR meeting_id IN (SELECT id FROM active_meetings))",
+    )
+    .bind(id)
+    .execute(app.state::<AppState>().db_manager.pool())
+    .await
+    .map_err(|_| "Could not remove bookmark.")?;
     let _ = app.emit("library-changed", ());
     Ok(())
 }
@@ -680,7 +704,10 @@ async fn export_local_subtitles_to(
     include_speakers: bool,
     path: std::path::PathBuf,
 ) -> Result<(), String> {
-    let mut tx = pool.begin().await.map_err(|_| "Could not read transcript.")?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| "Could not read transcript.")?;
     if !MeetingsRepository::is_active(&mut *tx, meeting_id)
         .await
         .map_err(|_| "Could not read transcript.")?
@@ -688,7 +715,9 @@ async fn export_local_subtitles_to(
         return Err("Meeting not found.".into());
     }
     let passages = read_export_transcript(&mut *tx, meeting_id).await?;
-    tx.commit().await.map_err(|_| "Could not read transcript.")?;
+    tx.commit()
+        .await
+        .map_err(|_| "Could not read transcript.")?;
     tokio::task::spawn_blocking(move || {
         crate::file_grants::save_target_parent_exists(&path)?;
         let rendered = subtitles::render(&passages, format, include_speakers)
@@ -774,6 +803,28 @@ async fn read_word_transcript(
 mod tests {
     use super::*;
     use crate::exports::metadata::export_meeting_date;
+
+    #[tokio::test]
+    async fn trash_hides_saved_bookmarks_and_blocks_new_ones() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let id = "review-test";
+        save_meeting_bookmark(&pool, id, 1.0, "Saved bookmark")
+            .await
+            .unwrap();
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+            .await
+            .unwrap());
+        assert!(save_meeting_bookmark(&pool, id, 2.0, "Stale bookmark")
+            .await
+            .is_err());
+        assert!(read_bookmarks(&pool, id).await.unwrap().is_empty());
+        assert!(MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
+        let bookmarks = read_bookmarks(&pool, id).await.unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].label, "Saved bookmark");
+    }
 
     #[tokio::test]
     async fn archive_tags_are_additive_and_a_full_meeting_rolls_back_the_batch() {
@@ -975,9 +1026,11 @@ mod tests {
     #[tokio::test]
     async fn subtitle_export_rejects_trashed_meetings() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
-        assert!(MeetingsRepository::move_to_trash(&pool, "review-test", false)
-            .await
-            .unwrap());
+        assert!(
+            MeetingsRepository::move_to_trash(&pool, "review-test", false)
+                .await
+                .unwrap()
+        );
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("meeting.srt");
         std::fs::write(&path, "Existing file").unwrap();

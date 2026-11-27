@@ -550,6 +550,15 @@ pub async fn fail(pool: &SqlitePool, id: &str) -> Result<(), String> {
 pub async fn clear(pool: &SqlitePool, owner: &ConversationOwner) -> Result<u64, String> {
     let key = owner_key(owner)?;
     let mut tx = pool.begin().await.map_err(failure)?;
+    if let ConversationOwner::Meeting(id) = owner {
+        use crate::database::repositories::meeting::{MeetingsRepository, NOT_FOUND};
+        if !MeetingsRepository::is_active(&mut *tx, id)
+            .await
+            .map_err(failure)?
+        {
+            return Err(NOT_FOUND.into());
+        }
+    }
     sqlx::query("UPDATE knowledge_requests SET status='cancelled' WHERE owner_id=?")
         .bind(&key)
         .execute(&mut *tx)

@@ -1,3 +1,4 @@
+use super::meeting::NOT_FOUND;
 use crate::database::models::SummaryProcess;
 use chrono::Utc;
 use serde_json::Value;
@@ -6,6 +7,8 @@ use tracing::{error, info as log_info};
 
 pub struct SummaryProcessesRepository;
 const INTERRUPTED: &str = "Summary generation was interrupted when ClawScribe closed";
+const TRASH_INTERRUPTED: &str =
+    "Summary generation was interrupted while the meeting was in Trash.";
 pub(crate) const RECOVERY_NEEDED: &str =
     "Review or retranscribe this meeting before generating notes.";
 pub(crate) const NO_TRANSCRIPT: &str = "There is no saved transcript to summarize.";
@@ -13,6 +16,107 @@ pub(crate) const NO_TRANSCRIPT: &str = "There is no saved transcript to summariz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn trash_blocks_summary_writes_and_restore_recovers_an_interrupted_job() {
+        use super::super::meeting::MeetingsRepository;
+
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let id = "review-test";
+        let old = serde_json::json!({"markdown": "Existing notes"});
+        SummaryProcessesRepository::create_or_reset_process(&pool, id)
+            .await
+            .unwrap();
+        SummaryProcessesRepository::update_process_completed(&pool, id, old.clone(), 1, 0.0)
+            .await
+            .unwrap();
+        SummaryProcessesRepository::create_or_reset_process(&pool, id)
+            .await
+            .unwrap();
+        let current = serde_json::json!({"markdown": "Latest notes"});
+        SummaryProcessesRepository::update_process_completed(&pool, id, current.clone(), 1, 0.0)
+            .await
+            .unwrap();
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+            .await
+            .unwrap());
+
+        assert!(
+            SummaryProcessesRepository::restore_previous_summary(&pool, id)
+                .await
+                .is_err()
+        );
+        assert!(
+            SummaryProcessesRepository::create_or_reset_process(&pool, id)
+                .await
+                .is_err()
+        );
+        assert!(
+            SummaryProcessesRepository::update_meeting_summary(&pool, id, &old)
+                .await
+                .is_err()
+        );
+        assert!(MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
+        let restored = SummaryProcessesRepository::get_summary_data(&pool, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&restored.result.unwrap()).unwrap(),
+            current
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&restored.previous_result.unwrap()).unwrap(),
+            old
+        );
+
+        SummaryProcessesRepository::create_or_reset_process(&pool, id)
+            .await
+            .unwrap();
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+            .await
+            .unwrap());
+        assert!(
+            !SummaryProcessesRepository::complete_for_revision(&pool, id, old, 1, 0.0, None)
+                .await
+                .unwrap()
+        );
+        SummaryProcessesRepository::fail_interrupted_processes(&pool)
+            .await
+            .unwrap();
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM summary_processes WHERE meeting_id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "PENDING");
+        assert!(MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
+        let restored = SummaryProcessesRepository::get_summary_data(&pool, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.status, "failed");
+        assert_eq!(restored.error.as_deref(), Some(TRASH_INTERRUPTED));
+        assert!(!SummaryProcessesRepository::complete_for_revision(
+            &pool,
+            id,
+            serde_json::json!({"markdown":"Late notes"}),
+            1,
+            0.0,
+            None
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            serde_json::from_str::<Value>(&restored.result.unwrap()).unwrap(),
+            current
+        );
+    }
 
     #[tokio::test]
     async fn editing_notes_requires_a_summary_row() {
@@ -709,8 +813,7 @@ impl SummaryProcessesRepository {
             .is_some();
 
         if !meeting_exists {
-            transaction.rollback().await?;
-            return Ok(false);
+            return Err(sqlx::Error::Protocol(NOT_FOUND.into()));
         }
 
         let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM summary_processes WHERE meeting_id = ? AND LOWER(status) IN ('pending', 'processing', 'summarizing', 'regenerating'))")
@@ -925,7 +1028,7 @@ impl SummaryProcessesRepository {
             WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint IN (?1, ?2 || ':' || ?1)
             AND meeting_id > ?3 AND meeting_id IN (SELECT id FROM active_meetings)
             AND (?9 IS NULL OR meeting_id = ?9) AND (
-                (status = 'failed' AND automatic_resume_attempted = 0 AND error = ?4)
+                (status = 'failed' AND automatic_resume_attempted = 0 AND error IN (?4, ?10))
                 OR (status = 'cancelled' AND result IS NULL AND (
                     (?5 AND error IN (?6, ?7, ?8)) OR (automatic_resume_attempted = 0 AND error = ?8)
                 ))
@@ -934,7 +1037,7 @@ impl SummaryProcessesRepository {
             .bind(crate::summary::automatic::PAUSED_FOR_INFERENCE)
             .bind(crate::summary::service::RECORDING_INTERRUPTED_SUMMARY)
             .bind(crate::summary::automatic::PAUSED_FOR_EXIT)
-            .bind(only_meeting)
+            .bind(only_meeting).bind(TRASH_INTERRUPTED)
             .fetch_all(pool).await
     }
 
@@ -949,7 +1052,7 @@ impl SummaryProcessesRepository {
             status = 'pending', error = NULL, start_time = CURRENT_TIMESTAMP, end_time = NULL, updated_at = CURRENT_TIMESTAMP
             WHERE meeting_id = ?1 AND automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ?2
             AND meeting_id IN (SELECT id FROM active_meetings)
-            AND ((status = 'failed' AND automatic_resume_attempted = 0 AND error = ?3)
+            AND ((status = 'failed' AND automatic_resume_attempted = 0 AND error IN (?3, ?8))
                 OR (status = 'cancelled' AND result IS NULL AND (
                     (?7 AND error IN (?4, ?5, ?6)) OR (automatic_resume_attempted = 0 AND error = ?6)
                 )))")
@@ -957,7 +1060,7 @@ impl SummaryProcessesRepository {
             .bind(crate::summary::automatic::PAUSED_FOR_INFERENCE)
             .bind(crate::summary::service::RECORDING_INTERRUPTED_SUMMARY)
             .bind(crate::summary::automatic::PAUSED_FOR_EXIT)
-            .bind(local)
+            .bind(local).bind(TRASH_INTERRUPTED)
             .execute(pool).await?.rows_affected() == 1)
     }
 
@@ -999,10 +1102,10 @@ impl SummaryProcessesRepository {
             meeting_id
         );
         let now = Utc::now();
-        sqlx::query(
+        let updated = sqlx::query(
             r#"
             INSERT INTO summary_processes (meeting_id, status, created_at, updated_at, start_time, result, error)
-            VALUES (?, 'PENDING', ?, ?, ?, NULL, NULL)
+            SELECT id, 'PENDING', ?, ?, ?, NULL, NULL FROM active_meetings WHERE id = ?
             ON CONFLICT(meeting_id) DO UPDATE SET
                 status = 'PENDING',
                 updated_at = excluded.updated_at,
@@ -1019,12 +1122,15 @@ impl SummaryProcessesRepository {
                 error = NULL
             "#
         )
+        .bind(now)
+        .bind(now)
+        .bind(now)
         .bind(meeting_id)
-        .bind(now)
-        .bind(now)
-        .bind(now)
         .execute(pool)
         .await?;
+        if updated.rows_affected() == 0 {
+            return Err(sqlx::Error::Protocol(NOT_FOUND.into()));
+        }
         log_info!(
             "Backed up existing summary before regeneration for meeting_id: {}",
             meeting_id
@@ -1068,7 +1174,9 @@ impl SummaryProcessesRepository {
             SET previous_result = CASE WHEN result IS NOT NULL AND TRIM(result) NOT IN ('', 'null', '{}') THEN result ELSE previous_result END,
                 previous_result_at = CASE WHEN result IS NOT NULL AND TRIM(result) NOT IN ('', 'null', '{}') THEN CURRENT_TIMESTAMP ELSE previous_result_at END,
                 status = 'completed', result = ?, updated_at = ?, end_time = ?, chunk_count = ?, processing_time = ?, error = NULL, metadata = NULL, result_backup = NULL, result_backup_timestamp = NULL
-            WHERE meeting_id = ? AND (? IS NULL OR ? = (SELECT summary_content_revision FROM meetings WHERE id = summary_processes.meeting_id))
+            WHERE meeting_id = (SELECT id FROM active_meetings WHERE id = ?)
+              AND (? IS NULL OR ? = (SELECT summary_content_revision FROM meetings WHERE id = summary_processes.meeting_id))
+              AND error IS NOT ?
             "#
         )
         .bind(result_str)
@@ -1079,6 +1187,7 @@ impl SummaryProcessesRepository {
         .bind(meeting_id)
         .bind(revision)
         .bind(revision)
+        .bind(TRASH_INTERRUPTED)
         .execute(pool)
         .await?;
         log_info!(
@@ -1093,7 +1202,7 @@ impl SummaryProcessesRepository {
         meeting_id: &str,
     ) -> Result<(), sqlx::Error> {
         let mut transaction = pool.begin().await?;
-        let updated = sqlx::query("UPDATE summary_processes SET result = previous_result, previous_result = result, previous_result_at = updated_at, updated_at = ?, status = 'completed', error = NULL WHERE meeting_id = ? AND previous_result IS NOT NULL AND LOWER(status) NOT IN ('pending', 'processing', 'summarizing', 'regenerating')")
+        let updated = sqlx::query("UPDATE summary_processes SET result = previous_result, previous_result = result, previous_result_at = updated_at, updated_at = ?, status = 'completed', error = NULL WHERE meeting_id = (SELECT id FROM active_meetings WHERE id = ?) AND previous_result IS NOT NULL AND LOWER(status) NOT IN ('pending', 'processing', 'summarizing', 'regenerating')")
             .bind(Utc::now()).bind(meeting_id).execute(&mut *transaction).await?;
         if updated.rows_affected() == 0 {
             return Err(sqlx::Error::Protocol(
@@ -1123,13 +1232,15 @@ impl SummaryProcessesRepository {
                 result = COALESCE(result_backup, result),
                 result_backup = NULL,
                 result_backup_timestamp = NULL
-            WHERE meeting_id = ?
+            WHERE meeting_id = (SELECT id FROM active_meetings WHERE id = ?)
+              AND summary_processes.error IS NOT ?
             "#,
         )
         .bind(error)
         .bind(now)
         .bind(now)
         .bind(meeting_id)
+        .bind(TRASH_INTERRUPTED)
         .execute(pool)
         .await?;
         log_info!(
@@ -1140,9 +1251,26 @@ impl SummaryProcessesRepository {
     }
 
     pub(crate) async fn fail_interrupted_processes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        Self::fail_interrupted_for(pool, None).await
+    }
+
+    pub(crate) async fn fail_interrupted_for<'e>(
+        executor: impl sqlx::SqliteExecutor<'e>,
+        meeting: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
         let now = Utc::now();
-        sqlx::query("UPDATE summary_processes SET status = 'failed', error = ?, updated_at = ?, end_time = ?, result = CASE WHEN automatic_origin IS NULL THEN COALESCE(result_backup, result) ELSE result END, result_backup = CASE WHEN automatic_origin IS NOT NULL THEN result_backup END, result_backup_timestamp = CASE WHEN automatic_origin IS NOT NULL THEN result_backup_timestamp END WHERE LOWER(status) IN ('pending', 'processing', 'summarizing', 'regenerating')")
-            .bind(INTERRUPTED).bind(now).bind(now).execute(pool).await?;
+        let reason = if meeting.is_some() {
+            TRASH_INTERRUPTED
+        } else {
+            INTERRUPTED
+        };
+        sqlx::query("UPDATE summary_processes SET status = 'failed', error = ?1, updated_at = ?2, end_time = ?2,
+            result = CASE WHEN automatic_origin IS NULL THEN COALESCE(result_backup, result) ELSE result END,
+            result_backup = CASE WHEN automatic_origin IS NOT NULL THEN result_backup END,
+            result_backup_timestamp = CASE WHEN automatic_origin IS NOT NULL THEN result_backup_timestamp END
+            WHERE LOWER(status) IN ('pending', 'processing', 'summarizing', 'regenerating')
+              AND (?3 IS NULL OR meeting_id = ?3) AND meeting_id IN (SELECT id FROM active_meetings)")
+            .bind(reason).bind(now).bind(meeting).execute(executor).await?;
         Ok(())
     }
 
@@ -1165,8 +1293,9 @@ impl SummaryProcessesRepository {
                       AND length(json_extract(metadata, '$.partial_notes')) >= length(json_extract(?2, '$.partial_notes'))
                     THEN metadata ELSE ?2 END ELSE ?2 END,
                 result = COALESCE(result_backup, result), result_backup = NULL, result_backup_timestamp = NULL
-            WHERE meeting_id = ?3 AND ?4 = (SELECT summary_content_revision FROM meetings WHERE id = summary_processes.meeting_id)
-        "#).bind(reason).bind(metadata.to_string()).bind(meeting).bind(revision).execute(pool).await?.rows_affected() == 1)
+            WHERE meeting_id = ?3 AND ?4 = (SELECT summary_content_revision FROM active_meetings WHERE id = summary_processes.meeting_id)
+              AND summary_processes.error IS NOT ?5
+        "#).bind(reason).bind(metadata.to_string()).bind(meeting).bind(revision).bind(TRASH_INTERRUPTED).execute(pool).await?.rows_affected() == 1)
     }
 
     pub async fn update_process_cancelled(
@@ -1200,13 +1329,15 @@ impl SummaryProcessesRepository {
                 result = COALESCE(result_backup, result),
                 result_backup = NULL,
                 result_backup_timestamp = NULL
-            WHERE meeting_id = ?
+            WHERE meeting_id = (SELECT id FROM active_meetings WHERE id = ?)
+              AND summary_processes.error IS NOT ?
             "#,
         )
         .bind(now)
         .bind(now)
         .bind(reason)
         .bind(meeting_id)
+        .bind(TRASH_INTERRUPTED)
         .execute(pool)
         .await?;
         log_info!(
