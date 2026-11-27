@@ -44,7 +44,7 @@ Removal is permanent and turns off playback and retranscription from that
 copy. The meeting, its measured duration and source, transcript, summaries, notes, reference originals,
 recording-folder support files, and existing backups remain available.
 Imported originals outside the meeting folder remain where they were.
-ClawScribe only removes audio after confirmation.
+ClawScribe records the confirmed removal so that backup repair skips that audio.
 
 Use **Bulk actions** to add project tags to the selection, export a Markdown
 or Word file per meeting, start a Meeting memory conversation with those
@@ -444,8 +444,10 @@ Turn on **Encrypt this backup** for a passphrase-protected `.clawbackup` file.
 ClawScribe asks for the passphrase when you choose an encrypted archive to
 restore. Keep the passphrase somewhere safe. ClawScribe does not store it or
 have a way to recover it. Encryption uses Argon2id key derivation and
-authenticated XChaCha20-Poly1305 in chunks. Encrypted operations need local
-disk space for a temporary ZIP that is removed when the operation closes.
+authenticated XChaCha20-Poly1305 in chunks. Encrypted operations check local
+disk space before writing a temporary ZIP. ClawScribe removes the temporary ZIP
+at the end of the operation and clears leftover scratch files at startup and
+before encrypted operations.
 Plain ZIP backups still work. Scheduled backups use plain ZIP, so keep
 unencrypted archives in trusted storage.
 
@@ -458,12 +460,15 @@ excluded. The backup reports their count, and restore reports omissions for
 meetings it adds. Unsaved live chat, pending answers from unfinished recordings,
 connection settings, and sharing approvals stay out of the archive.
 
-Restore adds meetings whose IDs are absent from the library. If a matching
-meeting is missing audio, restore copies available audio from the archive and
-reports the repaired meeting. Restore keeps existing audio, transcripts, notes,
-and other meeting data. For a missing or empty recording folder, ClawScribe attaches a
-new app-owned folder. An existing folder must be a verified, unshared ClawScribe
-recording folder without pending recovery files before audio can be added there.
+Restore adds meetings whose IDs are absent from the library. Select **Repair
+missing audio for existing meetings** before choosing the archive to also copy
+missing audio for matching meetings. Restore reports repaired meetings and
+unavailable recording locations. Reconnect unavailable storage and retry repair.
+ClawScribe skips audio with a recorded removal choice. Restore keeps existing
+audio, transcripts, notes, and other meeting data. For a missing or empty
+recording folder on available storage, ClawScribe attaches a new app-owned
+folder. An existing folder must be a verified, unshared ClawScribe recording
+folder without pending recovery files before audio can be added there.
 Restore validates the archive before extracting new or missing files. If a
 meeting or its recording folder changes during restore, retry the restore.
 Invalid archives leave existing meetings alone.

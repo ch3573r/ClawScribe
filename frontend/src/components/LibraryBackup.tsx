@@ -3,6 +3,7 @@ import { useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -20,6 +21,7 @@ export function LibraryBackup() {
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState('');
   const [encrypt, setEncrypt] = useState(false);
+  const [repairMissingAudio, setRepairMissingAudio] = useState(false);
   const [backupPassphrase, setBackupPassphrase] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [restorePath, setRestorePath] = useState<string | null>(null);
@@ -32,6 +34,9 @@ export function LibraryBackup() {
   const skippedTemplates = result?.report.skipped_template_items ?? 0;
   const omittedAnswers = result?.report.omitted_saved_live_answers ?? 0;
   const incompleteMeetings = result?.report.incomplete_meetings ?? [];
+  const unavailableLocations = result?.report.unavailable_audio_locations ?? 0;
+  const unavailableLocationNotice = (count: number) =>
+    `Recording locations were unavailable for ${count} ${count === 1 ? 'meeting' : 'meetings'}. Reconnect the storage and retry repair.`;
   const passphrasesMatch = backupPassphrase === confirmation;
   const canSave = !encrypt || (!!backupPassphrase.trim() && passphrasesMatch);
   const clearPassphrases = () => {
@@ -60,8 +65,11 @@ export function LibraryBackup() {
       setResult(null);
       await migrateLegacyMeetingCalendars();
       if (!restore) await flushMeetingContexts();
-      const report = await invoke<LibraryArchiveReport>(restore ? 'restore_library' : 'backup_library', { path, passphrase });
+      const report = restore
+        ? await invoke<LibraryArchiveReport>('restore_library', { path, passphrase, repairMissingAudio })
+        : await invoke<LibraryArchiveReport>('backup_library', { path, passphrase });
       setRestorePath(null);
+      if (restore) setRepairMissingAudio(false);
       setResult({ report, restore });
       const incomplete = report.incomplete_meetings?.length ?? 0;
       const unreadable = report.unreadable_calendar_links ?? 0;
@@ -71,6 +79,7 @@ export function LibraryBackup() {
       const description = [
         `${report.meetings} meetings${restore ? ' added' : ''}, ${report.files} files.`,
         repaired && `Restored missing audio for ${repaired} ${repaired === 1 ? 'meeting' : 'meetings'}.`,
+        !!report.unavailable_audio_locations && unavailableLocationNotice(report.unavailable_audio_locations),
         report.audio_excluded && audioExcludedNotice,
         report.skipped && `${report.skipped} existing meetings skipped.`,
         unreadable && `${unreadable} saved calendar links could not be read and were left unlinked.`,
@@ -78,6 +87,7 @@ export function LibraryBackup() {
         answersOmitted && `Excluded ${answersOmitted} saved live ${answersOmitted === 1 ? 'answer' : 'answers'}.`,
       ].filter(Boolean).join(' ');
       if (incomplete) toast.warning(restore ? 'Restore complete with incomplete audio' : 'Backup saved with incomplete audio', { description });
+      else if (report.unavailable_audio_locations) toast.warning('Restore complete with recording locations unavailable', { description });
       else if (templatesSkipped) toast.warning(restore ? 'Restore complete with templates skipped' : 'Backup saved with templates skipped', { description });
       else if (answersOmitted) toast.warning(restore ? 'Restore complete with saved answers excluded' : 'Backup saved with saved answers excluded', { description });
       else toast.success(restore ? 'Restore complete' : 'Backup saved', { description });
@@ -101,14 +111,16 @@ export function LibraryBackup() {
       if (!value) {
         clearPassphrases();
         setEncrypt(false);
+        setRepairMissingAudio(false);
         setRestorePath(null);
       }
       setVisible(value);
     }}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
       <DialogHeader><DialogTitle>Backup and restore</DialogTitle><DialogDescription>Save meetings, recordings, transcript history, notes, custom templates, vocabulary, and saved series preferences.</DialogDescription></DialogHeader>
       <p className="text-sm text-muted-foreground">Keep unencrypted archives in a trusted folder. Restore can add missing meetings and recover missing audio for existing meetings.</p>
-      {result && (result.report.audio_excluded || incompleteMeetings.length > 0 || skippedTemplates > 0 || omittedAnswers > 0) && <div role="alert" className="space-y-2 rounded border border-warning-border/40 bg-warning p-3 text-sm">
+      {result && (result.report.audio_excluded || incompleteMeetings.length > 0 || skippedTemplates > 0 || omittedAnswers > 0 || unavailableLocations > 0) && <div role="alert" className="space-y-2 rounded border border-warning-border/40 bg-warning p-3 text-sm">
         {result.report.audio_excluded && <p>{audioExcludedNotice}</p>}
+        {unavailableLocations > 0 && <p>{unavailableLocationNotice(unavailableLocations)}</p>}
         {skippedTemplates > 0 && <p>Skipped {skippedTemplates} template {skippedTemplates === 1 ? 'item' : 'items'} that could not be read or saved.</p>}
         {omittedAnswers > 0 && <p>{omittedAnswers === 1 ? '1 saved live answer was' : `${omittedAnswers} saved live answers were`} excluded.</p>}
         {incompleteMeetings.length > 0 && <>
@@ -132,7 +144,11 @@ export function LibraryBackup() {
           </label>
           <div className="flex flex-wrap gap-2">
             <Button type="submit" disabled={!!busy || unavailable || !restorePassphrase.trim()}>Unlock and restore</Button>
-            <Button type="button" variant="outline" disabled={!!busy} onClick={() => { setRestorePath(null); setRestorePassphrase(''); }}>Cancel</Button>
+            <Button type="button" variant="outline" disabled={!!busy} onClick={() => {
+              setRestorePath(null);
+              setRestorePassphrase('');
+              setRepairMissingAudio(false);
+            }}>Cancel</Button>
           </div>
         </form>
       ) : (
@@ -162,6 +178,11 @@ export function LibraryBackup() {
             <Button type="submit" disabled={!!busy || unavailable || !canSave}>Save backup</Button>
             <Button type="button" variant="outline" disabled={!!busy || unavailable} onClick={() => run(true)}>Choose archive to restore</Button>
           </div>
+          <label className="flex items-center gap-2 text-sm font-medium">
+            <Checkbox checked={repairMissingAudio} disabled={!!busy || unavailable}
+              onCheckedChange={checked => setRepairMissingAudio(checked === true)} />
+            Repair missing audio for existing meetings
+          </label>
         </form>
       )}
       {busy && <p role="status" className="text-sm">{busy} Keep ClawScribe open until this finishes.</p>}

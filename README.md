@@ -448,7 +448,7 @@ input and output and start off. [Local assistant access](docs/local-library.md#l
 recordings, custom templates, vocabulary, approved series notes, and linked
 calendar series preferences. It includes explicitly saved live answers when their
 recording supplied all the source material. Restore adds missing meetings and
-can repair missing audio for a matching meeting. Existing audio, notes, and
+offers optional audio repair for matching meetings. Existing audio, notes, and
 preferences are preserved. Backups continue when recording
 folders are missing and report affected meetings,
 excluded recovery files, unavailable audio, skipped custom template items, and

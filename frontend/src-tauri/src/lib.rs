@@ -735,6 +735,7 @@ pub fn run() {
             behavior_settings::load_and_apply(_app.handle());
             audio::com_anchor::ensure_device_enumerator();
             audio::transcription::queue::cleanup_abandoned_transcription_spools();
+            library::backup::clean_backup_scratch_on_startup(_app.handle());
 
             // The database comes first. If it cannot be opened, nothing else is
             // set up: no tray, no global shortcuts and no engine start-up, so

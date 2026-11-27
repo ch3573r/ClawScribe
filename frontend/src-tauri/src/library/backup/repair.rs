@@ -1,7 +1,7 @@
 //! Restore audio for matching meetings while preserving their local data.
 use super::{archive_audio_file, failure, Manifest};
 use crate::database::meeting_files::{
-    resolve_recording_folder_if_present, verify_recording_deletion,
+    directory_chain, read_marker, resolve_recording_folder_if_present, verify_recording_deletion,
 };
 use crate::library::archive::storage::{mark_backup_stage, pin_backup_folder, remove_backup_stage};
 use serde_json::Value;
@@ -10,29 +10,42 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-pub(super) type SavedFolders = HashMap<String, Option<String>>;
+pub(super) type SavedFolders = HashMap<String, (Option<String>, bool)>;
 
 pub(super) async fn saved_folders(db: &mut SqliteConnection) -> Result<SavedFolders, String> {
-    Ok(sqlx::query_as("SELECT id, folder_path FROM meetings")
-        .fetch_all(db)
-        .await
-        .map_err(failure)?
-        .into_iter()
-        .collect())
+    Ok(sqlx::query_as::<_, (String, Option<String>, bool)>(
+        "SELECT id, folder_path, saved_audio_removed_by_user FROM meetings",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(failure)?
+    .into_iter()
+    .map(|(id, folder, removed)| (id, (folder, removed)))
+    .collect())
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Destination {
     NewFolder,
     Existing(PathBuf),
+    Unavailable,
 }
 
 fn destination(id: &str, folders: &SavedFolders, roots: &[PathBuf]) -> Option<Destination> {
-    let saved = folders.get(id)?;
+    let (saved, removed) = folders.get(id)?;
+    if *removed {
+        return None;
+    }
     let Some(path) = saved.as_deref().filter(|path| !path.trim().is_empty()) else {
         return Some(Destination::NewFolder);
     };
     let path = Path::new(path);
+    if !roots.iter().any(|root| {
+        crate::local_path::lexically_inside(&path.to_string_lossy(), root)
+            && directory_chain(root).is_ok()
+    }) {
+        return Some(Destination::Unavailable);
+    }
     let Some(folder) = resolve_recording_folder_if_present(path, roots).ok()? else {
         return Some(Destination::NewFolder);
     };
@@ -45,7 +58,7 @@ fn destination(id: &str, folders: &SavedFolders, roots: &[PathBuf]) -> Option<De
     let other_folders = folders
         .iter()
         .filter(|(other, _)| other.as_str() != id)
-        .filter_map(|(_, path)| path.as_ref().filter(|path| !path.trim().is_empty()))
+        .filter_map(|(_, (path, _))| path.as_ref().filter(|path| !path.trim().is_empty()))
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     // Reuse the checks for a trusted recording directory with an app marker
@@ -79,16 +92,18 @@ fn is_missing_audio(folder: &Path) -> bool {
 
 pub(super) struct Plan {
     folders: SavedFolders,
-    roots: Vec<PathBuf>,
+    roots: Option<Vec<PathBuf>>,
     targets: HashMap<String, Destination>,
+    pub(super) unavailable: usize,
 }
 
 impl Plan {
-    pub(super) fn new(folders: SavedFolders, roots: Vec<PathBuf>) -> Self {
+    pub(super) fn new(folders: SavedFolders, roots: Option<Vec<PathBuf>>) -> Self {
         Self {
             folders,
             roots,
             targets: HashMap::new(),
+            unavailable: 0,
         }
     }
 
@@ -100,12 +115,23 @@ impl Plan {
         !self.targets.is_empty()
     }
 
-    pub(super) fn include_audio(&mut self, id: &str) -> bool {
-        let Some(destination) = destination(id, &self.folders, &self.roots) else {
-            return false;
+    pub(super) fn select_audio(&mut self, id: &str) -> super::Extract {
+        let Some(roots) = &self.roots else {
+            return super::Extract::Skip;
+        };
+        let Some(destination) = destination(id, &self.folders, roots) else {
+            return super::Extract::Skip;
+        };
+        let extract = match destination {
+            Destination::NewFolder => super::Extract::AudioWithMarkers,
+            Destination::Existing(_) => super::Extract::Audio,
+            Destination::Unavailable => {
+                self.unavailable += 1;
+                return super::Extract::Skip;
+            }
         };
         self.targets.insert(id.to_string(), destination);
-        true
+        extract
     }
 
     pub(super) async fn apply(
@@ -134,7 +160,7 @@ impl Plan {
             }
         }
         let stage = stage.to_path_buf();
-        let roots = self.roots;
+        let roots = self.roots.unwrap_or_default();
         let (result, reattached) = tokio::task::spawn_blocking(move || {
             let mut result = RepairedAudio::default();
             let mut reattached = Vec::new();
@@ -146,6 +172,7 @@ impl Plan {
                 let mut files = 0;
                 match expected {
                     Destination::NewFolder => {
+                        ensure_owner(&source, &id)?;
                         files = fs::read_dir(&source)
                             .map_err(failure)?
                             .collect::<Result<Vec<_>, _>>()
@@ -179,6 +206,7 @@ impl Plan {
                             files += 1;
                         }
                     }
+                    Destination::Unavailable => return Err(CHANGED.into()),
                 }
                 if files == 0 {
                     return Err(CHANGED.into());
@@ -200,6 +228,58 @@ impl Plan {
         }
         Ok(result)
     }
+}
+
+pub(super) fn marker_file(name: &str) -> bool {
+    matches!(
+        name,
+        "metadata.json" | "recording-outcome.json" | crate::audio::import::IMPORT_OWNER_FILE
+    )
+}
+
+fn ensure_owner(folder: &Path, id: &str) -> Result<(), String> {
+    let import_owner = folder.join(crate::audio::import::IMPORT_OWNER_FILE);
+    if import_owner.exists() && !crate::audio::import::owns_import_folder(folder, id) {
+        fs::remove_file(import_owner).map_err(failure)?;
+    }
+    let mut marker = read_marker(folder)
+        .filter(|marker| {
+            ["meeting_id", "recording_id"].iter().all(|key| {
+                marker
+                    .get(*key)
+                    .is_none_or(|value| value.is_null() || value.as_str() == Some(id))
+            })
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "version": "1.0",
+                "transcript_file": "transcripts.json",
+                "status": "completed",
+                "source": "backup_restore",
+            })
+        });
+    marker["meeting_id"] = Value::String(id.to_owned());
+    if marker["source"] == "backup_restore" && marker["audio_file"].is_null() {
+        let paths = fs::read_dir(folder).map_err(failure)?;
+        let mut audio = None;
+        for path in paths {
+            let entry = path.map_err(failure)?;
+            let name = entry.file_name();
+            if archive_audio_file(&name.to_string_lossy()) {
+                if audio.is_some() {
+                    audio = None;
+                    break;
+                }
+                audio = name.into_string().ok();
+            }
+        }
+        if let Some(name) = audio {
+            marker["audio_file"] = Value::String(name);
+        }
+    }
+    let mut file = File::create(folder.join("metadata.json")).map_err(failure)?;
+    serde_json::to_writer(&mut file, &marker).map_err(failure)?;
+    file.sync_all().map_err(failure)
 }
 
 const CHANGED: &str = "A recording folder changed during restore. Retry the restore.";

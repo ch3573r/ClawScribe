@@ -1,14 +1,15 @@
 //! Versioned encryption envelope for the portable ZIP. Each frame authenticates
 //! the header, its position, and whether it is the final frame.
+use crate::audio::disk_space::{free_space_volume, START_FLOOR_BYTES};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     aead::stream::{DecryptorBE32, EncryptorBE32},
     XChaCha20Poly1305,
 };
 use rand::{rngs::OsRng, RngCore};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Seek, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const EXTENSION: &str = "clawbackup";
@@ -22,6 +23,8 @@ const NONCE_START: usize = SALT_START + 16;
 const HEADER_SIZE: usize = NONCE_START + 19;
 const FRAME: usize = 1024 * 1024;
 const TAG: usize = 16;
+pub(super) const SCRATCH_FULL: &str =
+    "Not enough free disk space for the temporary backup on the local drive. Free up space and try again.";
 // The ZIP limit covers expanded entries separately. Allow room for its
 // manifest, local/central headers and ZIP64 metadata outside that budget.
 const MAX_ZIP: u64 = super::MAX_BYTES + super::MAX_MANIFEST + 128 * 1024 * 1024;
@@ -116,6 +119,16 @@ pub(super) fn open_zip(
         return Err("This encrypted backup format is unsupported.".into());
     }
     let passphrase = passphrase.ok_or(PASSPHRASE_REQUIRED)?;
+    let scratch = prepare_scratch(scratch)?;
+    let encrypted_bytes = input.metadata().map_err(super::failure)?.len();
+    let payload = encrypted_bytes.saturating_sub(HEADER_SIZE as u64);
+    let frames = payload.div_ceil((FRAME + TAG) as u64);
+    let estimate = payload
+        .checked_sub(frames * TAG as u64)
+        .ok_or(AUTHENTICATION_FAILED)?;
+    if estimate > MAX_ZIP {
+        return Err("Archive is too large.".into());
+    }
     let key = derive_key(&passphrase, &header[SALT_START..NONCE_START])?;
     drop(passphrase);
     let mut decrypt =
@@ -139,24 +152,30 @@ pub(super) fn open_zip(
             .decrypt_next_in_place(&header, &mut *buffer)
             .map_err(|_| AUTHENTICATION_FAILED)?;
         total += buffer.len() as u64;
-        if total > MAX_ZIP {
-            return Err("Archive is too large.".into());
+        if total > estimate {
+            return Err(AUTHENTICATION_FAILED.into());
         }
         // Check the first tag before opening a temporary ZIP. Use an unnamed
         // local file rather than a plaintext copy next to the selected backup.
         let output = match &mut zip {
             Some(output) => output,
-            None => zip.insert(scratch_file(scratch)?),
+            None => {
+                check_space(free_space_volume(&scratch).map(|(_, free)| free), estimate)?;
+                zip.insert(scratch_file(&scratch)?)
+            }
         };
         output.write_all(&buffer).map_err(super::failure)?;
         buffer.zeroize();
     }
-    if total + buffer.len() as u64 > MAX_ZIP {
-        return Err("Archive is too large.".into());
+    if total + buffer.len() as u64 != estimate {
+        return Err(AUTHENTICATION_FAILED.into());
     }
     let mut zip = match zip {
         Some(zip) => zip,
-        None => scratch_file(scratch)?,
+        None => {
+            check_space(free_space_volume(&scratch).map(|(_, free)| free), estimate)?;
+            scratch_file(&scratch)?
+        }
     };
     zip.write_all(&buffer).map_err(super::failure)?;
     zip.rewind().map_err(super::failure)?;
@@ -164,6 +183,72 @@ pub(super) fn open_zip(
 }
 
 pub(super) fn scratch_file(scratch: &Path) -> Result<File, String> {
-    std::fs::create_dir_all(scratch).map_err(super::failure)?;
     tempfile::tempfile_in(scratch).map_err(super::failure)
+}
+
+fn check_space(free: Option<u64>, needed: u64) -> Result<u64, String> {
+    let free = free.ok_or("Could not verify free disk space for the temporary backup.")?;
+    let budget = free.checked_sub(START_FLOOR_BYTES).ok_or(SCRATCH_FULL)?;
+    if needed > budget {
+        return Err(SCRATCH_FULL.into());
+    }
+    Ok(budget)
+}
+
+pub(super) fn backup_scratch_limit(
+    scratch: &Path,
+    destination: &Path,
+    estimate: u64,
+) -> Result<u64, String> {
+    let space = free_space_volume(scratch);
+    let same_volume = space
+        .as_ref()
+        .zip(destination.parent().and_then(free_space_volume))
+        .is_some_and(|((scratch_volume, _), (destination_volume, _))| {
+            scratch_volume == &destination_volume
+        });
+    let budget = check_space(space.map(|(_, free)| free), estimate)?;
+    if same_volume {
+        // The plaintext and ciphertext coexist until the completed backup is published.
+        let tag_budget = (budget / 2 / FRAME as u64 + 1) * TAG as u64 + HEADER_SIZE as u64;
+        let limit = budget.saturating_sub(tag_budget) / 2;
+        if estimate > limit {
+            return Err(SCRATCH_FULL.into());
+        }
+        return Ok(limit);
+    }
+    Ok(budget)
+}
+
+pub(super) fn prepare_scratch(local_data: &Path) -> Result<PathBuf, String> {
+    let scratch = local_data.join("backup-scratch");
+    fs::create_dir_all(&scratch).map_err(super::failure)?;
+    let _pins =
+        crate::library::archive::storage::pin_backup_folder(&scratch).map_err(super::failure)?;
+    for entry in fs::read_dir(&scratch).map_err(super::failure)? {
+        let entry = entry.map_err(super::failure)?;
+        fs::remove_file(entry.path()).map_err(super::failure)?;
+    }
+    Ok(scratch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scratch_sweep_is_scoped_and_reserves_free_space() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = prepare_scratch(root.path()).unwrap();
+        fs::write(scratch.join("abandoned.tmp"), b"synthetic archive").unwrap();
+        fs::write(root.path().join("keep.txt"), b"keep").unwrap();
+        assert_eq!(prepare_scratch(root.path()).unwrap(), scratch);
+        assert_eq!(fs::read_dir(scratch).unwrap().count(), 0);
+        assert!(root.path().join("keep.txt").exists());
+        assert_eq!(check_space(Some(START_FLOOR_BYTES + 8), 8).unwrap(), 8);
+        assert_eq!(
+            check_space(Some(START_FLOOR_BYTES + 8), 9).unwrap_err(),
+            SCRATCH_FULL
+        );
+    }
 }
