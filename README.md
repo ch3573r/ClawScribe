@@ -191,8 +191,9 @@ recordings use. Cloud APIs apply to Import and Enhance (whole-file), while live
 recordings stay on-device.
 Hosted Whisper can provide word timestamps. Text-only responses use local
 speech boundaries to estimate passage timing. For OpenAI, ClawScribe converts
-large files to 16 kHz mono MP3 and splits them as needed to stay under 25 MB
-per upload. Custom Whisper endpoints receive the original file up to 500 MB.
+large files to 16 kHz mono MP3 and splits them to fit the 25 MB upload limit.
+Custom Whisper endpoints receive the original file up to 500 MB. Larger files
+are compressed and split using the same process.
 Azure Speech uploads are limited to 300 MB and use WAV, MP3, or FLAC, with
 other formats converted locally to 16 kHz mono WAV. Rejected cloud
 requests can fall back to local transcription with a notification explaining

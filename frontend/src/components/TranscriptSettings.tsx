@@ -428,7 +428,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     placeholder="https://api.openai.com/v1"
                                 />
                             </SettingsRow>
-                            <SettingsRow title="Model" htmlFor="cloud-whisper-model" description="ClawScribe compresses large files for OpenAI and splits them into uploads under 25 MB. Custom endpoints accept files up to 500 MB.">
+                            <SettingsRow title="Model" htmlFor="cloud-whisper-model" description="ClawScribe compresses and splits large files to fit upload limits of 25 MB for OpenAI and 500 MB for custom endpoints.">
                                 <Input
                                     id="cloud-whisper-model"
                                     className="w-80 max-w-full"

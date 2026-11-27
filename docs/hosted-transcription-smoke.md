@@ -24,9 +24,11 @@ settings.
 OpenAI accepts up to 25 MB per upload. For larger inputs, ClawScribe uses its
 bundled FFmpeg to produce 32 kbps, 16 kHz mono MP3 parts and applies each part's
 start time to its segments and words. Import and Enhance display progress by
-part. Uploads to custom Whisper endpoints stream the original file from disk
-and are limited to 500 MB. Split preparation supports recordings shorter than
-24 hours.
+part. Custom Whisper endpoints stream the original file up to 500 MB and
+use the same compression and splitting for larger files. ClawScribe keeps
+prepared parts in its local app cache, deletes them after the job, and sweeps
+abandoned parts at startup. Split preparation supports recordings shorter
+than 24 hours.
 
 Standard Azure Speech omits enhanced mode and an explicit model. Existing
 MAI provider settings retain their endpoint and protected key. Use the Speech

@@ -706,6 +706,7 @@ pub async fn api_test_transcript_provider<R: Runtime>(
         }
     };
     let result = test_transcript_provider_with(
+        &app,
         &state,
         provider,
         model,
@@ -740,7 +741,8 @@ fn test_http_opt_in(
     }
 }
 
-async fn test_transcript_provider_with(
+async fn test_transcript_provider_with<R: Runtime>(
+    app: &AppHandle<R>,
     state: &tauri::State<'_, AppState>,
     provider: String,
     model: String,
@@ -826,9 +828,11 @@ async fn test_transcript_provider_with(
             let provider_client = OpenAiWhisperProvider::new(base_url, api_key, model.clone())
                 .with_http_opt_in(allow_unencrypted);
             let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let scratch_root = crate::audio::transcription::cloud::whisper_scratch_root(app);
             let segments = transcribe_whisper_file(
                 &provider_client,
                 audio_path,
+                scratch_root.as_deref(),
                 language,
                 &cancelled,
                 false,

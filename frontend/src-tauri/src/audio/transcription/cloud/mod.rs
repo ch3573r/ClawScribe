@@ -1,7 +1,9 @@
 pub mod azure_speech;
 pub mod openai_whisper;
 mod whisper_audio;
-pub(crate) use whisper_audio::transcribe_whisper_file;
+pub(crate) use whisper_audio::{
+    cleanup_abandoned_whisper_parts, transcribe_whisper_file, whisper_scratch_root,
+};
 
 use crate::api::{TranscriptWord, TranscriptWordTimestampSource};
 use crate::audio::batch_audio::{audio_decoder_command, unless_cancelled};
@@ -60,6 +62,7 @@ pub enum CloudFallbackReasonCategory {
     Transient,
     AuthConfig,
     UploadTooLarge,
+    AudioPreparation,
     UnsupportedMedia,
     ProviderOutput,
 }
@@ -70,6 +73,7 @@ impl CloudFallbackReasonCategory {
             Self::Transient => "transient",
             Self::AuthConfig => "auth_config",
             Self::UploadTooLarge => "upload_too_large",
+            Self::AudioPreparation => "audio_preparation",
             Self::UnsupportedMedia => "unsupported_media",
             Self::ProviderOutput => "provider_output",
         }
@@ -100,6 +104,13 @@ impl CloudTranscriptionError {
     pub fn upload_too_large(message: impl Into<String>) -> Self {
         Self {
             category: CloudFallbackReasonCategory::UploadTooLarge,
+            message: message.into(),
+        }
+    }
+
+    fn audio_preparation(message: impl Into<String>) -> Self {
+        Self {
+            category: CloudFallbackReasonCategory::AudioPreparation,
             message: message.into(),
         }
     }
@@ -247,9 +258,17 @@ pub(crate) async fn transcribe_whole_file<R: Runtime>(
                 model.clone(),
             )
             .with_http_opt_in(config.cloud_http_opt_in(provider));
-            let cloud_segments =
-                transcribe_whisper_file(&client, audio_path, language, cancelled, true, progress)
-                    .await?;
+            let scratch_root = whisper_scratch_root(app);
+            let cloud_segments = transcribe_whisper_file(
+                &client,
+                audio_path,
+                scratch_root.as_deref(),
+                language,
+                cancelled,
+                true,
+                progress,
+            )
+            .await?;
             Ok(CloudTranscriptionOutcome {
                 provider: PROVIDER_CLOUD_WHISPER.to_string(),
                 model,
@@ -573,20 +592,14 @@ pub(crate) fn validate_provider_upload_size(
 ) -> Result<(), CloudTranscriptionError> {
     if provider == PROVIDER_CLOUD_WHISPER {
         let hosted = endpoint_or_base_url.is_none_or(is_official_openai_api_url);
-        let (limit, description) = if hosted {
-            (
-                OPENAI_HOSTED_WHISPER_MAX_UPLOAD_BYTES,
-                "OpenAI Hosted Whisper",
-            )
+        let (limit, destination) = if hosted {
+            (OPENAI_HOSTED_WHISPER_MAX_UPLOAD_BYTES, "OpenAI")
         } else {
-            (
-                CUSTOM_WHISPER_MAX_UPLOAD_BYTES,
-                "ClawScribe for custom Whisper endpoints",
-            )
+            (CUSTOM_WHISPER_MAX_UPLOAD_BYTES, "custom Whisper endpoints")
         };
         if file_size_bytes > limit {
             return Err(CloudTranscriptionError::upload_too_large(format!(
-                "The upload limit for {description} is {}. Choose a smaller audio file or use local transcription. This file is {}.",
+                "Each upload to {destination} must be {} or smaller. This audio is {}.",
                 format_megabytes(limit),
                 format_megabytes(file_size_bytes)
             )));
@@ -1615,6 +1628,7 @@ pub(crate) mod live_smoke {
             let segments = transcribe_whisper_file(
                 &provider,
                 &audio_path,
+                None,
                 language,
                 &AtomicBool::new(false),
                 false,
