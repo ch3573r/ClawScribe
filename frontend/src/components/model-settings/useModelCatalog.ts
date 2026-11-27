@@ -8,8 +8,9 @@ type Catalog = {
 };
 
 const idle: Catalog = { models: [], status: 'idle' };
+type CatalogCommand = 'get_openai_models' | 'get_anthropic_models' | 'get_groq_models';
 
-export function useModelCatalog(command: string | undefined, scope: string, auto: boolean, automaticKey: string | null = null, customEndpoint?: string) {
+export function useModelCatalog(command: CatalogCommand | undefined, scope: string, auto: boolean, automaticKey: string | null = null, customEndpoint?: string) {
   const [result, setResult] = useState<{ scope: string; catalog: Catalog }>({ scope: '', catalog: idle });
   const generation = useRef(0);
   const pending = useRef<string | null>(null);
@@ -20,7 +21,9 @@ export function useModelCatalog(command: string | undefined, scope: string, auto
     setResult({ scope, catalog: { models: [], status: 'loading' } });
     let catalog: Catalog;
     try {
-      const rows = await invoke<{ id: string }[]>(command, customEndpoint ? { customEndpoint, apiKey } : { apiKey });
+      const rows = command === 'get_openai_models' && customEndpoint
+        ? await invoke<{ id: string }[]>(command, { customEndpoint, apiKey })
+        : await invoke<{ id: string }[]>(command, { apiKey });
       catalog = { models: Array.from(new Set(rows.map(model => model.id))), status: rows.length ? 'ready' : 'empty' };
     } catch (error) {
       const code = error instanceof Error ? error.message : error;

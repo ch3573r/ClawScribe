@@ -91,16 +91,16 @@ export class ConfigService {
    * Get saved transcript model configuration
    * @returns Promise with { provider, model, apiKey }
    */
-  async getTranscriptConfig(): Promise<TranscriptModelProps> {
-    return invoke<TranscriptModelProps>('api_get_transcript_config');
+  async getTranscriptConfig(): Promise<TranscriptModelProps | null> {
+    return invoke<TranscriptModelProps | null>('api_get_transcript_config');
   }
 
   /**
    * Get saved summary model configuration
    * @returns Promise with { provider, model, whisperModel }
    */
-  async getModelConfig(): Promise<ModelConfig> {
-    const raw = await invoke<ModelConfig & { apiKeyStatus?: unknown }>('api_get_model_config');
+  async getModelConfig(): Promise<ModelConfig | null> {
+    const raw = await invoke<(ModelConfig & { apiKeyStatus?: unknown }) | null>('api_get_model_config');
     if (!raw) return raw;
     return { ...withoutSecrets(raw), apiKeyStatus: readSecretStatus(raw.apiKeyStatus) };
   }

@@ -50,11 +50,11 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
     try { await onChanged?.(result.patches); await refresh(); }
     catch { setError('The correction is saved. Reopen the meeting to refresh its transcript.'); }
   };
-  const change = async (command: string, args: Record<string, unknown>, afterSaved?: () => void) => {
+  const change = async (write: () => Promise<EditResult>, afterSaved?: () => void) => {
     if (operation.current) return;
     operation.current = true;
     setBusy(true); setError('');
-    try { const result = await invoke<EditResult>(command, { meetingId, ...args }); await completed(result); if (currentMeeting.current === meetingId) onClose(); afterSaved?.(); }
+    try { const result = await write(); await completed(result); if (currentMeeting.current === meetingId) onClose(); afterSaved?.(); }
     catch (e) { if (currentMeeting.current === meetingId) setError(typeof e === 'string' ? e : 'Could not save the correction. Your text is retained.'); }
     finally { operation.current = false; setBusy(false); }
   };
@@ -66,7 +66,8 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
   };
   return <>
     {renderActions?.({ busy, canUndo: state.can_undo, canRestore: state.can_restore_previous,
-      undo: () => void change('api_undo_transcript_edit', {}), restore: () => void change('api_restore_previous_transcript', {}) })}
+      undo: () => void change(() => invoke<EditResult>('api_undo_transcript_edit', { meetingId })),
+      restore: () => void change(() => invoke<EditResult>('api_restore_previous_transcript', { meetingId })) })}
     {(state.pending_file_sync || (!editing && error)) && <div className="space-y-2 border-b border-border px-3 py-2 text-xs">
       {state.pending_file_sync && <p role="alert">{state.import_file_stage === 'metadata' ? 'The meeting is saved. Its recording-folder metadata needs updating.' : 'The transcript is saved in ClawScribe. The recording-folder copy needs updating.'} <Button variant="ghost" className="h-auto gap-0 rounded-none p-0 text-xs font-normal underline hover:bg-transparent hover:text-current" disabled={busy} onClick={async () => {
         if (operation.current) return;
@@ -83,7 +84,10 @@ export function TranscriptCorrections({ meetingId, editing, onClose, onChanged, 
         <label className="space-y-2 text-sm">Transcript text<Textarea autoFocus rows={8} value={text} disabled={busy} onChange={e => setText(e.target.value)} /></label>
         {editing?.original_text && <Accordion type="single" collapsible className="text-sm"><AccordionItem value="recognition" className="group/details border-0"><AccordionTrigger className="cursor-pointer rounded-none py-0 font-normal hover:no-underline">Original recognition</AccordionTrigger><AccordionContent forceMount className="p-0 group-data-[state=closed]/details:hidden"><p className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">{editing.original_text}</p></AccordionContent></AccordionItem></Accordion>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-        <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={busy || !text.trim() || text === editing?.text} onClick={() => editing && void change('api_update_transcript_text', { transcriptId: editing.id, expectedText: editing.text, text }, () => { if (readLearnVocabulary()) void offerVocabularyWords(vocabularySuggestions(editing.text, text)); })}>{busy ? 'Saving…' : 'Save correction'}</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={busy || !text.trim() || text === editing?.text} onClick={() => editing && void change(
+          () => invoke<EditResult>('api_update_transcript_text', { meetingId, transcriptId: editing.id, expectedText: editing.text, text }),
+          () => { if (readLearnVocabulary()) void offerVocabularyWords(vocabularySuggestions(editing.text, text)); },
+        )}>{busy ? 'Saving…' : 'Save correction'}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <TextReplaceDialog key={meetingId} open={replaceOpen} initialQuery={replaceQuery} offerWholeWords onOpenChange={onReplaceOpenChange} title="transcript" preview={preview} apply={replace} />

@@ -101,10 +101,10 @@ export function MeetingBookmarks({ meetingId, focusedBookmark, getPlaybackTime, 
     });
     return () => { active = false; refreshWithoutEvents.current = null; void subscription.then(unlisten => unlisten()).catch(() => {}); };
   }, [meetingId, revision]);
-  const change = async (command: string, args: Record<string, unknown>) => {
+  const change = async (write: () => Promise<unknown>, closeAdd = false) => {
     if (pending.current) return;
     pending.current = true; setBusy(true);
-    try { await invoke(command, args); if (command === 'add_meeting_bookmark') onAddOpenChange?.(false); setEditing(null); await refreshWithoutEvents.current?.(); }
+    try { await write(); if (closeAdd) onAddOpenChange?.(false); setEditing(null); await refreshWithoutEvents.current?.(); }
     catch (error) { toast.error('Could not update bookmark', { description: String(error) }); }
     finally { pending.current = false; setBusy(false); }
   };
@@ -127,7 +127,7 @@ export function MeetingBookmarks({ meetingId, focusedBookmark, getPlaybackTime, 
   const addForm = (
     <form className="mt-2 grid gap-3" onSubmit={event => {
       event.preventDefault();
-      if (!busy && seconds !== null) void change('add_meeting_bookmark', { meetingId, seconds, label: label.trim() || 'Review this' });
+      if (!busy && seconds !== null) void change(() => invoke('add_meeting_bookmark', { meetingId, seconds, label: label.trim() || 'Review this' }), true);
     }}>
       <label className="grid gap-1 text-sm">Note<Input autoFocus placeholder="Review this" maxLength={160} value={label} onChange={event => setLabel(event.target.value)} disabled={busy} /></label>
       <div className="grid gap-1 text-sm">
@@ -153,12 +153,12 @@ export function MeetingBookmarks({ meetingId, focusedBookmark, getPlaybackTime, 
     <ul className="mt-2 max-h-48 space-y-2 overflow-y-auto">{bookmarks.map(mark => <li key={mark.id} id={`bookmark-row-${mark.id}`} tabIndex={-1} className="flex flex-wrap items-center gap-1 focus-visible:ring-2 focus-visible:ring-ring">
       {editing === mark.id ? <>
         <Input aria-label="Bookmark label" maxLength={160} className="h-auto shadow-none text-sm md:text-sm min-w-0 flex-1 rounded border border-input bg-background p-1" value={editLabel} onChange={e => setEditLabel(e.target.value)} />
-        <Button size="sm" disabled={busy || !editLabel.trim()} onClick={() => change('rename_meeting_bookmark', { id: mark.id, label: editLabel })}>Save</Button>
+        <Button size="sm" disabled={busy || !editLabel.trim()} onClick={() => change(() => invoke('rename_meeting_bookmark', { id: mark.id, label: editLabel }))}>Save</Button>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel</Button>
       </> : <>
       <Button variant="ghost" className="block h-auto gap-0 rounded-none p-0 text-sm font-normal hover:bg-transparent hover:text-primary disabled:opacity-100 w-full truncate text-left text-primary underline disabled:text-muted-foreground" disabled={!onSeek} onClick={() => onSeek?.(mark.seconds)} title={`${bookmarkTime(mark.seconds)} · ${mark.label}`}>{bookmarkTime(mark.seconds)} · {mark.label}</Button>
       <Button size="sm" variant="ghost" disabled={busy} aria-label={`Rename bookmark ${mark.label}`} onClick={() => { setEditing(mark.id); setEditLabel(mark.label); }}>Rename</Button>
-      <Button size="sm" variant="ghost" disabled={busy} aria-label={`Remove bookmark ${mark.label}`} onClick={() => change('delete_meeting_bookmark', { id: mark.id })}>Remove</Button>
+      <Button size="sm" variant="ghost" disabled={busy} aria-label={`Remove bookmark ${mark.label}`} onClick={() => change(() => invoke('delete_meeting_bookmark', { id: mark.id }))}>Remove</Button>
       </>}
     </li>)}</ul>
     {!onSeek && <p className="mt-2 text-xs text-muted-foreground">Audio playback is unavailable for this meeting.</p>}
