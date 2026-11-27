@@ -61,6 +61,20 @@
                         "dialog:allow-message",
                         "process:default"
                     ]
+                },
+                {
+                    "identifier": "windows-autostart",
+                    "description": "Allow the main settings window to manage startup at Windows sign-in",
+                    "platforms": [
+                        "windows"
+                    ],
+                    "windows": [
+                        "main"
+                    ],
+                    "permissions": [
+                        "autostart:allow-is-enabled",
+                        "autostart:allow-disable"
+                    ]
                 }
             ]
         }
@@ -107,6 +121,7 @@
             "nsis": {
                 "installerIcon": "icons/app_icon.ico",
                 "uninstallerIcon": "icons/app_icon.ico",
+                "installerHooks": "scripts/installer-hooks.nsh",
                 "installMode": "currentUser",
                 "languages": [
                     "English"

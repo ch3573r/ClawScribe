@@ -69,6 +69,19 @@ test('normal validation builds and lints the frontend and runs the unfiltered na
   assert.match(native, /& \$testExecutable --test-threads=1\n/);
 });
 
+test('NSIS removes only ClawScribe startup values on uninstall and preserves them on update', () => {
+  const config = JSON.parse(read('frontend/src-tauri/tauri.conf.json'));
+  const hookPath = config.bundle.windows.nsis.installerHooks;
+  assert.ok(hookPath, 'the NSIS uninstall hook is configured');
+  const hook = read(`frontend/src-tauri/${hookPath}`);
+  const cleanup = hook.match(/!macro NSIS_HOOK_POSTUNINSTALL\n\s*\$\{If\} \$UpdateMode <> 1\n([\s\S]*?)\$\{EndIf\}\n!macroend/);
+  assert.ok(cleanup, 'startup cleanup runs only outside update mode');
+  assert.deepEqual(cleanup[1].match(/^\s*DeleteReg.*$/gm).map(line => line.trim()), [
+    String.raw`DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "ClawScribe"`,
+    String.raw`DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "ClawScribe"`,
+  ]);
+});
+
 test('release builds run packaged-binary acceptance after the native tests and before metadata', () => {
   const native = releaseWorkflow.indexOf('- name: Run native summary and resource regression tests');
   const acceptance = releaseWorkflow.indexOf('- name: Run packaged-binary acceptance');

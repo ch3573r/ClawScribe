@@ -7,6 +7,12 @@ recognizes. Detection starts off on a new installation. An existing Teams
 preference applies only to Teams until you select more apps. Automatic stopping
 has its own switch and starts off.
 
+To have call detection available after you sign in to Windows, turn on
+**Start ClawScribe when I sign in to Windows** under **Settings → Preferences**.
+This setting starts off. When enabled, ClawScribe opens in the system tray at
+sign-in and uses your existing call detection settings. Open the main window
+from the tray icon or by launching ClawScribe from the Start menu.
+
 | Meeting app | Evidence used |
 | --- | --- |
 | Microsoft Teams | Teams desktop process or a Teams website in a supported browser, with active call controls. |

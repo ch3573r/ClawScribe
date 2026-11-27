@@ -84,6 +84,10 @@ Closing the main window keeps ClawScribe running in the system tray by default.
 Under **Settings → General → Close button**, choose **Quit** to exit when
 closing the window. If a recording is active, the window stays open so you can save it.
 
+To start ClawScribe in the tray at Windows sign-in, turn on **Start ClawScribe
+when I sign in to Windows** in **Settings → Preferences**. This lets enabled
+call detection run without opening the main window.
+
 ## Capture And Transcription
 
 - Microphone and system-audio capture from the local Windows session.
@@ -225,6 +229,9 @@ Meeting memory conversation.
 
 Use **Meetings → Trash** to restore a removed meeting within 30 days or delete
 it permanently. Recording files stay on disk during retention.
+
+Export a saved transcript as SRT or WebVTT subtitles, with optional speaker
+labels. You can export a single meeting or a batch from the Archive.
 
 Read and correct the transcript while the speaker timeline loads. The text
 stays available when the recording is missing. Use **Find and replace** to
