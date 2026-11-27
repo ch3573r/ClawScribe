@@ -7,6 +7,9 @@ use super::common::{
 use super::import::{local_batch_language, resolve_local_fallback, unload_local_batch_engine};
 use super::transcription::cloud::{self, CloudFallbackReasonCategory};
 use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
+use crate::database::repositories::meeting::{
+    MeetingsRepository, FILE_PUBLICATION_LOCK, NOT_FOUND,
+};
 use crate::database::transcript_edits::{RetranscriptionFileUpdate, SyncedFiles};
 use crate::parakeet_engine::ParakeetEngine;
 use crate::state::AppState;
@@ -196,6 +199,23 @@ fn status_lock() -> std::sync::MutexGuard<'static, Option<RetranscriptionStatus>
         .unwrap_or_else(|error| error.into_inner())
 }
 
+async fn register_retranscription(
+    pool: &sqlx::SqlitePool,
+    status: &RetranscriptionStatus,
+) -> Result<(), String> {
+    // Register under the same lock as Trash so an accepted run is either
+    // visible to cancellation or rejected before it can do any work.
+    let _publication = FILE_PUBLICATION_LOCK.lock().await;
+    if !MeetingsRepository::is_active(pool, &status.meeting_id)
+        .await
+        .map_err(|_| "Could not check the meeting.")?
+    {
+        return Err(NOT_FOUND.into());
+    }
+    *status_lock() = Some(status.clone());
+    Ok(())
+}
+
 fn update_status(meeting_id: &str, state: RetranscriptionState) -> Option<RetranscriptionStatus> {
     let mut current = status_lock();
     let status = current.as_mut().filter(|status| {
@@ -325,9 +345,17 @@ async fn run_retranscription<R: Runtime>(
         crate::database::meeting_files::registered_meeting_folder(&pool, &meeting_id, &roots)
             .await
             .map_err(|message| anyhow!(message))?;
+    anyhow::ensure!(
+        !RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire),
+        "Retranscription cancelled"
+    );
     let (audio_path, capture_gaps) =
         crate::audio::incremental_saver::find_or_recover_audio_file_with_status(&folder_path)
             .await?;
+    anyhow::ensure!(
+        !RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire),
+        "Retranscription cancelled"
+    );
 
     info!(
         "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
@@ -857,7 +885,6 @@ async fn commit_retranscription(
     previous_provenance: Option<crate::database::transcript_edits::Provenance>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    use crate::database::repositories::meeting::{MeetingsRepository, NOT_FOUND};
     if !MeetingsRepository::is_active(&mut *tx, meeting_id).await? {
         return Err(anyhow!(NOT_FOUND));
     }
@@ -1293,7 +1320,8 @@ pub async fn start_retranscription_command<R: Runtime>(
             progress: progress.clone(),
         },
     };
-    *status_lock() = Some(started.clone());
+    let state = app.state::<AppState>();
+    register_retranscription(state.db_manager.pool(), &started).await?;
     let _ = app.emit(
         "retranscription-progress",
         RetranscriptionEvent {
@@ -1373,8 +1401,16 @@ pub fn get_retranscription_status() -> Option<RetranscriptionStatus> {
 
 #[tauri::command]
 pub fn cancel_retranscription_command(run_id: u64) -> bool {
+    cancel_matching_run(|status| status.run_id == run_id)
+}
+
+pub(crate) fn cancel_retranscription_for_meeting(meeting_id: &str) {
+    cancel_matching_run(|status| status.meeting_id == meeting_id);
+}
+
+fn cancel_matching_run(matches: impl FnOnce(&RetranscriptionStatus) -> bool) -> bool {
     status_lock().as_ref().is_some_and(|status| {
-        status.run_id == run_id
+        matches(status)
             && matches!(status.state, RetranscriptionState::Running { .. })
             && cancel_retranscription_if_possible()
     })
@@ -1454,9 +1490,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trash_prevents_publication_of_running_retranscription() {
-        use crate::database::repositories::meeting::MeetingsRepository;
+    async fn trash_cancels_the_matching_upload_and_releases_the_job_slot() {
+        let _test = super::super::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "hosted-upload-trash-test";
+        let other = "unrelated-upload-trash-test";
+        for id in [meeting, other] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Synthetic meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+                .bind(id).execute(&pool).await.unwrap();
+        }
+        let (job, guard, phase) = claim_retranscription().await.unwrap();
+        let run_id = NEXT_STATUS_REVISION.fetch_add(1, Ordering::Relaxed);
+        let status = RetranscriptionStatus {
+            run_id,
+            revision: run_id,
+            meeting_id: meeting.into(),
+            started_at_ms: 0,
+            replaces_transcript: true,
+            state: RetranscriptionState::Running {
+                progress: RetranscriptionProgress {
+                    meeting_id: meeting.into(),
+                    stage: "transcribing".into(),
+                    progress_percentage: 5,
+                    message: "Uploading audio".into(),
+                },
+            },
+        };
+        let previous = get_retranscription_status();
+        register_retranscription(&pool, &status).await.unwrap();
 
+        let (upload_started, running) = tokio::sync::oneshot::channel();
+        let upload = tokio::spawn(async move {
+            let result = super::super::batch_audio::unless_cancelled(
+                async {
+                    upload_started.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                },
+                &RETRANSCRIPTION_CANCELLED,
+            )
+            .await;
+            drop((phase, guard, job));
+            result
+        });
+        running.await.unwrap();
+        assert!(MeetingsRepository::move_to_trash(&pool, other, true)
+            .await
+            .unwrap());
+        assert!(!RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire));
+        assert!(MeetingsRepository::move_to_trash(&pool, meeting, true)
+            .await
+            .unwrap());
+        assert!(RETRANSCRIPTION_CANCELLED.load(Ordering::Acquire));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), upload)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, None);
+        let _purge = super::super::inference::claim_job().unwrap();
+        assert_eq!(
+            register_retranscription(&pool, &status).await.unwrap_err(),
+            NOT_FOUND
+        );
+        assert!(MeetingsRepository::purge_from_trash(&pool, meeting, false)
+            .await
+            .unwrap()
+            .is_some());
+        *status_lock() = previous;
+    }
+
+    #[tokio::test]
+    async fn trash_prevents_publication_of_running_retranscription() {
         let (pool, _) = publication_fixture().await;
         let id = "review-test";
         let replacement = create_transcript_segments(&[("new transcript".into(), 0.0, 2000.0)]);

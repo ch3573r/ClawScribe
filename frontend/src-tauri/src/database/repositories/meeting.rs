@@ -67,6 +67,7 @@ impl MeetingsRepository {
         .await?;
         let moved = result.rows_affected() == 1;
         if moved {
+            crate::audio::retranscription::cancel_retranscription_for_meeting(meeting_id);
             crate::speaker_profiles::forget_detection_sample(meeting_id);
         }
         Ok(moved)
