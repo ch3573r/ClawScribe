@@ -309,22 +309,29 @@ struct GithubRelease {
 #[derive(Debug)]
 struct Candidate {
     version: Version,
+    tag_version: Version,
     tag: String,
     prerelease: bool,
     manifest_url: String,
     installer_url: String,
 }
 
-fn runtime_version(tag: &str) -> Option<Version> {
-    let version = Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()?;
+fn parse_release_tag(tag: &str) -> Option<Version> {
+    Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
+}
+
+fn numeric_version(version: &Version) -> Version {
     // Windows ProductVersion cannot carry a prerelease suffix. Equal numeric
     // versions are never successive updates, even across release channels.
-    Some(Version::new(version.major, version.minor, version.patch))
+    Version::new(version.major, version.minor, version.patch)
+}
+
+fn runtime_version(tag: &str) -> Option<Version> {
+    parse_release_tag(tag).map(|version| numeric_version(&version))
 }
 
 fn newer_runtime(current: &Version, available: &Version) -> bool {
-    Version::new(available.major, available.minor, available.patch)
-        > Version::new(current.major, current.minor, current.patch)
+    numeric_version(available) > numeric_version(current)
 }
 
 fn newest_candidate(releases: Vec<GithubRelease>, floor: &Version) -> Option<Candidate> {
@@ -334,7 +341,8 @@ fn newest_candidate(releases: Vec<GithubRelease>, floor: &Version) -> Option<Can
             if release.draft {
                 return None;
             }
-            let version = runtime_version(&release.tag_name)?;
+            let tag_version = parse_release_tag(&release.tag_name)?;
+            let version = numeric_version(&tag_version);
             if version <= *floor {
                 return None;
             }
@@ -357,6 +365,7 @@ fn newest_candidate(releases: Vec<GithubRelease>, floor: &Version) -> Option<Can
             }
             Some(Candidate {
                 version,
+                tag_version,
                 tag: release.tag_name,
                 prerelease: release.prerelease,
                 manifest_url,
@@ -367,6 +376,7 @@ fn newest_candidate(releases: Vec<GithubRelease>, floor: &Version) -> Option<Can
             a.version
                 .cmp(&b.version)
                 .then_with(|| b.prerelease.cmp(&a.prerelease))
+                .then_with(|| a.tag_version.cmp_precedence(&b.tag_version))
                 .then_with(|| a.tag.cmp(&b.tag))
         })
 }
@@ -465,10 +475,7 @@ pub async fn check_app_update<R: Runtime>(webview: Webview<R>) -> Result<UpdateC
         let floor = update
             .as_ref()
             .and_then(|update| runtime_version(&update.version))
-            .unwrap_or_else(|| {
-                let version = &app.package_info().version;
-                Version::new(version.major, version.minor, version.patch)
-            });
+            .unwrap_or_else(|| numeric_version(&app.package_info().version));
         if let Some(candidate) = newest_candidate(preview_releases().await?, &floor) {
             let endpoint = candidate
                 .manifest_url
@@ -665,6 +672,20 @@ mod tests {
         .unwrap();
         assert!(!candidate.prerelease);
         assert_eq!(candidate.tag, "v0.5.10");
+    }
+
+    #[test]
+    fn compares_preview_numbers_for_equal_runtime_versions() {
+        let candidate = newest_candidate(
+            vec![
+                release("v0.68.2-preview.10", true),
+                release("v0.68.2-preview.9", true),
+            ],
+            &Version::new(0, 68, 1),
+        )
+        .unwrap();
+        assert_eq!(candidate.tag, "v0.68.2-preview.10");
+        assert_eq!(candidate.version, Version::new(0, 68, 2));
     }
 
     #[test]
