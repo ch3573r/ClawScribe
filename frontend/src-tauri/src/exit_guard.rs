@@ -161,14 +161,7 @@ async fn stop_recording_then_exit<R: Runtime>(app: AppHandle<R>, code: i32) {
     }
     let outcome = bounded_stop(
         EXIT_FINALIZE_TIMEOUT,
-        crate::audio::recording_commands::stop_recording(
-            app.clone(),
-            // The stop path ignores the save path; the recording folder is
-            // chosen when the recording starts.
-            crate::audio::recording_commands::RecordingArgs {
-                save_path: String::new(),
-            },
-        ),
+        crate::audio::recording_commands::stop_recording(app.clone()),
     )
     .await;
     match outcome {

@@ -33,6 +33,14 @@ test('failed audio and incomplete transcription remain distinct actionable state
   assert.match(recordingRecoveryMessage(recordingOutcome({audio_save_failed: true, transcription_incomplete: true})), /recovery files/);
 });
 
+test('Stop only offers to retranscribe when the recording saved audio', () => {
+  const outcome = recordingOutcome({ transcription_incomplete: true });
+  assert.match(recordingRecoveryMessage(outcome, true), /Use Retranscribe/);
+  const transcriptOnly = recordingRecoveryMessage(outcome, false);
+  assert.match(transcriptOnly, /Audio was not kept/);
+  assert.doesNotMatch(transcriptOnly, /Retranscribe/);
+});
+
 test('auto-summary blocks only failed audio or incomplete transcription', () => {
   for (const flag of ['capture_incomplete', 'recording_files_incomplete']) {
     const outcome = recordingOutcome({ [flag]: true });

@@ -103,6 +103,34 @@ test('a native stop no-op returns to idle when the state read rejects', async t 
   assert.equal(state.sessionId, null);
 });
 
+test('a no-op Stop leaves a newly active recording ready to stop', async t => {
+  const view = createView();
+  t.after(() => view.unmount());
+  view.render();
+  await flush();
+  view.requests[0].resolve(recording);
+  await flush();
+  view.render().setStatus('stopping');
+  const stop = view.render().reconcileNothingToStop(false);
+  view.requests[1].resolve({ ...recording, is_stopping: false });
+  assert.equal(await stop, true);
+  assert.equal(view.render().status, 'recording');
+});
+
+test('a state poll clears stopping if the completion event was missed', async t => {
+  const view = createView();
+  t.after(() => view.unmount());
+  view.render();
+  await flush();
+  view.requests[0].resolve(recording);
+  await flush();
+  view.render().setStatus('stopping');
+  view.tick();
+  view.requests[1].resolve({ is_recording: false, is_stopping: false });
+  await flush();
+  assert.equal(view.render().status, 'idle');
+});
+
 test('elapsed ticks update the clock without changing the lifecycle context value', async () => {
   const view = createView();
   view.render();

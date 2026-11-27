@@ -466,10 +466,7 @@ impl RecordingManager {
 
         // A native driver can block while pausing or destroying a stream.
         // Freeze this session first, then bound how long Stop waits for release.
-        let mut streams = std::mem::replace(
-            &mut self.stream_manager,
-            AudioStreamManager::new(self.state.clone()),
-        );
+        let mut streams = self.take_streams();
         let release = tokio::task::spawn_blocking(move || streams.stop_streams());
 
         if let Some(ref mut monitor) = self.device_monitor {
@@ -789,14 +786,26 @@ impl RecordingManager {
         self.state.mark_source_missing(device, source);
     }
 
-    pub async fn attempt_device_reconnect(
-        &mut self,
+    pub(super) fn take_streams(&mut self) -> AudioStreamManager {
+        std::mem::replace(
+            &mut self.stream_manager,
+            AudioStreamManager::new(self.state.clone()),
+        )
+    }
+
+    pub(super) fn restore_streams(&mut self, streams: AudioStreamManager) {
+        self.stream_manager = streams;
+    }
+
+    pub(super) async fn reconnect_streams(
+        state: &RecordingState,
+        streams: &mut AudioStreamManager,
         device_name: &str,
         device_type: DeviceMonitorType,
     ) -> Result<ReconnectResult> {
         let (source, kind) = source_types(device_type);
-        let Some(revision) = self.state.source_failure_revision(device_name, &source) else {
-            return Ok(self.reconnect_result(false));
+        let Some(revision) = state.source_failure_revision(device_name, &source) else {
+            return Ok(Self::reconnect_result(state, streams, false));
         };
 
         let device = list_audio_devices()
@@ -804,10 +813,12 @@ impl RecordingManager {
             .into_iter()
             .find(|device| device.name == device_name && device.device_type == kind);
         let Some(device) = device.map(Arc::new) else {
-            return Ok(self.reconnect_result(false));
+            return Ok(Self::reconnect_result(state, streams, false));
         };
-        if self
-            .stream_manager
+        if !state.is_recording() {
+            return Ok(Self::reconnect_result(state, streams, false));
+        }
+        if streams
             .reconnect_source(device, source.clone())
             .await
             .is_err()
@@ -816,21 +827,24 @@ impl RecordingManager {
         } else {
             // Keep the source visibly unavailable until it opens, and never
             // clear a newer error reported by a callback during that open.
-            self.state.mark_source_reconnected(&source, revision);
+            state.mark_source_reconnected(&source, revision);
         }
         // An error callback can report a disconnect even while the stream is opening.
-        Ok(self.reconnect_result(self.source_active(&source)))
+        let reconnected = streams.source_active(&source) && !state.source_is_missing(&source);
+        Ok(Self::reconnect_result(state, streams, reconnected))
     }
 
-    fn source_active(&self, source: &RecordingDeviceType) -> bool {
-        self.stream_manager.source_active(source) && !self.state.source_is_missing(source)
-    }
-
-    fn reconnect_result(&self, reconnected: bool) -> ReconnectResult {
+    fn reconnect_result(
+        state: &RecordingState,
+        streams: &AudioStreamManager,
+        reconnected: bool,
+    ) -> ReconnectResult {
+        let source_active =
+            |source| streams.source_active(source) && !state.source_is_missing(source);
         ReconnectResult {
             reconnected,
-            microphone_active: self.source_active(&RecordingDeviceType::Microphone),
-            system_audio_active: self.source_active(&RecordingDeviceType::System),
+            microphone_active: source_active(&RecordingDeviceType::Microphone),
+            system_audio_active: source_active(&RecordingDeviceType::System),
         }
     }
 
@@ -894,7 +908,10 @@ mod reconnect_recovery_tests {
         let pending = manager.state.disconnected_devices();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].1, system);
-        assert!(!manager.reconnect_result(false).reconnected);
+        assert!(
+            !RecordingManager::reconnect_result(&manager.state, &manager.stream_manager, false)
+                .reconnected
+        );
         let system_failure = manager
             .state
             .source_failure_revision("synthetic output", &system)

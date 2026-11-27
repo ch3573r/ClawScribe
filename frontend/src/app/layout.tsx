@@ -203,15 +203,25 @@ export default function RootLayout({
   }, []);
   // Surface non-fatal warnings raised by the recording pipeline.
   useEffect(() => {
-    const unlisten = listen<string>('recording-warning', (event) => {
-      const isTranscriptionWarning = event.payload.startsWith('Live transcription');
+    let disposed = false;
+    const showWarning = (message: string, isTranscriptionWarning: boolean) => {
+      if (disposed) return;
       toast.warning(isTranscriptionWarning ? 'Live transcription incomplete' : 'Recording warning', {
-        description: event.payload,
+        id: isTranscriptionWarning ? 'live-transcription-warning' : undefined,
+        description: message,
         duration: 12000,
       });
-    });
+    };
+    const subscriptions = [
+      listen<string>('recording-warning', ({ payload }) => showWarning(payload, payload.startsWith('Live transcription'))),
+      listen<string>('transcription-warning', ({ payload }) => showWarning(payload, true)),
+    ];
+    for (const subscription of subscriptions) {
+      void subscription.catch(() => console.warn('Could not subscribe to recording warnings.'));
+    }
     return () => {
-      unlisten.then((fn) => fn());
+      disposed = true;
+      for (const subscription of subscriptions) void subscription.then(unlisten => unlisten(), () => {});
     };
   }, []);
 

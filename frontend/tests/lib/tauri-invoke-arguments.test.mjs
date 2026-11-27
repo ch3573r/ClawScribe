@@ -104,3 +104,24 @@ test('the manual start sends the title and both device choices by camelCase name
     ['attempt_device_reconnect', { deviceName: 'Synthetic mic', deviceType: 'Microphone', sessionId: 'synthetic-session' }],
   ]);
 });
+
+test('Stop preserves the native boolean and sends no destination argument', async () => {
+  const { loadTsModule } = await import('./load-ts-module.mjs');
+  for (const stopped of [false, true]) {
+    const { recordingService } = loadTsModule('src/services/recordingService.ts', {
+      '@tauri-apps/api/core': { invoke: async (...args) => {
+        assert.deepEqual(args, ['stop_recording']);
+        return stopped;
+      } },
+      '@tauri-apps/api/event': { listen: async () => () => {} },
+    });
+    assert.equal(await recordingService.stopRecording(), stopped);
+  }
+
+  const native = fs.readFileSync(new URL('../../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  const stop = native.slice(native.indexOf('async fn stop_recording<'), native.indexOf('async fn is_recording'));
+  assert.match(stop, /\(app: AppHandle<R>\) -> Result<bool, String>/);
+  assert.match(stop, /Ok\(false\) => Ok\(false\)/);
+  assert.match(stop, /Ok\(true\)\s*\n\s*}/);
+  assert.doesNotMatch(stop, /save_path|create_dir_all/);
+});

@@ -180,10 +180,17 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       return null;
     });
     // A newer lifecycle event owns the UI if it arrived during the state read.
-    if (!backend?.is_recording && revision === lifecycleRevision.current && lifecycleStatus.current === RecordingStatus.STOPPING) {
+    if (revision !== lifecycleRevision.current || lifecycleStatus.current !== RecordingStatus.STOPPING) return true;
+    if (!backend?.is_recording) {
       setStatus(RecordingStatus.IDLE);
       setElapsedSeconds(0);
       setState(prev => ({ ...prev, sessionId: null, isRecording: false, isPaused: false, isActive: false }));
+    } else if (!backend.is_stopping) {
+      setStatus(RecordingStatus.RECORDING);
+      setState(prev => ({
+        ...prev, sessionId: backend.session_id ?? null, isRecording: true,
+        isPaused: backend.is_paused, isActive: backend.is_active,
+      }));
     }
     return true;
   }, [setStatus]);
@@ -233,6 +240,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         }
         if (backend.is_recording) startPolling();
         else stopPolling();
+        if (!backend.is_recording && lifecycleStatus.current === RecordingStatus.STOPPING) {
+          setStatus(RecordingStatus.IDLE);
+        }
         const status = backend.is_recording && lifecycleStatus.current === RecordingStatus.IDLE
           ? RecordingStatus.RECORDING : lifecycleStatus.current;
         lifecycleStatus.current = status;

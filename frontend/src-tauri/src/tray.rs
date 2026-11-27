@@ -217,26 +217,7 @@ async fn stop_active_recording<R: Runtime>(app: &AppHandle<R>, origin: &str) {
     set_tray_state(app, RecordingState::Stopping);
     log::info!("{origin}: stopping recording...");
 
-    // Generate save path (same as RecordingControls.tsx)
-    let data_dir = match app.path().app_data_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            log::error!("Failed to get app data dir: {}", e);
-            update_tray_menu_async(app).await;
-            return;
-        }
-    };
-    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
-    let save_path = data_dir.join(format!("recording-{}.wav", timestamp));
-
-    // Call Rust stop_recording command (like pause/resume pattern)
-    let stop_result = crate::audio::recording_commands::stop_recording(
-        app.clone(),
-        crate::audio::recording_commands::RecordingArgs {
-            save_path: save_path.to_string_lossy().to_string(),
-        },
-    )
-    .await;
+    let stop_result = crate::audio::recording_commands::stop_recording(app.clone()).await;
 
     match stop_result {
         Ok(false) => {}

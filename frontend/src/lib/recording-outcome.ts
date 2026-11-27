@@ -43,7 +43,7 @@ export function recordingBlocksAutoSummary(value?: Partial<RecordingOutcome> | n
   return value?.audio_save_failed === true || value?.transcription_incomplete === true;
 }
 
-export function recordingRecoveryMessage(value: RecordingOutcome): string | null {
+export function recordingRecoveryMessage(value: RecordingOutcome, audioSaved?: boolean): string | null {
   const messages: string[] = [];
   if (value.recovery_files_elsewhere) {
     messages.push('Audio could not be fully saved on the computer where this meeting was recorded. Its recovery files were not included in this backup. Recover the audio on that computer, then back it up again.');
@@ -55,9 +55,19 @@ export function recordingRecoveryMessage(value: RecordingOutcome): string | null
   }
   if (value.transcription_incomplete && !value.recovery_files_elsewhere) {
     const remaining = value.capture_details?.unfinished_segments ?? 0;
-    messages.push(remaining > 0
-      ? `The live transcript is incomplete. Stop left ${remaining} speech ${remaining === 1 ? 'segment' : 'segments'} unfinished. Use Retranscribe to process the saved audio.`
-      : 'The live transcript is incomplete. Use Retranscribe to process the saved audio before relying on notes or exports.');
+    messages.push('The live transcript is incomplete.');
+    if (remaining > 0) {
+      messages.push(`Stop left ${remaining} speech ${remaining === 1 ? 'segment' : 'segments'} unfinished.`);
+    }
+    if (audioSaved) {
+      messages.push(remaining > 0
+        ? 'Use Retranscribe to process the saved audio.'
+        : 'Use Retranscribe to process the saved audio before relying on notes or exports.');
+    } else if (audioSaved === false && !value.audio_save_failed) {
+      messages.push('Audio was not kept.');
+    } else if (!value.audio_save_failed) {
+      messages.push('If audio is available, use Retranscribe before relying on notes or exports.');
+    }
   }
   if (value.recording_files_incomplete && !value.recovery_files_elsewhere) {
     messages.push('Some recording details or transcript backup files could not be saved. Review the library transcript and keep the meeting folder.');

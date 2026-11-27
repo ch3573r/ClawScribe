@@ -1,7 +1,6 @@
 'use client';
 
 import { invoke } from '@tauri-apps/api/core';
-import { appDataDir } from '@tauri-apps/api/path';
 import { useCallback, useEffect, useState } from 'react';
 import { Play, Pause, Square, Mic, AlertCircle, X, PictureInPicture2 } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
@@ -118,10 +117,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const stopRecordingAction = useCallback(async () => {
     try {
       setIsProcessing(true);
-      const dataDir = await appDataDir();
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const savePath = `${dataDir}/recording-${timestamp}.wav`;
-      const stopped = await recordingService.stopRecording(savePath);
+      const stopped = await recordingService.stopRecording();
       if (stopped === false) {
         if (await recordingState.reconcileNothingToStop(stopped)) return;
         throw new Error('Could not verify whether the recording stopped. Try again.');

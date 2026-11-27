@@ -21,7 +21,6 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
     'react/jsx-runtime': { jsx: () => null, jsxs: () => null, Fragment: 'Fragment' },
     '@tauri-apps/api/event': { listen: async (name, callback) => { subscriptions.push(name); events.set(name, callback); return () => events.delete(name); } },
     '@tauri-apps/api/core': { invoke: async command => { calls.push(['invoke', command]); } },
-    '@tauri-apps/api/path': { appDataDir: async () => 'synthetic-data' },
     sonner: { toast: {
       error: (title, options) => toasts.push({ title, ...options }),
       info: (title, options) => toasts.push({ kind: 'info', title, ...options }),
@@ -35,8 +34,8 @@ function setup(t, { recording = { is_recording: true, is_paused: false, is_activ
     },
     '@/services/recordingService': { recordingService: {
       getRecordingState: async () => recording,
-      stopRecording: async path => {
-        calls.push(['stop_recording', path.startsWith('synthetic-data/recording-')]);
+      stopRecording: async (...args) => {
+        calls.push(['stop_recording', ...args]);
         if (stopRecordingFails !== null) throw stopRecordingFails;
         return stopped;
       },
@@ -65,7 +64,7 @@ test('Stop from the sidebar saves the recording without needing the Home page', 
   app.windowListeners.get('stop-recording-from-sidebar')();
   await flush();
   assert.deepEqual(app.calls.filter(([name]) => name !== 'version'), [
-    ['setStatus', 'STOPPING'], ['stop_recording', true],
+    ['setStatus', 'STOPPING'], ['stop_recording'],
   ]);
 });
 
