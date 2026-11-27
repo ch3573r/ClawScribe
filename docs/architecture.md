@@ -220,12 +220,22 @@ restores polling for an active session after a reload, and permits one poll at a
 time. Lifecycle events invalidate older polls. Cleanup also removes subscriptions
 whose asynchronous registration finishes after the provider unmounts.
 
+`audio/stream.rs` copies CPAL input into a bounded pool of reusable buffers.
+Per-source workers run DSP and pass the capture position of each block to the
+mixer. The mixer uses a pause-adjusted 48 kHz timeline for both inputs, with
+bounded lookahead and silence where a source has no samples. Saving and live
+speech detection receive the same mixed windows.
+
 `audio/transcription/queue.rs` serves both live recognition and the retained
 recording spool. Startup removes abandoned UUID-named temporary transcription
 queues without following links; queues owned by a running session are retained. Bounded producer buffers feed independent disk workers so disk
 latency does not block the mixer. `audio/audio_spool.rs` encodes final audio from
 the available PCM spool in one pass with a duration-scaled deadline and recovers
-it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. Both paths accept a readable temporary tail at the next sequence
+it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. New capture chunks carry absolute sample positions, and a stop
+records the intended end. Both paths insert silence for known missing spans so
+later audio keeps its transcript position. Older spools still recover in
+sequence. Older builds can read new capture chunks and play them in sequence.
+Both paths accept a readable temporary tail at the next sequence
 position. Torn temporary writes record a gap without preventing spool cleanup;
 unreadable published chunks retain their originals. Playback uses asset-protocol
 byte ranges and an HTML audio element. The core grants access to each resolved

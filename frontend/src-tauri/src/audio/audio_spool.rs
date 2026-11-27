@@ -1,8 +1,8 @@
 //! Rebuild playable audio from durable capture chunks with bounded audio memory.
 use super::incremental_saver::AudioRecoveryStatus;
-use super::transcription::queue::read_chunk;
+use super::transcription::queue::{capture_timeline_end, read_capture_chunk, read_chunk};
 use std::fs::{self, File};
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Bounded encode budget shared by final saving and long-recording recovery.
@@ -79,6 +79,7 @@ pub(super) fn capture_has_gaps(folder: &Path) -> std::io::Result<bool> {
         return Ok(true);
     }
     let mut sample_rate = None;
+    let mut end = 0;
     for (index, path) in paths.iter().enumerate() {
         if path
             .file_stem()
@@ -88,16 +89,117 @@ pub(super) fn capture_has_gaps(folder: &Path) -> std::io::Result<bool> {
         {
             return Ok(true);
         }
-        let chunk = match read_chunk(path) {
-            Ok(chunk) if chunk.sample_rate > 0 && !chunk.data.is_empty() => chunk,
+        let (chunk, start) = match read_capture_chunk(path) {
+            Ok(entry) if entry.0.sample_rate > 0 && !entry.0.data.is_empty() => entry,
             _ => return Ok(true),
         };
-        if sample_rate.is_some_and(|rate| rate != chunk.sample_rate) {
+        if sample_rate.is_some_and(|rate| rate != chunk.sample_rate)
+            || start.is_some_and(|start| start != end)
+        {
             return Ok(true);
         }
         sample_rate = Some(chunk.sample_rate);
+        end += chunk.data.len() as u64;
     }
-    Ok(false)
+    Ok(capture_timeline_end(&spool).is_some_and(|expected| expected != end))
+}
+
+struct CapturePcm {
+    samples: u64,
+    chunks: u32,
+    gaps: bool,
+    all_encoded: bool,
+}
+
+fn expected_samples(paths: &[PathBuf], timeline_end: Option<u64>) -> u64 {
+    let last_position = paths
+        .iter()
+        .rev()
+        .find_map(|path| read_capture_chunk(path).ok())
+        .and_then(|(chunk, start)| start?.checked_add(chunk.data.len() as u64));
+    if let Some(end) = last_position.or(timeline_end) {
+        return end.max(timeline_end.unwrap_or(0));
+    }
+    paths
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.len().saturating_sub(33) / 4)
+        .sum()
+}
+
+fn fill_capture_gap(writer: &mut impl Write, gap: u64, sample_rate: u32) -> io::Result<()> {
+    if gap > u64::from(sample_rate) * 24 * 60 * 60 {
+        return Err(io::Error::other("Invalid gap in the capture timeline"));
+    }
+    let silence = [0; 8192];
+    let mut bytes = gap * 4;
+    while bytes > 0 {
+        let count = bytes.min(silence.len() as u64) as usize;
+        writer.write_all(&silence[..count])?;
+        bytes -= count as u64;
+    }
+    Ok(())
+}
+
+/// Use positioned chunks for gap lengths. Older spools have wall-clock
+/// timestamps, so keep their original sequential recovery behavior.
+fn write_capture_pcm(
+    writer: &mut impl Write,
+    paths: &[PathBuf],
+    sample_rate: u32,
+    timeline_end: Option<u64>,
+    max_samples: u64,
+    result: &mut CapturePcm,
+) -> io::Result<()> {
+    for (index, path) in paths.iter().enumerate() {
+        result.gaps |= path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<usize>().ok())
+            != Some(index);
+        let (chunk, start) = match read_capture_chunk(path) {
+            Ok(entry) if entry.0.sample_rate == sample_rate && !entry.0.data.is_empty() => entry,
+            Err(_) if path.extension().is_some_and(|ext| ext == "tmp") => {
+                result.gaps = true;
+                continue;
+            }
+            _ => {
+                result.gaps = true;
+                result.all_encoded = false;
+                continue;
+            }
+        };
+        let start = start.unwrap_or(result.samples);
+        if start < result.samples {
+            result.gaps = true;
+            result.all_encoded = false;
+            continue;
+        }
+        let end = start
+            .checked_add(chunk.data.len() as u64)
+            .filter(|&end| end <= max_samples)
+            .ok_or_else(|| io::Error::other("Recording exceeds format size limit"))?;
+        let gap = start - result.samples;
+        if gap > 0 {
+            fill_capture_gap(writer, gap, sample_rate)?;
+            result.gaps = true;
+        }
+        writer.write_all(bytemuck::cast_slice(&chunk.data))?;
+        result.samples = end;
+        result.chunks += 1;
+    }
+    if result.chunks == 0 {
+        return Err(io::Error::other("No readable captured audio"));
+    }
+    if let Some(end) = timeline_end.filter(|&end| end > result.samples) {
+        if end > max_samples {
+            return Err(io::Error::other("Recording exceeds format size limit"));
+        }
+        fill_capture_gap(writer, end - result.samples, sample_rate)?;
+        result.samples = end;
+        result.gaps = true;
+    }
+    Ok(())
 }
 
 /// Returns (has gaps, all recoverable chunks encoded). Unreadable published
@@ -115,7 +217,7 @@ pub(super) fn encode_capture_at_bitrate(
     bitrate_kbps: u32,
 ) -> anyhow::Result<(bool, bool)> {
     let spool = folder.join(".audio-spool");
-    let (paths, temporary_gaps, mut all_encoded) = capture_paths(&spool)?;
+    let (paths, temporary_gaps, all_encoded) = capture_paths(&spool)?;
     let first = paths
         .iter()
         .find_map(|path| {
@@ -126,13 +228,15 @@ pub(super) fn encode_capture_at_bitrate(
         .ok_or_else(|| std::io::Error::other("No readable captured audio"))?;
     let sample_rate = first.sample_rate;
     drop(first);
-    let samples: u64 = paths
-        .iter()
-        .filter_map(|path| fs::metadata(path).ok())
-        .map(|metadata| metadata.len().saturating_sub(33) / 4)
-        .sum();
-    let timeout = encode_timeout(samples as f64 / sample_rate as f64);
-    let mut gaps = temporary_gaps || spool.join(".incomplete").exists();
+    let timeline_end = capture_timeline_end(&spool);
+    let samples = expected_samples(&paths, timeline_end);
+    let timeout = encode_timeout(samples as f64 / f64::from(sample_rate));
+    let mut pcm = CapturePcm {
+        samples: 0,
+        chunks: 0,
+        gaps: temporary_gaps || spool.join(".incomplete").exists(),
+        all_encoded,
+    };
     super::encode::encode_pcm_stream_at_bitrate(
         sample_rate,
         1,
@@ -140,37 +244,17 @@ pub(super) fn encode_capture_at_bitrate(
         timeout,
         bitrate_kbps,
         |writer| {
-            let mut written = false;
-            for (index, path) in paths.iter().enumerate() {
-                gaps |= path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .and_then(|stem| stem.parse::<usize>().ok())
-                    != Some(index);
-                let chunk = match read_chunk(path) {
-                    Ok(chunk) if chunk.sample_rate == sample_rate && !chunk.data.is_empty() => {
-                        chunk
-                    }
-                    Err(_) if path.extension().is_some_and(|ext| ext == "tmp") => {
-                        gaps = true;
-                        continue;
-                    }
-                    _ => {
-                        gaps = true;
-                        all_encoded = false;
-                        continue;
-                    }
-                };
-                writer.write_all(bytemuck::cast_slice(&chunk.data))?;
-                written = true;
-            }
-            if !written {
-                return Err(std::io::Error::other("No readable captured audio"));
-            }
-            Ok(())
+            write_capture_pcm(
+                writer,
+                &paths,
+                sample_rate,
+                timeline_end,
+                u64::MAX,
+                &mut pcm,
+            )
         },
     )?;
-    Ok((gaps, all_encoded))
+    Ok((pcm.gaps, pcm.all_encoded))
 }
 
 pub(super) fn recover(folder: &Path) -> Result<AudioRecoveryStatus, String> {
@@ -190,22 +274,21 @@ fn recover_with_encoder(
     encode: impl FnOnce(&Path, &PathBuf) -> anyhow::Result<(bool, bool)>,
 ) -> std::io::Result<AudioRecoveryStatus> {
     let spool = folder.join(".audio-spool");
-    let (paths, temporary_gaps, _) = capture_paths(&spool)?;
+    let (paths, temporary_gaps, all_encoded) = capture_paths(&spool)?;
+    let timeline_end = capture_timeline_end(&spool);
+    let sample_rate = paths
+        .iter()
+        .find_map(|path| {
+            read_chunk(path)
+                .ok()
+                .filter(|chunk| chunk.sample_rate > 0 && !chunk.data.is_empty())
+                .map(|chunk| chunk.sample_rate)
+        })
+        .ok_or_else(|| io::Error::other("No readable captured audio"))?;
     let staged = folder.join(format!(".audio-recovered-{}.tmp", uuid::Uuid::new_v4()));
     // Prefer compact AAC; retain encoder-free WAV recovery as the fallback.
     if encoder_available {
-        let first = paths
-            .iter()
-            .find_map(|path| {
-                read_chunk(path)
-                    .ok()
-                    .filter(|chunk| chunk.sample_rate > 0 && !chunk.data.is_empty())
-            })
-            .ok_or_else(|| std::io::Error::other("No readable captured audio"))?;
-        let samples = paths.iter().try_fold(0u64, |total, path| {
-            fs::metadata(path)
-                .map(|metadata| total.saturating_add(metadata.len().saturating_sub(33) / 4))
-        })?;
+        let samples = expected_samples(&paths, timeline_end);
         let mut encoded_gaps = false;
         let encoded = encode(folder, &staged)
             .map(|(gaps, _)| {
@@ -239,7 +322,7 @@ fn recover_with_encoder(
         return Ok(AudioRecoveryStatus {
             status: if partial { "partial" } else { "success" }.into(),
             chunk_count: paths.len() as u32,
-            estimated_duration_seconds: samples as f64 / first.sample_rate as f64,
+            estimated_duration_seconds: samples as f64 / f64::from(sample_rate),
             audio_file_path: Some(output.to_string_lossy().into_owned()),
             message: "Recovered captured audio. Recovery originals have been retained.".into(),
         });
@@ -248,44 +331,22 @@ fn recover_with_encoder(
     let result = (|| -> std::io::Result<AudioRecoveryStatus> {
         let mut writer = BufWriter::new(File::create(&staged)?);
         writer.write_all(&[0; 44])?;
-        let mut sample_rate = 0;
-        let mut samples = 0u64;
-        let mut count = 0u32;
-        let mut partial = temporary_gaps || spool.join(".incomplete").exists();
-        for (index, path) in paths.iter().enumerate() {
-            if path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .and_then(|value| value.parse::<usize>().ok())
-                != Some(index)
-            {
-                partial = true;
-            }
-            let chunk = match read_chunk(path) {
-                Ok(chunk) if chunk.sample_rate > 0 && !chunk.data.is_empty() => chunk,
-                _ => {
-                    partial = true;
-                    continue;
-                }
-            };
-            if sample_rate == 0 {
-                sample_rate = chunk.sample_rate;
-            }
-            if chunk.sample_rate != sample_rate {
-                return Err(std::io::Error::other("Inconsistent capture format"));
-            }
-            samples += chunk.data.len() as u64;
-            // Standard WAV has a 32-bit length. Fail without touching recovery originals.
-            if samples * 4 > u32::MAX as u64 - 36 {
-                return Err(std::io::Error::other("Recording exceeds WAV size limit"));
-            }
-            writer.write_all(bytemuck::cast_slice(&chunk.data))?;
-            count += 1;
-        }
-        if samples == 0 {
-            return Err(std::io::Error::other("No recoverable samples"));
-        }
-        let data_bytes = (samples * 4) as u32;
+        let mut pcm = CapturePcm {
+            samples: 0,
+            chunks: 0,
+            gaps: temporary_gaps || spool.join(".incomplete").exists(),
+            all_encoded,
+        };
+        // Standard WAV has a 32-bit length. Fail without touching recovery originals.
+        write_capture_pcm(
+            &mut writer,
+            &paths,
+            sample_rate,
+            timeline_end,
+            (u64::from(u32::MAX) - 36) / 4,
+            &mut pcm,
+        )?;
+        let data_bytes = (pcm.samples * 4) as u32;
         writer.seek(SeekFrom::Start(0))?;
         writer.write_all(b"RIFF")?;
         writer.write_all(&(data_bytes + 36).to_le_bytes())?;
@@ -310,11 +371,11 @@ fn recover_with_encoder(
         fs::rename(&staged, &output)?;
         remove_superseded_recovery(&folder.join("audio-recovered.mp4"))?;
         Ok(AudioRecoveryStatus {
-            status: if partial { "partial" } else { "success" }.into(),
-            chunk_count: count,
-            estimated_duration_seconds: samples as f64 / sample_rate as f64,
+            status: if pcm.gaps { "partial" } else { "success" }.into(),
+            chunk_count: pcm.chunks,
+            estimated_duration_seconds: pcm.samples as f64 / f64::from(sample_rate),
             audio_file_path: Some(output.to_string_lossy().into_owned()),
-            message: if partial { "Recovered available audio; some capture chunks are missing. Review the transcript before using notes." }
+            message: if pcm.gaps { "Recovered available audio; some capture chunks are missing. Review the transcript before using notes." }
                 else { "Recovered captured audio. Recovery originals have been retained." }.into(),
         })
     })();
@@ -411,6 +472,7 @@ pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), Strin
         }
         let mut rate = None;
         let mut samples = 0u64;
+        let mut timeline_gaps = false;
         for (index, path) in paths.iter().enumerate() {
             if path
                 .file_stem()
@@ -420,17 +482,26 @@ pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), Strin
             {
                 return Ok(());
             }
-            let chunk = match read_chunk(path) {
-                Ok(chunk) if chunk.sample_rate > 0 && !chunk.data.is_empty() => chunk,
+            let (chunk, start) = match read_capture_chunk(path) {
+                Ok(entry) if entry.0.sample_rate > 0 && !entry.0.data.is_empty() => entry,
                 _ => return Ok(()),
             };
             if rate.is_some_and(|rate| rate != chunk.sample_rate) {
                 return Ok(());
             }
             rate = Some(chunk.sample_rate);
-            samples = samples
+            let start = start.unwrap_or(samples);
+            if start < samples {
+                return Ok(());
+            }
+            timeline_gaps |= start > samples;
+            samples = start
                 .checked_add(chunk.data.len() as u64)
                 .ok_or("Capture length is invalid")?;
+        }
+        if let Some(end) = capture_timeline_end(&spool) {
+            timeline_gaps |= end != samples;
+            samples = samples.max(end);
         }
         // A longer alternate file must not authorize removing originals while a
         // shorter preferred recovery is still what playback/retranscription selects.
@@ -444,7 +515,7 @@ pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), Strin
             return Ok(());
         }
         let mut outcome = super::outcome::RecordingOutcome::read(&folder)?.unwrap_or_default();
-        outcome.capture_incomplete |= spool.join(".incomplete").exists();
+        outcome.capture_incomplete |= timeline_gaps || spool.join(".incomplete").exists();
         outcome.write(&folder)?;
         fs::remove_dir_all(&spool).map_err(|_| "Could not release recovered capture files".into())
     })
@@ -456,6 +527,67 @@ pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), Strin
 mod tests {
     use super::*;
     use crate::audio::recording_state::{AudioChunk, DeviceType};
+
+    #[tokio::test]
+    async fn capture_recovery_preserves_the_sample_clock_across_write_and_read_failures() {
+        use super::super::transcription::queue::{recording_audio_queue, BufferedSpool};
+        use crate::audio::recording_state::RecordingState;
+        use std::time::Duration;
+
+        let folder = tempfile::tempdir().unwrap();
+        let (writer, mut reader, metrics) = recording_audio_queue(folder.path()).unwrap();
+        let mut buffered = BufferedSpool::new(writer, RecordingState::new(), true);
+        let path = folder.path().join(".audio-spool");
+        let chunk = |sample| AudioChunk {
+            data: vec![sample; 3],
+            sample_rate: 48_000,
+            timestamp: 0.0,
+            chunk_id: 0,
+            device_type: DeviceType::System,
+        };
+
+        buffered.send_capture(chunk(0.1), 0).await.unwrap();
+        reader.recv().await.unwrap().unwrap();
+        let blocked = path.join("00000000000000000001.tmp");
+        fs::create_dir(&blocked).unwrap();
+        buffered.send_capture(chunk(0.2), 3).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while metrics.snapshot().failed_chunks == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        fs::remove_dir(blocked).unwrap();
+        buffered.send_capture(chunk(0.3), 6).await.unwrap();
+        buffered.send_capture(chunk(0.4), 9).await.unwrap();
+        buffered.send_capture(chunk(0.5), 12).await.unwrap();
+        buffered.send_capture(chunk(0.6), 15).await.unwrap();
+        buffered.finish().await;
+
+        let middle = path.join("00000000000000000002.chunk");
+        let tail = path.join("00000000000000000004.chunk");
+        fs::write(&middle, b"unreadable").unwrap();
+        fs::remove_file(tail).unwrap();
+        assert!(capture_has_gaps(folder.path()).unwrap());
+        let status = recover_inner(folder.path(), false).unwrap();
+        assert_eq!(status.status, "partial");
+        assert_eq!(status.chunk_count, 3);
+        assert_eq!(status.estimated_duration_seconds, 18.0 / 48_000.0);
+        let wav = fs::read(status.audio_file_path.unwrap()).unwrap();
+        let samples: Vec<_> = wav[44..]
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(
+            samples,
+            [
+                0.1, 0.1, 0.1, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0,
+                0.0, 0.0,
+            ]
+        );
+        assert!(middle.exists());
+    }
 
     #[test]
     fn encode_deadline_scales_for_long_meetings_and_stays_bounded() {

@@ -2,13 +2,19 @@ use anyhow::Result;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, Stream, SupportedStreamConfig};
 use log::{error, info, warn};
+use ringbuf::{
+    traits::{Consumer, Observer, Producer, Split},
+    HeapCons, HeapProd, HeapRb,
+};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::capture::{get_current_backend, AudioCaptureBackend};
 use super::devices::{get_device_and_config, AudioDevice};
-use super::pipeline::AudioCapture;
-use super::recording_state::{DeviceType, RecordingState};
+use super::pipeline::{AudioCapture, CAPTURE_SAMPLE_RATE};
+use super::recording_state::{CaptureProgress, DeviceType, RecordingState, CAPTURE_HANDOFF_MS};
 
 #[cfg(target_os = "macos")]
 use super::capture::CoreAudioCapture;
@@ -36,6 +42,225 @@ pub struct AudioStream {
 
 // SAFETY: AudioStream contains StreamBackend which we've marked as Send
 unsafe impl Send for AudioStream {}
+
+struct CapturePacket {
+    samples: usize,
+    resume_revision: u64,
+    timestamp: f64,
+    missing_frames: usize,
+}
+
+#[derive(Default)]
+struct CaptureHandoffStatus {
+    copying: AtomicBool,
+    dropped_samples: AtomicUsize,
+    progress: Arc<CaptureProgress>,
+}
+
+struct CaptureInput<T> {
+    ready: HeapProd<CapturePacket>,
+    samples: HeapProd<T>,
+    status: Arc<CaptureHandoffStatus>,
+    missing_frames: usize,
+    last_capture_end: Option<(u64, f64)>,
+    report_source_gaps: bool,
+}
+
+struct CaptureOutput<T> {
+    ready: HeapCons<CapturePacket>,
+    samples: HeapCons<T>,
+    status: Arc<CaptureHandoffStatus>,
+}
+
+fn capture_handoff<T>(frames: usize, channels: usize) -> (CaptureInput<T>, CaptureOutput<T>) {
+    // A callback may contain as little as one frame. Reserve enough packet
+    // descriptors to use the entire sample ring at any callback size.
+    let (ready_tx, ready_rx) = HeapRb::new(frames).split();
+    let (sample_tx, sample_rx) = HeapRb::new(frames * channels).split();
+    let status = Arc::new(CaptureHandoffStatus::default());
+    (
+        CaptureInput {
+            ready: ready_tx,
+            samples: sample_tx,
+            status: status.clone(),
+            missing_frames: 0,
+            last_capture_end: None,
+            report_source_gaps: false,
+        },
+        CaptureOutput {
+            ready: ready_rx,
+            samples: sample_rx,
+            status,
+        },
+    )
+}
+
+fn handoff_frames(rate: u32) -> usize {
+    (rate as usize * CAPTURE_HANDOFF_MS as usize).div_ceil(1_000)
+}
+
+fn packet_capture_age(reported: Option<Duration>, frames: usize, rate: u32) -> Duration {
+    let duration = Duration::from_secs_f64(frames as f64 / f64::from(rate));
+    // A bogus QPC timestamp can put a current packet before recording start.
+    // Allow endpoint latency for short packets and a few periods for larger
+    // ones. Use the packet duration when the reported age is implausible.
+    let max_age = duration.saturating_mul(4).max(Duration::from_millis(100));
+    reported
+        .filter(|&age| age >= duration / 2 && age <= max_age)
+        .unwrap_or(duration)
+}
+
+impl<T: Copy> CaptureInput<T> {
+    fn copy_samples(
+        &mut self,
+        samples: &[T],
+        resume_revision: u64,
+        timestamp: f64,
+        rate: u32,
+        channels: usize,
+    ) -> bool {
+        let frames = samples.len() / channels;
+        // A source can disappear between callbacks, including normal WASAPI
+        // loopback silence. Only a substantial forward gap is a discontinuity.
+        if let Some((revision, last_end)) = self.last_capture_end {
+            let gap = timestamp - last_end;
+            if revision == resume_revision && gap > 0.150 {
+                let missing = (gap * f64::from(rate)).round() as usize;
+                self.missing_frames += missing;
+                // Loopback can legitimately stop delivering packets in
+                // silence. An unexplained gap in mic delivery is sample loss.
+                if self.report_source_gaps {
+                    self.status
+                        .dropped_samples
+                        .fetch_add(missing * channels, Ordering::Relaxed);
+                }
+            }
+        }
+        let callback_end = timestamp + frames as f64 / f64::from(rate);
+        self.last_capture_end = Some((resume_revision, callback_end));
+        let available = if self.ready.is_full() {
+            0
+        } else {
+            self.samples.vacant_len() / channels
+        };
+        let accepted = frames.min(available);
+        if accepted > 0 {
+            let end = timestamp + accepted as f64 / f64::from(rate);
+            self.status
+                .progress
+                .pending_packets
+                .fetch_add(1, Ordering::AcqRel);
+            self.status.progress.admitted_end.fetch_max(
+                (end * f64::from(CAPTURE_SAMPLE_RATE)).round() as u64,
+                Ordering::Release,
+            );
+            let sample_count = accepted * channels;
+            self.samples.push_slice(&samples[..sample_count]);
+            // The descriptor makes the samples visible as one complete packet.
+            let _ = self.ready.try_push(CapturePacket {
+                samples: sample_count,
+                resume_revision,
+                timestamp,
+                missing_frames: std::mem::take(&mut self.missing_frames),
+            });
+        }
+        let dropped = frames - accepted;
+        self.missing_frames += dropped;
+        self.status
+            .dropped_samples
+            .fetch_add(dropped * channels, Ordering::Relaxed);
+        dropped == 0
+    }
+}
+
+#[cfg(windows)]
+struct DspThreadPriority(Option<windows::Win32::Foundation::HANDLE>);
+
+#[cfg(windows)]
+impl DspThreadPriority {
+    fn elevate() -> Self {
+        use windows::Win32::System::Threading::{
+            AvSetMmThreadCharacteristicsW, GetCurrentThread, SetThreadPriority,
+            THREAD_PRIORITY_HIGHEST,
+        };
+        let mut task_index = 0;
+        // These APIs affect only the current worker. The MMCSS handle is
+        // released on this same thread when the worker exits.
+        unsafe {
+            if let Ok(handle) =
+                AvSetMmThreadCharacteristicsW(windows::core::w!("Pro Audio"), &mut task_index)
+            {
+                Self(Some(handle))
+            } else {
+                let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+                Self(None)
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for DspThreadPriority {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0 {
+            // The handle is owned by this worker's MMCSS registration.
+            let _ = unsafe {
+                windows::Win32::System::Threading::AvRevertMmThreadCharacteristics(handle)
+            };
+        }
+    }
+}
+
+impl<T: cpal::SizedSample + Copy + Default + Send + 'static> CaptureOutput<T> {
+    fn run(
+        mut self,
+        state: Arc<RecordingState>,
+        capture: AudioCapture,
+        sender: mpsc::Sender<super::recording_state::AudioChunk>,
+        sample_rate: u32,
+        channels: u16,
+        to_f32: impl Fn(T) -> f32,
+    ) {
+        let mut raw = Vec::new();
+        let mut converted = Vec::new();
+        loop {
+            let stopped = !state.is_recording() || !self.ready.write_is_held();
+            // A Stop can race a callback already copying its final packet.
+            let can_exit = stopped && !self.status.copying.load(Ordering::SeqCst);
+            let dropped = self.status.dropped_samples.swap(0, Ordering::Relaxed);
+            if dropped > 0 {
+                state.record_sample_loss(
+                    (dropped * 48_000).div_ceil(usize::from(channels) * sample_rate as usize),
+                );
+            }
+            if let Some(packet) = self.ready.try_pop() {
+                raw.resize(packet.samples, T::default());
+                let count = self.samples.pop_slice(&mut raw);
+                debug_assert_eq!(count, packet.samples);
+                converted.clear();
+                converted.extend(raw[..count].iter().copied().map(&to_f32));
+                capture.process_captured_data(
+                    &converted,
+                    packet.resume_revision,
+                    packet.timestamp,
+                    packet.missing_frames,
+                    |chunk| state.send_captured_chunk(&sender, chunk),
+                );
+                self.status
+                    .progress
+                    .pending_packets
+                    .fetch_sub(1, Ordering::AcqRel);
+            } else if can_exit {
+                capture.finish_capture(|chunk| state.send_captured_chunk(&sender, chunk));
+                return;
+            } else {
+                // The real-time thread only writes to the ring; it never wakes
+                // the worker through a lock or performs an OS wait.
+                std::thread::park_timeout(Duration::from_millis(2));
+            }
+        }
+    }
+}
 
 impl AudioStream {
     /// Create a new audio stream for the given device
@@ -141,7 +366,7 @@ impl AudioStream {
         );
 
         // Build the appropriate stream based on sample format
-        let stream = Self::build_stream(&cpal_device, &config, capture.clone())?;
+        let stream = Self::build_stream(&cpal_device, &config, state, capture)?;
 
         // Start the stream
         stream.play()?;
@@ -260,83 +485,88 @@ impl AudioStream {
     fn build_stream(
         device: &Device,
         config: &SupportedStreamConfig,
+        state: Arc<RecordingState>,
         capture: AudioCapture,
     ) -> Result<Stream> {
-        let config_copy = config.clone();
-
-        let stream = match config.sample_format() {
+        match config.sample_format() {
             cpal::SampleFormat::F32 => {
-                let capture_clone = capture.clone();
-                device.build_input_stream(
-                    &config_copy.into(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        capture.process_audio_data(data);
-                    },
-                    move |err| {
-                        capture_clone.handle_stream_error(err);
-                    },
-                    None,
-                )?
+                Self::build_typed_stream(device, config, state, capture, |sample: f32| sample)
             }
             cpal::SampleFormat::I16 => {
-                let capture_clone = capture.clone();
-                device.build_input_stream(
-                    &config_copy.into(),
-                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        let f32_data: Vec<f32> = data
-                            .iter()
-                            .map(|&sample| sample as f32 / i16::MAX as f32)
-                            .collect();
-                        capture.process_audio_data(&f32_data);
-                    },
-                    move |err| {
-                        capture_clone.handle_stream_error(err);
-                    },
-                    None,
-                )?
+                Self::build_typed_stream(device, config, state, capture, |sample: i16| {
+                    sample as f32 / i16::MAX as f32
+                })
             }
             cpal::SampleFormat::I32 => {
-                let capture_clone = capture.clone();
-                device.build_input_stream(
-                    &config_copy.into(),
-                    move |data: &[i32], _: &cpal::InputCallbackInfo| {
-                        let f32_data: Vec<f32> = data
-                            .iter()
-                            .map(|&sample| sample as f32 / i32::MAX as f32)
-                            .collect();
-                        capture.process_audio_data(&f32_data);
-                    },
-                    move |err| {
-                        capture_clone.handle_stream_error(err);
-                    },
-                    None,
-                )?
+                Self::build_typed_stream(device, config, state, capture, |sample: i32| {
+                    sample as f32 / i32::MAX as f32
+                })
             }
             cpal::SampleFormat::I8 => {
-                let capture_clone = capture.clone();
-                device.build_input_stream(
-                    &config_copy.into(),
-                    move |data: &[i8], _: &cpal::InputCallbackInfo| {
-                        let f32_data: Vec<f32> = data
-                            .iter()
-                            .map(|&sample| sample as f32 / i8::MAX as f32)
-                            .collect();
-                        capture.process_audio_data(&f32_data);
-                    },
-                    move |err| {
-                        capture_clone.handle_stream_error(err);
-                    },
-                    None,
-                )?
+                Self::build_typed_stream(device, config, state, capture, |sample: i8| {
+                    sample as f32 / i8::MAX as f32
+                })
             }
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Unsupported sample format: {:?}",
-                    config.sample_format()
-                ));
-            }
-        };
+            format => Err(anyhow::anyhow!("Unsupported sample format: {format:?}")),
+        }
+    }
 
+    fn build_typed_stream<T: cpal::SizedSample + Copy + Default + Send + 'static>(
+        device: &Device,
+        config: &SupportedStreamConfig,
+        state: Arc<RecordingState>,
+        capture: AudioCapture,
+        to_f32: impl Fn(T) -> f32 + Send + 'static,
+    ) -> Result<Stream> {
+        let sender = state
+            .capture_sender()
+            .ok_or_else(|| anyhow::anyhow!("Audio pipeline not ready"))?;
+        let rate = config.sample_rate().0;
+        let channels = config.channels();
+        let (mut input, output) = capture_handoff(handoff_frames(rate), usize::from(channels));
+        let source = capture.device_type();
+        input.report_source_gaps = source == DeviceType::Microphone;
+        state.register_capture_progress(source, &input.status.progress);
+        let callback_state = state.clone();
+        let error_handler = capture.clone();
+        let stream = device.build_input_stream(
+            &config.clone().into(),
+            move |data: &[T], info: &cpal::InputCallbackInfo| {
+                input.status.copying.store(true, Ordering::SeqCst);
+                let callback = std::time::Instant::now();
+                let channels = usize::from(channels);
+                let frames = data.len() / channels;
+                let time = info.timestamp();
+                let age =
+                    packet_capture_age(time.callback.duration_since(&time.capture), frames, rate);
+                let captured_at = callback.checked_sub(age).unwrap_or(callback);
+                if let Some(stamp) = callback_state.admit_capture(captured_at, frames, rate) {
+                    if !input.copy_samples(
+                        &data[stamp.skipped_frames * channels..frames * channels],
+                        stamp.resume_revision,
+                        stamp.seconds,
+                        rate,
+                        channels,
+                    ) {
+                        let kept = frames - stamp.skipped_frames;
+                        let end = stamp.seconds + kept as f64 / f64::from(rate);
+                        callback_state.record_capture_gap_end(
+                            (end * f64::from(CAPTURE_SAMPLE_RATE)).round() as u64,
+                        );
+                    }
+                }
+                input.status.copying.store(false, Ordering::SeqCst);
+            },
+            move |err| error_handler.handle_stream_error(err),
+            None,
+        )?;
+        std::thread::Builder::new()
+            .name("audio-capture-dsp".into())
+            .spawn(move || {
+                #[cfg(windows)]
+                let _priority = DspThreadPriority::elevate();
+                output.run(state, capture, sender, rate, channels, to_f32);
+            })?;
         Ok(stream)
     }
 
@@ -562,5 +792,86 @@ impl Drop for AudioStreamManager {
         if let Err(e) = self.stop_streams() {
             error!("Error stopping streams during drop: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_handoff_is_bounded_and_drains_accepted_packets_after_stop() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        let (sender, mut receiver) = mpsc::channel(2);
+        state.set_audio_sender(sender.clone());
+        let capture = AudioCapture::new(
+            Arc::new(AudioDevice::new(
+                "Fixture output".into(),
+                super::super::devices::DeviceType::Output,
+            )),
+            state.clone(),
+            48_000,
+            1,
+            DeviceType::System,
+        );
+        let (mut input, output) = capture_handoff(4, 1);
+        assert!(input.copy_samples(&[1_i16, 2], 0, 0.0, 48_000, 1));
+        assert!(!input.copy_samples(&[3, 4, 5, 6], 0, 2.0 / 48_000.0, 48_000, 1));
+
+        // The driver can still own its callback when Stop freezes capture.
+        state.stop_recording();
+        output.run(state.clone(), capture, sender, 48_000, 1, f32::from);
+
+        assert_eq!(receiver.try_recv().unwrap().data, [1.0, 2.0]);
+        assert_eq!(receiver.try_recv().unwrap().data, [3.0, 4.0]);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert!(state.capture_incomplete());
+        assert_eq!(state.health.lock().unwrap().details.dropped_samples, 2);
+    }
+
+    #[test]
+    fn short_callbacks_use_the_full_handoff_duration() {
+        let rate = 48_000;
+        let frames = handoff_frames(rate);
+        let (mut input, _output) = capture_handoff(frames, 2);
+        for frame in 0..frames {
+            let start = frame as f64 / f64::from(rate);
+            assert!(input.copy_samples(&[1_i16, 2], 0, start, rate, 2));
+        }
+        assert_eq!(
+            input.status.progress.admitted_end.load(Ordering::Acquire),
+            frames as u64
+        );
+        assert!(!input.copy_samples(&[3, 4], 0, 0.4, rate, 2));
+    }
+
+    #[test]
+    fn implausible_driver_timestamps_use_the_packet_duration() {
+        let expected = Duration::from_millis(10);
+        for reported in [None, Some(Duration::ZERO), Some(Duration::from_secs(60))] {
+            assert_eq!(packet_capture_age(reported, 480, 48_000), expected);
+        }
+        let bluetooth_latency = Duration::from_millis(70);
+        assert_eq!(
+            packet_capture_age(Some(bluetooth_latency), 480, 48_000),
+            bluetooth_latency
+        );
+    }
+
+    #[test]
+    fn a_delivery_gap_counts_missing_microphone_frames_and_excludes_pause() {
+        let (mut input, mut output) = capture_handoff(100, 1);
+        input.report_source_gaps = true;
+        assert!(input.copy_samples(&[0_i16; 10], 0, 0.0, 1_000, 1));
+        assert!(input.copy_samples(&[0_i16; 10], 0, 0.2, 1_000, 1));
+        assert!(input.copy_samples(&[0_i16; 10], 1, 0.5, 1_000, 1));
+        assert_eq!(output.ready.try_pop().unwrap().missing_frames, 0);
+        assert_eq!(output.ready.try_pop().unwrap().missing_frames, 190);
+        assert_eq!(output.ready.try_pop().unwrap().missing_frames, 0);
+        assert_eq!(output.status.dropped_samples.load(Ordering::Relaxed), 190);
     }
 }
