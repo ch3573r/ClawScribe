@@ -91,65 +91,6 @@ struct RecordingArgs {
 }
 
 #[tauri::command]
-async fn start_recording<R: Runtime>(
-    app: AppHandle<R>,
-    mic_device_name: Option<String>,
-    system_device_name: Option<String>,
-    meeting_name: Option<String>,
-) -> Result<(), String> {
-    log_info!("Recording start requested");
-
-    if !tray::check_can_record(&app).await {
-        return Err("recording_setup_incomplete".into());
-    }
-    if is_recording().await {
-        return Err("Recording already in progress".to_string());
-    }
-
-    // Call the actual audio recording system with meeting name
-    match audio::recording_commands::start_recording_with_devices_and_meeting(
-        app.clone(),
-        mic_device_name,
-        system_device_name,
-        meeting_name.clone(),
-    )
-    .await
-    {
-        Ok(_) => {
-            RECORDING_FLAG.store(true, Ordering::SeqCst);
-            tray::update_tray_menu(&app);
-
-            log_info!("Recording started successfully");
-
-            // Notification work must not hold up the command response; capture
-            // is already running at this point.
-            let app_for_notification = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let notification_manager_state =
-                    app_for_notification.state::<NotificationManagerState<R>>();
-                if let Err(e) = notifications::commands::show_recording_started_notification(
-                    &app_for_notification,
-                    &notification_manager_state,
-                    meeting_name.clone(),
-                )
-                .await
-                {
-                    log_error!("Failed to show recording started notification: {}", e);
-                } else {
-                    log_info!("Successfully showed recording started notification");
-                }
-            });
-
-            Ok(())
-        }
-        Err(e) => {
-            log_error!("Failed to start audio recording: {}", e);
-            Err(format!("Failed to start recording: {}", e))
-        }
-    }
-}
-
-#[tauri::command]
 async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> Result<(), String> {
     log_info!("Attempting to stop recording...");
 
@@ -1255,6 +1196,7 @@ pub fn run() {
             database::commands::initialize_fresh_database,
             // Database and Models path commands
             database::commands::get_database_directory,
+            database::commands::open_database_folder,
             whisper_engine::commands::open_models_folder,
             // Onboarding commands
             onboarding::get_onboarding_status,

@@ -60,14 +60,15 @@ test('retired commands are absent and their current entry points are registered'
     'api_search_library', 'api_search_transcripts', 'export_to_planner', 'get_audio_devices',
     'get_meeting_folder_path', 'get_parakeet_directml_default_unavailable',
     'get_parakeet_directml_session_disabled', 'get_parakeet_use_directml',
-    'get_reviewed_meeting_actions', 'open_database_folder', 'parakeet_retry_download',
+    'get_reviewed_meeting_actions', 'parakeet_retry_download',
     'save_onboarding_status_cmd', 'set_meeting_series_template', 'start_recording',
     'start_recording_summary',
   ];
   assert.deepEqual(retired.filter(command => registered.has(command)), []);
   for (const command of [
-    'get_parakeet_directml_status', 'get_recording_device_inventory', 'pull_ollama_model',
-    'resolve_meeting_audio_file', 'start_recording_with_devices_and_meeting', 'stop_recording',
+    'get_parakeet_directml_status', 'get_recording_device_inventory', 'open_database_folder',
+    'open_models_folder', 'open_recordings_folder', 'pull_ollama_model', 'resolve_meeting_audio_file',
+    'start_recording_with_devices_and_meeting', 'stop_recording',
   ]) {
     assert.ok(registered.has(command), `${command} must stay registered`);
   }

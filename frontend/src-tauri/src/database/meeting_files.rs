@@ -360,18 +360,27 @@ pub(crate) async fn registered_meeting_folder(
     meeting_id: &str,
     roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
-    registered_meeting_folder_if_present(pool, meeting_id, roots)
-        .await?
-        .ok_or_else(|| "This meeting has no recording folder".into())
+    match lookup_registered_meeting_folder(pool, meeting_id, roots).await? {
+        RegisteredMeetingFolder::Available(folder) => Ok(folder),
+        RegisteredMeetingFolder::None => Err("This meeting has no recording folder".into()),
+        RegisteredMeetingFolder::Unavailable => Err(RECORDING_FOLDER_UNAVAILABLE.into()),
+    }
 }
 
-/// Preserves the distinction between a meeting with no folder and one with an
-/// invalid or unavailable saved folder.
-pub(crate) async fn registered_meeting_folder_if_present(
+pub(crate) const RECORDING_FOLDER_UNAVAILABLE: &str = "The recording folder is not available";
+
+pub(crate) enum RegisteredMeetingFolder {
+    None,
+    Unavailable,
+    Available(PathBuf),
+}
+
+/// Distinguishes a missing or offline registered folder from a refused path.
+pub(crate) async fn lookup_registered_meeting_folder(
     pool: &sqlx::SqlitePool,
     meeting_id: &str,
     roots: &[PathBuf],
-) -> Result<Option<PathBuf>, String> {
+) -> Result<RegisteredMeetingFolder, String> {
     let folder: Option<String> =
         sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
             .bind(meeting_id)
@@ -380,26 +389,67 @@ pub(crate) async fn registered_meeting_folder_if_present(
             .map_err(|_| "Could not read the meeting")?
             .ok_or("Meeting not found")?;
     let Some(folder) = folder.filter(|path| !path.trim().is_empty()) else {
-        return Ok(None);
+        return Ok(RegisteredMeetingFolder::None);
     };
     let roots = roots.to_vec();
     tokio::task::spawn_blocking(move || {
         // On a local drive, or inside a root the user trusted (a network folder).
         let path = Path::new(&folder);
-        if !crate::trusted_roots::text_allowed(&folder, &roots)
-            || is_cleanup_path(path)
-            || directory_chain(path).is_err()
+        if !crate::trusted_roots::text_allowed(&folder, &roots) || is_cleanup_path(path) {
+            return Err(RECORDING_FOLDER_UNAVAILABLE.into());
+        }
+        let resolved = match directory_chain(path).and_then(|()| path.canonicalize()) {
+            Ok(resolved) => resolved,
+            Err(error) if registered_folder_is_offline(&error) => {
+                return Ok(RegisteredMeetingFolder::Unavailable);
+            }
+            Err(_) => return Err(RECORDING_FOLDER_UNAVAILABLE.into()),
+        };
+        if is_cleanup_path(&resolved)
+            || !(crate::local_path::is_local_canonical(&resolved)
+                || crate::trusted_roots::canonical_inside(&resolved, &roots))
         {
-            return Err("The recording folder is not available".into());
+            return Err(RECORDING_FOLDER_UNAVAILABLE.into());
         }
-        let resolved = crate::trusted_roots::resolve_allowed(&folder, &roots)?;
-        if is_cleanup_path(&resolved) {
-            return Err("The recording folder is not available".into());
-        }
-        Ok(Some(plain_path(&resolved)))
+        Ok(RegisteredMeetingFolder::Available(plain_path(&resolved)))
     })
     .await
     .map_err(|_| "Recording folder resolution was interrupted")?
+}
+
+fn registered_folder_is_offline(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::NotFound
+            | ErrorKind::NotConnected
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::HostUnreachable
+            | ErrorKind::TimedOut
+    ) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{
+            ERROR_BAD_NETPATH, ERROR_BAD_NET_NAME, ERROR_CONNECTION_UNAVAIL, ERROR_DEV_NOT_EXIST,
+            ERROR_INVALID_DRIVE, ERROR_NOT_READY,
+        };
+        return error.raw_os_error().is_some_and(|code| {
+            [
+                ERROR_BAD_NET_NAME,
+                ERROR_BAD_NETPATH,
+                ERROR_CONNECTION_UNAVAIL,
+                ERROR_DEV_NOT_EXIST,
+                ERROR_INVALID_DRIVE,
+                ERROR_NOT_READY,
+            ]
+            .iter()
+            .any(|error| error.0 as i32 == code)
+        });
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 /// Removes the recording folder the core registered for `meeting_id`: an

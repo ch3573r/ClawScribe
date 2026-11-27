@@ -22,6 +22,12 @@ import { RECOVERY_OPEN_ALL, RECOVERY_OPEN_REQUEST } from "@/lib/interruptedRecor
 
 type FolderKind = "database" | "models" | "recordings";
 
+const openStorageFolder: Record<FolderKind, () => Promise<void>> = {
+  database: () => invoke("open_database_folder"),
+  models: () => invoke("open_models_folder"),
+  recordings: () => invoke("open_recordings_folder"),
+};
+
 interface StorageRow {
   kind: FolderKind;
   title: string;
@@ -137,7 +143,7 @@ export function PreferenceSettings() {
   const handleOpenFolder = async (folderType: FolderKind) => {
     setOpeningFolder(folderType);
     try {
-      await invoke(`open_${folderType}_folder`);
+      await openStorageFolder[folderType]();
       Analytics.track("storage_folder_opened", { folder_type: folderType })
         .catch((error) => console.error("Failed to track folder open:", error));
     } catch (error) {

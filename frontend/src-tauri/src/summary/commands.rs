@@ -1,4 +1,6 @@
-use crate::database::meeting_files::registered_meeting_folder_if_present;
+use crate::database::meeting_files::{
+    lookup_registered_meeting_folder, RegisteredMeetingFolder, RECORDING_FOLDER_UNAVAILABLE,
+};
 use crate::database::repositories::{
     meeting::MeetingsRepository, summary::SummaryProcessesRepository,
     transcript_chunk::TranscriptChunksRepository,
@@ -134,7 +136,7 @@ pub async fn api_get_meeting_summary_language<R: Runtime>(
         state.db_manager.pool(),
         &meeting_id,
         &roots,
-        read_summary_language_from_metadata,
+        LanguageMetadataAccess::Read(read_summary_language_from_metadata),
     )
     .await
 }
@@ -158,7 +160,9 @@ pub async fn api_save_meeting_summary_language<R: Runtime>(
         state.db_manager.pool(),
         &meeting_id,
         &roots,
-        move |folder| write_summary_language_to_metadata(folder, summary_language.as_deref()),
+        LanguageMetadataAccess::Write(move |folder: &Path| {
+            write_summary_language_to_metadata(folder, summary_language.as_deref())
+        }),
     )
     .await
 }
@@ -180,7 +184,7 @@ pub async fn api_get_meeting_detected_summary_language<R: Runtime>(
         state.db_manager.pool(),
         &meeting_id,
         &roots,
-        read_detected_summary_language_from_metadata,
+        LanguageMetadataAccess::Read(read_detected_summary_language_from_metadata),
     )
     .await
 }
@@ -204,12 +208,12 @@ pub async fn api_save_meeting_detected_summary_language<R: Runtime>(
         state.db_manager.pool(),
         &meeting_id,
         &roots,
-        move |folder| {
+        LanguageMetadataAccess::Write(move |folder: &Path| {
             write_detected_summary_language_to_metadata(
                 folder,
                 detected_summary_language.as_deref(),
             )
-        },
+        }),
     )
     .await
 }
@@ -222,17 +226,38 @@ pub async fn api_detect_transcript_summary_language(
     Ok(detect_summary_language(&transcript_texts))
 }
 
+enum LanguageMetadataAccess<F> {
+    Read(F),
+    Write(F),
+}
+
 async fn with_meeting_language_metadata(
     pool: &sqlx::SqlitePool,
     meeting_id: &str,
     roots: &[PathBuf],
-    access: impl FnOnce(&Path) -> anyhow::Result<Option<String>> + Send + 'static,
+    access: LanguageMetadataAccess<
+        impl FnOnce(&Path) -> anyhow::Result<Option<String>> + Send + 'static,
+    >,
 ) -> Result<MeetingSummaryLanguagePreference, String> {
-    let Some(folder) = registered_meeting_folder_if_present(pool, meeting_id, roots).await? else {
-        return Ok(MeetingSummaryLanguagePreference::local_fallback());
+    let folder = match lookup_registered_meeting_folder(pool, meeting_id, roots).await? {
+        RegisteredMeetingFolder::Available(folder) => folder,
+        RegisteredMeetingFolder::None => {
+            return Ok(MeetingSummaryLanguagePreference::local_fallback())
+        }
+        RegisteredMeetingFolder::Unavailable => {
+            return match access {
+                LanguageMetadataAccess::Read(_) => {
+                    Ok(MeetingSummaryLanguagePreference::metadata(None))
+                }
+                LanguageMetadataAccess::Write(_) => Err(RECORDING_FOLDER_UNAVAILABLE.into()),
+            };
+        }
     };
 
     tokio::task::spawn_blocking(move || {
+        let access = match access {
+            LanguageMetadataAccess::Read(access) | LanguageMetadataAccess::Write(access) => access,
+        };
         access(&folder)
             .map(MeetingSummaryLanguagePreference::metadata)
             .map_err(|error| error.to_string())
@@ -769,9 +794,11 @@ mod tests {
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         let saved_folder = tempfile::tempdir().unwrap();
         let saved_path = saved_folder.path().to_str().unwrap();
+        let missing_folder = saved_folder.path().join("moved-meeting");
         for (id, path) in [
             ("saved", Some(saved_path)),
-            ("unavailable", Some("relative-folder")),
+            ("unregistered", Some("relative-folder")),
+            ("missing", missing_folder.to_str()),
             ("legacy", None),
         ] {
             sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 'Test meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)")
@@ -783,10 +810,15 @@ mod tests {
         }
 
         let async_thread = std::thread::current().id();
-        let saved = with_meeting_language_metadata(&pool, "saved", &[], move |folder| {
-            assert_ne!(std::thread::current().id(), async_thread);
-            write_summary_language_to_metadata(folder, Some("de-DE"))
-        })
+        let saved = with_meeting_language_metadata(
+            &pool,
+            "saved",
+            &[],
+            LanguageMetadataAccess::Write(move |folder: &Path| {
+                assert_ne!(std::thread::current().id(), async_thread);
+                write_summary_language_to_metadata(folder, Some("de-DE"))
+            }),
+        )
         .await
         .unwrap();
         assert_eq!(
@@ -798,29 +830,70 @@ mod tests {
                 &pool,
                 "saved",
                 &[],
-                read_summary_language_from_metadata,
+                LanguageMetadataAccess::Read(read_summary_language_from_metadata),
             )
             .await
             .unwrap(),
             saved
         );
         assert_eq!(
-            with_meeting_language_metadata(&pool, "legacy", &[], |_| {
-                panic!("meetings without a folder cannot access metadata")
-            })
+            with_meeting_language_metadata(
+                &pool,
+                "legacy",
+                &[],
+                LanguageMetadataAccess::Read(|_: &Path| {
+                    panic!("meetings without a folder cannot access metadata")
+                }),
+            )
             .await
             .unwrap(),
             MeetingSummaryLanguagePreference::local_fallback()
         );
-        assert!(
-            with_meeting_language_metadata(&pool, "unavailable", &[], |_| Ok(None))
+        assert!(with_meeting_language_metadata(
+            &pool,
+            "unregistered",
+            &[],
+            LanguageMetadataAccess::Read(read_summary_language_from_metadata),
+        )
+        .await
+        .is_err());
+        for read in [
+            read_summary_language_from_metadata as fn(&Path) -> anyhow::Result<Option<String>>,
+            read_detected_summary_language_from_metadata,
+        ] {
+            assert_eq!(
+                with_meeting_language_metadata(
+                    &pool,
+                    "missing",
+                    &[],
+                    LanguageMetadataAccess::Read(read)
+                )
                 .await
-                .is_err()
+                .unwrap(),
+                MeetingSummaryLanguagePreference::metadata(None)
+            );
+        }
+        assert_eq!(
+            with_meeting_language_metadata(
+                &pool,
+                "missing",
+                &[],
+                LanguageMetadataAccess::Write(|folder: &Path| {
+                    write_summary_language_to_metadata(folder, Some("de"))
+                }),
+            )
+            .await
+            .unwrap_err(),
+            RECORDING_FOLDER_UNAVAILABLE
         );
-        assert!(
-            with_meeting_language_metadata(&pool, "unknown", &[], |_| Ok(None))
-                .await
-                .is_err()
-        );
+        assert!(!missing_folder.exists());
+        assert!(with_meeting_language_metadata(
+            &pool,
+            "unknown",
+            &[],
+            LanguageMetadataAccess::Read(read_summary_language_from_metadata),
+        )
+        .await
+        .is_err());
     }
 }
