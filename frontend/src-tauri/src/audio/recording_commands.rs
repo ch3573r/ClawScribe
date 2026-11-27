@@ -3440,6 +3440,64 @@ mod reconnect_tests {
         (manager, sink)
     }
 
+    #[tokio::test]
+    async fn recovery_and_release_protect_only_the_active_capture_folder() {
+        use crate::audio::{
+            audio_spool::release_recovered_capture, incremental_saver::recover_interrupted_audio,
+            interrupted::ActiveFolder, recording_state::AudioChunk,
+            transcription::queue::recording_audio_queue,
+        };
+
+        let _serial = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let active = tempfile::tempdir().unwrap();
+        let interrupted = tempfile::tempdir().unwrap();
+        for folder in [active.path(), interrupted.path()] {
+            let (writer, _, _) = recording_audio_queue(folder).unwrap();
+            writer
+                .send(AudioChunk {
+                    data: vec![0.05; 4_800],
+                    sample_rate: 48_000,
+                    timestamp: 0.0,
+                    chunk_id: 0,
+                    device_type: RecordingDeviceType::System,
+                })
+                .await
+                .unwrap();
+        }
+        let (_manager, sink) = new_recording();
+        let _flags = RestoreStopGlobals::take();
+        *RECORDING.active_capture.lock().unwrap() = Some(ActiveRecording {
+            sink,
+            recording_id: None,
+            folder: Some(active.path().to_owned()),
+            default_meeting_name: None,
+            meeting_name: None,
+        });
+
+        let owner = active_recording_folder();
+        assert_eq!(owner, ActiveFolder::Folder(active.path().to_owned()));
+        assert!(owner.protects(active.path()));
+        assert!(!owner.protects(interrupted.path()));
+        let result = recover_interrupted_audio(active.path().to_string_lossy().into_owned()).await;
+        assert!(matches!(result, Err(message) if message.contains("Stop recording")));
+        let result = release_recovered_capture(active.path()).await;
+        assert!(matches!(result, Err(message) if message.contains("Stop recording")));
+
+        let recovered =
+            recover_interrupted_audio(interrupted.path().to_string_lossy().into_owned())
+                .await
+                .unwrap();
+        assert_eq!(recovered.status, "success");
+        assert!(std::path::Path::new(&recovered.audio_file_path.unwrap()).is_file());
+        release_recovered_capture(interrupted.path()).await.unwrap();
+        assert!(!interrupted.path().join(".audio-spool").exists());
+        assert!(active
+            .path()
+            .join(".audio-spool/00000000000000000000.chunk")
+            .is_file());
+        assert_eq!(std::fs::read_dir(active.path()).unwrap().count(), 1);
+    }
+
     fn install_manager() -> (Restore, super::super::recording_manager::LiveTranscriptSink) {
         let (manager, sink) = new_recording();
         let restore = Restore(
@@ -3744,10 +3802,20 @@ mod startup_guard_tests {
         let chunk = spool.join("00000000000000000000.chunk");
         std::fs::write(&chunk, b"synthetic capture prefix").unwrap();
         let _starting = super::StartingState::claim().unwrap();
+        let owner = super::active_recording_folder();
+        assert_eq!(owner, crate::audio::interrupted::ActiveFolder::Unknown);
+        assert!(owner.protects(root.path()));
         let result = crate::audio::incremental_saver::recover_audio_in_folder(
             root.path().to_string_lossy().into_owned(),
         )
         .await;
+        assert!(matches!(result, Err(message) if message.contains("Stop recording")));
+        let result = crate::audio::incremental_saver::recover_interrupted_audio(
+            root.path().to_string_lossy().into_owned(),
+        )
+        .await;
+        assert!(matches!(result, Err(message) if message.contains("Stop recording")));
+        let result = crate::audio::audio_spool::release_recovered_capture(root.path()).await;
         assert!(matches!(result, Err(message) if message.contains("Stop recording")));
         assert_eq!(std::fs::read(&chunk).unwrap(), b"synthetic capture prefix");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
