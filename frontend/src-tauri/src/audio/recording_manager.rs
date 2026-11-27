@@ -133,29 +133,6 @@ impl RecordingManager {
     pub(super) fn owns_detected_call(&self, session: &str) -> bool {
         self.detected_call && self.live_session_id() == Some(session)
     }
-    pub(crate) fn live_recording_generation(
-        &self,
-    ) -> Option<crate::knowledge::live::RecordingGeneration> {
-        self.live.as_ref().map(|sink| sink.recording_generation)
-    }
-    pub(crate) fn live_snapshot(&self) -> Result<crate::knowledge::live::LiveSnapshot, String> {
-        let mut snapshot = self
-            .live
-            .as_ref()
-            .ok_or("No active live session")?
-            .snapshot()?;
-        snapshot.transcription_incomplete |= self.state.capture_incomplete();
-        if self.mode.transcribes() {
-            snapshot.transcription_incomplete |=
-                super::transcription::current_transcription_metrics().is_none_or(|metrics| {
-                    metrics.failed_chunks > 0
-                        || metrics.chunks_in_queue > 0
-                        || metrics.is_processing
-                });
-        }
-        Ok(snapshot)
-    }
-
     /// Start recording with specified devices
     ///
     /// # Arguments

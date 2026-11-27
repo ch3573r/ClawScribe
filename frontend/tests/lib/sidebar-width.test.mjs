@@ -63,7 +63,6 @@ test('sidebar provider restores width, shares offsets, reclamps on resize and cl
   const { SidebarProvider } = loadWithWindow('src/components/Sidebar/SidebarProvider.tsx', window, {
     react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
     'next/navigation': { usePathname: () => pathname, useRouter: () => ({}) },
-    '@/lib/analytics': { trackBackendConnection() {} },
     '@/contexts/RecordingStateContext': { useRecordingState: () => ({ isRecording: false }) },
     '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
       audioDeviceInventory: { data: null, status: 'checking', refresh() {} },

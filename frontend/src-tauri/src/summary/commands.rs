@@ -13,7 +13,7 @@ use crate::summary::metadata::{
     write_detected_summary_language_to_metadata, write_summary_language_to_metadata,
 };
 use crate::summary::service::SummaryService;
-use log::{error as log_error, info as log_info, warn as log_warn};
+use log::{error as log_error, info as log_info};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Runtime};

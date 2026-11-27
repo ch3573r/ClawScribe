@@ -15,7 +15,6 @@ import { WindowsStartupSettings } from "./WindowsStartupSettings";
 import { PendingRecordingNotes } from "./PendingRecordingNotes";
 import { LibraryBackup } from "./LibraryBackup";
 import { ArchiveStorageButton } from "./Archive/ArchiveStorageButton";
-import Analytics from "@/lib/analytics";
 import { usePreferenceConfig, type NotificationSettings } from "@/contexts/ConfigContext";
 import { AUTO_UPDATE_CHECK_CHANGED_EVENT, loadAutoUpdateCheckEnabled, setAutoUpdateCheckEnabled } from "@/lib/updatePreferences";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
@@ -91,7 +90,6 @@ export function PreferenceSettings() {
   const [openingFolder, setOpeningFolder] = useState<FolderKind | null>(null);
   const [choosingFolder, setChoosingFolder] = useState(false);
   const folderPicker = useRef(false);
-  const hasTrackedViewRef = useRef(false);
 
   // Lazy load preferences on mount (only loads if not already cached).
   useEffect(() => {
@@ -101,7 +99,6 @@ export function PreferenceSettings() {
     };
     window.addEventListener(AUTO_UPDATE_CHECK_CHANGED_EVENT, syncUpdatePreference);
     syncUpdatePreference();
-    hasTrackedViewRef.current = false;
     void loadPreferences().finally(() => { if (active) setLoaded(true); });
     invoke<{ save_folder?: string }>("get_recording_preferences")
       .then((preferences) => { if (active && preferences?.save_folder) setSaveFolder(preferences.save_folder); })
@@ -135,15 +132,6 @@ export function PreferenceSettings() {
     }
   };
 
-  // Track preferences viewed once per visit, when the settings are known.
-  useEffect(() => {
-    if (hasTrackedViewRef.current || !loaded) return;
-    hasTrackedViewRef.current = true;
-    void Analytics.track("preferences_viewed", {
-      notifications_enabled: notificationSettings?.notification_preferences.show_recording_started ? "true" : "false",
-    });
-  }, [loaded, notificationSettings]);
-
   const notificationsEnabled = notificationSettings
     ? notificationSettings.notification_preferences.show_recording_started
       && notificationSettings.notification_preferences.show_recording_stopped
@@ -164,8 +152,6 @@ export function PreferenceSettings() {
         },
       };
       await updateNotificationSettings(updated);
-      Analytics.track("notification_settings_changed", { notifications_enabled: enabled.toString() })
-        .catch((error) => console.error("Failed to track notification change:", error));
     } catch (error) {
       console.error("Failed to update notification settings:", error);
       setNotificationError("Could not save the notification setting. Try again.");
@@ -178,8 +164,6 @@ export function PreferenceSettings() {
     setOpeningFolder(folderType);
     try {
       await openStorageFolder[folderType]();
-      Analytics.track("storage_folder_opened", { folder_type: folderType })
-        .catch((error) => console.error("Failed to track folder open:", error));
     } catch (error) {
       console.error(`Failed to open ${folderType} folder:`, error);
       toast.error("Could not open the folder.");

@@ -22,7 +22,6 @@ function createView({ fromRecording = false, outcome = null } = {}) {
     '@/components/ui/button': { Button: 'button' },
     '@/components/Sidebar/SidebarProvider': { useSidebar: () => sidebar },
     'next/navigation': { useRouter: () => router, useSearchParams: () => ({ get: key => key === 'id' ? meetingId : fromRecording ? 'recording' : null }) },
-    '@/lib/analytics': { default: { trackPageView() {} }, __esModule: true },
     '@/contexts/ConfigContext': { useConfig: () => ({ isAutoSummary: true }) },
     '@/hooks/usePaginatedTranscripts': { usePaginatedTranscripts: () => ({ metadata, transcripts }) },
     '@tauri-apps/api/event': { listen: async (event, callback) => {

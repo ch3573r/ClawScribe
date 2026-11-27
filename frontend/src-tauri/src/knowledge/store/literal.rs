@@ -640,21 +640,6 @@ fn collect(
     Ok(false)
 }
 
-pub(crate) async fn linked(
-    pool: &SqlitePool,
-    query: &str,
-    scope: Option<&KnowledgeScope>,
-    one_per_meeting: bool,
-) -> Result<LinkedHits, KnowledgeError> {
-    linked_query(
-        pool,
-        LiteralQuery::new(query, false)?,
-        scope,
-        one_per_meeting,
-    )
-    .await
-}
-
 pub(super) async fn linked_query(
     pool: &SqlitePool,
     query: LiteralQuery,
@@ -750,6 +735,10 @@ mod tests {
     use super::*;
     use crate::knowledge::evidence::{resolve, EvidenceStatus};
 
+    async fn search(pool: &SqlitePool, query: &str) -> Result<LinkedHits, KnowledgeError> {
+        linked_query(pool, LiteralQuery::new(query, false)?, None, false).await
+    }
+
     #[tokio::test]
     async fn searches_literal_unicode_and_resolves_a_verified_late_segment() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -777,44 +766,26 @@ mod tests {
             .await
             .unwrap();
 
-        let results = linked(&pool, "äpfel 50%_", None, false).await.unwrap();
+        let results = search(&pool, "äpfel 50%_").await.unwrap();
         assert!(results.titles.is_empty());
         assert_eq!(results.passages.len(), 1);
         let hit = &results.passages[0];
         assert!(hit.hit.text.contains("📘İ ÄPFEL 50%_ τέλος"));
         assert!(hit.hit.text.len() <= 220);
         assert!(!results.limited);
+        assert_eq!(search(&pool, "öFFNUNG 50%_").await.unwrap().titles.len(), 2);
         assert_eq!(
-            linked(&pool, "öFFNUNG 50%_", None, false)
-                .await
-                .unwrap()
-                .titles
-                .len(),
-            2
-        );
-        assert_eq!(
-            linked(&pool, "i\u{307} äpfel", None, false)
+            search(&pool, "i\u{307} äpfel")
                 .await
                 .unwrap()
                 .passages
                 .len(),
             1
         );
-        assert_eq!(
-            linked(&pool, "ΤΈΛΟΣ", None, false)
-                .await
-                .unwrap()
-                .passages
-                .len(),
-            1
-        );
-        assert!(linked(&pool, "50%X", None, false)
-            .await
-            .unwrap()
-            .passages
-            .is_empty());
+        assert_eq!(search(&pool, "ΤΈΛΟΣ").await.unwrap().passages.len(), 1);
+        assert!(search(&pool, "50%X").await.unwrap().passages.is_empty());
         assert!(matches!(
-            linked(&pool, &"📘".repeat(MAX_QUERY_CHARS + 1), None, false).await,
+            search(&pool, &"📘".repeat(MAX_QUERY_CHARS + 1)).await,
             Err(KnowledgeError::InvalidInput)
         ));
 

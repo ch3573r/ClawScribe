@@ -45,7 +45,6 @@ async function stopOn(location, { autoSummary = true, newRecording = false, fail
       '@/contexts/ConfigContext': { useConfig: () => ({ modelConfig: { provider: 'synthetic', model: 'synthetic' }, isAutoSummary: autoSummary }) },
       '@/lib/auto-summary': { startAutomaticSummary: async request => { summaries.push(request.meetingId); return true; } },
       '@/contexts/RecordingStateContext': { useRecordingState: () => ({ subscribeStopped }) },
-      '@/lib/analytics': { __esModule: true, default: new Proxy({}, { get: () => asyncNoop }) },
       '@/lib/meetingCalendar': { clearActiveRecordingCalendar: id => calendars.push(id) },
       '@/lib/summary-language-preferences': { detectAndCacheSummaryLanguage: () => preference.promise },
     });

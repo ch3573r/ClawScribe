@@ -100,7 +100,7 @@ export async function readMeetingSummaryLanguage(
   meetingId: string
 ): Promise<MeetingSummaryLanguagePreference> {
   const response = normalisePreferenceResponse(
-    await invoke<RawMeetingSummaryLanguagePreference>('api_get_meeting_summary_language', {
+    await invoke<MeetingSummaryLanguagePreference>('api_get_meeting_summary_language', {
       meetingId,
     })
   );
@@ -122,7 +122,7 @@ export async function saveMeetingSummaryLanguage(
 ): Promise<MeetingSummaryLanguagePreference> {
   const normalised = language ? normaliseLanguageCode(language) : null;
   const response = normalisePreferenceResponse(
-    await invoke<RawMeetingSummaryLanguagePreference>('api_save_meeting_summary_language', {
+    await invoke<MeetingSummaryLanguagePreference>('api_save_meeting_summary_language', {
       meetingId,
       summaryLanguage: normalised,
     })
@@ -156,7 +156,7 @@ export async function applyPinnedSummaryLanguageToMeeting(meetingId: string): Pr
 
 export async function readCachedDetectedSummaryLanguage(meetingId: string): Promise<string | null> {
   const response = normalisePreferenceResponse(
-    await invoke<RawMeetingSummaryLanguagePreference>(
+    await invoke<MeetingSummaryLanguagePreference>(
       'api_get_meeting_detected_summary_language',
       { meetingId }
     )
@@ -176,7 +176,7 @@ export async function saveCachedDetectedSummaryLanguage(
 ): Promise<void> {
   const normalised = language ? normaliseLanguageCode(language) : null;
   const response = normalisePreferenceResponse(
-    await invoke<RawMeetingSummaryLanguagePreference>(
+    await invoke<MeetingSummaryLanguagePreference>(
       'api_save_meeting_detected_summary_language',
       {
         meetingId,

@@ -4,7 +4,6 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
 import { errorText } from '@/lib/errorText';
 
 interface Run {
@@ -112,14 +111,10 @@ export function RetranscriptionProvider({ children }: { children: ReactNode }) {
     lastAnnouncement.current = snapshot.revision;
     const action = snapshot.replaces_transcript ? 'Retranscription' : 'Transcription';
     if (snapshot.state === 'complete') {
-      const { segments_count, duration_seconds } = snapshot.result;
+      const { segments_count } = snapshot.result;
       toast.success(`${action} complete! ${segments_count} segments created.`);
-      void Analytics.track('enhance_transcript_completed', {
-        success: 'true', duration_seconds: String(duration_seconds), segments_count: String(segments_count),
-      });
     } else if (snapshot.state === 'failed') {
       toast.error(`${action} failed`, { description: snapshot.error });
-      void Analytics.trackError('enhance_transcript_failed', snapshot.error);
     } else {
       toast.info(`${action} cancelled`);
     }
@@ -133,13 +128,9 @@ export function RetranscriptionProvider({ children }: { children: ReactNode }) {
     setStarting({ meetingId: request.meetingId, replacesTranscript: request.replacesTranscript });
     try {
       acceptStatus(await invoke<RetranscriptionStatus>('start_retranscription_command', { ...request }));
-      void Analytics.track('enhance_transcript_started', {
-        language: request.language ?? 'auto', model_provider: request.provider, model_name: request.model,
-      });
     } catch (caught) {
       const error = errorText(caught, 'Could not start transcription.');
       toast.error(request.replacesTranscript ? 'Retranscription failed' : 'Transcription failed', { description: error });
-      void Analytics.trackError('enhance_transcript_failed', error);
       throw caught;
     } finally {
       startingRequest.current = false;

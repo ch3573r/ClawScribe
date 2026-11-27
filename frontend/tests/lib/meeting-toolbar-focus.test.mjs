@@ -42,7 +42,6 @@ const primitives = {
   '@/lib/summary-languages': { labelForCode: code => code },
   '@/lib/openExternal': { openExternal() {} },
   '@/lib/utils': { isOllamaNotInstalledError: () => false },
-  '@/lib/analytics': { default: { trackButtonClick() {} } },
   '@tauri-apps/api/core': { invoke: async () => {} },
   '@tauri-apps/api/event': { listen: async () => () => {} },
   sonner: { toast: {} },
@@ -266,7 +265,7 @@ test('meeting title strips pasted line breaks without trimming ordinary spaces',
 
 test('the empty summary view offers the only Generate action', () => {
   const hooks = createHookHarness();
-  const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', { ...primitives, '@/lib/analytics': { __esModule: true, default: { trackButtonClick() {} } }, react: hooks.react });
+  const { SummaryPanel } = loadTsModule('src/components/MeetingDetails/SummaryPanel.tsx', { ...primitives, react: hooks.react });
   const render = props => hooks.render(() => SummaryPanel({ ...summaryProps, ...props }));
   const group = tree => nodes(tree).find(node => node.props && 'showRegenerate' in node.props);
   const generate = tree => nodes(tree).find(node => node.type === 'button' && text(node) === 'Generate summary');

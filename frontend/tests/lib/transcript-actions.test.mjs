@@ -32,7 +32,6 @@ for (const [label, expected] of [['Keep my labels', true], ['Replace', false]]) 
         return null;
       } },
       '@tauri-apps/api/event': { listen: async () => () => {} },
-      '@/lib/analytics': { __esModule: true, default: { trackButtonClick() {} } },
     });
     const props = {
       meetingId: 'test-meeting', meetingFolderPath: 'saved-recording', transcriptCount: 5,
@@ -70,7 +69,6 @@ for (const meetingFolderPath of [null, '', 'synthetic-recording']) for (const tr
       '@tauri-apps/api/core': { invoke: async () => null },
       '@tauri-apps/api/event': { listen: async () => () => {} },
       sonner: { toast: { error() {}, success() {}, info() {} } },
-      '@/lib/analytics': { default: { trackButtonClick() {} } },
       './RetranscribeDialog': { RetranscribeDialog: 'RetranscribeDialog' },
       './SpeakerDiarizationDialog': { SpeakerDiarizationDialog: 'SpeakerDiarizationDialog' },
     });

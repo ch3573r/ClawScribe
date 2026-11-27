@@ -8,7 +8,6 @@ import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { currentRoute } from '@/lib/current-route';
 import { errorText } from '@/lib/errorText';
-import Analytics from '@/lib/analytics';
 import { clearActiveRecordingCalendar } from '@/lib/meetingCalendar';
 import { detectAndCacheSummaryLanguage } from '@/lib/summary-language-preferences';
 
@@ -29,8 +28,7 @@ export function useRecordingStop() {
       return;
     }
 
-    // Capture the stopped session's UI data before awaiting anything. Native
-    // Stop owns the saved transcript, so these lines are only for preferences and analytics.
+    // Capture the stopped session's UI data for summary language detection.
     flushBuffer();
     const transcripts = [...transcriptsRef.current];
     clearTranscripts();
@@ -60,24 +58,8 @@ export function useRecordingStop() {
     const meetingRoute = `/meeting-details?id=${meetingId}&source=recording`;
     if (isCurrent() && route.path === '/') {
       router.push(meetingRoute);
-      Analytics.trackPageView('meeting_details');
     } else if (isCurrent() && route.path === '/meeting-details' && route.id === meetingId) {
       router.replace(meetingRoute);
-    }
-
-    try {
-      const duration = transcripts.at(-1)?.audio_end_time ?? 0;
-      const words = transcripts.reduce((total, line) => total + line.text.split(/\s+/).length, 0);
-      await Analytics.trackMeetingCompleted(meetingId, {
-        duration_seconds: duration,
-        transcript_segments: payload.transcript_count ?? transcripts.length,
-        transcript_word_count: words,
-        words_per_minute: duration > 0 ? words * 60 / duration : 0,
-        meetings_today: await Analytics.getMeetingsCountToday(),
-      });
-      await Analytics.updateMeetingCount();
-    } catch {
-      console.warn('Could not update recording analytics.');
     }
   };
 

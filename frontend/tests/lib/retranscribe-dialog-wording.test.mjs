@@ -67,7 +67,6 @@ async function setup(hasTranscript, editStateFails = false, cancelAccepted = tru
       return () => listeners.delete(event);
     } },
     sonner: { toast: { success: message => messages.push(message), info() {}, error: message => messages.push(message) } },
-    '@/lib/analytics': { track: async () => {}, trackError: async () => {} },
   });
   const { RetranscribeDialog } = loadTsModule(fileURLToPath(new URL('../../src/components/MeetingDetails/RetranscribeDialog.tsx', import.meta.url)), {
     react: hooks.react,

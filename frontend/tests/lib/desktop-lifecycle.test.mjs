@@ -16,7 +16,6 @@ const primitives = {
   '@/components/ui/button': components('Button'),
   '@/components/ui/tooltip': components('Tooltip', 'TooltipContent', 'TooltipProvider', 'TooltipTrigger'),
   '@/components/ui/alert': components('Alert', 'AlertDescription', 'AlertTitle'),
-  '@/lib/analytics': { trackPageView: noop },
 };
 
 function withListeners(t, lateEvent) {
@@ -106,7 +105,6 @@ test('Home can start another recording after a concurrent Stop finishes first', 
   } };
   const { RecordingControls } = loadTsModule('src/components/RecordingControls', {
     ...app.mocks,
-    '@/lib/analytics': { trackButtonClick: noop },
     '@/services/recordingService': { recordingService: { stopRecording: () => pending.promise } },
     sonner: { toast: { error: (...args) => errors.push(args) } },
     '@/contexts/RecordingStateContext': { RecordingStatus: {}, useRecordingState: () => state },

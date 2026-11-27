@@ -62,7 +62,6 @@ test('project tags distinguish initial loading, failure, retry, and success', as
     ({ SidebarProvider } = loadTsModule('src/components/Sidebar/SidebarProvider.tsx', {
       react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
       'next/navigation': { usePathname: () => '/meetings', useRouter: () => ({}) },
-      '@/lib/analytics': { trackBackendConnection() {} },
       '@/contexts/RecordingStateContext': { useRecordingState: () => ({ isRecording: false }) },
       '@/contexts/ConfigContext': { useTranscriptionConfig: () => ({
         audioDeviceInventory: { data: null, status: 'checking', refresh() {} },

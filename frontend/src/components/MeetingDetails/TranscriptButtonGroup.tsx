@@ -19,7 +19,6 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
 import { canDetectSpeakers } from '@/lib/speaker-attribution';
 import { DEFAULT_PLAYER_BINDINGS, playerKeycaps, type PlayerBindings } from '@/lib/player-bindings';
 import { RetranscribeDialog } from './RetranscribeDialog';
@@ -234,7 +233,6 @@ export function TranscriptButtonGroup({
     setDiarizationError(null);
     setShowDiarizationDialog(true);
     try {
-      Analytics.trackButtonClick(numSpeakers ? `speaker_diarization_${numSpeakers}` : 'speaker_diarization_auto', 'meeting_details');
       const complete = await invoke<SpeakerDiarizationComplete>('start_speaker_diarization_command', {
         meetingId,
         meetingFolderPath,
@@ -263,10 +261,10 @@ export function TranscriptButtonGroup({
   return (
     <div className="flex shrink-0 items-center justify-end gap-1">
       {onFindReplace && <Button variant="ghost" size="sm" className="px-1 text-xs" disabled={correctionActions?.busy || transcriptCount === 0} onClick={onFindReplace}>Find and replace</Button>}
-      <Button variant="ghost" size="sm" className="px-1 text-xs" disabled={transcriptCount === 0} onClick={() => { Analytics.trackButtonClick('copy_transcript', 'meeting_details'); onCopyTranscript(); }}>Copy</Button>
+      <Button variant="ghost" size="sm" className="px-1 text-xs" disabled={transcriptCount === 0} onClick={() => { onCopyTranscript(); }}>Copy</Button>
       <DropdownMenu><DropdownMenuTrigger asChild><ActionIcon ref={menuTrigger} label="More transcript actions" className="h-8 w-8"><MoreHorizontal /></ActionIcon></DropdownMenuTrigger>
         <DropdownMenuContent align="end" onCloseAutoFocus={event => { if (detectionRequest) event.preventDefault(); }}>
-          {meetingId && meetingFolderPath && audioAvailable && <DropdownMenuItem title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'} onClick={() => { Analytics.trackButtonClick('enhance_transcript', 'meeting_details'); onTranscribeOpenChange(true); }}>{transcriptCount === 0 ? 'Transcribe saved audio' : 'Enhance or retranscribe'}</DropdownMenuItem>}
+          {meetingId && meetingFolderPath && audioAvailable && <DropdownMenuItem title={transcriptCount === 0 ? 'Transcribe saved audio' : 'Retranscribe to enhance your recorded audio'} onClick={() => { onTranscribeOpenChange(true); }}>{transcriptCount === 0 ? 'Transcribe saved audio' : 'Enhance or retranscribe'}</DropdownMenuItem>}
           {onFind && <DropdownMenuItem disabled={transcriptCount === 0} onSelect={onFind}>Find in transcript<DropdownMenuShortcut>{playerKeycaps(bindings.find).join('+')}</DropdownMenuShortcut></DropdownMenuItem>}
           {onAddBookmark && <DropdownMenuItem onSelect={onAddBookmark}>Add bookmark<DropdownMenuShortcut>{playerKeycaps(bindings.bookmark).join('+')}</DropdownMenuShortcut></DropdownMenuItem>}
           {correctionActions?.canUndo && <DropdownMenuItem disabled={correctionActions.busy} onSelect={correctionActions.undo}>Undo last correction</DropdownMenuItem>}

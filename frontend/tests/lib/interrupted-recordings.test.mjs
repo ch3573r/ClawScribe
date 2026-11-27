@@ -96,13 +96,20 @@ function harness({ browserMeetings = [], scan = { recordings: [], truncated: fal
       }
       if (command === 'preview_interrupted_recording') return [{ text: 'first line', timestamp: '[00:01]', audioStartTime: 1 }];
       if (command === 'save_offline_recording_transcript' || command === 'save_recovery_transcript_copy') return saveDraft(command, args);
-      if (command === 'recover_audio_from_checkpoints') {
-        return { status: audioStatus, chunk_count: 1, estimated_duration_seconds: 1, audio_file_path: ['success', 'partial'].includes(audioStatus) ? args.meetingFolder + '/audio-recovered.wav' : undefined };
+      if (command === 'recover_interrupted_recording') {
+        const currentScan = typeof scan === 'function' ? scan() : scan;
+        const recording = currentScan.recordings.find(entry => entry.folder === args.folder);
+        if (recording && !recording.hasAudio && !recording.hasTranscript) throw new Error('No audio could be recovered yet');
+        if (!args.folder && !args.cached?.transcripts.length) throw new Error('No audio could be recovered yet');
+        const count = recording?.registeredMeetingId ? 0 : (args.cached?.transcripts.length ?? recording?.transcriptLines ?? 0);
+        saves.push(args);
+        return { meetingId: recording?.registeredMeetingId ?? 'saved-1', transcriptCount: count, audioRecoveryStatus: {
+          status: audioStatus, chunk_count: 1, estimated_duration_seconds: 1,
+          audio_file_path: ['success', 'partial'].includes(audioStatus) ? args.folder + '/audio-recovered.wav' : undefined,
+        } };
       }
       if (command === 'keep_interrupted_recording') return;
-      if (command === 'repair_saved_recording') return { meetingId: args.folder === 'C:\Rec\saved' ? 'meeting-7' : 'other', audioStatus: 'success', audioPath: args.folder + '/audio-recovered.wav' };
       if (command === 'discard_interrupted_recording') { if (failDiscard) throw new Error('refused'); return; }
-      if (command === 'release_recovered_capture' || command === 'cleanup_checkpoints') return;
       throw new Error('Unexpected command: ' + command);
     } },
     '@/services/indexedDBService': { indexedDBService: {
@@ -112,9 +119,8 @@ function harness({ browserMeetings = [], scan = { recordings: [], truncated: fal
       markMeetingSaved: async id => { calls.push(['markSaved', id]); },
       deleteMeeting: async id => { calls.push(['deleteBrowser', id]); },
     } },
-    '@/services/storageService': { storageService: { saveMeeting: async (...args) => { calls.push(['save']); saves.push(args); return { meeting_id: 'saved-1' }; } } },
     '@/lib/summary-language-preferences': { applyPinnedSummaryLanguageToMeeting: async () => {} },
-    sonner: { toast: { warning: () => {} } },
+    sonner: { toast: { warning: () => {}, info: () => { calls.push(['deferredNotice']); } } },
   });
   const render = () => hooks.render(useTranscriptRecovery);
   const names = () => calls.map(call => call[0]);
@@ -214,7 +220,7 @@ test('a folder reused by another recording is never attached to a detached brows
   assert.equal(oldEntry.recordingFolder, undefined);
   assert.ok(!h.names().includes('has_audio_checkpoints'));
   await assert.rejects(h.render().recoverMeeting('old-browser'), /No audio could be recovered yet/);
-  assert.ok(!h.names().includes('recover_audio_from_checkpoints'));
+  assert.equal(h.calls.find(([name]) => name === 'recover_interrupted_recording')[1].folder, null);
   assert.equal(h.saves.length, 0);
   h.hooks.unmount();
 });
@@ -253,7 +259,7 @@ test('an unverified folder keeps its browser draft visible and returns to regula
   assert.equal(retried.length, 2);
   assert.equal(retried.find(entry => entry.meetingId === 'offline').recordingFolder, folder);
   await h.render().recoverMeeting('offline');
-  assert.equal(h.saves[0][2], folder);
+  assert.equal(h.saves[0].folder, folder);
   assert.equal(h.calls.filter(([name]) => name === 'find_interrupted_recordings')[1][1].cacheEntries[0].folder, folder);
   h.hooks.unmount();
 });
@@ -314,8 +320,8 @@ for (const id of [stableId, legacyId]) {
       assert.equal(entries.length, 1);
       assert.equal(entries[0].disk.registeredMeetingId, id);
       await h.render().recoverMeeting(entries[0].meetingId);
-      assert.ok(h.names().includes('repair_saved_recording'));
-      assert.equal(h.saves.length, 0);
+      assert.ok(h.names().includes('recover_interrupted_recording'));
+      assert.equal(h.saves[0].cached, null);
     } else {
       const entries = await h.render().checkForRecoverableTranscripts();
       assert.equal(entries[0].recordingFolder, folder);
@@ -352,47 +358,26 @@ test('old browser-only recovery stays visible while a live or just-written cache
   h.hooks.unmount();
 });
 
-test('recovering a clean Stop handoff does not mark its complete transcript as partial', async () => {
-  const h = harness({ scan: { recordings: [disk('pending-folder', { reasons: ['library_handoff_pending'] })] } });
+test('a disk recording sends one request and uses the native result', async () => {
+  const folder = 'synthetic-disk-recording';
+  const h = harness({ scan: { recordings: [disk(folder, { title: 'Only on disk' })], truncated: false, recordingActive: false } });
   await h.render().checkForRecoverableTranscripts();
-  await h.render().recoverMeeting(h.render().recoverableMeetings[0].meetingId);
-  assert.equal(h.saves[0][3].transcription_incomplete, false);
-  assert.equal(h.saves[0][4], true);
-  h.hooks.unmount();
-});
-
-test('a recording only on disk is recovered through audio recovery and the normal save, then released', async () => {
-  const h = harness({ scan: { recordings: [disk('C:\\Rec\\two', { title: 'Only on disk' })], truncated: false, recordingActive: false } });
-  await h.render().checkForRecoverableTranscripts();
-  const id = h.render().recoverableMeetings[0].meetingId;
-  const result = await h.render().recoverMeeting(id);
+  const result = await h.render().recoverMeeting(h.render().recoverableMeetings[0].meetingId);
   assert.equal(result.success, true);
   assert.equal(result.meetingId, 'saved-1');
-  assert.equal(h.saves.length, 1);
-  const [title, transcripts, folder, outcome, useSaved] = h.saves[0];
-  assert.equal(title, 'Only on disk');
-  assert.equal(transcripts.length, 0, 'the core reads the transcript snapshot from the folder');
-  assert.equal(folder, 'C:\\Rec\\two');
-  assert.equal(useSaved, true);
-  assert.equal(outcome.transcription_incomplete, true);
-  assert.equal(outcome.capture_incomplete, false);
-  const names = h.names();
-  assert.ok(names.indexOf('recover_audio_from_checkpoints') < names.indexOf('save'));
-  assert.ok(names.indexOf('save') < names.indexOf('release_recovered_capture'));
-  assert.ok(names.includes('cleanup_checkpoints'));
+  assert.equal(result.transcriptCount, 12);
+  assert.deepEqual(json(h.saves), [{ folder, meetingTitle: 'Only on disk', cached: null }]);
   assert.equal(h.render().recoverableMeetings.length, 0);
   h.hooks.unmount();
 });
 
-test('a disk recording without a transcript snapshot is saved for transcription and is not read as a saved one', async () => {
-  const h = harness({ scan: { recordings: [disk('C:\\Rec\\audio-only', { hasTranscript: false, transcriptLines: 0 })], truncated: false, recordingActive: false }, audioStatus: 'partial' });
+test('a disk recording without a transcript displays the native partial audio result', async () => {
+  const h = harness({ scan: { recordings: [disk('synthetic-audio-only', { hasTranscript: false, transcriptLines: 0 })] }, audioStatus: 'partial' });
   await h.render().checkForRecoverableTranscripts();
-  await h.render().recoverMeeting(h.render().recoverableMeetings[0].meetingId);
-  const [, , , outcome, useSaved] = h.saves[0];
-  assert.equal(useSaved, false);
-  assert.equal(outcome.capture_incomplete, true);
-  assert.equal(outcome.transcription_incomplete, false);
-  assert.equal(h.names().includes('cleanup_checkpoints'), false, 'a partial recovery keeps the originals');
+  const result = await h.render().recoverMeeting(h.render().recoverableMeetings[0].meetingId);
+  assert.equal(result.transcriptCount, 0);
+  assert.equal(result.audioRecoveryStatus.status, 'partial');
+  assert.equal(h.saves[0].cached, null);
   h.hooks.unmount();
 });
 
@@ -474,9 +459,24 @@ test('a recording already saved in the library repairs that meeting and never sa
   const result = await h.render().recoverMeeting(h.render().recoverableMeetings[0].meetingId);
   assert.equal(result.meetingId, 'meeting-7');
   assert.equal(result.success, true);
-  assert.equal(h.saves.length, 0, 'no second meeting is saved');
-  assert.deepEqual(json(h.calls.find(call => call[0] === 'repair_saved_recording')[1]), { folder: 'C:\Rec\saved' });
-  assert.equal(h.names().includes('save'), false);
+  assert.equal(h.saves.length, 1, 'the same native call handles repair');
+  assert.equal(h.saves[0].folder, 'C:\Rec\saved');
+  assert.equal(h.saves[0].cached, null);
   assert.equal(h.render().recoverableMeetings.length, 0);
+  h.hooks.unmount();
+});
+
+test('a busy repair remains available for retry without showing a recovery failure', async () => {
+  const h = harness({
+    scan: { recordings: [disk('synthetic-saved-recording', { registeredMeetingId: 'meeting-7' })] },
+    audioStatus: 'deferred',
+  });
+  const [candidate] = await h.render().checkForRecoverableTranscripts();
+  const result = await h.render().recoverMeeting(candidate.meetingId);
+  assert.equal(result.success, false);
+  assert.equal(result.remainingCount, 1);
+  assert.equal(h.render().recoverableMeetings[0].meetingId, candidate.meetingId);
+  assert.ok(h.names().includes('deferredNotice'));
+  assert.ok(!h.names().includes('markSaved'));
   h.hooks.unmount();
 });

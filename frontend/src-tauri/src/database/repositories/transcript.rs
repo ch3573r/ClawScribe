@@ -576,6 +576,27 @@ impl TranscriptsRepository {
         .await
     }
 
+    pub(crate) async fn save_detached_recovery(
+        pool: &SqlitePool,
+        meeting_id: String,
+        title: &str,
+        transcripts: &[TranscriptSegment],
+        outcome: &crate::audio::outcome::RecordingOutcome,
+    ) -> Result<String, SqlxError> {
+        Self::save_with_id(
+            pool,
+            meeting_id,
+            title,
+            transcripts,
+            None,
+            Some(outcome),
+            None,
+            false,
+            RecordingProvenance::default(),
+        )
+        .await
+    }
+
     /// The native recording ID is sufficient to save the text without
     /// attaching an unverified path. Audio repair can later bind a trusted
     /// folder whose recording marker carries this same ID.

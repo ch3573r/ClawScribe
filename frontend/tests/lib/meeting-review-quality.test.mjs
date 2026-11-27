@@ -58,7 +58,6 @@ function summaryGeneration(provider, invoke, toast = { info() {}, error: message
   const { useSummaryGeneration } = loadTsModule('src/hooks/meeting-details/useSummaryGeneration.ts', {
     react: hooks.react,
     '@tauri-apps/api/core': { invoke },
-    '@/lib/analytics': { __esModule: true, default: { async trackSummaryGenerationStarted() {} } },
     '@/lib/meetingContext': { getMeetingContext: async () => '' },
     '@/lib/meetingDrafts': { confirmSummaryRegeneration: async () => true },
     '@/lib/summary-language-preferences': { readMeetingSummaryLanguage: async () => ({ language: null }) },
@@ -212,7 +211,6 @@ function summaryPanel(t, initial = {}) {
     '@/components/ui/input': stubs('Input'), '@/components/ui/button': stubs('Button'), '@/components/ui/textarea': stubs('Textarea'),
     '@/components/ui/tooltip': stubs('Tooltip TooltipTrigger TooltipContent'), '@/components/ui/popover': stubs('Popover PopoverTrigger PopoverContent'),
     '@/components/ui/dialog': dialogs, '@/components/ui/progress': stubs('Progress'),
-    '@/lib/analytics': { __esModule: true, default: { trackButtonClick() {} } },
     '@/lib/summary-language-preferences': { readMeetingSummaryLanguage: async () => ({ language: null, storage: 'metadata' }) },
     '@/lib/summary-find': { collectSummaryRanges: (root, query) => root.ranges.filter(range => range.label.includes(query)) },
     sonner: { toast: { success() {}, error() {} } },
@@ -332,7 +330,7 @@ test('the meeting header overflow is the single recording-folder action', () => 
     '@/services/meetingActionsService': { getMeetingActionsOverview: async () => null },
   });
   const { SummaryUpdaterButtonGroup } = loadTsModule('src/components/MeetingDetails/SummaryUpdaterButtonGroup.tsx', {
-    'react/jsx-runtime': { jsx, jsxs: jsx }, '@/components/ui/dropdown-menu': dropdown, '@/lib/analytics': {},
+    'react/jsx-runtime': { jsx, jsxs: jsx }, '@/components/ui/dropdown-menu': dropdown,
   });
   let opened = 0;
   const render = folder_path => hooks.render(() => MeetingHeader({

@@ -9,7 +9,6 @@ import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useTranscriptionConfig } from '@/contexts/ConfigContext';
 import { useLiveAssistanceOwner } from '@/contexts/LiveAssistanceContext';
 import { StatusOverlays } from '@/app/_components/StatusOverlays';
-import Analytics from '@/lib/analytics';
 import { SettingsModals } from './_components/SettingsModal';
 import { TranscriptPanel } from './_components/TranscriptPanel';
 import { LiveAssistanceDock } from '@/components/LiveAssistanceDock';
@@ -69,11 +68,6 @@ export default function Home() {
   } = useTranscriptRecovery();
 
   const router = useRouter();
-
-  useEffect(() => {
-    // Track page view
-    Analytics.trackPageView('home');
-  }, []);
 
   // Startup recovery check
   useEffect(() => {

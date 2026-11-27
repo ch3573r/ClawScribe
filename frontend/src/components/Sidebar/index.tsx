@@ -22,7 +22,6 @@ import { useRouter, usePathname } from "next/navigation";
 import { useSidebar } from "./SidebarProvider";
 import { ConfirmationModal } from "../ConfirmationModel/confirmation-modal";
 import { meetingDraft } from "@/lib/meetingDrafts";
-import Analytics from "@/lib/analytics";
 import { groupMeetings, shortMeetingDate } from "@/lib/sidebarMeetings";
 import { Meta, StatusText } from "@/components/ui/settings-layout";
 import { NextUpCard } from "./NextUpCard";
@@ -191,7 +190,6 @@ const Sidebar: React.FC = () => {
       setMeetings(previous => previous.filter(meeting => meeting.id !== itemId));
 
       // Track meeting deletion
-      Analytics.trackMeetingDeleted(itemId);
 
       // Show success toast
       toast.success("Meeting moved to Trash", {
@@ -255,7 +253,6 @@ const Sidebar: React.FC = () => {
       setCurrentMeeting(previous => previous?.id === meetingId ? { ...previous, title: newTitle } : previous);
 
       // Track the edit
-      Analytics.trackButtonClick("edit_meeting_title", "sidebar");
 
       toast.success("Meeting title updated successfully");
 

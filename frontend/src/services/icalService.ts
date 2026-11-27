@@ -167,9 +167,9 @@ function changed(sources: ICalendarSource[]) {
   void refreshICalendars();
 }
 
-async function add(command: string, args: Record<string, string>) {
+async function add(save: () => Promise<ICalendarSource>) {
   let source: ICalendarSource;
-  try { source = await invoke<ICalendarSource>(command, args); }
+  try { source = await save(); }
   catch (error) { throw new Error(messageFor(error, "Could not add the calendar. Check the source and try again.")); }
   changed([...current.sources.filter(s => s.id !== source.id), source]);
 }
@@ -185,11 +185,11 @@ export async function importICalendarFile(file: File) {
     throw new Error(messageFor(error, "Could not import this calendar. Choose a valid UTF-8 .ics file."));
   }
   const name = file.name.replace(/\.ics$/i, "").trim().slice(0, 80) || "Imported calendar";
-  await add("add_ical_file", { name, content: text });
+  await add(() => invoke<ICalendarSource>("add_ical_file", { name, content: text }));
 }
 
 export async function addICalendarSubscription(name: string, url: string) {
-  await add("add_ical_subscription", { name: name.trim(), url: url.trim() });
+  await add(() => invoke<ICalendarSource>("add_ical_subscription", { name: name.trim(), url: url.trim() }));
 }
 
 export async function removeICalendarSource(id: string) {

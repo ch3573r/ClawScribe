@@ -144,7 +144,6 @@ test('summary settings never request an API key, for Claude Code or any other pr
         '@/components/SummaryLanguageSettings': { SummaryLanguageSettings: 'summary-language' },
         '@/contexts/ConfigContext': { useSummaryConfig: () => ({ isAutoSummary: false, toggleIsAutoSummary() {} }) },
         './ui/switch': { Switch: 'switch' },
-        '@/lib/analytics': { __esModule: true, default: {} },
         sonner: { toast: { error() {}, success() {} } },
       };
       const { SummaryModelSettings } = loadTsModule('src/components/SummaryModelSettings.tsx', mocks);

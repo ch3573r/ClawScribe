@@ -31,6 +31,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+pub(crate) mod recovery;
+
 const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DIR_ENTRIES: usize = 20_000;
 const LEGACY_CHECKPOINT_SECONDS: f64 = 10.0;
@@ -249,6 +251,21 @@ fn regular_file_size(path: &Path) -> Option<u64> {
     (metadata.is_file() && !meeting_files::is_link(path, &metadata)).then_some(metadata.len())
 }
 
+fn audio_evidence(folder: &Path) -> (bool, (u32, u64), (u32, u64)) {
+    let final_audio = FINAL_AUDIO_NAMES
+        .iter()
+        .any(|name| regular_file_size(&folder.join(name)).is_some_and(|size| size > 0));
+    let spool = capture_entries(&folder.join(".audio-spool"), |path| {
+        has_extension(path, &["chunk", "tmp"])
+    });
+    let checkpoints = capture_entries(&folder.join(".checkpoints"), |path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("audio_chunk_") && name.ends_with(".mp4"))
+    });
+    (final_audio, spool, checkpoints)
+}
+
 pub(crate) fn is_recording_marker(marker: &Value) -> bool {
     marker["source"].as_str() != Some("import")
         && (matches!(marker["source"].as_str(), Some("recording"))
@@ -421,17 +438,8 @@ fn classify_folder_with_deletions(
     }
     let status = marker.get("status").and_then(Value::as_str).unwrap_or("");
 
-    let has_final_audio = FINAL_AUDIO_NAMES
-        .iter()
-        .any(|name| regular_file_size(&folder.join(name)).is_some_and(|size| size > 0));
-    let (spool_chunks, spool_bytes) = capture_entries(&folder.join(".audio-spool"), |path| {
-        has_extension(path, &["chunk", "tmp"])
-    });
-    let (checkpoints, checkpoint_bytes) = capture_entries(&folder.join(".checkpoints"), |path| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("audio_chunk_") && name.ends_with(".mp4"))
-    });
+    let (has_final_audio, (spool_chunks, spool_bytes), (checkpoints, checkpoint_bytes)) =
+        audio_evidence(folder);
     let has_capture = spool_chunks > 0 || checkpoints > 0;
     if pending_audio && !has_capture && !has_final_audio {
         return None;
@@ -827,7 +835,10 @@ fn reconcile_cache_entries(
     };
     let mut result = CacheReconciliation::default();
     for entry in entries {
-        if by_id.contains_key(entry.id.as_str()) {
+        if by_id.contains_key(entry.id.as_str())
+            || by_id
+                .contains_key(recovery::detached_meeting_id(&entry.id, entry.started_at).as_str())
+        {
             result.resolved.push(entry.id);
             continue;
         }
@@ -1103,13 +1114,12 @@ pub async fn keep_interrupted_recording<R: tauri::Runtime>(
 }
 
 /// What repairing a saved recording achieved.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RepairedRecording {
-    pub meeting_id: String,
-    /// `success`, `partial`, `failed` or `none`, as audio recovery reports it.
-    pub audio_status: String,
-    pub audio_path: Option<String>,
+struct RepairedRecording {
+    meeting_id: String,
+    /// An audio recovery status, or `deferred` while the repair job slot is busy.
+    audio_status: String,
+    audio_path: Option<String>,
+    wake_summary: bool,
 }
 
 fn import_owner_waiting_for_metadata(folder: &Path, meeting_id: &str, roots: &[PathBuf]) -> bool {
@@ -1153,19 +1163,14 @@ fn verify_pending_audio_inputs(folder: &Path) -> std::io::Result<()> {
 
 /// Repairs a saved recording or attaches trusted audio to an offline
 /// transcript with the same recording ID. Neither path creates a meeting.
-#[tauri::command]
-pub async fn repair_saved_recording<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    state: tauri::State<'_, crate::state::AppState>,
+async fn repair_saved_recording<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    pool: &sqlx::SqlitePool,
     folder: String,
 ) -> Result<RepairedRecording, String> {
-    let _install_guard = crate::updates::admit_work()?;
-    let job = super::inference::claim_job().map_err(|_| {
-        "Another operation is using the recorder. Try repairing again when it finishes.".to_string()
-    })?;
-    let roots = super::recording_preferences::recording_roots(&app).await;
-    let rows = registered_rows(state.db_manager.pool()).await?;
-    let pending = pending_audio_ids(state.db_manager.pool()).await?;
+    let roots = super::recording_preferences::recording_roots(app).await;
+    let rows = registered_rows(pool).await?;
+    let pending = pending_audio_ids(pool).await?;
     let active = super::recording_commands::active_recording_folder();
     let repair_roots = roots.clone();
     let (authorised, meeting_id, registered_path, marker) =
@@ -1241,7 +1246,6 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
         .map_err(|_| "Could not repair the recording".to_string())??;
 
     use crate::database::transcript_edits;
-    let pool = state.db_manager.pool();
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM active_meetings WHERE id=?)")
             .bind(&meeting_id)
@@ -1251,23 +1255,40 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
     if !exists {
         return Err("This meeting is unavailable for recording repair.".into());
     }
+    // Only repair shares a saved folder with inference jobs. A busy slot
+    // leaves the existing meeting and its original files available for retry.
+    let Ok(_job) = super::inference::claim_job() else {
+        return Ok(RepairedRecording {
+            meeting_id,
+            audio_status: "deferred".into(),
+            audio_path: None,
+            wake_summary: false,
+        });
+    };
     if registered_path.is_some()
         && transcript_edits::import_file_stage(pool, &meeting_id)
             .await?
             .is_some()
     {
         transcript_edits::sync_file_with_profile(pool, &meeting_id, &roots, |_| Ok(None)).await?;
-        transcript_edits::notify_file_sync(&app, &meeting_id);
+        transcript_edits::notify_file_sync(app, &meeting_id);
         return Ok(RepairedRecording {
             meeting_id,
             audio_status: "none".into(),
             audio_path: None,
+            wake_summary: false,
         });
     }
     let Some(marker) = marker else {
         return Err("There is no pending import file repair for this folder.".into());
     };
 
+    let audio_folder = PathBuf::from(&authorised);
+    tokio::task::spawn_blocking(move || verify_pending_audio_inputs(&audio_folder))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or("Could not verify the audio files. Keep the recording folder and retry.")?;
     let status = super::incremental_saver::recover_audio_in_folder(authorised.clone())
         .await
         .map_err(|_| {
@@ -1281,6 +1302,7 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
                 .into(),
         );
     }
+    let mut wake_summary = false;
     if recovered {
         let transcribes = super::recording_mode::marker_transcribes(&marker);
         let provenance = {
@@ -1299,23 +1321,22 @@ pub async fn repair_saved_recording<R: tauri::Runtime>(
             .map_err(|_| "Could not read recovered recording details".to_string())?
         };
         let outcome_updated = commit_repaired_audio(
-            state.db_manager.pool(),
+            pool,
             &meeting_id,
             registered_path.as_deref(),
             &authorised,
             provenance,
             status.status == "partial",
+            status.audio_file_path.as_deref(),
         )
         .await?;
-        drop(job);
-        if transcribes && outcome_updated {
-            super::recording_commands::wake_saved_recording_summary(&app, meeting_id.clone());
-        }
+        wake_summary = transcribes && outcome_updated;
     }
     Ok(RepairedRecording {
         meeting_id,
         audio_status: status.status,
         audio_path: status.audio_file_path,
+        wake_summary,
     })
 }
 
@@ -1326,6 +1347,7 @@ async fn commit_repaired_audio(
     authorised: &str,
     provenance: RecordingProvenance,
     partial: bool,
+    audio_path: Option<&str>,
 ) -> Result<bool, String> {
     // The meeting no longer has a failed audio save; a partial recovery says
     // the capture had gaps.
@@ -1373,10 +1395,33 @@ async fn commit_repaired_audio(
     // Release capture only once the repaired meeting is committed.
     let _ = super::incremental_saver::release_registered_capture(pool, authorised).await;
     if !partial {
-        let checkpoints = Path::new(authorised).join(".checkpoints");
-        let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(checkpoints)).await;
+        remove_legacy_checkpoints(authorised, audio_path).await;
     }
     Ok(updated.rows_affected() == 1)
+}
+
+async fn remove_legacy_checkpoints(folder: &str, audio_path: Option<&str>) {
+    let Some(audio_path) = audio_path.map(PathBuf::from) else {
+        return;
+    };
+    let folder = PathBuf::from(folder);
+    let _ = tokio::task::spawn_blocking(move || {
+        if super::recording_commands::active_recording_folder().protects(&folder) {
+            return;
+        }
+        let checkpoints = folder.join(".checkpoints");
+        let Ok(metadata) = std::fs::symlink_metadata(&checkpoints) else {
+            return;
+        };
+        if metadata.is_dir()
+            && !meeting_files::is_link(&checkpoints, &metadata)
+            && super::incremental_saver::validate_recoverable_temp_audio_file(&audio_path).is_ok()
+            && std::fs::remove_dir_all(&checkpoints).is_err()
+        {
+            log::warn!("Could not remove recovered legacy checkpoints");
+        }
+    })
+    .await;
 }
 
 /// Deletes an interrupted recording's folder, only on an explicit request and
@@ -1389,6 +1434,7 @@ pub async fn discard_interrupted_recording<R: tauri::Runtime>(
     state: tauri::State<'_, crate::state::AppState>,
     folder: String,
 ) -> Result<(), String> {
+    let _recovery = recovery::MUTATION.lock().await;
     let roots = super::recording_preferences::recording_roots(&app).await;
     let rows = registered_rows(state.db_manager.pool()).await?;
     let deleted = deleted_recording_ids(state.db_manager.pool()).await?;
@@ -2483,7 +2529,8 @@ mod tests {
             None,
             authorised,
             RecordingProvenance::default(),
-            false
+            false,
+            None,
         )
         .await
         .unwrap());
@@ -2523,8 +2570,15 @@ mod tests {
         std::fs::create_dir(&checkpoints).unwrap();
         let chunk = checkpoints.join("audio_chunk_000.mp4");
         std::fs::write(&chunk, b"synthetic checkpoint").unwrap();
-        let recovered = folder.path().join("audio-recovered.wav");
-        std::fs::write(&recovered, b"synthetic materialised audio").unwrap();
+        let recovered = folder.path().join("audio-recovered.mp4");
+        crate::audio::encode::encode_single_audio(
+            bytemuck::cast_slice(&vec![0.05f32; 4_800]),
+            48_000,
+            1,
+            &recovered,
+        )
+        .unwrap();
+        let audio_path = recovered.to_str();
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect(":memory:")
@@ -2546,12 +2600,18 @@ mod tests {
         .unwrap();
 
         let provenance = RecordingProvenance::recording(Some(5.0), None);
-        assert!(
-            commit_repaired_audio(&pool, "repair", Some(path), path, provenance, false)
-                .await
-                .unwrap_err()
-                .contains("moved")
-        );
+        assert!(commit_repaired_audio(
+            &pool,
+            "repair",
+            Some(path),
+            path,
+            provenance,
+            false,
+            audio_path
+        )
+        .await
+        .unwrap_err()
+        .contains("moved"));
         assert!(chunk.is_file() && recovered.is_file());
         let failed: i64 = sqlx::query_scalar(
             "SELECT audio_save_failed FROM recording_outcomes WHERE meeting_id = 'repair'",
@@ -2566,11 +2626,17 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert!(
-            commit_repaired_audio(&pool, "repair", Some(path), path, provenance, false)
-                .await
-                .unwrap()
-        );
+        assert!(commit_repaired_audio(
+            &pool,
+            "repair",
+            Some(path),
+            path,
+            provenance,
+            false,
+            audio_path
+        )
+        .await
+        .unwrap());
         assert!(!checkpoints.exists() && recovered.is_file());
         let stored: (String, f64, i64) = sqlx::query_as(
             "SELECT recording_source, recording_duration_s, audio_save_failed FROM meetings

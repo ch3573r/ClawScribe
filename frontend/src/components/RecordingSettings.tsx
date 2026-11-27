@@ -11,7 +11,6 @@ import { MicrophoneCheck, SignalCheck } from '@/components/settings/SignalCheck'
 import { useSignalCheck } from '@/components/settings/useSignalCheck';
 import { useAudioLevelFeed } from '@/components/settings/useAudioLevelFeed';
 import { usePlatform } from '@/hooks/usePlatform';
-import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { setSourceAttribution } from '@/lib/sourceAttribution';
 import { useTranscriptionConfig } from '@/contexts/ConfigContext';
@@ -130,11 +129,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         toast.error('Could not update source attribution');
       }
     }
-
-    // Track auto-save setting change
-    await Analytics.track('auto_save_recording_toggled', {
-      enabled: enabled.toString()
-    });
   };
 
   const handleOpenFolder = async () => {
@@ -160,7 +154,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       // The new folder is trusted: the notice about the earlier one no longer applies.
       if (saved) setPreferences(current => ({ ...current, folder_notice: null }));
 
-      await Analytics.track('recording_save_folder_changed');
     } catch (error) {
       console.error('Failed to choose recordings folder:', error);
       toast.error('Failed to choose recordings folder', {
@@ -175,9 +168,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       await refreshBehaviorSettings();
       setShowRecordingNotification(enabled);
       toast.success('Preference saved');
-      await Analytics.track('recording_notification_preference_changed', {
-        enabled: enabled.toString()
-      });
     } catch (error) {
       console.error('Failed to save notification preference:', error);
       toast.error('Failed to save preference');

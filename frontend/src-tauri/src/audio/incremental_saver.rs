@@ -525,18 +525,6 @@ async fn authorized_recording_folder<R: tauri::Runtime>(
     )
 }
 
-/// Recover audio from checkpoint files
-/// This is called by the transcript recovery system to merge audio chunks after a crash
-#[tauri::command]
-pub async fn recover_audio_from_checkpoints<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    meeting_folder: String,
-) -> Result<AudioRecoveryStatus, String> {
-    // The webview names the folder; only a recording folder may be touched.
-    let folder = authorized_recording_folder(&app, &meeting_folder, false).await?;
-    recover_audio_in_folder(folder.to_string_lossy().to_string()).await
-}
-
 /// Recovery for a folder the caller has already validated.
 pub(crate) async fn recover_audio_in_folder(
     meeting_folder: String,
@@ -544,15 +532,27 @@ pub(crate) async fn recover_audio_in_folder(
     if super::recording_commands::is_starting() || super::recording_commands::capture_active() {
         return Err("Stop recording before recovering audio.".into());
     }
-    let spool_folder = PathBuf::from(&meeting_folder);
-    if spool_folder.join(".audio-spool").is_dir() {
-        return tokio::task::spawn_blocking(move || super::audio_spool::recover(&spool_folder))
-            .await
-            .map_err(|_| "Audio recovery task failed".to_string())?;
-    }
-    tokio::task::spawn_blocking(move || recover_legacy_checkpoints(&meeting_folder))
-        .await
-        .map_err(|_| "Audio recovery task failed".to_string())?
+    recover_interrupted_audio(meeting_folder).await
+}
+
+/// The interrupted-recordings command has verified folder ownership and
+/// serialized recovery with discard. Encoding only touches that folder.
+pub(super) async fn recover_interrupted_audio(
+    meeting_folder: String,
+) -> Result<AudioRecoveryStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        let folder = Path::new(&meeting_folder);
+        if super::recording_commands::active_recording_folder().protects(folder) {
+            return Err("Stop recording before recovering this recording's audio.".into());
+        }
+        if folder.join(".audio-spool").is_dir() {
+            super::audio_spool::recover(folder)
+        } else {
+            recover_legacy_checkpoints(&meeting_folder)
+        }
+    })
+    .await
+    .map_err(|_| "Audio recovery task failed".to_string())?
 }
 
 fn recover_legacy_checkpoints(meeting_folder: &str) -> Result<AudioRecoveryStatus, String> {
@@ -708,15 +708,6 @@ fn recover_legacy_checkpoints(meeting_folder: &str) -> Result<AudioRecoveryStatu
     }
 }
 
-/// Frontend cleanup accepts only a canonical folder already saved in the library.
-#[tauri::command]
-pub async fn release_recovered_capture(
-    state: tauri::State<'_, crate::state::AppState>,
-    meeting_folder: String,
-) -> Result<(), String> {
-    release_registered_capture(state.db_manager.pool(), &meeting_folder).await
-}
-
 pub(crate) async fn release_registered_capture(
     pool: &sqlx::SqlitePool,
     meeting_folder: &str,
@@ -730,34 +721,6 @@ pub(crate) async fn release_registered_capture(
         return Err("Recovery folder is not registered in the library".into());
     }
     super::audio_spool::release_recovered_capture(&folder).await
-}
-
-/// Clean up checkpoint files after successful recording or recovery
-/// This command is called by the frontend after successful save to clean up checkpoint files
-#[tauri::command]
-pub async fn cleanup_checkpoints<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    meeting_folder: String,
-) -> Result<(), String> {
-    info!("Cleaning up saved checkpoints");
-
-    // The webview names the folder; only a recording folder, or one saved in the
-    // library, may be touched.
-    let folder_path = authorized_recording_folder(&app, &meeting_folder, true).await?;
-    if super::recording_commands::active_recording_folder().protects(&folder_path) {
-        return Err("Stop recording before cleaning up its checkpoints.".into());
-    }
-    let checkpoints_dir = folder_path.join(".checkpoints");
-
-    if checkpoints_dir.exists() {
-        std::fs::remove_dir_all(&checkpoints_dir)
-            .map_err(|e| format!("Failed to remove checkpoints directory: {}", e))?;
-        info!("Successfully cleaned up checkpoints directory");
-    } else {
-        info!("No checkpoints directory to clean up");
-    }
-
-    Ok(())
 }
 
 /// Check for saved/recovered audio or readable raw/legacy recovery data.

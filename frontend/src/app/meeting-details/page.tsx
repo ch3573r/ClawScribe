@@ -5,7 +5,6 @@ import type { MeetingDetails as MeetingDetailsData, MeetingSummary } from "@/typ
 import { readMeetingSummary } from '@/lib/meeting-summary';
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
-import Analytics from "@/lib/analytics";
 import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -141,7 +140,6 @@ function MeetingDetailsContent() {
     if (!summaryUpdates) {
       console.warn("No valid meeting ID in URL - meetingId:");
       setError("No meeting selected");
-      Analytics.trackPageView('meeting_details');
       return;
     }
     return summaryUpdates.subscribe(snapshot => {

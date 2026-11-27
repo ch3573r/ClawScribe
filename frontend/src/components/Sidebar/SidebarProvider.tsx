@@ -2,7 +2,6 @@
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
-import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { MeetingTag } from '@/lib/library';
@@ -168,13 +167,11 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       allowLoadedMeetingDrafts(transformedMeetings);
       updateMeetings(transformedMeetings);
       setMeetingsError(null);
-      Analytics.trackBackendConnection(true);
     } catch (error) {
       if (version !== meetingVersion.current) return;
       console.error('Error fetching meetings:', error);
       // Keep what was loaded before; an empty list would pass for an empty library.
       setMeetingsError('Could not load your meetings.');
-      Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
     } finally {
       if (version === meetingVersion.current) {
         meetingLoadPending.current = false;
@@ -255,7 +252,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     window.dispatchEvent(new CustomEvent('stop-recording-from-sidebar'));
-    Analytics.trackButtonClick('stop_recording', 'sidebar');
   }, [isRecording, nextMeetingTitle, recordingActionReason, start]);
 
   const value = React.useMemo<SidebarContextType>(() => ({

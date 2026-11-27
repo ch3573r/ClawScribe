@@ -2,7 +2,7 @@
 //! label binds every request to the recording, including requests after reload.
 use super::{
     active_capture, capture_snapshot, is_stopping, reconnect_device, set_recording_paused,
-    stop_recording_session, CaptureSnapshot, StopTarget, IS_RECORDING, SAVING_RECORDING,
+    stop_recording_session, CaptureSnapshot, StopTarget, RECORDING,
 };
 use crate::audio::outcome::RecordingOutcome;
 use crate::audio::recording_levels::RecordingLevels;
@@ -108,7 +108,7 @@ enum OpenReason {
 
 impl OpenReason {
     fn current_session<R: Runtime>(self, app: &AppHandle<R>) -> Option<String> {
-        let saving = SAVING_RECORDING.lock().ok()?;
+        let saving = RECORDING.saving_recording.lock().ok()?;
         if let Some(owner) = saving.as_ref() {
             return if self == Self::Manual {
                 owner.session_id.clone()
@@ -116,7 +116,7 @@ impl OpenReason {
                 None
             };
         }
-        if is_stopping() || !IS_RECORDING.load(Ordering::Acquire) {
+        if is_stopping() || !RECORDING.is_recording.load(Ordering::Acquire) {
             return None;
         }
         // A reconnect can temporarily take the recording manager. The
@@ -355,7 +355,8 @@ pub(crate) async fn floating_status<R: Runtime>(
 fn recording_status(id: &str) -> Result<Status, String> {
     // Hold admission through the manager read. Stop temporarily takes the
     // manager away, and the panel must not mistake that handoff for completion.
-    let saving = SAVING_RECORDING
+    let saving = RECORDING
+        .saving_recording
         .lock()
         .map_err(|_| "Recording status unavailable.")?;
     if let Some(owner) = saving
@@ -385,7 +386,7 @@ fn recording_status(id: &str) -> Result<Status, String> {
                 paused: state.is_paused(),
                 levels,
                 mic_no_signal,
-                mode: if super::LIVE_TRANSCRIPTION.load(Ordering::Acquire) {
+                mode: if RECORDING.live_transcription.load(Ordering::Acquire) {
                     super::super::recording_mode::RecordingMode::Live
                 } else {
                     super::super::recording_mode::RecordingMode::AudioOnly

@@ -11,7 +11,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import Analytics from '@/lib/analytics';
 import { RecordingStatus, useRecordingElapsedSeconds, useRecordingState } from '@/contexts/RecordingStateContext';
 import { LiveBookmarkButton } from '@/components/MeetingDetails/MeetingBookmarks';
 import { LiveRecordingNotes } from '@/components/LiveRecordingNotes';
@@ -123,7 +122,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         throw new Error('Could not verify whether the recording stopped. Try again.');
       }
       // Track successful transcription
-      Analytics.trackTranscriptionSuccess();
     } catch (error) {
       if (await recordingState.reconcileNothingToStop(error)) return;
       console.error('Failed to stop recording');
@@ -205,7 +203,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             console.error("Transcription error received:");
             const errorMessage = event.payload as string;
 
-            Analytics.trackTranscriptionError(errorMessage);
 
             setIsProcessing(false);
             if (onTranscriptionError) {
@@ -219,24 +216,9 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         // Transcription error listener - handles structured error objects with actionable flag
         const transcriptionErrorUnsubscribe = await listen(
           'transcription-error',
-          (event) => {
+          () => {
             if (disposed) return;
             console.error("Transcription error received:");
-
-            let errorMessage: string;
-
-            if (typeof event.payload === 'object' && event.payload !== null) {
-              const payload = event.payload as {
-                error: string;
-                userMessage: string;
-              };
-              errorMessage = payload.userMessage || payload.error;
-            } else {
-              errorMessage = String(event.payload);
-            }
-
-            Analytics.trackTranscriptionError(errorMessage);
-
             setIsProcessing(false);
 
             // For actionable errors (like model loading failures), the main page will handle showing the model selector
@@ -311,7 +293,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                       <Button variant="ghost" size="icon"
                         aria-label={isStartPending ? 'Starting recording' : 'Start recording'}
                         onClick={() => {
-                          Analytics.trackButtonClick('start_recording', 'recording_controls');
                           void handleStartRecording();
                         }}
                         disabled={isProcessing || isRecordingDisabled || isStartPending}
@@ -375,16 +356,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                         aria-label={isPaused ? 'Resume recording' : 'Pause recording'}
                         onClick={() => {
                           if (isPaused) {
-                            Analytics.trackButtonClick(
-                              'resume_recording',
-                              'recording_controls',
-                            );
                             handleResumeRecording();
                           } else {
-                            Analytics.trackButtonClick(
-                              'pause_recording',
-                              'recording_controls',
-                            );
                             handlePauseRecording();
                           }
                         }}
@@ -415,10 +388,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                       <Button variant="ghost" size="icon"
                         aria-label="Stop recording"
                         onClick={() => {
-                          Analytics.trackButtonClick(
-                            'stop_recording',
-                            'recording_controls',
-                          );
                           handleStopRecording();
                         }}
                         disabled={isRecordingDisabled || isStopping || isPausing || isResuming}

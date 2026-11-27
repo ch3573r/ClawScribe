@@ -1,4 +1,3 @@
-use super::commands::ProcessTranscriptResponse;
 pub(crate) use super::request_config::AuthorizedRequest;
 use super::request_config::{AutomaticRequest, DestinationReview, DispatchCheck};
 use super::service::{SummaryProviderRequest, SummaryService};
@@ -295,19 +294,6 @@ fn validate_import_approval(
     } else {
         Err("The import's summary approval expired or the destination changed. Generate a summary from the saved meeting.".into())
     }
-}
-
-#[tauri::command]
-pub async fn start_recording_summary<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, AppState>,
-    meeting_id: String,
-) -> Result<ProcessTranscriptResponse, String> {
-    start(app, state.db_manager.pool().clone(), meeting_id.clone()).await?;
-    Ok(ProcessTranscriptResponse {
-        message: "Check the meeting for automatic notes status".into(),
-        process_id: meeting_id,
-    })
 }
 
 pub(crate) async fn start<R: Runtime>(

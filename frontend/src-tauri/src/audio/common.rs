@@ -1,9 +1,7 @@
 use crate::api::{TranscriptSegment, TranscriptWord, TranscriptWordTimestampSource};
 use crate::summary::processor::language_name_from_code;
-use anyhow::Result;
-use log::{debug, info};
+use log::debug;
 use once_cell::sync::Lazy;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
@@ -568,42 +566,6 @@ pub(crate) fn estimate_word_timestamps(
             })
             .collect(),
     )
-}
-
-/// Write transcripts.json to a meeting folder (atomic write with temp file)
-pub(crate) fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegment]) -> Result<()> {
-    let transcript_path = folder.join("transcripts.json");
-    let temp_path = folder.join(".transcripts.json.tmp");
-
-    let json = serde_json::json!({
-        "version": "1.0",
-        "last_updated": chrono::Utc::now().to_rfc3339(),
-        "total_segments": segments.len(),
-        "segments": segments.iter().enumerate().map(|(i, s)| {
-            serde_json::json!({
-                "id": s.id,
-                "text": s.text,
-                "speaker": s.speaker,
-                "timestamp": s.timestamp,
-                "audio_start_time": s.audio_start_time,
-                "audio_end_time": s.audio_end_time,
-                "duration": s.duration,
-                "sequence_id": i,
-                "word_timestamps": s.word_timestamps.clone()
-            })
-        }).collect::<Vec<_>>()
-    });
-
-    let json_string = serde_json::to_string_pretty(&json)?;
-    std::fs::write(&temp_path, &json_string)?;
-    std::fs::rename(&temp_path, &transcript_path)?;
-
-    info!(
-        "Wrote transcripts.json with {} segments to {}",
-        segments.len(),
-        transcript_path.display()
-    );
-    Ok(())
 }
 
 /// Split a long speech segment at the lowest-energy (silence) point near the target size.

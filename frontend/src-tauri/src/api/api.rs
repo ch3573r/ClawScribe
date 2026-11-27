@@ -374,23 +374,6 @@ pub async fn api_search_transcripts<R: Runtime>(
 }
 
 #[tauri::command]
-pub(crate) async fn api_search_library(
-    state: tauri::State<'_, AppState>,
-    query: String,
-    scope: Option<crate::knowledge::types::KnowledgeScope>,
-    one_per_meeting: Option<bool>,
-) -> Result<crate::knowledge::store::literal::LinkedHits, String> {
-    crate::knowledge::store::literal::linked(
-        state.db_manager.pool(),
-        &query,
-        scope.as_ref(),
-        one_per_meeting.unwrap_or_default(),
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 pub async fn api_get_model_config<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
@@ -1284,7 +1267,7 @@ pub async fn api_save_meeting_title<R: Runtime>(
     }
 }
 
-fn parse_recording_transcripts(
+pub(crate) fn parse_recording_transcripts(
     values: Vec<serde_json::Value>,
 ) -> Result<Vec<TranscriptSegment>, String> {
     values
@@ -1385,7 +1368,7 @@ fn write_recovery_transcript_copy(
     Ok(true)
 }
 
-fn read_recording_snapshot(
+pub(crate) fn read_recording_snapshot(
     folder: Option<&std::path::Path>,
 ) -> Result<Vec<TranscriptSegment>, String> {
     let path = folder
@@ -1411,7 +1394,7 @@ fn read_recording_snapshot(
     parse_recording_transcripts(segments)
 }
 
-fn select_recording_transcripts(
+pub(crate) fn select_recording_transcripts(
     saved: Result<Vec<TranscriptSegment>, String>,
     fallback: Vec<serde_json::Value>,
 ) -> Result<(Vec<TranscriptSegment>, bool), String> {
@@ -1485,243 +1468,6 @@ mod recording_snapshot_tests {
         assert!(!used_fallback);
         assert_eq!(segments[0].id, "backend");
         assert_eq!(segments[0].timestamp, "00:02");
-    }
-}
-
-#[tauri::command]
-pub async fn api_save_transcript<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, AppState>,
-    meeting_title: String,
-    transcripts: Vec<serde_json::Value>,
-    folder_path: Option<String>,
-    recording_outcome: Option<crate::audio::outcome::RecordingOutcome>,
-    use_saved_recording: Option<bool>,
-    calendar_link: Option<serde_json::Value>,
-) -> Result<serde_json::Value, String> {
-    log_info!("Saving meeting transcript");
-
-    // The webview does not decide where a meeting's files are: the folder must
-    // be one the core created for a recording (the session that just ended), or
-    // a marked recording inside a recording root being recovered. What is
-    // stored and read is the core's own text for it.
-    let (folder_path, recording_id, recovered_live, marker) = match folder_path
-        .filter(|folder| !folder.trim().is_empty())
-    {
-        Some(requested) => {
-            let roots = crate::audio::recording_preferences::recording_roots(&app).await;
-            // A folder this process created for a recording may be saved again (a
-            // retry of the same save finds its meeting). Any other folder, one
-            // from an earlier run being recovered, must not already belong to a
-            // meeting: that one is repaired, not saved a second time.
-            let created_here =
-                crate::database::meeting_files::core_folder_text(std::path::Path::new(&requested))
-                    .is_some();
-            let asked = requested.clone();
-            let (authorised, recording_id, stamped_id, transcribes, marker) =
-                tokio::task::spawn_blocking(move || {
-                    use crate::database::meeting_files;
-                    let authorised =
-                        meeting_files::authorize_new_meeting_folder(&requested, &roots)?;
-                    if crate::audio::recording_commands::active_recording_folder()
-                        .protects(std::path::Path::new(&authorised))
-                    {
-                        return Err(
-                            "The recording is still being finalized. Try again after it stops."
-                                .into(),
-                        );
-                    }
-                    let marker = meeting_files::read_marker(std::path::Path::new(&authorised))
-                        .ok_or("The recording folder is no longer available.")?;
-                    if meeting_files::has_invalid_marker_id(&marker) {
-                        return Err("The recording marker has an invalid meeting ID.".into());
-                    }
-                    let recording_id = meeting_files::recording_id(&marker).map(str::to_owned);
-                    let stamped_id = meeting_files::stamped_meeting_id(&marker).map(str::to_owned);
-                    let transcribes = crate::audio::recording_mode::marker_transcribes(&marker);
-                    Ok::<_, String>((authorised, recording_id, stamped_id, transcribes, marker))
-                })
-                .await
-                .map_err(|_| "Could not check the recording folder".to_string())??;
-            if !created_here && stamped_id.is_none() && recording_id.is_none() {
-                let existing: Option<String> = sqlx::query_scalar(
-                    "SELECT id FROM meetings WHERE folder_path COLLATE NOCASE IN (?, ?) LIMIT 1",
-                )
-                .bind(&authorised)
-                .bind(&asked)
-                .fetch_optional(state.db_manager.pool())
-                .await
-                .map_err(|_| "Could not check the library".to_string())?;
-                if existing.is_some() {
-                    return Err("This recording is already saved in your library. Use Recover on it to repair that meeting instead of saving it again.".into());
-                }
-            }
-            let deleted: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM recording_library_deletions AS deleted
-                 WHERE meeting_id IN (?, ?) AND NOT EXISTS
-                     (SELECT 1 FROM meetings WHERE id = deleted.meeting_id))",
-            )
-            .bind(stamped_id.as_deref())
-            .bind(recording_id.as_deref())
-            .fetch_one(state.db_manager.pool())
-            .await
-            .map_err(|_| "Could not check the library".to_string())?;
-            if deleted {
-                return Err("This meeting was deleted from this library.".into());
-            }
-            (
-                Some(authorised),
-                recording_id.or(stamped_id),
-                transcribes,
-                Some(marker),
-            )
-        }
-        None => (None, None, false, None),
-    };
-
-    let (transcripts_to_save, used_fallback) = if use_saved_recording.unwrap_or(false) {
-        let folder = folder_path.clone();
-        let saved = tokio::task::spawn_blocking(move || {
-            read_recording_snapshot(folder.as_deref().map(std::path::Path::new))
-        })
-        .await
-        .unwrap_or_else(|_| Err("Saved transcript reader failed".into()));
-        select_recording_transcripts(saved, transcripts)?
-    } else {
-        (parse_recording_transcripts(transcripts)?, false)
-    };
-
-    let mut save_warnings = Vec::new();
-    // Invalid optional calendar metadata must not prevent the recording from being saved.
-    let calendar_link = calendar_link.and_then(|value| {
-        match serde_json::from_value::<crate::library::calendar::CalendarLink>(value)
-            .map_err(|_| "Invalid calendar link.".to_string())
-            .and_then(crate::library::calendar::CalendarLink::normalized)
-            .and_then(|link| link.encoded())
-        {
-            Ok(link) => Some(link),
-            Err(_) => {
-                save_warnings
-                    .push("The calendar event could not be linked. The recording was saved.");
-                None
-            }
-        }
-    });
-    let mut recording_outcome = recording_outcome.unwrap_or_default();
-    if used_fallback {
-        recording_outcome.transcription_incomplete = true;
-        save_warnings.push("The final transcript snapshot was unavailable. Saved the transcript visible in the app; review it for missing lines.");
-        log_warn!("Library save used the UI transcript because the final snapshot was unavailable");
-    }
-    let mut measured = crate::audio::provenance::RecordingProvenance::default();
-    if let Some((folder, marker)) = folder_path
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .zip(marker)
-    {
-        let saved = tokio::task::spawn_blocking(move || {
-            let measured = crate::audio::interrupted::recovered_provenance(&folder, &marker, None);
-            (
-                measured,
-                crate::audio::outcome::RecordingOutcome::read(&folder),
-            )
-        })
-        .await;
-        let disk_outcome = saved.map(|(provenance, outcome)| {
-            measured = provenance;
-            outcome
-        });
-        match disk_outcome {
-            Ok(Ok(Some(saved))) => {
-                recording_outcome.audio_save_failed |= saved.audio_save_failed;
-                recording_outcome.transcription_incomplete |= saved.transcription_incomplete;
-                recording_outcome.capture_incomplete |= saved.capture_incomplete;
-                recording_outcome.recording_files_incomplete |= saved.recording_files_incomplete;
-            }
-            Ok(Ok(None)) => {}
-            _ => {
-                recording_outcome.recording_files_incomplete = true;
-                save_warnings.push("The recording warning file could not be read. Review the saved meeting and keep its folder.");
-            }
-        }
-    }
-    let pool = state.db_manager.pool();
-    let stamp_target = folder_path.clone();
-
-    let saved = match (folder_path, recording_id) {
-        (Some(folder), Some(recording_id)) => {
-            TranscriptsRepository::save_recording_handoff(
-                pool,
-                &recording_id,
-                &meeting_title,
-                &transcripts_to_save,
-                folder,
-                &recording_outcome,
-                measured,
-            )
-            .await
-        }
-        (folder, _) => {
-            TranscriptsRepository::save_recording(
-                pool,
-                &meeting_title,
-                &transcripts_to_save,
-                folder,
-                Some(&recording_outcome),
-                calendar_link,
-                measured,
-            )
-            .await
-        }
-    };
-    match saved {
-        Ok(meeting_id) => {
-            log_info!("Meeting and transcript saved");
-            // Tie the folder to this meeting, so deleting the meeting later can
-            // verify it removes only its own recording.
-            if let Some(folder) = stamp_target {
-                // An idempotent retry may find this ID under a different
-                // restored path. Do not stamp the redundant copy.
-                let owns_folder: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ? AND folder_path = ?)",
-                )
-                .bind(&meeting_id)
-                .bind(&folder)
-                .fetch_one(pool)
-                .await
-                .unwrap_or(false);
-                if owns_folder {
-                    let id = meeting_id.clone();
-                    let stamped = tokio::task::spawn_blocking(move || {
-                        crate::database::meeting_files::stamp_meeting_id(
-                            std::path::Path::new(&folder),
-                            &id,
-                        )
-                    })
-                    .await;
-                    if !matches!(stamped, Ok(Ok(()))) {
-                        log_warn!("The recording folder could not be marked with its meeting");
-                    }
-                }
-            }
-            if recovered_live {
-                crate::audio::recording_commands::wake_saved_recording_summary(
-                    &app,
-                    meeting_id.clone(),
-                );
-            }
-            Ok(serde_json::json!({
-                "status": "success",
-                "message": "Transcript saved successfully",
-                "meeting_id": meeting_id,
-                "warning": if save_warnings.is_empty() { None } else { Some(save_warnings.join(" ")) },
-                "recording_outcome": recording_outcome
-            }))
-        }
-        Err(e) => {
-            log_error!("Failed to save meeting transcript");
-            Err(format!("Failed to save transcript: {}", e))
-        }
     }
 }
 
