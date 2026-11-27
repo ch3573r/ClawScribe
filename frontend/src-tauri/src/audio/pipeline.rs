@@ -364,6 +364,7 @@ pub struct AudioCapture {
     resampler: Arc<std::sync::Mutex<Option<SincFixedIn<f32>>>>,
     // Buffering for variable-size chunks → fixed-size resampler input
     resampler_input_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
+    resampler_revision: Arc<std::sync::atomic::AtomicU64>,
     resampler_chunk_size: usize, // Fixed chunk size for resampler (512 samples)
     // Audio enhancement processors (microphone only)
     noise_suppressor: Arc<std::sync::Mutex<Option<NoiseSuppressionProcessor>>>,
@@ -553,6 +554,7 @@ impl AudioCapture {
             resampler_input_buffer: Arc::new(std::sync::Mutex::new(Vec::with_capacity(
                 RESAMPLER_CHUNK_SIZE * 2,
             ))),
+            resampler_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             resampler_chunk_size: RESAMPLER_CHUNK_SIZE,
             noise_suppressor: Arc::new(std::sync::Mutex::new(noise_suppressor)),
             high_pass_filter: Arc::new(std::sync::Mutex::new(high_pass_filter)),
@@ -563,8 +565,8 @@ impl AudioCapture {
 
     /// Process audio data directly from callback
     pub fn process_audio_data(&self, data: &[f32]) {
-        // Check if still recording
-        if !self.state.is_recording() {
+        let resume_revision = self.state.resume_revision();
+        if !self.state.is_active() {
             return;
         }
 
@@ -596,12 +598,18 @@ impl AudioCapture {
             let mut used_persistent_resampler = false;
 
             if let Ok(mut buffer_lock) = self.resampler_input_buffer.lock() {
-                // Add new samples to buffer
-                buffer_lock.extend_from_slice(&mono_data);
-
                 // Process complete chunks through the resampler
                 if let Ok(mut resampler_lock) = self.resampler.lock() {
                     if let Some(ref mut resampler) = *resampler_lock {
+                        if self
+                            .resampler_revision
+                            .swap(resume_revision, std::sync::atomic::Ordering::Relaxed)
+                            != resume_revision
+                        {
+                            buffer_lock.clear();
+                            resampler.reset();
+                        }
+                        buffer_lock.extend_from_slice(&mono_data);
                         used_persistent_resampler = true;
 
                         // Process as many complete chunks as we have
@@ -811,6 +819,9 @@ impl AudioCapture {
         // Individual raw streams go only to the transcription pipeline below
 
         // Send to processing pipeline for transcription
+        if self.state.resume_revision() != resume_revision {
+            return;
+        }
         if let Err(e) = self.state.send_audio_chunk(audio_chunk) {
             // Check if this is the "pipeline not ready" error
             if e.to_string().contains("Audio pipeline not ready") {
@@ -1716,6 +1727,35 @@ mod system_audio_silence_tests {
 #[cfg(test)]
 mod queue_failure_tests {
     use super::*;
+
+    #[test]
+    fn resuming_clears_pending_input_and_filter_history_from_the_resampler() {
+        let state = RecordingState::new();
+        let (sender, mut receiver) = mpsc::channel(8);
+        state.set_audio_sender(sender);
+        state.start_recording().unwrap();
+        let capture = AudioCapture::new(
+            Arc::new(AudioDevice::new(
+                "Fixture output".into(),
+                super::super::devices::DeviceType::Output,
+            )),
+            state.clone(),
+            16_000,
+            1,
+            DeviceType::System,
+        );
+        capture.process_audio_data(&[0.8; 768]);
+        assert!(receiver.try_recv().is_ok());
+        assert!(!capture.resampler_input_buffer.lock().unwrap().is_empty());
+        state.pause_recording().unwrap();
+        capture.process_audio_data(&[0.8; 128]);
+        state.resume_recording().unwrap();
+        capture.process_audio_data(&[0.0; 512]);
+        let resumed = receiver.try_recv().unwrap();
+        assert!(!resumed.data.is_empty());
+        assert!(resumed.data.iter().all(|&sample| sample == 0.0));
+        assert!(capture.resampler_input_buffer.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn mixing_preserves_unity_gain_and_clips_overlapping_peaks() {

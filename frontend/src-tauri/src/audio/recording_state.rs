@@ -139,6 +139,7 @@ pub struct RecordingState {
     live_transcription_disabled: AtomicBool,
     speech_clock_ms: AtomicU64,
     is_paused: AtomicBool,
+    resume_revision: AtomicU64,
 
     // Audio devices
     microphone_device: Mutex<Option<Arc<AudioDevice>>>,
@@ -256,6 +257,7 @@ impl RecordingState {
         }
 
         *self.latest_levels.lock().unwrap() = LiveLevels::default();
+        self.resume_revision.fetch_add(1, Ordering::SeqCst);
         self.is_paused.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -270,6 +272,10 @@ impl RecordingState {
 
     pub fn is_active(&self) -> bool {
         self.is_recording() && !self.is_paused()
+    }
+
+    pub(super) fn resume_revision(&self) -> u64 {
+        self.resume_revision.load(Ordering::SeqCst)
     }
 
     pub fn mark_source_missing(&self, device: Arc<AudioDevice>, device_type: DeviceType) {
@@ -702,6 +708,7 @@ impl Default for RecordingState {
             speech_clock_ms: AtomicU64::new(0),
             is_recording: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
+            resume_revision: AtomicU64::new(0),
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
             disconnected_devices: Mutex::new(Vec::new()),
