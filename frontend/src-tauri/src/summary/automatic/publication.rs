@@ -108,7 +108,8 @@ async fn consume(
     launch: impl std::future::Future<Output = Result<Launch, String>>,
 ) -> Result<Launch, String> {
     let marker: Option<(String, String)> = sqlx::query_as(
-        "SELECT profile, publication FROM retranscription_notes_retry WHERE meeting_id = ?",
+        "SELECT profile, publication FROM retranscription_notes_retry
+         WHERE meeting_id = (SELECT id FROM active_meetings WHERE id = ?)",
     )
     .bind(meeting)
     .fetch_optional(pool)
@@ -128,7 +129,8 @@ async fn consume(
     }
     // A crash before acknowledgement is safe: the normal job claim or skip
     // is already durable. A newer publication keeps its own marker.
-    sqlx::query("DELETE FROM retranscription_notes_retry WHERE meeting_id = ? AND publication = ?")
+    sqlx::query("DELETE FROM retranscription_notes_retry
+                 WHERE meeting_id = (SELECT id FROM active_meetings WHERE id = ?) AND publication = ?")
         .bind(meeting)
         .bind(publication)
         .execute(pool)
@@ -141,8 +143,13 @@ pub(super) async fn resume<R: Runtime>(app: &AppHandle<R>, pool: &SqlitePool) {
     let mut after = String::new();
     while !super::is_exiting() {
         let next = sqlx::query_scalar::<_, String>(
-            "SELECT meeting_id FROM retranscription_notes_retry WHERE meeting_id > ? ORDER BY meeting_id LIMIT 1",
-        ).bind(&after).fetch_optional(pool).await;
+            "SELECT meeting_id FROM retranscription_notes_retry
+             WHERE meeting_id > ? AND meeting_id IN (SELECT id FROM active_meetings)
+             ORDER BY meeting_id LIMIT 1",
+        )
+        .bind(&after)
+        .fetch_optional(pool)
+        .await;
         match next {
             Ok(Some(meeting)) => after = meeting,
             Ok(None) => return,
@@ -178,6 +185,33 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pending_retranscription_notes_wait_for_restore() {
+        use crate::database::repositories::meeting::MeetingsRepository;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let meeting = "review-test";
+        publish(&pool).await;
+        assert!(MeetingsRepository::move_to_trash(&pool, meeting, false)
+            .await
+            .unwrap());
+        consume(&pool, meeting, || Ok(Some("local".into())), async {
+            panic!("Notes must wait while the meeting is in Trash");
+        })
+        .await
+        .unwrap();
+        assert_eq!(pending(&pool).await, 1);
+
+        assert!(MeetingsRepository::restore_from_trash(&pool, meeting)
+            .await
+            .unwrap());
+        consume(&pool, meeting, || Ok(Some("local".into())), async {
+            Ok(Launch::Handled)
+        })
+        .await
+        .unwrap();
+        assert_eq!(pending(&pool).await, 0);
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub(crate) async fn restore_trashed_meeting<R: Runtime>(
         return Err("The meeting is no longer in Trash.".into());
     }
     let _ = app.emit("library-changed", ());
+    crate::audio::import::queue::notify(&app);
     Ok(())
 }
 
@@ -45,6 +46,7 @@ pub(crate) async fn purge_trashed_meeting<R: Runtime>(
         .await?
         .ok_or("The meeting is no longer in Trash.")?;
     let _ = app.emit("library-meeting-deleted", &meeting_id);
+    crate::audio::import::queue::forget_deleted_meeting(&app, &meeting_id).await;
     Ok(cleanup(pool, &CleanupLocations::for_app(&app).await, ids).await)
 }
 
@@ -102,6 +104,7 @@ pub(crate) async fn purge_expired<R: Runtime>(app: AppHandle<R>, pool: SqlitePoo
             match purge(&pool, &id, true).await {
                 Ok(Some(cleanup_ids)) => {
                     let _ = app.emit("library-meeting-deleted", &id);
+                    crate::audio::import::queue::forget_deleted_meeting(&app, &id).await;
                     if cleanup(&pool, &locations, cleanup_ids).await {
                         log::warn!("Some expired meeting files are pending cleanup");
                     }

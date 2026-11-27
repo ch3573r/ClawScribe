@@ -1048,7 +1048,7 @@ pub async fn api_delete_meeting<R: Runtime>(
         }
     }
     let _ = app.emit("library-meeting-trashed", &meeting_id);
-    crate::audio::import::queue::forget_deleted_meeting(&app, &meeting_id).await;
+    crate::audio::import::queue::notify(&app);
     Ok(())
 }
 

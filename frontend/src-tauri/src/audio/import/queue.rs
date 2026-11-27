@@ -95,11 +95,28 @@ impl Queue {
             .position(|item| item.status == Status::Queued)
     }
 
-    fn snapshots(&self) -> Vec<QueueItem> {
+    async fn hidden_items(&self, pool: &sqlx::SqlitePool) -> Result<HashSet<String>, String> {
+        if self.items.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let ids: Vec<_> = self.items.iter().map(|item| item.id.as_str()).collect();
+        sqlx::query_scalar(
+            "SELECT id FROM meetings WHERE deleted_at IS NOT NULL
+             AND id IN (SELECT value FROM json_each(?))",
+        )
+        .bind(sqlx::types::Json(ids))
+        .fetch_all(pool)
+        .await
+        .map(|ids| ids.into_iter().collect())
+        .map_err(|_| "Could not review imports in Trash".into())
+    }
+
+    fn snapshots(&self, hidden: &HashSet<String>) -> Vec<QueueItem> {
         let waits_for_recording = recording_has_priority();
         let active_progress = PROGRESS.lock().unwrap_or_else(|error| error.into_inner());
         self.items
             .iter()
+            .filter(|item| !hidden.contains(&item.id))
             .map(|item| QueueItem {
                 id: item.id.clone(),
                 filename: item.filename.clone(),
@@ -120,6 +137,31 @@ impl Queue {
             })
             .collect()
     }
+
+    fn clear_finished(&mut self, hidden: &HashSet<String>) {
+        self.items.retain(|item| {
+            hidden.contains(&item.id)
+                || !matches!(
+                    item.status,
+                    Status::Saved | Status::Cancelled | Status::Failed
+                )
+        });
+        self.sources
+            .retain(|id, _| self.items.iter().any(|item| item.id == *id));
+    }
+}
+
+async fn hidden_items<R: Runtime>(
+    app: &AppHandle<R>,
+    queue: &Queue,
+) -> Result<HashSet<String>, String> {
+    if queue.items.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let state = app
+        .try_state::<AppState>()
+        .ok_or("Meeting storage is unavailable")?;
+    queue.hidden_items(state.db_manager.pool()).await
 }
 
 #[derive(Serialize)]
@@ -286,7 +328,7 @@ async fn find_saved(pool: &sqlx::SqlitePool, item: &Item) -> Result<Option<Impor
     ))
 }
 
-fn notify<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) fn notify<R: Runtime>(app: &AppHandle<R>) {
     let _ = app.emit(CHANGED, ());
 }
 
@@ -366,13 +408,6 @@ async fn worker<R: Runtime>(app: AppHandle<R>, _work: tokio::sync::RwLockReadGua
                 entry.status = Status::Saved;
                 entry.result = Some(result);
                 queue.sources.remove(&item.id);
-                // A library-only deletion can run after the database commit
-                // and before the worker publishes the finished queue entry.
-                if let Some(state) = app.try_state::<AppState>() {
-                    if meeting_deleted(state.db_manager.pool(), &item.id).await == Ok(true) {
-                        queue.items.remove(index);
-                    }
-                }
                 let _ = app.emit("library-changed", ());
             }
             Err(error) if IMPORT_CANCELLED.load(Ordering::Acquire) => {
@@ -387,6 +422,14 @@ async fn worker<R: Runtime>(app: AppHandle<R>, _work: tokio::sync::RwLockReadGua
             Err(error) => {
                 entry.status = Status::Failed;
                 entry.message = Some(error.to_string());
+            }
+        }
+        // Permanent deletion can commit after the import releases its permit
+        // and before the worker publishes the outcome.
+        if let Some(state) = app.try_state::<AppState>() {
+            if meeting_deleted(state.db_manager.pool(), &item.id).await == Ok(true) {
+                queue.items.remove(index);
+                queue.sources.remove(&item.id);
             }
         }
         clear_progress();
@@ -495,7 +538,7 @@ pub async fn import_queue_snapshot<R: Runtime>(app: AppHandle<R>) -> Result<Queu
     let mut slot = QUEUE.lock().await;
     load(&app, &mut slot).await?;
     let queue = slot.as_ref().unwrap();
-    let mut items = queue.snapshots();
+    let mut items = queue.snapshots(&hidden_items(&app, queue).await?);
     let recovery_notice = queue.recovery_notice;
     drop(slot);
     if let Some(state) = app.try_state::<AppState>() {
@@ -569,7 +612,7 @@ pub async fn enqueue_imports<R: Runtime>(
     load(&app, &mut slot).await?;
     let queue = slot.as_mut().unwrap();
     if queue.items.len() + files.len() > MAX_ITEMS {
-        return Err("The import queue holds 32 items. Clear finished items to add more.".into());
+        return Err("The import queue holds 32 items, including imports in Trash. Clear finished items to free space.".into());
     }
     let mut seen = HashSet::new();
     let mut next = queue.clone();
@@ -637,6 +680,9 @@ pub async fn cancel_import_item<R: Runtime>(app: AppHandle<R>, id: String) -> Re
     let mut slot = QUEUE.lock().await;
     load(&app, &mut slot).await?;
     let queue = slot.as_mut().unwrap();
+    if hidden_items(&app, queue).await?.contains(&id) {
+        return Err("Restore the meeting from Trash to manage this import.".into());
+    }
     let mut next = queue.clone();
     let entry = next
         .items
@@ -675,6 +721,9 @@ pub async fn retry_import_item<R: Runtime>(
     let mut slot = QUEUE.lock().await;
     load(&app, &mut slot).await?;
     let queue = slot.as_mut().unwrap();
+    if hidden_items(&app, queue).await?.contains(&id) {
+        return Err("Restore the meeting from Trash to retry this import.".into());
+    }
     let mut next = queue.clone();
     let item = next
         .items
@@ -734,14 +783,7 @@ pub async fn clear_finished_imports<R: Runtime>(app: AppHandle<R>) -> Result<(),
     load(&app, &mut slot).await?;
     let queue = slot.as_mut().unwrap();
     let mut next = queue.clone();
-    next.items.retain(|item| {
-        !matches!(
-            item.status,
-            Status::Saved | Status::Cancelled | Status::Failed
-        )
-    });
-    next.sources
-        .retain(|id, _| next.items.iter().any(|item| item.id == *id));
+    next.clear_finished(&hidden_items(&app, queue).await?);
     next.save()?;
     *queue = next;
     notify(&app);
@@ -842,6 +884,45 @@ mod tests {
             assert!(!item.options.summary_use_automatic_preference);
             assert!(item.options.cloud_destination.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn trash_then_restore_keeps_a_failed_import_and_its_retry_source() {
+        use crate::database::repositories::meeting::MeetingsRepository;
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("synthetic.wav");
+        file_grants::grant(Purpose::AudioImport, &source).unwrap();
+        let grant = file_grants::take(Purpose::AudioImport, &source.to_string_lossy()).unwrap();
+        let id = "review-test";
+        let mut failed = queued(id);
+        failed.status = Status::Failed;
+        let mut queue = read_queue(dir.path().join("queue.json")).unwrap();
+        queue.items.push(failed);
+        queue.items.push(queued("unsaved-import"));
+        queue.sources.insert(id.into(), grant);
+
+        assert!(MeetingsRepository::move_to_trash(&pool, id, true)
+            .await
+            .unwrap());
+        let hidden = queue.hidden_items(&pool).await.unwrap();
+        queue.clear_finished(&hidden);
+        let shown = queue.snapshots(&hidden);
+        assert_eq!(
+            shown
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["unsaved-import"]
+        );
+
+        assert!(MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
+        let restored = queue.snapshots(&queue.hidden_items(&pool).await.unwrap());
+        assert_eq!(restored[0].id, id);
+        assert_eq!(restored[0].status, Status::Failed);
+        assert!(!restored[0].requires_file);
     }
 
     #[tokio::test]

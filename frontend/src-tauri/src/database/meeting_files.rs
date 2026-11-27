@@ -361,7 +361,7 @@ pub(crate) async fn registered_meeting_folder(
     roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
     let folder: Option<String> = sqlx::query_scalar(
-        "SELECT folder_path FROM meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
+        "SELECT folder_path FROM active_meetings WHERE id = ? AND folder_path IS NOT NULL AND TRIM(folder_path) <> ''",
     )
     .bind(meeting_id)
     .fetch_optional(pool)
@@ -971,6 +971,14 @@ mod tests {
                 .unwrap(),
             plain_path(&folder.canonicalize().unwrap())
         );
+        use crate::database::repositories::meeting::MeetingsRepository;
+        assert!(MeetingsRepository::move_to_trash(&pool, "saved", true)
+            .await
+            .unwrap());
+        assert!(registered_meeting_folder(&pool, "saved", &[])
+            .await
+            .is_err());
+        assert!(folder.is_dir());
         for refused in [
             "network",
             "relative",

@@ -40,6 +40,7 @@ const FOLDER_CLAIMS_CHANGED: &str =
 struct ArchiveFolder {
     id: String,
     folder_path: String,
+    active: bool,
     has_transcript: bool,
     needs_recovery: bool,
 }
@@ -47,13 +48,14 @@ struct ArchiveFolder {
 const FOLDER_CLAIMS_QUERY: &str = "SELECT id, folder_path FROM meetings
     WHERE folder_path IS NOT NULL AND TRIM(folder_path) <> '' ORDER BY id";
 
-const FOLDERS_QUERY: &str = "SELECT m.id, m.folder_path,
+// Preserve ownership of retained recordings, including folders claimed by Trash.
+const FOLDERS_QUERY: &str = "SELECT m.id, m.folder_path, m.deleted_at IS NULL AS active,
     EXISTS(SELECT 1 FROM transcripts t WHERE t.meeting_id = m.id) AS has_transcript,
     (COALESCE(o.audio_save_failed, 0) OR COALESCE(o.transcription_incomplete, 0) OR
      COALESCE(o.capture_incomplete, 0) OR COALESCE(o.recording_files_incomplete, 0) OR
      COALESCE(o.recovery_files_elsewhere, 0) OR
      EXISTS(SELECT 1 FROM transcript_file_sync f WHERE f.meeting_id = m.id)) AS needs_recovery
-    FROM active_meetings m LEFT JOIN recording_outcomes o ON m.id = o.meeting_id
+    FROM meetings m LEFT JOIN recording_outcomes o ON m.id = o.meeting_id
     WHERE m.folder_path IS NOT NULL AND TRIM(m.folder_path) <> ''";
 
 async fn folders(pool: &SqlitePool) -> Result<Vec<ArchiveFolder>, String> {
@@ -318,7 +320,7 @@ fn inspect_candidate(
 ) -> Result<Candidate, &'static str> {
     let row = rows
         .iter()
-        .find(|row| row.id == id)
+        .find(|row| row.active && row.id == id)
         .ok_or("This meeting has no saved recording folder.")?;
     if row.needs_recovery {
         return Err(RECOVERY_PENDING);
@@ -441,11 +443,13 @@ async fn remove_prepared(
     {
         return Err(FOLDER_CLAIMS_CHANGED);
     }
-    let current: ArchiveFolder = sqlx::query_as(&format!("{FOLDERS_QUERY} AND m.id = ?"))
-        .bind(&request.id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| FOLDER_CHANGED)?;
+    let current: ArchiveFolder = sqlx::query_as(&format!(
+        "{FOLDERS_QUERY} AND m.deleted_at IS NULL AND m.id = ?"
+    ))
+    .bind(&request.id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| FOLDER_CHANGED)?;
     if current.needs_recovery {
         return Err(RECOVERY_PENDING);
     }

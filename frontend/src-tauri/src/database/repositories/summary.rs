@@ -351,6 +351,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trash_keeps_paused_and_interrupted_automatic_notes_resumable() {
+        use crate::database::repositories::meeting::MeetingsRepository;
+        for interrupted in [false, true] {
+            let pool = crate::database::transcript_edits::tests::fixture().await;
+            let meeting = "review-test";
+            if interrupted {
+                assert!(SummaryProcessesRepository::create_automatic_process(
+                    &pool, meeting, "import", "approved"
+                )
+                .await
+                .unwrap());
+                SummaryProcessesRepository::fail_interrupted_processes(&pool)
+                    .await
+                    .unwrap();
+            } else {
+                assert!(
+                    SummaryProcessesRepository::defer_automatic_process_for_exit(
+                        &pool, meeting, "import", "approved"
+                    )
+                    .await
+                    .unwrap()
+                );
+            }
+            assert!(MeetingsRepository::move_to_trash(&pool, meeting, true)
+                .await
+                .unwrap());
+            let candidates =
+                || SummaryProcessesRepository::automatic_resume_candidates(&pool, "approved", None);
+            let claim = || {
+                SummaryProcessesRepository::claim_automatic_resume(
+                    &pool, meeting, "approved", false,
+                )
+            };
+            assert!(candidates().await.unwrap().is_empty());
+            assert!(!claim().await.unwrap());
+
+            assert!(MeetingsRepository::restore_from_trash(&pool, meeting)
+                .await
+                .unwrap());
+            assert_eq!(
+                candidates().await.unwrap(),
+                [(meeting.to_owned(), "approved".to_owned())]
+            );
+            assert!(claim().await.unwrap());
+        }
+    }
+
+    #[tokio::test]
     async fn local_preemption_resumes_with_one_claim_and_user_cancellation_stays_final() {
         let pool = crate::database::transcript_edits::tests::fixture().await;
         let meeting = "review-test";
@@ -759,10 +807,10 @@ impl SummaryProcessesRepository {
     ) -> Result<bool, sqlx::Error> {
         sqlx::query_scalar(
             r#"
-            SELECT NOT EXISTS (
-                SELECT 1 FROM summary_processes WHERE meeting_id = ?
-                AND NOT (? = 'recording' AND status = 'skipped'
-                    AND (error IS ? OR error IS ?) AND (automatic_origin = 'recording' OR automatic_origin IS NULL)
+            SELECT EXISTS (SELECT 1 FROM active_meetings WHERE id = ?1) AND NOT EXISTS (
+                SELECT 1 FROM summary_processes WHERE meeting_id = ?1
+                AND NOT (?2 = 'recording' AND status = 'skipped'
+                    AND (error IS ?3 OR error IS ?4) AND (automatic_origin = 'recording' OR automatic_origin IS NULL)
                     AND result IS NULL AND result_backup IS NULL AND previous_result IS NULL AND metadata IS NULL)
             )
         "#,
@@ -847,7 +895,7 @@ impl SummaryProcessesRepository {
     ) -> Result<Vec<(String, String)>, sqlx::Error> {
         sqlx::query_as("SELECT meeting_id, automatic_request_fingerprint FROM summary_processes
             WHERE automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint IN (?1, ?2 || ':' || ?1)
-            AND meeting_id > ?3 AND (
+            AND meeting_id > ?3 AND meeting_id IN (SELECT id FROM active_meetings) AND (
                 (status = 'failed' AND automatic_resume_attempted = 0 AND error = ?4)
                 OR (status = 'cancelled' AND result IS NULL AND (
                     (?5 AND error IN (?6, ?7, ?8)) OR (automatic_resume_attempted = 0 AND error = ?8)
@@ -870,6 +918,7 @@ impl SummaryProcessesRepository {
             automatic_resume_attempted = CASE WHEN status = 'failed' OR (NOT ?7 AND error = ?6) THEN 1 ELSE automatic_resume_attempted END,
             status = 'pending', error = NULL, start_time = CURRENT_TIMESTAMP, end_time = NULL, updated_at = CURRENT_TIMESTAMP
             WHERE meeting_id = ?1 AND automatic_origin IN ('recording', 'import') AND automatic_request_fingerprint = ?2
+            AND meeting_id IN (SELECT id FROM active_meetings)
             AND ((status = 'failed' AND automatic_resume_attempted = 0 AND error = ?3)
                 OR (status = 'cancelled' AND result IS NULL AND (
                     (?7 AND error IN (?4, ?5, ?6)) OR (automatic_resume_attempted = 0 AND error = ?6)
