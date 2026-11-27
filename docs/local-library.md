@@ -636,6 +636,9 @@ folder again in **Settings → Recording**. This also makes earlier interrupted
 recordings in that target available to the disk scan. Folder deletion continues
 to require an unlinked path and verified ownership.
 
+Open **Interrupted recordings** in **Settings → General** to recover an earlier
+meeting while recording. The recovery list excludes the current recording.
+
 If a recovery scan cannot verify a draft's folder or read its recording marker,
 **Interrupted recordings** shows **Folder unverified** and lets you preview the
 cached transcript. Reconnect the location or let OneDrive finish downloading,

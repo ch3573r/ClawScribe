@@ -67,9 +67,8 @@ export function PreferenceSettings() {
 
   const router = useRouter();
   const recordingState = useRecordingState();
-  // Interrupted recordings (found in the browser data and on disk) are shown
-  // only when there are some, and never while a recording is running.
-  const interrupted = useInterruptedRecordings(!recordingState.isRecording);
+  const interrupted = useInterruptedRecordings(!recordingState.isStarting && !recordingState.isStopping
+    && !recordingState.isProcessing && !recordingState.isSaving);
   const reviewInterrupted = (includeKept = false) => {
     try { sessionStorage.setItem(RECOVERY_OPEN_REQUEST, includeKept ? RECOVERY_OPEN_ALL : "true"); } catch { /* the home page still offers them on start */ }
     router.push("/");
