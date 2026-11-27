@@ -2878,6 +2878,10 @@ mod tests {
             "saved_live_answer_attachment_instances",
             "saved_live_answer_dependencies",
             "settings",
+            // Voice data stays on this device and is never archived.
+            "speaker_profile_preferences",
+            "speaker_profile_suggestions",
+            "speaker_profiles",
             "transcript_settings",
             "webhook_deliveries", // delivery history belongs to this profile's destination
         ];
