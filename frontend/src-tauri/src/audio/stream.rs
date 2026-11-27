@@ -540,21 +540,18 @@ impl AudioStream {
                 let age =
                     packet_capture_age(time.callback.duration_since(&time.capture), frames, rate);
                 let captured_at = callback.checked_sub(age).unwrap_or(callback);
-                if let Some(stamp) = callback_state.capture_stamp(captured_at) {
-                    // A capture buffer can straddle the start or resume boundary.
-                    let skip = stamp.skip_frames(rate);
-                    if skip < frames
-                        && !input.copy_samples(
-                            &data[skip * channels..frames * channels],
-                            stamp.resume_revision,
-                            stamp.seconds + skip as f64 / f64::from(rate),
-                            rate,
-                            channels,
-                        )
-                    {
-                        let end = stamp.seconds + frames as f64 / f64::from(rate);
+                if let Some(stamp) = callback_state.admit_capture(captured_at, frames, rate) {
+                    if !input.copy_samples(
+                        &data[stamp.skipped_frames * channels..frames * channels],
+                        stamp.resume_revision,
+                        stamp.seconds,
+                        rate,
+                        channels,
+                    ) {
+                        let kept = frames - stamp.skipped_frames;
+                        let end = stamp.seconds + kept as f64 / f64::from(rate);
                         callback_state.record_capture_gap_end(
-                            (end * f64::from(super::pipeline::CAPTURE_SAMPLE_RATE)).round() as u64,
+                            (end * f64::from(CAPTURE_SAMPLE_RATE)).round() as u64,
                         );
                     }
                 }

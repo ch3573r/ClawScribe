@@ -278,8 +278,7 @@ impl RecordingManager {
 
         // Start audio streams - they send RAW unmixed chunks to pipeline for mixing
         // Pipeline handles mixing and distribution to both recording and transcription
-        // Save the start when the first device opens. Invitation checks and
-        // starting another device can each cross midnight.
+        // Record the first device-open time until capture supplies sample zero.
         let saver = &mut self.recording_saver;
         self.stream_manager
             .start_streams(
@@ -513,10 +512,12 @@ impl RecordingManager {
     }
 
     pub(super) fn recording_provenance(&self) -> super::provenance::RecordingProvenance {
-        super::provenance::RecordingProvenance::recording(
+        let mut provenance = super::provenance::RecordingProvenance::recording(
             self.get_active_recording_duration(),
             self.recording_saver.started_at(),
-        )
+        );
+        provenance.started_at = self.state.capture_started_at().or(provenance.started_at);
+        provenance
     }
 
     pub(crate) fn library_transcripts(&self) -> Vec<crate::api::TranscriptSegment> {

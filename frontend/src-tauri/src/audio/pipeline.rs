@@ -776,16 +776,15 @@ impl AudioCapture {
         let frames = data.len() / usize::from(self.channels);
         let duration =
             std::time::Duration::from_secs_f64(frames as f64 / f64::from(self.sample_rate));
-        let Some(stamp) = self
-            .state
-            .capture_stamp(std::time::Instant::now() - duration)
-        else {
+        let Some(stamp) = self.state.admit_capture(
+            std::time::Instant::now() - duration,
+            frames,
+            self.sample_rate,
+        ) else {
             return;
         };
-        let skip = stamp.skip_frames(self.sample_rate).min(frames);
-        let data = &data[skip * usize::from(self.channels)..];
-        let timestamp = stamp.seconds + skip as f64 / f64::from(self.sample_rate);
-        self.process_captured_data(data, stamp.resume_revision, timestamp, 0, |chunk| {
+        let data = &data[stamp.skipped_frames * usize::from(self.channels)..];
+        self.process_captured_data(data, stamp.resume_revision, stamp.seconds, 0, |chunk| {
             self.state.send_audio_chunk(chunk)
         });
     }
@@ -1212,9 +1211,10 @@ impl AudioPipeline {
             };
 
             let now = std::time::Instant::now();
-            let clock = self.state.capture_stamp(now).map_or(0, |stamp| {
-                (stamp.seconds * f64::from(self.sample_rate)) as u64
-            });
+            let clock = self
+                .state
+                .capture_seconds(now)
+                .map_or(0, |seconds| (seconds * f64::from(self.sample_rate)) as u64);
             // Packetless loopback can advance on idle ticks. A source with
             // admitted input or recent callbacks gets time to deliver its DSP
             // output. Take the queue check after reading worker progress.

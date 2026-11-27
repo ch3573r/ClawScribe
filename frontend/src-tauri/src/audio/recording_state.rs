@@ -66,16 +66,11 @@ pub(super) struct CaptureProgress {
 pub(super) struct CaptureStamp {
     pub resume_revision: u64,
     pub seconds: f64,
-    earliest_seconds: f64,
+    pub skipped_frames: usize,
 }
 
-impl CaptureStamp {
-    pub fn skip_frames(&self, rate: u32) -> usize {
-        ((self.earliest_seconds - self.seconds) * f64::from(rate))
-            .ceil()
-            .max(0.0) as usize
-    }
-}
+const CAPTURE_NOT_STARTED: u64 = u64::MAX;
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
 /// Processed audio chunk (post-VAD) for recording
 #[derive(Debug, Clone)]
@@ -163,8 +158,12 @@ pub struct RecordingState {
     is_paused: AtomicBool,
     resume_revision: AtomicU64,
     capture_epoch: Instant,
+    capture_epoch_utc: chrono::DateTime<chrono::Utc>,
     capture_origin_ns: AtomicU64,
+    capture_started_ns: AtomicU64,
+    capture_pause_ns: AtomicU64,
     capture_cutoff_ns: AtomicU64,
+    capture_start_notified: AtomicBool,
     capture_lost_through: AtomicU64,
     capture_progress: Mutex<Vec<(DeviceType, std::sync::Weak<CaptureProgress>)>>,
 
@@ -220,8 +219,13 @@ impl RecordingState {
         self.capture_incomplete.store(false, Ordering::Release);
         let start = Instant::now();
         let start_ns = self.capture_nanos(start);
-        self.capture_origin_ns.store(start_ns, Ordering::SeqCst);
+        self.capture_origin_ns
+            .store(CAPTURE_NOT_STARTED, Ordering::SeqCst);
+        self.capture_started_ns
+            .store(CAPTURE_NOT_STARTED, Ordering::SeqCst);
+        self.capture_pause_ns.store(0, Ordering::SeqCst);
         self.capture_cutoff_ns.store(start_ns, Ordering::SeqCst);
+        self.capture_start_notified.store(false, Ordering::Relaxed);
         self.capture_lost_through.store(0, Ordering::Relaxed);
         *self.recording_start.lock().unwrap() = Some(start);
         *self.recording_end.lock().unwrap() = None;
@@ -283,7 +287,7 @@ impl RecordingState {
             let resumed = Instant::now();
             let pause_duration = resumed.duration_since(pause_start);
             *self.total_pause_duration.lock().unwrap() += pause_duration;
-            self.capture_origin_ns
+            self.capture_pause_ns
                 .fetch_add(pause_duration.as_nanos() as u64, Ordering::SeqCst);
             self.capture_cutoff_ns
                 .store(self.capture_nanos(resumed), Ordering::SeqCst);
@@ -321,20 +325,84 @@ impl RecordingState {
             .as_nanos() as u64
     }
 
-    /// Snapshot the active capture clock without locking on the audio callback.
-    pub(super) fn capture_stamp(&self, captured_at: Instant) -> Option<CaptureStamp> {
+    fn active_capture_clock(&self) -> Option<(u64, u64, u64)> {
         let resume_revision = self.resume_revision();
-        let origin = self.capture_origin_ns.load(Ordering::SeqCst);
+        let paused = self.capture_pause_ns.load(Ordering::SeqCst);
         let cutoff = self.capture_cutoff_ns.load(Ordering::SeqCst);
-        if !self.is_active() || resume_revision != self.resume_revision() {
+        (self.is_active() && resume_revision == self.resume_revision()).then_some((
+            resume_revision,
+            paused,
+            cutoff,
+        ))
+    }
+
+    /// The first packet with admissible frames claims the common sample zero.
+    /// The callback only uses atomics and the monotonic clock.
+    pub(super) fn admit_capture(
+        &self,
+        captured_at: Instant,
+        frames: usize,
+        rate: u32,
+    ) -> Option<CaptureStamp> {
+        let (resume_revision, paused, cutoff) = self.active_capture_clock()?;
+        let raw = if captured_at >= self.capture_epoch {
+            i128::from(self.capture_nanos(captured_at))
+        } else {
+            -(self.capture_epoch.duration_since(captured_at).as_nanos() as i128)
+        };
+        let frames_before = |boundary: u64| {
+            ((i128::from(boundary) - raw).max(0) as u128 * u128::from(rate))
+                .div_ceil(u128::from(NANOS_PER_SECOND)) as usize
+        };
+        let after_frames = |skip: usize| {
+            (raw + (skip as i128 * i128::from(NANOS_PER_SECOND)) / i128::from(rate)).max(0) as u64
+        };
+        let mut origin = self.capture_origin_ns.load(Ordering::Acquire);
+        let skipped = frames_before(cutoff);
+        if skipped >= frames {
             return None;
         }
-        let relative = |nanos: u64| (nanos as f64 - origin as f64) / 1_000_000_000.0;
+        if origin == CAPTURE_NOT_STARTED {
+            let first = after_frames(skipped);
+            let effective_origin = first.saturating_sub(paused);
+            origin = match self.capture_origin_ns.compare_exchange(
+                CAPTURE_NOT_STARTED,
+                effective_origin,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.capture_started_ns.store(first, Ordering::Release);
+                    effective_origin
+                }
+                Err(existing) => existing,
+            };
+        }
+        let skipped_frames = frames_before(cutoff.max(origin.saturating_add(paused)));
+        if skipped_frames >= frames {
+            return None;
+        }
         Some(CaptureStamp {
             resume_revision,
-            seconds: relative(self.capture_nanos(captured_at)),
-            earliest_seconds: relative(cutoff),
+            seconds: after_frames(skipped_frames).saturating_sub(origin + paused) as f64
+                / NANOS_PER_SECOND as f64,
+            skipped_frames,
         })
+    }
+
+    pub(super) fn capture_seconds(&self, instant: Instant) -> Option<f64> {
+        let (_, paused, _) = self.active_capture_clock()?;
+        let origin = self.capture_origin_ns.load(Ordering::Acquire);
+        (origin != CAPTURE_NOT_STARTED).then(|| {
+            self.capture_nanos(instant).saturating_sub(origin + paused) as f64
+                / NANOS_PER_SECOND as f64
+        })
+    }
+
+    pub(super) fn capture_started_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let started = self.capture_started_ns.load(Ordering::Acquire);
+        (started != CAPTURE_NOT_STARTED)
+            .then(|| self.capture_epoch_utc + chrono::Duration::nanoseconds(started as i64))
     }
 
     pub(super) fn record_capture_gap_end(&self, end_sample: u64) {
@@ -534,6 +602,11 @@ impl RecordingState {
         let mut stats = self.stats.lock().unwrap();
         stats.chunks_processed += 1;
         stats.last_activity = Some(Instant::now());
+        if self.capture_started_ns.load(Ordering::Acquire) != CAPTURE_NOT_STARTED
+            && !self.capture_start_notified.swap(true, Ordering::AcqRel)
+        {
+            self.request_recovery_snapshot();
+        }
         Ok(())
     }
 
@@ -739,13 +812,11 @@ impl RecordingState {
 
     pub fn get_active_recording_duration(&self) -> Option<f64> {
         self.recording_start.lock().unwrap().map(|start| {
-            let total_duration = self
+            let end = self
                 .recording_end
                 .lock()
                 .unwrap()
-                .unwrap_or_else(Instant::now)
-                .duration_since(start)
-                .as_secs_f64();
+                .unwrap_or_else(Instant::now);
             let pause_duration = self.get_total_pause_duration();
             let current_pause = if self.is_paused() {
                 self.pause_start
@@ -756,7 +827,13 @@ impl RecordingState {
             } else {
                 0.0
             };
-            total_duration - pause_duration - current_pause
+            let origin = self.capture_origin_ns.load(Ordering::Acquire);
+            let elapsed = if origin == CAPTURE_NOT_STARTED {
+                end.saturating_duration_since(start).as_secs_f64()
+            } else {
+                self.capture_nanos(end).saturating_sub(origin) as f64 / NANOS_PER_SECOND as f64
+            };
+            (elapsed - pause_duration - current_pause).max(0.0)
         })
     }
 
@@ -814,8 +891,12 @@ impl Default for RecordingState {
             is_paused: AtomicBool::new(false),
             resume_revision: AtomicU64::new(0),
             capture_epoch: Instant::now(),
-            capture_origin_ns: AtomicU64::new(0),
+            capture_epoch_utc: chrono::Utc::now(),
+            capture_origin_ns: AtomicU64::new(CAPTURE_NOT_STARTED),
+            capture_started_ns: AtomicU64::new(CAPTURE_NOT_STARTED),
+            capture_pause_ns: AtomicU64::new(0),
             capture_cutoff_ns: AtomicU64::new(0),
+            capture_start_notified: AtomicBool::new(false),
             capture_lost_through: AtomicU64::new(0),
             capture_progress: Mutex::new(Vec::new()),
             microphone_device: Mutex::new(None),
@@ -858,6 +939,46 @@ impl Clone for RecordingStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_admitted_frame_sets_sample_zero_and_excludes_device_open_time() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        let requested = state.recording_start.lock().unwrap().unwrap();
+        let first = requested + std::time::Duration::from_millis(750);
+        assert!(state.capture_seconds(first).is_none());
+        assert!(state
+            .admit_capture(
+                requested - std::time::Duration::from_millis(10),
+                240,
+                48_000
+            )
+            .is_none());
+        assert!(state.capture_started_at().is_none());
+
+        let stamp = state.admit_capture(first, 480, 48_000).unwrap();
+        assert_eq!((stamp.seconds, stamp.skipped_frames), (0.0, 0));
+        let late_other_source = state
+            .admit_capture(first - std::time::Duration::from_millis(5), 480, 48_000)
+            .unwrap();
+        assert_eq!(
+            (late_other_source.seconds, late_other_source.skipped_frames),
+            (0.0, 240)
+        );
+
+        let end = first + std::time::Duration::from_millis(250);
+        assert_eq!(state.capture_seconds(end), Some(0.25));
+        assert_eq!(
+            state.capture_started_at(),
+            Some(
+                state.capture_epoch_utc
+                    + chrono::Duration::nanoseconds(state.capture_nanos(first) as i64)
+            )
+        );
+        *state.recording_end.lock().unwrap() = Some(end);
+        state.stop_recording();
+        assert_eq!(state.get_active_recording_duration(), Some(0.25));
+    }
 
     #[test]
     fn recording_quiet_loopback_updates_diagnostics_only() {
