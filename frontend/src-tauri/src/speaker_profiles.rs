@@ -54,6 +54,19 @@ pub(crate) struct ProfileSettings {
     profiles: Vec<ProfileName>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProfileDeletion {
+    cleanup_pending: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PreferenceChange {
+    preferences: Preferences,
+    #[serde(flatten)]
+    deletion: ProfileDeletion,
+}
+
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SpeakerVoiceOption {
@@ -67,6 +80,13 @@ pub(crate) struct DetectionSamples {
     generation: i64,
     model: String,
     voices: BTreeMap<String, Vec<f32>>,
+    eligible_labels: BTreeSet<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct DetectionOutcome {
+    pub(crate) cache: Option<DetectionCache>,
+    pub(crate) applied_names: Vec<String>,
 }
 
 type Fingerprint = Vec<u8>;
@@ -125,6 +145,9 @@ async fn update_preferences(
     .await?;
     if !enabled {
         sqlx::query("DELETE FROM speaker_profile_suggestions")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("DELETE FROM speaker_profiles")
             .execute(conn)
             .await?;
     }
@@ -160,7 +183,7 @@ pub(crate) async fn set_speaker_profile_preferences<R: Runtime>(
     state: State<'_, AppState>,
     enabled: bool,
     auto_apply: bool,
-) -> Result<Preferences, String> {
+) -> Result<PreferenceChange, String> {
     let mut tx = state
         .db_manager
         .pool()
@@ -183,7 +206,11 @@ pub(crate) async fn set_speaker_profile_preferences<R: Runtime>(
         }
     }
     let _ = app.emit(CHANGED, ());
-    Ok(preferences)
+    let cleanup_pending = !enabled && !state.db_manager.finish_speaker_profile_deletion().await;
+    Ok(PreferenceChange {
+        preferences,
+        deletion: ProfileDeletion { cleanup_pending },
+    })
 }
 
 #[tauri::command]
@@ -191,14 +218,16 @@ pub(crate) async fn delete_speaker_profile<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
     key: String,
-) -> Result<(), String> {
+) -> Result<ProfileDeletion, String> {
     sqlx::query("DELETE FROM speaker_profiles WHERE name_key = ?")
         .bind(key)
         .execute(state.db_manager.pool())
         .await
         .map_err(|_| "Could not delete the speaker profile.")?;
+    offer_detection_sample(None);
     let _ = app.emit(CHANGED, ());
-    Ok(())
+    let cleanup_pending = !state.db_manager.finish_speaker_profile_deletion().await;
+    Ok(ProfileDeletion { cleanup_pending })
 }
 
 #[tauri::command]
@@ -349,9 +378,23 @@ async fn save_voice(
     model: &str,
     voice: &[f32],
 ) -> sqlx::Result<()> {
-    sqlx::query("INSERT INTO speaker_profiles (name_key, model, name, embedding) VALUES (?, ?, ?, ?) ON CONFLICT(name_key, model) DO NOTHING")
-        .bind(name.to_lowercase()).bind(model).bind(name).bind(encode_embedding(voice))
-        .execute(conn).await?;
+    let key = name.to_lowercase();
+    let result = sqlx::query("INSERT INTO speaker_profiles (name_key, model, name, embedding) VALUES (?, ?, ?, ?) ON CONFLICT(name_key, model) DO NOTHING")
+        .bind(&key).bind(model).bind(name).bind(encode_embedding(voice))
+        .execute(&mut *conn).await?;
+    if result.rows_affected() == 0 {
+        let existing = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM speaker_profiles WHERE name_key = ? AND model = ?",
+        )
+        .bind(key)
+        .bind(model)
+        .fetch_optional(conn)
+        .await?;
+        return Err(sqlx::Error::Protocol(format!(
+            "A voice is already saved for {}. Delete it in Transcription settings first.",
+            existing.as_deref().unwrap_or(name),
+        )));
+    }
     Ok(())
 }
 
@@ -365,17 +408,17 @@ pub(crate) async fn finish_detection(
     meeting: &str,
     segments: &mut [TranscriptSegment],
     capture: Option<DetectionSamples>,
-) -> sqlx::Result<Option<DetectionCache>> {
+) -> sqlx::Result<DetectionOutcome> {
     sqlx::query("DELETE FROM speaker_profile_suggestions WHERE meeting_id = ?")
         .bind(meeting)
         .execute(&mut *conn)
         .await?;
     let Some(capture) = capture else {
-        return Ok(None);
+        return Ok(DetectionOutcome::default());
     };
     let preferences = read_preferences(conn).await?;
     if !preferences.enabled || capture.generation != preferences.generation {
-        return Ok(None);
+        return Ok(DetectionOutcome::default());
     }
 
     let mut lanes: BTreeMap<String, Vec<LaneRow>> = BTreeMap::new();
@@ -383,7 +426,7 @@ pub(crate) async fn finish_detection(
     for segment in segments.iter() {
         if let Some(label) = &segment.speaker {
             used_names.insert(label.to_lowercase());
-            if capture.voices.contains_key(label) {
+            if capture.eligible_labels.contains(label) && capture.voices.contains_key(label) {
                 lanes.entry(label.clone()).or_default().push((
                     segment.id.clone(),
                     segment.audio_start_time,
@@ -409,6 +452,7 @@ pub(crate) async fn finish_detection(
         .collect();
     let matches = unambiguous_matches(&capture.voices, &profiles, &used_names);
     let mut eligible = BTreeMap::new();
+    let mut applied_names = Vec::new();
     for (speaker, voice) in capture.voices {
         let Some(rows) = lanes.remove(&speaker) else {
             continue;
@@ -422,6 +466,7 @@ pub(crate) async fn finish_detection(
                 {
                     set_transcript_segment_speaker(segment, &profile.name);
                 }
+                applied_names.push(profile.name.clone());
                 continue;
             }
             Some(profile) => {
@@ -433,12 +478,15 @@ pub(crate) async fn finish_detection(
         }
         eligible.insert(speaker, (fingerprint, voice));
     }
-    Ok(Some(DetectionCache {
-        meeting: meeting.into(),
-        generation: capture.generation,
-        model: capture.model,
-        lanes: eligible,
-    }))
+    Ok(DetectionOutcome {
+        cache: Some(DetectionCache {
+            meeting: meeting.into(),
+            generation: capture.generation,
+            model: capture.model,
+            lanes: eligible,
+        }),
+        applied_names,
+    })
 }
 
 type LaneRow = (String, Option<f64>, Option<f64>);
@@ -474,21 +522,22 @@ fn unambiguous_matches<'a>(
     profiles: &'a [KnownVoice],
     used_names: &BTreeSet<String>,
 ) -> BTreeMap<String, &'a KnownVoice> {
-    let mut frequencies = BTreeMap::new();
-    let matches: Vec<_> = voices
+    voices
         .iter()
         .filter_map(|(label, voice)| {
             let profile = best_match(voice, profiles)?;
-            *frequencies.entry(&profile.name_key).or_insert(0) += 1;
-            Some((label, profile))
+            if used_names.contains(&profile.name_key) {
+                return None;
+            }
+            let score = cosine(voice, &profile.embedding);
+            // A different lane can be a close runner-up even when its own
+            // score is below the enrollment match threshold.
+            let leads_meeting = voices
+                .iter()
+                .filter(|(other_label, other)| *other_label != label && other.len() == voice.len())
+                .all(|(_, other)| score - cosine(other, &profile.embedding) >= MIN_MATCH_MARGIN);
+            leads_meeting.then(|| (label.clone(), profile))
         })
-        .collect();
-    matches
-        .into_iter()
-        .filter(|(_, profile)| {
-            frequencies[&profile.name_key] == 1 && !used_names.contains(&profile.name_key)
-        })
-        .map(|(label, profile)| (label.clone(), profile))
         .collect()
 }
 
@@ -621,6 +670,7 @@ pub(crate) fn extract_detection_samples(
     model_file: &Path,
     mut turns: Vec<DiarizationTurn>,
     lanes: BTreeMap<usize, usize>,
+    eligible_labels: BTreeSet<String>,
     samples: &[f32],
     cancelled: &AtomicBool,
 ) -> Option<DetectionSamples> {
@@ -669,5 +719,6 @@ pub(crate) fn extract_detection_samples(
         generation,
         model,
         voices,
+        eligible_labels,
     })
 }

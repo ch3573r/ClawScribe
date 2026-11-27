@@ -10,6 +10,10 @@ import { Switch } from "@/components/ui/switch";
 type Preferences = { enabled: boolean; autoApply: boolean };
 type Profile = { key: string; name: string };
 type Settings = { preferences: Preferences; profiles: Profile[] };
+type Cleanup = { cleanupPending: boolean };
+type Confirmation = { kind: "disable" } | { kind: "delete"; profile: Profile };
+
+const CLEANUP_PENDING = "Restart ClawScribe to retry removing voice data from database recovery files.";
 
 export function SpeakerProfilesSettings() {
   const id = useId();
@@ -18,7 +22,7 @@ export function SpeakerProfilesSettings() {
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const [error, setError] = useState("");
-  const [selected, setSelected] = useState<Profile>();
+  const [confirmation, setConfirmation] = useState<Confirmation>();
 
   useEffect(() => {
     let active = true;
@@ -46,18 +50,29 @@ export function SpeakerProfilesSettings() {
 
   function setPreferences(enabled: boolean, autoApply: boolean) {
     return save(async () => {
-      const preferences = await invoke<Preferences>("set_speaker_profile_preferences", { enabled, autoApply });
-      setSettings(current => current && { ...current, preferences });
+      const result = await invoke<Cleanup & { preferences: Preferences }>("set_speaker_profile_preferences", { enabled, autoApply });
+      setSettings(current => current && { preferences: result.preferences, profiles: enabled ? current.profiles : [] });
+      setConfirmation(undefined);
+      if (result.cleanupPending) setError(CLEANUP_PENDING);
     }, "Could not update speaker profile settings. Please try again.");
   }
 
   function deleteProfile(profile: Profile) {
     return save(async () => {
-      await invoke("delete_speaker_profile", { key: profile.key });
+      const result = await invoke<Cleanup>("delete_speaker_profile", { key: profile.key });
       setSettings(current => current && { ...current, profiles: current.profiles.filter(item => item.key !== profile.key) });
-      setSelected(undefined);
+      setConfirmation(undefined);
+      if (result.cleanupPending) setError(CLEANUP_PENDING);
     }, "Could not delete the speaker profile. Please try again.");
   }
+
+  function closeConfirmation() {
+    setConfirmation(undefined);
+    setError("");
+  }
+
+  const profileCount = settings?.profiles.length ?? 0;
+  const disabling = confirmation?.kind === "disable";
 
   return (
     <SettingsCard title="Speaker profiles">
@@ -70,10 +85,17 @@ export function SpeakerProfilesSettings() {
       ) : (
         <>
           <SettingsRow title="Use speaker profiles" htmlFor={id} description={
-            <span id={`${id}-consent`}>When you choose to remember a voice, ClawScribe stores its voice characteristics on this device to suggest names in future meetings. Voice data stays on this device and is excluded from library backups.</span>
+            <span id={`${id}-consent`}>When you choose to remember a voice, ClawScribe stores its characteristics on this device to suggest names in future meetings. Turning this off deletes saved voices. Library backups exclude them.</span>
           }>
             <Switch id={id} aria-describedby={`${id}-consent`} checked={settings.preferences.enabled} disabled={busy}
-              onCheckedChange={enabled => void setPreferences(enabled, false)} />
+              onCheckedChange={enabled => {
+                if (!enabled && profileCount > 0) {
+                  setError("");
+                  setConfirmation({ kind: "disable" });
+                } else {
+                  void setPreferences(enabled, false);
+                }
+              }} />
           </SettingsRow>
           {settings.preferences.enabled && (
             <SettingsRow title="Apply matched names automatically" htmlFor={`${id}-auto`}
@@ -84,23 +106,28 @@ export function SpeakerProfilesSettings() {
           {settings.profiles.length ? settings.profiles.map(profile => (
             <SettingsRow key={profile.key} title={<span className="break-words">{profile.name}</span>}>
               <Button type="button" aria-label={`Delete the profile for ${profile.name}`} variant="outline" size="sm" disabled={busy}
-                onClick={() => { setError(""); setSelected(profile); }}>Delete</Button>
+                onClick={() => { setError(""); setConfirmation({ kind: "delete", profile }); }}>Delete</Button>
             </SettingsRow>
           )) : settings.preferences.enabled && (
             <SettingsRow title="No saved voices" description="Run Detect speakers in a saved meeting, then choose to remember a voice when you rename it." />
           )}
-          {error && !selected && <SettingsRow title={error} role="alert" />}
-          <Dialog open={Boolean(selected)} onOpenChange={open => { if (!open && !busy) { setSelected(undefined); setError(""); } }}>
+          {error && !confirmation && <SettingsRow title={error} role="alert" />}
+          <Dialog open={Boolean(confirmation)} onOpenChange={open => { if (!open && !busy) closeConfirmation(); }}>
             <DialogContent onEscapeKeyDown={event => { if (busy) event.preventDefault(); }}>
               <DialogHeader>
-                <DialogTitle>Delete speaker profile?</DialogTitle>
-                <DialogDescription>This removes the saved voice data for {selected?.name}. Edit applied names directly in the transcript.</DialogDescription>
+                <DialogTitle>{disabling ? "Turn off speaker profiles?" : "Delete speaker profile?"}</DialogTitle>
+                <DialogDescription>{confirmation && (confirmation.kind === "disable"
+                  ? `Turning this off deletes ${profileCount} saved ${profileCount === 1 ? "voice" : "voices"}.`
+                  : `This removes the saved voice data for ${confirmation.profile.name}. Edit applied names directly in the transcript.`)}</DialogDescription>
               </DialogHeader>
               {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
               <DialogFooter>
-                <Button type="button" variant="outline" disabled={busy} onClick={() => { setSelected(undefined); setError(""); }}>Cancel</Button>
-                <Button type="button" variant="destructive" disabled={busy || !selected} onClick={() => { if (selected) void deleteProfile(selected); }}>
-                  {busy ? "Deleting…" : "Delete profile"}
+                <Button type="button" variant="outline" disabled={busy} onClick={closeConfirmation}>Cancel</Button>
+                <Button type="button" variant="destructive" disabled={busy || !confirmation} onClick={() => {
+                  if (confirmation?.kind === "disable") void setPreferences(false, false);
+                  if (confirmation?.kind === "delete") void deleteProfile(confirmation.profile);
+                }}>
+                  {busy ? "Deleting…" : disabling ? "Turn off and delete" : "Delete profile"}
                 </Button>
               </DialogFooter>
             </DialogContent>

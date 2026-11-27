@@ -28,6 +28,7 @@ import {
   SpeakerDiarizationComplete,
   SpeakerDiarizationProgress,
 } from './SpeakerDiarizationDialog';
+import { autoAppliedSpeakerMessage } from '@/lib/speaker-labels';
 
 interface SpeakerDiarizationError {
   meeting_id: string;
@@ -125,7 +126,8 @@ export function TranscriptButtonGroup({
     setDiarizationError(null);
     setShowDiarizationDialog(true);
     toast.success('Speaker labels applied', {
-      description: `${payload.updated_segments} transcript segments updated across ${payload.speaker_count} speaker${payload.speaker_count === 1 ? '' : 's'}.`,
+      description: autoAppliedSpeakerMessage(payload.auto_applied_names)
+        ?? `${payload.updated_segments} transcript segments updated across ${payload.speaker_count} speaker${payload.speaker_count === 1 ? '' : 's'}.`,
     });
     void onRefetchTranscriptsRef.current?.();
   }, [completionKey]);

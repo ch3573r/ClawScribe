@@ -411,14 +411,18 @@ disabling speaker profiles.
 In later meetings, the rename control offers a suggested name when a saved voice
 is a strong, distinct match using the same voice model. Review the suggestion
 before renaming. **Apply matched names automatically** is a separate setting
-that applies strong matches during **Detect speakers**. To check a result,
-listen to the corresponding passage and correct the label or restore the
-previous transcript.
+that applies strong matches during **Detect speakers**. A match must lead both
+the next candidate name for that speaker and the next detected speaker for that
+name. The completion notice lists any names applied from saved voices. Listen
+to the corresponding passage to check a label. You can correct it or restore
+the previous transcript.
 
 ClawScribe stores the saved voice characteristics in the local app database and
-never uploads them. Disabling profiles pauses matching and removes pending
+never uploads them. Turning off profiles deletes all saved voices and pending
 suggestions. Use **Delete** in **Settings → Transcription** to remove a person’s
-saved voice data. Edit applied names directly in the transcript. See
+saved voice data. To replace a sample, delete the profile and enroll the voice
+again. Deletion also scrubs old database recovery snapshots. Edit applied
+names directly in the transcript. See
 [Backup and restore](local-library.md#backup-and-restore) for what moves between
 devices.
 

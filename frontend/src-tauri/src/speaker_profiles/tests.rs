@@ -3,6 +3,83 @@ use sqlx::migrate::Migrator;
 use std::borrow::Cow;
 
 #[test]
+fn one_profile_needs_a_clear_lead_over_a_lane_below_threshold() {
+    let profile = KnownVoice {
+        name_key: "alex".into(),
+        name: "Alex".into(),
+        embedding: vec![1.0, 0.0],
+    };
+    let voice_with_score = |score: f32| vec![score, (1.0 - score * score).sqrt()];
+    let mut voices = BTreeMap::from([
+        ("Speaker 1".into(), voice_with_score(0.88)),
+        ("Speaker 2".into(), voice_with_score(0.84)),
+    ]);
+    let profiles = [profile];
+    assert!(unambiguous_matches(&voices, &profiles, &BTreeSet::new()).is_empty());
+    voices.insert("Speaker 2".into(), voice_with_score(0.75));
+    assert_eq!(
+        unambiguous_matches(&voices, &profiles, &BTreeSet::new())["Speaker 1"].name,
+        "Alex"
+    );
+}
+
+#[tokio::test]
+async fn disabling_deletes_saved_voices_and_existing_suggestions() {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    update_preferences(&mut tx, true, false).await.unwrap();
+    save_voice(&mut tx, "Alex", "model", &[1.0, 0.0])
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('saved', 'Meeting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO speaker_profile_suggestions VALUES ('saved', 'Speaker 1', X'00', 'alex', 'model')")
+        .execute(&mut *tx).await.unwrap();
+    let preferences = update_preferences(&mut tx, false, true).await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(!preferences.enabled && !preferences.auto_apply);
+    for count in [
+        "SELECT COUNT(*) FROM speaker_profiles",
+        "SELECT COUNT(*) FROM speaker_profile_suggestions",
+    ] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(count)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn duplicate_enrollment_explains_how_to_replace_the_existing_voice() {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    save_voice(&mut conn, "Alex", "model", &[1.0, 0.0])
+        .await
+        .unwrap();
+    let error = save_voice(&mut conn, "alex", "model", &[0.0, 1.0])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, sqlx::Error::Protocol(message) if message == "A voice is already saved for Alex. Delete it in Transcription settings first.")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT embedding FROM speaker_profiles")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap(),
+        encode_embedding(&[1.0, 0.0])
+    );
+    save_voice(&mut conn, "Alex", "other-model", &[0.0, 1.0])
+        .await
+        .unwrap();
+}
+
+#[test]
 fn rejects_weak_ambiguous_and_duplicate_voice_matches() {
     let known = |name: &str, embedding: Vec<f32>| KnownVoice {
         name_key: name.to_lowercase(),
@@ -223,6 +300,7 @@ async fn suggestions_use_current_lane_and_disappear_with_profile_deletion() {
         generation: 1,
         model: "model".into(),
         voices: BTreeMap::from([("Speaker 1".into(), vec![1.0, 0.0])]),
+        eligible_labels: BTreeSet::from(["Speaker 1".into()]),
     };
     finish_detection(&mut tx, "meeting", &mut segments, Some(capture))
         .await
@@ -287,6 +365,7 @@ async fn auto_apply_requires_current_consent_and_does_not_replace_other_names() 
         generation: 1,
         model: "model".into(),
         voices: BTreeMap::from([("Speaker 1".into(), vec![1.0, 0.0])]),
+        eligible_labels: BTreeSet::from(["Speaker 1".into()]),
     };
     let mut existing = segments[0].clone();
     existing.speaker = Some("Ada".into());
@@ -294,21 +373,38 @@ async fn auto_apply_requires_current_consent_and_does_not_replace_other_names() 
     let cache = finish_detection(&mut tx, "meeting", &mut segments, Some(capture.clone()))
         .await
         .unwrap()
+        .cache
         .unwrap();
     assert_eq!(segments[0].speaker.as_deref(), Some("Speaker 1"));
     assert!(cache.lanes.contains_key("Speaker 1"));
     segments.pop();
-    finish_detection(&mut tx, "meeting", &mut segments, Some(capture.clone()))
+    let result = finish_detection(&mut tx, "meeting", &mut segments, Some(capture.clone()))
         .await
         .unwrap();
+    assert_eq!(result.applied_names, ["Ada"]);
     assert_eq!(segments[0].speaker.as_deref(), Some("Ada"));
     update_preferences(&mut tx, false, true).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM speaker_profiles")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM speaker_profile_suggestions")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
+        0
+    );
     update_preferences(&mut tx, true, true).await.unwrap();
     segments[0].speaker = Some("Speaker 1".into());
     assert!(
         finish_detection(&mut tx, "meeting", &mut segments, Some(capture))
             .await
             .unwrap()
+            .cache
             .is_none()
     );
     assert_eq!(segments[0].speaker.as_deref(), Some("Speaker 1"));

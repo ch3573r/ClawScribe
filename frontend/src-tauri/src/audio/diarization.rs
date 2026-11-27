@@ -1799,6 +1799,7 @@ pub struct SpeakerDiarizationComplete {
     pub provider: String,
     pub embedding_model: String,
     pub turn_count: usize,
+    pub auto_applied_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2356,15 +2357,16 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
             .filter_map(|row| row.speaker.as_deref())
             .filter(|_| preserve_existing_labels)
             .collect();
-        let mut lanes = attempt.speaker_map;
-        lanes.retain(|_, label| {
-            let label = speaker_label(*label);
-            targets.contains(label.as_str()) && !preserved.contains(label.as_str())
-        });
+        let lanes = attempt.speaker_map;
+        let eligible_labels: BTreeSet<_> = lanes
+            .values()
+            .map(|label| speaker_label(*label))
+            .filter(|label| targets.contains(label.as_str()) && !preserved.contains(label.as_str()))
+            .collect();
         let path = attempt.model_paths.embedding_model.clone();
         let cancelled = diarization_cancel_flag();
         let raw_turns = attempt.raw_turns;
-        if !lanes.is_empty() {
+        if !eligible_labels.is_empty() {
             emit_progress(
                 &app,
                 &meeting_id,
@@ -2379,6 +2381,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
                     &path,
                     raw_turns,
                     lanes,
+                    eligible_labels,
                     &samples,
                     &cancelled,
                 )
@@ -2402,7 +2405,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
     );
 
     let roots = super::recording_preferences::recording_roots(&app).await;
-    let (updated_segments, synced) = save_diarization_labels(
+    let (updated_segments, synced, auto_applied_names) = save_diarization_labels(
         &pool,
         &meeting_id,
         &stored_segments,
@@ -2441,6 +2444,7 @@ async fn run_speaker_diarization_for_meeting<R: Runtime>(
         provider: attempt.provider.to_string(),
         embedding_model,
         turn_count,
+        auto_applied_names,
     })
 }
 
@@ -2460,7 +2464,7 @@ async fn save_diarization_labels(
     profile_capture: Option<DetectionSamples>,
     roots: &[PathBuf],
     notes_profile: impl FnOnce(&Path) -> Result<Option<String>, String>,
-) -> Result<(usize, Option<SyncedFiles>)> {
+) -> Result<(usize, Option<SyncedFiles>, Vec<String>)> {
     begin_diarization_save(meeting_id)?;
     // Speaker labels do not change what produced the text; keep its provenance
     // with the archived revision so a later restore does not turn it "unknown".
@@ -2475,7 +2479,7 @@ async fn save_diarization_labels(
     {
         return Err(anyhow!("The transcript changed while speakers were being detected. Run speaker detection again."));
     }
-    let voice_cache =
+    let voice_outcome =
         speaker_profiles::finish_detection(&mut tx, meeting_id, mapped_segments, profile_capture)
             .await?;
     let updated_segments = count_changed_transcript_segments(stored_segments, mapped_segments);
@@ -2546,7 +2550,7 @@ async fn save_diarization_labels(
         .await?;
     tx.commit().await?;
     if crate::audio::diarization::is_diarizing_meeting(meeting_id) {
-        speaker_profiles::offer_detection_sample(voice_cache);
+        speaker_profiles::offer_detection_sample(voice_outcome.cache);
     }
     let synced = crate::database::transcript_edits::sync_file_with_profile(
         pool,
@@ -2555,7 +2559,7 @@ async fn save_diarization_labels(
         notes_profile,
     )
     .await;
-    Ok((updated_segments, synced.ok()))
+    Ok((updated_segments, synced.ok(), voice_outcome.applied_names))
 }
 
 async fn run_diarization_mapping_attempt<R: Runtime>(
@@ -4466,7 +4470,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let (updated, synced) = save_diarization_labels(
+        let (updated, synced, _) = save_diarization_labels(
             &pool,
             "review-test",
             &stored,

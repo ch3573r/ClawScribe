@@ -621,3 +621,6 @@ meetings. Each new snapshot keeps the newest two, and startup cleanup removes
 snapshots older than 14 days. Retention can last longer while the app is closed
 or cleanup fails. Portable backups are separate, unencrypted archives. Meeting
 deletion does not remove these archives or copies exported elsewhere.
+Speaker profiles and pending voice matches are removed from pre-migration
+snapshots before publishing them. ClawScribe also scrubs older local snapshots
+on startup and when deleting a profile or turning off speaker profiles.

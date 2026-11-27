@@ -24,6 +24,13 @@ test('only a new person name can be remembered from an eligible speaker lane', (
   assert.equal(canRememberSpeaker(undefined, getSpeakerRename(catalog, 'Speaker 1', 'Ada')), false);
 });
 
+test('the completion message lists automatically matched names and asks for review', () => {
+  const { autoAppliedSpeakerMessage } = load();
+  assert.equal(autoAppliedSpeakerMessage(), null);
+  assert.equal(autoAppliedSpeakerMessage(['Ada']), 'Matched Ada using a saved voice. Review the labels in the transcript.');
+  assert.equal(autoAppliedSpeakerMessage(['Ada', 'Grace']), 'Matched Ada, Grace using saved voices. Review the labels in the transcript.');
+});
+
 test('catalog orders speakers by time, counts all loaded rows and keeps unlabeled rows neutral', () => {
   const { buildSpeakerCatalog, getSpeakerColor } = load();
   const catalog = buildSpeakerCatalog([

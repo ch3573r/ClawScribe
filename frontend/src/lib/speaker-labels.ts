@@ -103,3 +103,9 @@ export function canRememberSpeaker(
   return Boolean(option?.canRemember && rename.changed && !rename.merge && rename.name
     && !/^(?:me|participants|unlabeled|speaker \d+)$/i.test(rename.name));
 }
+
+export function autoAppliedSpeakerMessage(names: readonly string[] = []): string | null {
+  if (!names.length) return null;
+  const source = names.length === 1 ? "a saved voice" : "saved voices";
+  return `Matched ${names.join(", ")} using ${source}. Review the labels in the transcript.`;
+}
