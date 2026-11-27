@@ -80,6 +80,10 @@ runs in the background: the window keeps its page and any unsaved text, and it
 is not brought to the front. See
 [Recording from the tray, shortcuts and command line](docs/tray-and-recording-control.md).
 
+To start ClawScribe in the tray at Windows sign-in, turn on **Start ClawScribe
+when I sign in to Windows** in **Settings → Preferences**. This lets enabled
+call detection run without opening the main window.
+
 ## Capture And Transcription
 
 - Microphone and system-audio capture from the local Windows session.
@@ -212,6 +216,9 @@ project, date and attention filters when you return. Choose **Hybrid** to add
 semantic transcript matches when the local semantic index is ready. Use
 **Select meetings** for bulk tagging, local export, deletion, or to scope a
 Meeting memory conversation.
+
+Export a saved transcript as SRT or WebVTT subtitles, with optional speaker
+labels. You can export a single meeting or a batch from the Archive.
 
 Read and correct the transcript while the speaker timeline loads. The text
 stays available when the recording is missing. Use **Find and replace** to

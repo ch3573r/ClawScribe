@@ -46,9 +46,9 @@ recording-folder support files, and existing backups remain available.
 Imported originals outside the meeting folder remain where they were.
 ClawScribe only removes audio after confirmation.
 
-Use **Bulk actions** to add project tags to the selection, export a Markdown
-or Word file per meeting, start a Meeting memory conversation with those
-meetings selected, or delete them. Export asks where to save each file. Cancel
+Use **Bulk actions** to add project tags to the selection, export a Markdown,
+Word, SRT, or WebVTT file per meeting, start a Meeting memory conversation with
+those meetings selected, or delete them. Export asks where to save each file. Cancel
 a save dialog to stop the batch. Deleting requires confirmation and keeps
 recording files on disk unless you also select their removal. Opening a scoped
 Meeting memory conversation leaves the question and sending under your control.
@@ -328,6 +328,15 @@ confirmed attendee names, and project tags when available.
 
 ClawScribe opens the native save dialog and authorizes the chosen path for that
 export. Local document exports require no Microsoft connection.
+
+## Subtitles
+
+Choose **SRT subtitles (.srt)** or **WebVTT subtitles (.vtt)** in a saved meeting's
+**Export** menu or in the Archive's **Bulk actions → Export meetings** dialog.
+ClawScribe uses the start and end times saved with each transcript segment.
+Speaker labels are on by default and can be turned off. The export skips segments
+without usable recording times and reports an error if the meeting has no timed
+text. You can still export those transcripts as Word or Markdown.
 
 ## Shared document export options
 

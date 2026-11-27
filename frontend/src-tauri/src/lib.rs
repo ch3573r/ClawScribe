@@ -671,6 +671,19 @@ pub fn run() {
 
     let mut context = tauri::generate_context!();
     database::recovery::configure(&mut context);
+    let start_hidden = cfg!(windows) && cli_control::is_sign_in_launch(std::env::args_os());
+    if start_hidden {
+        if let Some(main) = context
+            .config_mut()
+            .app
+            .windows
+            .iter_mut()
+            .find(|w| w.label == "main")
+        {
+            main.visible = false;
+            main.focus = false;
+        }
+    }
     let mut builder = tauri::Builder::default();
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
@@ -682,6 +695,16 @@ pub fn run() {
                 || tray::focus_main_window(app),
             );
         }));
+    }
+
+    #[cfg(windows)]
+    {
+        builder = builder.plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name(cli_control::AUTOSTART_NAME)
+                .arg(cli_control::START_IN_TRAY_ARG)
+                .build(),
+        );
     }
 
     builder
@@ -729,7 +752,7 @@ pub fn run() {
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
-        .setup(|_app| {
+        .setup(move |_app| {
             // Settings that change how the core behaves come from the core's own
             // storage, before anything can start a recording or an import.
             behavior_settings::load_and_apply(_app.handle());
@@ -765,6 +788,9 @@ pub fn run() {
             // Initialize system tray
             if let Err(e) = tray::create_tray(_app.handle()) {
                 log::error!("Failed to create system tray: {}", e);
+                if start_hidden {
+                    tray::focus_main_window(_app.handle());
+                }
             }
             // Tray icon and tooltip follow the recorder, and the PC is kept
             // awake only while audio is captured. Independent of the tray
@@ -896,6 +922,7 @@ pub fn run() {
             }
         })
         .invoke_handler(floating::restrict_commands(tauri::generate_handler![
+            cli_control::enable_windows_autostart,
             floating::open_floating_controls,
             floating::floating_status,
             floating::recording_window_appearance,
@@ -939,6 +966,7 @@ pub fn run() {
             library::summary_bookmarks::set_meeting_summary_bookmarks,
             library::export_local_word,
             library::export_local_markdown,
+            library::export_local_subtitles,
             exports::metadata::get_meeting_export_header,
             exports::local_open::open_saved_meeting_export,
             library::backup::backup_library,
@@ -1084,6 +1112,7 @@ pub fn run() {
             file_grants::pick_backup_restore_path,
             file_grants::pick_word_save_path,
             file_grants::pick_markdown_save_path,
+            file_grants::pick_subtitle_save_path,
             audio::interrupted::find_interrupted_recordings,
             audio::interrupted::preview_interrupted_recording,
             audio::interrupted::discard_interrupted_recording,

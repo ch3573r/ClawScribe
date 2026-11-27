@@ -2,12 +2,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { archiveDateKey } from "@/lib/archive-review";
 import { safeDocumentName } from "@/lib/library";
 import { isEditorSummary, readMeetingSummary } from "@/lib/meeting-summary";
+import { exportMeetingSubtitles, isSubtitleFormat, type SubtitleFormat } from "@/lib/subtitle-export";
 import type { SummaryDataResponse } from "@/types";
 import type { ArchiveMeeting } from "./ArchiveAudioRemoval";
 
-export type LocalExportFormat = "markdown" | "word";
+export type LocalExportFormat = "markdown" | "word" | SubtitleFormat;
 
-export async function exportArchiveMeeting(meeting: ArchiveMeeting, format: LocalExportFormat): Promise<boolean> {
+export async function exportArchiveMeeting(meeting: ArchiveMeeting, format: LocalExportFormat, subtitleSpeakers = true): Promise<boolean> {
+  if (isSubtitleFormat(format)) {
+    return (await exportMeetingSubtitles(meeting.id, meeting.title, meeting.created_at, format, subtitleSpeakers)) !== null;
+  }
   const summary = await invoke<{ data: SummaryDataResponse | null }>("api_get_summary", { meetingId: meeting.id });
   const { summary: notes } = readMeetingSummary(summary.data);
   let markdown = "";

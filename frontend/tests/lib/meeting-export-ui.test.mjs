@@ -25,6 +25,7 @@ async function setup({ connected = true, planner = true, todo = true, rest = fal
     '@/hooks/useWebhookSettings': { useWebhookSettings: () => ({ status: 'ready', value: webhook }) },
     '@/components/IntegrationIcons': names('ConfluenceIcon WordIcon OneNoteIcon OneDriveIcon PlannerIcon ToDoIcon'),
     '@/components/ui/button': names('Button'),
+    '@/components/ui/checkbox': names('Checkbox'),
     '@/components/ui/input': names('Input'),
     '@/components/ui/textarea': names('Textarea'),
     '@/components/ui/select': names('Select SelectContent SelectItem SelectTrigger SelectValue'),
@@ -36,14 +37,14 @@ async function setup({ connected = true, planner = true, todo = true, rest = fal
     './PlannerExportPreview': names('PlannerExportPreview'),
     './ToDoExportPreview': names('ToDoExportPreview'),
     '@tauri-apps/api/core': { invoke: async (command, args) => {
-      if (command === 'pick_word_save_path' || command === 'pick_markdown_save_path') {
+      if (['pick_word_save_path', 'pick_markdown_save_path', 'pick_subtitle_save_path'].includes(command)) {
         // The core opens the dialog: this is the one place the user picks the file.
         calls.push({ kind: 'save', command, args });
         return save();
       }
       calls.push({ kind: command, args });
       if (command === 'send_meeting_webhook') return { outcome: 'succeeded', httpStatus: 204 };
-      if (command === 'export_local_word' || command === 'export_local_markdown') return canOpen;
+      if (['export_local_word', 'export_local_markdown', 'export_local_subtitles'].includes(command)) return canOpen;
       if (command === 'get_meeting_export_header') {
         return {
           markdown: '# Review\n\n- Date: 2026-01-01\n',
@@ -95,6 +96,33 @@ const destinations = [
   ['OneDrive DOCX/PDF', 'Upload to OneDrive', 'onedrive'],
   ['OneNote', 'Export page', 'onenote'],
 ];
+
+test('subtitle exports save the transcript with the selected format and speaker-label option', async () => {
+  for (const [format, label] of [['srt', 'SRT subtitles'], ['vtt', 'WebVTT subtitles']]) {
+    const path = `review.${format}`;
+    const view = await setup({ connected: false, save: async () => path });
+    find(view.render(), 'DropdownMenuItem', `${label} (.${format})`).props.onSelect();
+    const dialog = nodes(view.render()).find(node =>
+      node.type === 'DialogContent' && find(node, 'DialogTitle', `Export ${label}`));
+    assert.ok(dialog);
+    assert.equal(find(dialog, 'ExportContentOptions'), undefined);
+    const speakers = find(dialog, 'Checkbox');
+    assert.equal(speakers.props.checked, true);
+    if (format === 'vtt') speakers.props.onCheckedChange(false);
+    await find(view.render(), 'Button', 'Save subtitles').props.onClick();
+    const save = view.calls.find(call => call.kind === 'save');
+    assert.equal(save.command, 'pick_subtitle_save_path');
+    assert.equal(save.args.format, format);
+    assert.ok(save.args.suggestedName.endsWith(`.${format}`));
+    const write = view.calls.find(call => call.kind === 'export_local_subtitles');
+    assert.equal(write.args.meetingId, 'meeting');
+    assert.equal(write.args.format, format);
+    assert.equal(write.args.path, path);
+    assert.equal(write.args.includeSpeakers, format === 'srt');
+    assert.ok(!view.calls.some(call => call.kind === 'api_get_meeting'));
+    assert.deepEqual(view.errors, []);
+  }
+});
 
 test('Word export uses its integration icon', async () => {
   const view = await setup();

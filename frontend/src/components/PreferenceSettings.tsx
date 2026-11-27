@@ -10,6 +10,7 @@ import { Switch } from "./ui/switch";
 import { Meta, SettingsCard, SettingsRow, SettingsStack } from "./ui/settings-layout";
 import { NoteRow } from "./settings/settings-parts";
 import { UpdateChannelSettings } from "./UpdateChannelSettings";
+import { WindowsStartupSettings } from "./WindowsStartupSettings";
 import { PendingRecordingNotes } from "./PendingRecordingNotes";
 import { LibraryBackup } from "./LibraryBackup";
 import { ArchiveStorageButton } from "./Archive/ArchiveStorageButton";
@@ -186,6 +187,7 @@ export function PreferenceSettings() {
 
   return (
     <SettingsStack>
+      <WindowsStartupSettings />
       <SettingsCard title="Updates">
         <SettingsRow
           title="Check for updates automatically"

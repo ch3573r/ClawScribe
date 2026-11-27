@@ -10,6 +10,7 @@ mod markdown;
 pub mod pending_recording_notes;
 pub(crate) mod recording_calendar;
 pub(crate) mod saved_text;
+pub(crate) mod subtitles;
 pub mod summary_bookmarks;
 
 use crate::exports::metadata::{export_timestamp, Header};
@@ -638,10 +639,59 @@ async fn export_local_markdown_to(
     .map_err(|_| "Markdown export was interrupted.")?
 }
 
+#[tauri::command]
+pub(crate) async fn export_local_subtitles(
+    app: AppHandle,
+    meeting_id: String,
+    format: subtitles::SubtitleFormat,
+    include_speakers: bool,
+    path: String,
+) -> Result<bool, String> {
+    let purpose = crate::file_grants::Purpose::SubtitleSave(format);
+    let granted = crate::file_grants::take(purpose, &path)?;
+    let state = app.state::<AppState>();
+    let result = export_local_subtitles_to(
+        state.db_manager.pool(),
+        &meeting_id,
+        format,
+        include_speakers,
+        granted.path.clone(),
+    )
+    .await;
+    if result.is_err() {
+        crate::file_grants::give_back(purpose, &granted);
+    }
+    result?;
+    Ok(tokio::task::spawn_blocking(move || {
+        crate::exports::local_open::allow_saved_file(&granted.path)
+    })
+    .await
+    .unwrap_or(false))
+}
+
+async fn export_local_subtitles_to(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    format: subtitles::SubtitleFormat,
+    include_speakers: bool,
+    path: std::path::PathBuf,
+) -> Result<(), String> {
+    let passages = read_export_transcript(pool, meeting_id).await?;
+    tokio::task::spawn_blocking(move || {
+        crate::file_grants::save_target_parent_exists(&path)?;
+        let rendered = subtitles::render(&passages, format, include_speakers)
+            .ok_or("This meeting has no transcript segments with recording times.")?;
+        atomic_write(&path, rendered.as_bytes())
+    })
+    .await
+    .map_err(|_| "Subtitle export was interrupted.")?
+}
+
 #[derive(sqlx::FromRow)]
 struct TranscriptPassage {
     timestamp: String,
     audio_start_time: Option<f64>,
+    audio_end_time: Option<f64>,
     speaker: Option<String>,
     text: String,
 }
@@ -652,7 +702,7 @@ async fn read_export_transcript(
 ) -> Result<Vec<TranscriptPassage>, String> {
     // Use the current saved text and speaker, independently of the UI's current page.
     sqlx::query_as(
-        "SELECT timestamp, audio_start_time, speaker, transcript AS text FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
+        "SELECT timestamp, audio_start_time, audio_end_time, speaker, transcript AS text FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
     )
     .bind(meeting_id)
     .fetch_all(pool)
@@ -676,6 +726,7 @@ async fn read_word_transcript(
                  audio_start_time,
                  speaker,
                  text,
+                 ..
              }| {
                 let time = if timestamps {
                     export_timestamp(&timestamp, audio_start_time)
@@ -867,6 +918,72 @@ mod tests {
         assert_eq!(clean_label("  Project   Ä  ", 60).unwrap(), "Project Ä");
         assert!(clean_label("\n", 60).is_err());
         assert!(clean_label(&"x".repeat(61), 60).is_err());
+    }
+
+    #[tokio::test]
+    async fn subtitle_exports_use_saved_audio_offsets_and_skip_untimed_text() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query(
+            "UPDATE transcripts SET transcript = '  <edited> & first' || char(13, 10, 13, 10) || 'second --> line',
+             speaker = 'Änne & Jo', audio_start_time = 3661.125, audio_end_time = 3663.5 WHERE id = 'a'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE transcripts SET audio_end_time = NULL WHERE id = 'b'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        for (format, speakers, expected) in [
+            (
+                subtitles::SubtitleFormat::Srt,
+                true,
+                "1\n01:01:01,125 --> 01:01:03,500\nÄnne & Jo: <edited> & first second --> line\n\n",
+            ),
+            (
+                subtitles::SubtitleFormat::Vtt,
+                true,
+                "WEBVTT\n\n01:01:01.125 --> 01:01:03.500\nÄnne &amp; Jo: &lt;edited&gt; &amp; first second --&gt; line\n\n",
+            ),
+            (
+                subtitles::SubtitleFormat::Vtt,
+                false,
+                "WEBVTT\n\n01:01:01.125 --> 01:01:03.500\n&lt;edited&gt; &amp; first second --&gt; line\n\n",
+            ),
+        ] {
+            let path = directory.path().join("meeting").with_extension(format.extension());
+            export_local_subtitles_to(&pool, "review-test", format, speakers, path.clone())
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn subtitle_export_without_timed_text_leaves_existing_file_intact() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        sqlx::query("UPDATE transcripts SET audio_start_time = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("meeting.vtt");
+        std::fs::write(&path, "Existing file").unwrap();
+        let error = export_local_subtitles_to(
+            &pool,
+            "review-test",
+            subtitles::SubtitleFormat::Vtt,
+            true,
+            path.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "This meeting has no transcript segments with recording times."
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "Existing file");
     }
     #[tokio::test]
     async fn live_bookmarks_attach_and_tags_cascade() {

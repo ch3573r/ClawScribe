@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::library::subtitles::SubtitleFormat;
+
 const GRANT_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const MAX_GRANTS: usize = 32;
 pub(crate) const AUDIO_EXTENSIONS: &[&str] = &[
@@ -37,6 +39,8 @@ pub(crate) enum Purpose {
     WordSave,
     /// Where to write a Markdown export (`.md`).
     MarkdownSave,
+    /// Where to write a subtitle export in the chosen format.
+    SubtitleSave(SubtitleFormat),
     /// Open or locate a document successfully written from an export save grant.
     OpenExport,
     /// The folder recordings are saved in.
@@ -327,6 +331,22 @@ pub async fn pick_markdown_save_path<R: Runtime>(
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
+#[tauri::command]
+pub(crate) async fn pick_subtitle_save_path<R: Runtime>(
+    app: AppHandle<R>,
+    format: SubtitleFormat,
+    suggested_name: String,
+) -> Result<Option<String>, String> {
+    let extension = format.extension();
+    let Some(chosen) = pick_save(app, format.label(), extension, suggested_name).await? else {
+        return Ok(None);
+    };
+    let path = with_extension(chosen, extension)?;
+    save_target_parent_exists(&path)?;
+    grant(Purpose::SubtitleSave(format), &path)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
 /// Grants the audio files of a drop on the window. The core saw the drop, so it
 /// is a user choice; the paths are never taken from a webview argument.
 pub(crate) fn grant_dropped_audio(paths: &[PathBuf]) -> Vec<String> {
@@ -382,6 +402,18 @@ mod tests {
         give_back(Purpose::WordSave, &taken);
         let again = take(Purpose::WordSave, &chosen.to_string_lossy()).unwrap();
         assert_eq!(again.granted, original, "the lifetime does not restart");
+    }
+
+    #[test]
+    fn subtitle_save_grant_is_limited_to_the_requested_format() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let path = local("subtitles.srt");
+        let srt = Purpose::SubtitleSave(SubtitleFormat::Srt);
+        let vtt = Purpose::SubtitleSave(SubtitleFormat::Vtt);
+        grant(srt, &path).unwrap();
+        assert!(take(vtt, &path.to_string_lossy()).is_err());
+        assert!(take(srt, &path.to_string_lossy()).is_ok());
+        assert!(take(srt, &path.to_string_lossy()).is_err());
     }
 
     #[test]

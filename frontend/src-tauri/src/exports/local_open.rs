@@ -17,9 +17,11 @@ fn saved_file(text: &str) -> Result<PathBuf, String> {
 
 fn validate_saved_file(path: &Path) -> Result<(), String> {
     if !local_path::is_local_path_text(&path.to_string_lossy())
-        || !path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("docx") || ext.eq_ignore_ascii_case("md"))
+        || !path.extension().is_some_and(|ext| {
+            ["docx", "md", "srt", "vtt"]
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+        })
     {
         return Err(UNAVAILABLE.into());
     }

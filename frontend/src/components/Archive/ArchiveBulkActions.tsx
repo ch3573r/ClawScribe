@@ -13,6 +13,7 @@ import { addTag } from "@/lib/library";
 import { discardMeetingDraft } from "@/lib/meetingDrafts";
 import { indexedDBService } from "@/services/indexedDBService";
 import { openStorageDialog } from "@/lib/storage-dialog-controller";
+import { isSubtitleFormat, subtitleFormats } from "@/lib/subtitle-export";
 import type { ArchiveMeeting } from "./ArchiveAudioRemoval";
 import { exportArchiveMeeting, type LocalExportFormat } from "./archive-bulk-export";
 
@@ -21,7 +22,7 @@ const labels = { tag: "Add project tags", delete: "Delete meetings", export: "Ex
 const description = {
   tag: "Add tags to each selected meeting. Existing tags stay in place. Separate tags with commas.",
   delete: "Permanently remove the selected meetings, transcripts, and notes from ClawScribe.",
-  export: "Save a file with the saved notes and transcript for each meeting. Choose each path in the save dialog. Cancel a save dialog to stop the batch.",
+  export: "Choose where to save each meeting. Cancel a save dialog to stop the batch.",
 };
 
 export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onReturnFocus }: {
@@ -37,6 +38,7 @@ export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onRet
   const [tag, setTag] = useState("");
   const [deleteFiles, setDeleteFiles] = useState(false);
   const [format, setFormat] = useState<LocalExportFormat>("markdown");
+  const [subtitleSpeakers, setSubtitleSpeakers] = useState(true);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState<{ count: number; stopped: boolean; failures: { title: string; message: string }[]; cleanup: boolean; cacheFailure: boolean } | null>(null);
@@ -67,7 +69,7 @@ export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onRet
           setProgress(`${index + 1} of ${meetings.length} · ${meeting.title}`);
           try {
             if (action === "export") {
-              if (!await exportArchiveMeeting(meeting, format)) { summary.stopped = true; break; }
+              if (!await exportArchiveMeeting(meeting, format, subtitleSpeakers)) { summary.stopped = true; break; }
             } else {
               const outcome = await invoke<{ cleanup_pending: boolean }>("api_delete_meeting", { meetingId: meeting.id, deleteFiles });
               discardMeetingDraft(meeting.id);
@@ -116,8 +118,19 @@ export function ArchiveBulkActions({ action, meetings, onClose, onDeleted, onRet
           <label htmlFor="archive-bulk-format">File format</label>
           <Select value={format} onValueChange={value => setFormat(value as LocalExportFormat)} disabled={!!progress}>
             <SelectTrigger id="archive-bulk-format"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="markdown">Markdown (.md)</SelectItem><SelectItem value="word">Word (.docx)</SelectItem></SelectContent>
+            <SelectContent>
+              <SelectItem value="markdown">Markdown (.md)</SelectItem>
+              <SelectItem value="word">Word (.docx)</SelectItem>
+              {subtitleFormats.map(({ format, label }) => <SelectItem key={format} value={format}>{label}</SelectItem>)}
+            </SelectContent>
           </Select>
+          {isSubtitleFormat(format) ? <>
+            <p className="text-muted-foreground">Only segments with recording times are included.</p>
+            <label className="flex items-center gap-2">
+              <Checkbox checked={subtitleSpeakers} disabled={!!progress} onCheckedChange={checked => setSubtitleSpeakers(checked === true)} />
+              Speaker labels
+            </label>
+          </> : <p className="text-muted-foreground">Includes saved notes and the transcript.</p>}
         </div>}
         {progress && <p role="status" className="text-sm text-muted-foreground">{progress}</p>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}

@@ -81,6 +81,7 @@ mod tests {
         let passages = [TranscriptPassage {
             timestamp: "09:00:00".into(),
             audio_start_time: Some(65.9),
+            audio_end_time: Some(67.0),
             speaker: Some("Änne".into()),
             text: "Edited passage.".into(),
         }];
@@ -116,6 +117,7 @@ mod tests {
         let passages = [TranscriptPassage {
             timestamp: "00:42".into(),
             audio_start_time: None,
+            audio_end_time: None,
             speaker: Some("*Dana* [guest]".into()),
             text: "First line\r\n# still the passage".into(),
         }];

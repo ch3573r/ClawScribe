@@ -5,7 +5,43 @@
 //! flags and drives the same recording path the tray and global shortcut use.
 //! `--pause-recording` toggles between paused and recording.
 
+use std::ffi::OsStr;
 use tauri::{AppHandle, Runtime};
+
+pub(crate) const START_IN_TRAY_ARG: &str = "--start-in-tray";
+#[cfg(windows)]
+pub(crate) const AUTOSTART_NAME: &str = "ClawScribe";
+
+pub(crate) fn is_sign_in_launch(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> bool {
+    args.into_iter()
+        .skip(1)
+        .any(|arg| arg.as_ref() == OsStr::new(START_IN_TRAY_ARG))
+}
+
+#[cfg(any(windows, test))]
+fn quote_startup_exe(path: &std::path::Path) -> Option<String> {
+    let path = path.to_str()?;
+    (!path.contains('"')).then(|| format!("\"{path}\""))
+}
+
+#[tauri::command]
+pub(crate) async fn enable_windows_autostart() -> Result<(), String> {
+    #[cfg(windows)]
+    return tokio::task::spawn_blocking(|| {
+        let exe = std::env::current_exe().map_err(|_| "Could not locate ClawScribe.")?;
+        let path =
+            quote_startup_exe(&exe).ok_or("Could not use the ClawScribe installation path.")?;
+        // The plugin's Windows launcher does not quote the Run command's path.
+        // Quote it before writing the per-user entry, including on paths with spaces.
+        auto_launch::AutoLaunch::new(AUTOSTART_NAME, &path, &[START_IN_TRAY_ARG])
+            .enable()
+            .map_err(|_| "Windows could not enable ClawScribe startup.".to_string())
+    })
+    .await
+    .map_err(|_| "Changing Windows startup was interrupted.".to_string())?;
+    #[cfg(not(windows))]
+    Err("This startup setting is available on Windows.".into())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliAction {
@@ -36,7 +72,8 @@ pub(crate) fn dispatch_forwarded(
 ) {
     match parse_cli_action(args) {
         Some(action) => run(action),
-        None => focus_main(),
+        None if !is_sign_in_launch(args) => focus_main(),
+        None => {}
     }
 }
 
@@ -158,5 +195,35 @@ mod tests {
             );
             assert_eq!(actions, [action]);
         }
+    }
+
+    #[test]
+    fn sign_in_launch_stays_hidden_but_an_explicit_launch_focuses_the_window() {
+        assert!(is_sign_in_launch(["app.exe", "--start-in-tray"]));
+        assert!(!is_sign_in_launch(["app.exe"]));
+        assert!(!is_sign_in_launch(["--start-in-tray"]));
+
+        let focused = std::cell::Cell::new(false);
+        for (args, should_focus) in [
+            (vec!["app.exe", "--start-in-tray"], false),
+            (vec!["app.exe"], true),
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            dispatch_forwarded(
+                &args,
+                |_| panic!("sign-in launch must not issue a recording command"),
+                || focused.set(true),
+            );
+            assert_eq!(focused.replace(false), should_focus);
+        }
+    }
+
+    #[test]
+    fn startup_executable_with_spaces_is_quoted() {
+        let exe = std::path::Path::new(r"C:\Program Files\ClawScribe\ClawScribe.exe");
+        assert_eq!(
+            quote_startup_exe(exe).as_deref(),
+            Some(r#""C:\Program Files\ClawScribe\ClawScribe.exe""#)
+        );
     }
 }
