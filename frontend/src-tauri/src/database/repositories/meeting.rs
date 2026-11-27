@@ -25,6 +25,16 @@ const TRASH_RETENTION: &str = "+30 days";
 const EXPIRED: &str = "datetime(deleted_at, ?1) <= CURRENT_TIMESTAMP";
 
 impl MeetingsRepository {
+    pub(crate) async fn is_active<'e>(
+        executor: impl sqlx::SqliteExecutor<'e>,
+        meeting_id: &str,
+    ) -> Result<bool, SqlxError> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM active_meetings WHERE id = ?)")
+            .bind(meeting_id)
+            .fetch_one(executor)
+            .await
+    }
+
     pub async fn get_meetings(pool: &SqlitePool) -> Result<Vec<MeetingModel>, sqlx::Error> {
         sqlx::query_as("SELECT id,title,created_at,updated_at,folder_path FROM active_meetings ORDER BY created_at DESC")
             .fetch_all(pool)

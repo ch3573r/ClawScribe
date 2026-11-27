@@ -14,6 +14,7 @@ pub(crate) mod subtitles;
 pub mod summary_bookmarks;
 pub(crate) mod trash;
 
+use crate::database::repositories::meeting::MeetingsRepository;
 use crate::exports::metadata::{export_timestamp, Header};
 use crate::state::AppState;
 use serde::Serialize;
@@ -679,7 +680,15 @@ async fn export_local_subtitles_to(
     include_speakers: bool,
     path: std::path::PathBuf,
 ) -> Result<(), String> {
-    let passages = read_export_transcript(pool, meeting_id).await?;
+    let mut tx = pool.begin().await.map_err(|_| "Could not read transcript.")?;
+    if !MeetingsRepository::is_active(&mut *tx, meeting_id)
+        .await
+        .map_err(|_| "Could not read transcript.")?
+    {
+        return Err("Meeting not found.".into());
+    }
+    let passages = read_export_transcript(&mut *tx, meeting_id).await?;
+    tx.commit().await.map_err(|_| "Could not read transcript.")?;
     tokio::task::spawn_blocking(move || {
         crate::file_grants::save_target_parent_exists(&path)?;
         let rendered = subtitles::render(&passages, format, include_speakers)
@@ -699,8 +708,8 @@ struct TranscriptPassage {
     text: String,
 }
 
-async fn read_export_transcript(
-    pool: &SqlitePool,
+async fn read_export_transcript<'e>(
+    executor: impl sqlx::SqliteExecutor<'e>,
     meeting_id: &str,
 ) -> Result<Vec<TranscriptPassage>, String> {
     // Use the current saved text and speaker, independently of the UI's current page.
@@ -708,7 +717,7 @@ async fn read_export_transcript(
         "SELECT timestamp, audio_start_time, audio_end_time, speaker, transcript AS text FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
     )
     .bind(meeting_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(|_| "Could not read transcript.".into())
 }
@@ -961,6 +970,29 @@ mod tests {
                 .unwrap();
             assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn subtitle_export_rejects_trashed_meetings() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        assert!(MeetingsRepository::move_to_trash(&pool, "review-test", false)
+            .await
+            .unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("meeting.srt");
+        std::fs::write(&path, "Existing file").unwrap();
+
+        let error = export_local_subtitles_to(
+            &pool,
+            "review-test",
+            subtitles::SubtitleFormat::Srt,
+            true,
+            path.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Meeting not found.");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "Existing file");
     }
 
     #[tokio::test]
