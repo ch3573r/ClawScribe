@@ -1763,7 +1763,7 @@ fn accept_import_segment<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::common::{create_transcript_segments, write_transcripts_json};
+    use super::super::common::create_transcript_segments;
     use super::*;
     use crate::audio::common::split_segment_at_silence;
 
@@ -2245,58 +2245,6 @@ mod tests {
             total_samples >= 60 * 16000,
             "Overlap should not lose samples"
         );
-    }
-
-    #[test]
-    fn test_write_transcripts_json() {
-        let dir = tempfile::tempdir().unwrap();
-        let segments = vec![
-            TranscriptSegment {
-                id: "t-1".to_string(),
-                text: "Hello world".to_string(),
-                timestamp: "2024-01-01T00:00:00Z".to_string(),
-                audio_start_time: Some(0.0),
-                audio_end_time: Some(1.5),
-                duration: Some(1.5),
-                speaker: Some("Participants".to_string()),
-                word_timestamps: None,
-            },
-            TranscriptSegment {
-                id: "t-2".to_string(),
-                text: "Second segment".to_string(),
-                timestamp: "2024-01-01T00:00:01Z".to_string(),
-                audio_start_time: Some(2.0),
-                audio_end_time: Some(3.5),
-                duration: Some(1.5),
-                speaker: None,
-                word_timestamps: None,
-            },
-        ];
-
-        let result = write_transcripts_json(dir.path(), &segments);
-        assert!(
-            result.is_ok(),
-            "write_transcripts_json failed: {:?}",
-            result
-        );
-
-        // Verify file exists and is valid JSON
-        let path = dir.path().join("transcripts.json");
-        assert!(path.exists());
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed["total_segments"], 2);
-        assert_eq!(parsed["version"], "1.0");
-        assert_eq!(parsed["segments"][0]["text"], "Hello world");
-        assert_eq!(parsed["segments"][1]["text"], "Second segment");
-        assert_eq!(parsed["segments"][0]["speaker"], "Participants");
-        assert!(parsed["segments"][1]["speaker"].is_null());
-        assert_eq!(parsed["segments"][0]["sequence_id"], 0);
-        assert_eq!(parsed["segments"][1]["sequence_id"], 1);
-
-        // Verify temp file was cleaned up
-        assert!(!dir.path().join(".transcripts.json.tmp").exists());
     }
 
     #[tokio::test]

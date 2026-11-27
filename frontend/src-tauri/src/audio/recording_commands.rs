@@ -166,11 +166,11 @@ mod stop_tests {
         let mut previous = 0;
         for transcribes in [true, false, true] {
             let mut manager = RecordingManager::new();
-            let (startup, _sink) =
+            let (startup, sink) =
                 prepare_live_recording(&runtime, &mut manager, transcribes).unwrap();
             let id = startup.commit();
             let canonical = serde_json::to_value(runtime.live.snapshot(&id).unwrap()).unwrap();
-            let producer = serde_json::to_value(manager.live_snapshot().unwrap()).unwrap();
+            let producer = serde_json::to_value(sink.snapshot().unwrap()).unwrap();
             assert_eq!(canonical["session_id"], id);
             assert_eq!(producer["session_id"], id);
             assert_eq!(producer["transcription_available"], transcribes);

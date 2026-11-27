@@ -374,23 +374,6 @@ pub async fn api_search_transcripts<R: Runtime>(
 }
 
 #[tauri::command]
-pub(crate) async fn api_search_library(
-    state: tauri::State<'_, AppState>,
-    query: String,
-    scope: Option<crate::knowledge::types::KnowledgeScope>,
-    one_per_meeting: Option<bool>,
-) -> Result<crate::knowledge::store::literal::LinkedHits, String> {
-    crate::knowledge::store::literal::linked(
-        state.db_manager.pool(),
-        &query,
-        scope.as_ref(),
-        one_per_meeting.unwrap_or_default(),
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 pub async fn api_get_model_config<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
