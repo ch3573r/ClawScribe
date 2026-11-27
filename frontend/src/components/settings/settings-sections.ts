@@ -30,7 +30,7 @@ export const SETTINGS_GROUPS: { label: string; items: SectionItem[] }[] = [
   {
     label: "Workspace",
     items: [
-      { value: "general", label: "General", icon: Settings2, desc: "Close button and system tray, updates, notifications, recording folder, library storage, backup and restore" },
+      { value: "general", label: "General", icon: Settings2, desc: "Windows sign-in startup, close button and system tray, updates, notifications, recording folder, library storage, backup and restore" },
       { value: "privacy", label: "Privacy", icon: ShieldCheck, desc: "What stays on this PC and what leaves it" },
       { value: "appearance", label: "Appearance", icon: Palette, desc: "Theme, accent colour and interface font" },
       { value: "recording", label: "Recording", icon: Mic, desc: "Capture, audio devices and call detection" },

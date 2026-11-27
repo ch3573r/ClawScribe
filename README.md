@@ -85,7 +85,7 @@ Under **Settings → General → Close button**, choose **Quit** to exit when
 closing the window. If a recording is active, the window stays open so you can save it.
 
 To start ClawScribe in the tray at Windows sign-in, turn on **Start ClawScribe
-when I sign in to Windows** in **Settings → Preferences**. This lets enabled
+when I sign in to Windows** in **Settings → General**. This lets enabled
 call detection run without opening the main window.
 
 ## Capture And Transcription
