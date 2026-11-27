@@ -14,13 +14,17 @@ function recoveryHarness({ status = 'success', hasAudio = status !== 'none', tra
       calls.push(command);
       if (command === 'has_audio_checkpoints') return hasAudio;
       if (command === 'find_interrupted_recordings') return { recordings: [], truncated: false, recordingActive: false };
-      if (command === 'recover_audio_from_checkpoints') {
-        assert.equal(args.meetingFolder, metadata.folderPath);
-        if (status === 'throw') throw new Error('Synthetic audio failure');
-        return { status, chunk_count: 1, estimated_duration_seconds: 1,
-          audio_file_path: ['success', 'partial'].includes(status) ? 'synthetic-recording/audio-recovered.wav' : undefined };
+      if (command === 'recover_interrupted_recording') {
+        assert.equal(args.folder, metadata.folderPath);
+        if (failSave) throw new Error('Synthetic database failure');
+        const recovered = ['success', 'partial'].includes(status);
+        if (!recovered && (!transcripts.length || args.cached.hadAudio)) throw new Error('No audio could be recovered yet');
+        saves.push(args);
+        return { meetingId: 'saved-audio', transcriptCount: transcripts.length, audioRecoveryStatus: {
+          status, chunk_count: 1, estimated_duration_seconds: 1,
+          audio_file_path: recovered ? 'synthetic-recording/audio-recovered.wav' : undefined,
+        } };
       }
-      if (command === 'cleanup_checkpoints' || command === 'release_recovered_capture') return;
       throw new Error('Unexpected command: ' + command);
     } },
     '@/services/indexedDBService': { indexedDBService: {
@@ -29,11 +33,6 @@ function recoveryHarness({ status = 'success', hasAudio = status !== 'none', tra
       getTranscripts: async () => { if (failRead) throw new Error('Synthetic transcript read failure'); return transcripts; },
       markMeetingSaved: async () => { calls.push('markSaved'); },
     } },
-    '@/services/storageService': { storageService: { saveMeeting: async (...args) => {
-      calls.push('save'); saves.push(args);
-      if (failSave) throw new Error('Synthetic database failure');
-      return { meeting_id: 'saved-audio' };
-    } } },
     '@/lib/summary-language-preferences': { applyPinnedSummaryLanguageToMeeting: async () => {} },
     sonner: { toast: { warning: () => {} } },
   });
@@ -51,14 +50,11 @@ for (const status of ['success', 'partial']) {
     assert.equal(result.meetingId, 'saved-audio');
     assert.equal(result.remainingCount, 0);
     assert.equal(h.saves.length, 1);
-    assert.equal(h.saves[0][1].length, 0);
-    assert.equal(h.saves[0][2], 'synthetic-recording');
-    assert.equal(h.saves[0][3].capture_incomplete, status === 'partial');
-    assert.equal(h.saves[0][3].transcription_incomplete, false);
-    assert.ok(h.calls.indexOf('recover_audio_from_checkpoints') < h.calls.indexOf('save'));
-    assert.ok(h.calls.indexOf('save') < h.calls.indexOf('markSaved'));
-    assert.ok(h.calls.indexOf('save') < h.calls.indexOf('release_recovered_capture'));
-    assert.equal(h.calls.includes('cleanup_checkpoints'), status === 'success');
+    assert.equal(h.saves[0].cached.transcripts.length, 0);
+    assert.equal(h.saves[0].folder, 'synthetic-recording');
+    assert.equal(result.audioRecoveryStatus.status, status);
+    assert.ok(h.calls.indexOf('recover_interrupted_recording') < h.calls.indexOf('markSaved'));
+    assert.equal(h.calls.filter(command => command === 'recover_interrupted_recording').length, 1);
     assert.equal(h.render().recoverableMeetings.length, 0);
     h.hooks.unmount();
   });
@@ -71,8 +67,6 @@ for (const status of ['none', 'failed', 'throw']) {
     await assert.rejects(h.render().recoverMeeting('interrupted'), /No audio could be recovered yet/);
     assert.equal(h.saves.length, 0);
     assert.ok(!h.calls.includes('markSaved'));
-    assert.ok(!h.calls.includes('cleanup_checkpoints'));
-    assert.ok(!h.calls.includes('release_recovered_capture'));
     assert.equal(h.render().recoverableMeetings.length, 1);
     assert.equal(h.render().isRecovering, false);
     h.hooks.unmount();
@@ -80,16 +74,13 @@ for (const status of ['none', 'failed', 'throw']) {
 }
 
 for (const status of ['success', 'partial', 'none']) {
-  test(`recovered live transcript is incomplete when audio recovery is ${status}`, async () => {
+  test(`cached live rows reach the native command when audio recovery is ${status}`, async () => {
     const h = recoveryHarness({ status, transcripts: [{ text: 'Synthetic saved words', timestamp: '00:00', sequenceId: 0 }] });
     await h.render().checkForRecoverableTranscripts();
     const result = await h.render().recoverMeeting('interrupted');
     assert.equal(result.transcriptCount, 1);
-    assert.equal(h.saves[0][1][0].text, 'Synthetic saved words');
-    assert.equal(h.saves[0][3].audio_save_failed, false);
-    assert.equal(h.saves[0][3].transcription_incomplete, true);
-    assert.equal(h.calls.includes('cleanup_checkpoints'), status === 'success');
-    assert.equal(h.calls.includes('release_recovered_capture'), ['success', 'partial'].includes(status));
+    assert.equal(h.saves[0].cached.transcripts[0].text, 'Synthetic saved words');
+    assert.equal(result.audioRecoveryStatus.status, status);
     h.hooks.unmount();
   });
 }
@@ -116,7 +107,7 @@ test('recovery preserves timing, sequence, speaker and word fields from both cac
   ] });
   await h.render().checkForRecoverableTranscripts();
   await h.render().recoverMeeting('interrupted');
-  const [first, second] = h.saves[0][1];
+  const [first, second] = h.saves[0].cached.transcripts;
   assert.equal(first.id, '1');
   assert.equal(first.sequence_id, 0);
   assert.equal(first.speaker, 'Me');
@@ -137,8 +128,6 @@ for (const failure of ['failSave', 'failRead']) {
     await h.render().checkForRecoverableTranscripts();
     await assert.rejects(h.render().recoverMeeting('interrupted'), /Synthetic/);
     assert.ok(!h.calls.includes('markSaved'));
-    assert.ok(!h.calls.includes('cleanup_checkpoints'));
-    assert.ok(!h.calls.includes('release_recovered_capture'));
     assert.equal(h.render().recoverableMeetings.length, 1);
     h.hooks.unmount();
   });

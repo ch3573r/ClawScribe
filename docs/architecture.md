@@ -253,7 +253,13 @@ checkpoint reader and merge fallback remain available for older meetings. The
 recovery dialog probes raw chunks (including a readable temporary tail), recovered
 files, and legacy checkpoints without encoding the spool. Recovery attempts audio
 before checking for recoverable content, so zero transcript rows do not block
-audio-only meetings; unsuccessful attempts retain the recovery entry and originals. Final transcript, audio and
+audio-only meetings. A single native recovery operation verifies the folder and
+its library ownership, computes the outcome, commits the meeting, then releases
+safe-to-remove originals. It continues through cleanup if the webview closes.
+Cached live rows still provide transcript recovery when available. The webview
+marks them saved only after the core returns success. A detached cache entry
+uses a durable meeting ID so a retry after a lost response returns the same meeting.
+Unsuccessful attempts retain the recovery entry and originals. Final transcript, audio and
 metadata writes are independent. Stopped duration and completion time are
 persisted before encoding, using the existing error status until finalization
 succeeds; capture gaps and artifact-save failures have
@@ -274,8 +280,9 @@ fully readable recovered spools are released only after audio validation, a
 presentation-duration check against all retained samples, and saved outcome status.
 The check uses the same preferred recovery file as playback/retranscription; a
 longer alternate file cannot authorize cleanup. Publishing a recovered format
-removes the superseded recovery format only after the new file is safely written. Frontend release requests require a canonical registered meeting
-folder; incomplete chunks retain their originals.
+removes the superseded recovery format only after the new file is safely written.
+The core releases recovery files only from a registered meeting folder.
+Incomplete chunks retain their originals.
 Shared stop ownership suppresses duplicate completion events. Quit waits on the
 same native Stop with a deadline. The webview associates its cleanup with the
 stopped recording ID. If a new recording starts, delayed work from the earlier
