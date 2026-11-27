@@ -4,6 +4,8 @@ export interface MeetingBookmark { id: string; seconds: number; label: string }
 export interface LibraryArchiveReport {
   meetings: number;
   skipped: number;
+  repaired_audio?: number;
+  unavailable_audio_locations?: number;
   files: number;
   audio_excluded?: boolean;
   /** Restored meetings whose saved calendar link could not be read and was left unlinked. */

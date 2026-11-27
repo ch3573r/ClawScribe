@@ -24,13 +24,16 @@ for (const restore of [false, true]) {
       { meeting_id: 'missing', title: 'Missing recording', recovery_files_excluded: false, audio_unavailable: true, recording_folder_missing: true },
     ] };
     const { LibraryBackup } = loadTsModule('src/components/LibraryBackup.tsx', {
-      react: hooks.react, 'react/jsx-runtime': { jsx, jsxs: jsx },
+      react: { ...hooks.react, useId: () => 'repair-note' }, 'react/jsx-runtime': { jsx, jsxs: jsx },
       '@/components/ui/button': { Button: 'button' },
+      '@/components/ui/checkbox': { Checkbox: 'checkbox' },
+      '@/components/ui/input': { Input: 'input' },
+      '@/components/ui/switch': { Switch: 'switch' },
       '@/components/ScheduledBackups': { ScheduledBackups: 'ScheduledBackups' },
       '@/components/ui/dialog': Object.fromEntries(['Dialog', 'DialogContent', 'DialogHeader', 'DialogTitle', 'DialogDescription'].map(name => [name, name])),
       '@/contexts/RecordingStateContext': { useRecordingState: () => ({}) },
       '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ refetchMeetings: async () => { refreshes++; }, refreshProjectTags: async () => { refreshes++; } }) },
-      '@tauri-apps/api/core': { invoke: async command => {
+      '@tauri-apps/api/core': { invoke: async (command, args) => {
         // The core opens the dialogs; the picker commands return the chosen path.
         if (command === 'pick_backup_save_path' || command === 'pick_backup_restore_path') {
           assert.equal(command, expectedRestore ? 'pick_backup_restore_path' : 'pick_backup_save_path');
@@ -38,6 +41,7 @@ for (const restore of [false, true]) {
         }
         invokes++;
         assert.equal(command, expectedRestore ? 'restore_library' : 'backup_library');
+        if (expectedRestore) assert.equal(args.repairMissingAudio, false);
         if (invokeFails) throw new Error('Synthetic archive failure');
         return report;
       } },
@@ -46,7 +50,10 @@ for (const restore of [false, true]) {
     const render = () => hooks.render(() => LibraryBackup());
     const run = (nextRestore = restore) => {
       expectedRestore = nextRestore;
-      return flatten(render()).find(node => node.type === 'button' && text(node) === (nextRestore ? 'Choose archive to restore' : 'Save backup')).props.onClick();
+      const nodes = flatten(render());
+      return nextRestore
+        ? nodes.find(node => node.type === 'button' && text(node) === 'Choose archive to restore').props.onClick()
+        : nodes.find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
     };
     await run();
     assert.equal(notifications[0].kind, 'warning');
@@ -91,5 +98,75 @@ for (const restore of [false, true]) {
     await run();
     assert.equal(notifications.at(-1).kind, 'warning');
     assert.match(text(flatten(render()).find(node => node.props?.role === 'alert')), /Skipped 2 template items/);
+    if (restore) {
+      report = { meetings: 0, files: 0, skipped: 1, unavailable_audio_locations: 1 };
+      await run();
+      assert.equal(notifications.at(-1).kind, 'warning');
+      assert.match(text(flatten(render()).find(node => node.props?.role === 'alert')), /Recording locations were unavailable for 1 meeting/);
+    }
   });
 }
+
+test('encrypted backup confirms the passphrase and restore prompts only after archive detection', async () => {
+  const hooks = createHookHarness();
+  const commands = [];
+  const archive = 'synthetic.clawbackup';
+  const phrase = ['synthetic', 'sample'].join(' ');
+  const { LibraryBackup } = loadTsModule('src/components/LibraryBackup.tsx', {
+    react: { ...hooks.react, useId: () => 'repair-note' }, 'react/jsx-runtime': { jsx, jsxs: jsx },
+    '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/checkbox': { Checkbox: 'checkbox' },
+    '@/components/ui/input': { Input: 'input' },
+    '@/components/ui/switch': { Switch: 'switch' },
+    '@/components/ScheduledBackups': { ScheduledBackups: 'ScheduledBackups' },
+    '@/components/ui/dialog': Object.fromEntries(['Dialog', 'DialogContent', 'DialogHeader', 'DialogTitle', 'DialogDescription'].map(name => [name, name])),
+    '@/contexts/RecordingStateContext': { useRecordingState: () => ({}) },
+    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ refetchMeetings: async () => {}, refreshProjectTags: async () => {} }) },
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      commands.push({ command, args });
+      if (command.startsWith('pick_backup_')) return archive;
+      if (command === 'restore_library' && !args.passphrase) throw 'Enter the passphrase for this backup.';
+      if (command === 'restore_library' && args.passphrase !== phrase) throw 'The passphrase is incorrect or the encrypted backup is damaged.';
+      return { meetings: 1, files: 1, skipped: 0, repaired_audio: 1 };
+    } },
+    sonner: { toast: { success() {}, warning() {}, error() {} } },
+  });
+  const render = () => flatten(hooks.render(() => LibraryBackup()));
+  const find = (type, label) => render().find(node => node.type === type && (label === undefined || text(node) === label));
+  const enter = (index, value) => render().filter(node => node.type === 'input')[index].props.onChange({ target: { value } });
+  const submit = () => find('form').props.onSubmit({ preventDefault() {} });
+  find('switch').props.onCheckedChange(true);
+  enter(0, phrase);
+  enter(1, 'different');
+  assert.equal(find('button', 'Save backup').props.disabled, true);
+  enter(1, phrase);
+  await submit();
+  assert.equal(commands[0].args.encrypted, true);
+  assert.match(commands[0].args.suggestedName, /\.clawbackup$/);
+  assert.equal(commands[1].command, 'backup_library');
+  assert.deepEqual({ ...commands[1].args }, { path: archive, passphrase: phrase });
+  assert.ok(render().filter(node => node.type === 'input').every(node => node.props.value === ''));
+
+  const repair = find('checkbox');
+  const nodes = render();
+  const restoreButton = nodes.findIndex(node => node.type === 'button' && text(node) === 'Choose archive to restore');
+  const repairControl = nodes.findIndex(node => node.type === 'checkbox');
+  assert.ok(repairControl < restoreButton);
+  const repairNote = nodes.find(node => node.type === 'p' && node.props.id === repair.props['aria-describedby']);
+  assert.match(text(repairNote), /may also bring back audio you removed before this version/i);
+  assert.equal(repair.props.checked, false);
+  repair.props.onCheckedChange(true);
+  await find('button', 'Choose archive to restore').props.onClick();
+  assert.equal(commands[3].args.passphrase, undefined);
+  assert.equal(commands[3].args.repairMissingAudio, true);
+  enter(0, 'different');
+  await submit();
+  assert.ok(find('button', 'Unlock and restore'));
+  assert.equal(find('input').props.value, '');
+  enter(0, phrase);
+  await submit();
+  assert.equal(commands[5].command, 'restore_library');
+  assert.deepEqual({ ...commands[5].args }, { path: archive, passphrase: phrase, repairMissingAudio: true });
+  assert.equal(find('button', 'Unlock and restore'), undefined);
+  assert.equal(find('checkbox').props.checked, false);
+});

@@ -81,6 +81,15 @@ pub(crate) struct CleanupLocations {
 }
 
 impl CleanupLocations {
+    #[cfg(test)]
+    pub(super) fn test_recordings(app_data: &Path, recording_roots: Vec<PathBuf>) -> Self {
+        Self {
+            app_data: Some(app_data.to_path_buf()),
+            codex_runs: app_data.join("runs"),
+            recording_roots,
+        }
+    }
+
     pub(crate) async fn for_app<R: Runtime>(app: &AppHandle<R>) -> Self {
         Self {
             app_data: app.path().app_data_dir().ok(),

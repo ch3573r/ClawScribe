@@ -411,4 +411,51 @@ async fn refuses_recovery_directory_created_after_candidate_inspection() {
     .await;
     assert_eq!(result, Err(RECOVERY_PENDING));
     assert!(fixture.folder.join("audio.mp4").exists());
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT saved_audio_removed_by_user FROM meetings WHERE id = 'first'"
+    )
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap());
+}
+
+#[tokio::test]
+async fn failed_unlink_clears_only_this_attempts_removal_marker() {
+    let _guard = crate::audio::inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+    let fixture = Fixture::new().await;
+    for previously_removed in [false, true] {
+        sqlx::query("UPDATE meetings SET saved_audio_removed_by_user = ? WHERE id = 'first'")
+            .bind(previously_removed)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        let request = fixture.request().await;
+        let rows = folders(&fixture.pool).await.unwrap();
+        let canonical = canonical_folders(&fixture.roots, &rows);
+        let candidate =
+            inspect_candidate(&fixture.roots, &rows, &canonical, "first", true).unwrap();
+        let job = Arc::new(crate::audio::inference::claim_job().unwrap());
+        let result = remove_prepared_with(
+            &fixture.pool,
+            &fixture.roots,
+            &request,
+            &rows,
+            candidate,
+            job,
+            |_, _| Err(io::ErrorKind::PermissionDenied.into()),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err("Could not remove the saved audio. Close any player using it and try again.")
+        );
+        assert!(fixture.folder.join("audio.mp4").is_file());
+        let removed = sqlx::query_scalar::<_, bool>(
+            "SELECT saved_audio_removed_by_user FROM meetings WHERE id = 'first'",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(removed, previously_removed);
+    }
 }
