@@ -63,6 +63,7 @@ struct CaptureInput<T> {
     status: Arc<CaptureHandoffStatus>,
     missing_frames: usize,
     last_capture_end: Option<(u64, f64)>,
+    report_source_gaps: bool,
 }
 
 struct CaptureOutput<T> {
@@ -84,6 +85,7 @@ fn capture_handoff<T>(frames: usize, channels: usize) -> (CaptureInput<T>, Captu
             status: status.clone(),
             missing_frames: 0,
             last_capture_end: None,
+            report_source_gaps: false,
         },
         CaptureOutput {
             ready: ready_rx,
@@ -95,6 +97,17 @@ fn capture_handoff<T>(frames: usize, channels: usize) -> (CaptureInput<T>, Captu
 
 fn handoff_frames(rate: u32) -> usize {
     (rate as usize * CAPTURE_HANDOFF_MS as usize).div_ceil(1_000)
+}
+
+fn packet_capture_age(reported: Option<Duration>, frames: usize, rate: u32) -> Duration {
+    let duration = Duration::from_secs_f64(frames as f64 / f64::from(rate));
+    // A bogus QPC timestamp can put a current packet before recording start.
+    // Allow endpoint latency for short packets and a few periods for larger
+    // ones. Use the packet duration when the reported age is implausible.
+    let max_age = duration.saturating_mul(4).max(Duration::from_millis(100));
+    reported
+        .filter(|&age| age >= duration / 2 && age <= max_age)
+        .unwrap_or(duration)
 }
 
 impl<T: Copy> CaptureInput<T> {
@@ -112,7 +125,15 @@ impl<T: Copy> CaptureInput<T> {
         if let Some((revision, last_end)) = self.last_capture_end {
             let gap = timestamp - last_end;
             if revision == resume_revision && gap > 0.150 {
-                self.missing_frames += (gap * f64::from(rate)).round() as usize;
+                let missing = (gap * f64::from(rate)).round() as usize;
+                self.missing_frames += missing;
+                // Loopback can legitimately stop delivering packets in
+                // silence. An unexplained gap in mic delivery is sample loss.
+                if self.report_source_gaps {
+                    self.status
+                        .dropped_samples
+                        .fetch_add(missing * channels, Ordering::Relaxed);
+                }
             }
         }
         let callback_end = timestamp + frames as f64 / f64::from(rate);
@@ -503,7 +524,9 @@ impl AudioStream {
         let rate = config.sample_rate().0;
         let channels = config.channels();
         let (mut input, output) = capture_handoff(handoff_frames(rate), usize::from(channels));
-        state.register_capture_progress(capture.device_type(), &input.status.progress);
+        let source = capture.device_type();
+        input.report_source_gaps = source == DeviceType::Microphone;
+        state.register_capture_progress(source, &input.status.progress);
         let callback_state = state.clone();
         let error_handler = capture.clone();
         let stream = device.build_input_stream(
@@ -514,10 +537,8 @@ impl AudioStream {
                 let channels = usize::from(channels);
                 let frames = data.len() / channels;
                 let time = info.timestamp();
-                let age = time
-                    .callback
-                    .duration_since(&time.capture)
-                    .unwrap_or_else(|| Duration::from_secs_f64(frames as f64 / f64::from(rate)));
+                let age =
+                    packet_capture_age(time.callback.duration_since(&time.capture), frames, rate);
                 let captured_at = callback.checked_sub(age).unwrap_or(callback);
                 if let Some(stamp) = callback_state.capture_stamp(captured_at) {
                     // A capture buffer can straddle the start or resume boundary.
@@ -807,5 +828,31 @@ mod tests {
             frames as u64
         );
         assert!(!input.copy_samples(&[3, 4], 0, 0.4, rate, 2));
+    }
+
+    #[test]
+    fn implausible_driver_timestamps_use_the_packet_duration() {
+        let expected = Duration::from_millis(10);
+        for reported in [None, Some(Duration::ZERO), Some(Duration::from_secs(60))] {
+            assert_eq!(packet_capture_age(reported, 480, 48_000), expected);
+        }
+        let bluetooth_latency = Duration::from_millis(70);
+        assert_eq!(
+            packet_capture_age(Some(bluetooth_latency), 480, 48_000),
+            bluetooth_latency
+        );
+    }
+
+    #[test]
+    fn a_delivery_gap_counts_missing_microphone_frames_and_excludes_pause() {
+        let (mut input, mut output) = capture_handoff(100, 1);
+        input.report_source_gaps = true;
+        assert!(input.copy_samples(&[0_i16; 10], 0, 0.0, 1_000, 1));
+        assert!(input.copy_samples(&[0_i16; 10], 0, 0.2, 1_000, 1));
+        assert!(input.copy_samples(&[0_i16; 10], 1, 0.5, 1_000, 1));
+        assert_eq!(output.ready.try_pop().unwrap().missing_frames, 0);
+        assert_eq!(output.ready.try_pop().unwrap().missing_frames, 190);
+        assert_eq!(output.ready.try_pop().unwrap().missing_frames, 0);
+        assert_eq!(output.status.dropped_samples.load(Ordering::Relaxed), 190);
     }
 }
