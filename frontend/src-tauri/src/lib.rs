@@ -1245,6 +1245,7 @@ pub fn run() {
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
             audio::retranscription::cancel_retranscription_command,
+            audio::retranscription::get_retranscription_status,
             // Speaker diarization commands
             audio::diarization::start_speaker_diarization_command,
             audio::diarization::active_speaker_diarization_command,

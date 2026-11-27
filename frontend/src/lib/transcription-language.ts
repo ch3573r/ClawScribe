@@ -34,9 +34,17 @@ export function languageSupport(provider: string | null | undefined): LanguageSu
 
 export const isAutoLanguage = (code: string) => code === 'auto' || code === 'auto-translate';
 
-/** Standard Azure Speech transcribes audio in its original language. */
 export function fileLanguageOptions(provider?: string | null) {
-  return LANGUAGES.filter(option => provider !== 'mai-transcribe' || option.code !== 'auto-translate');
+  const support = languageSupport(provider);
+  return LANGUAGES
+    .filter(option => support === 'whisper' || option.code !== 'auto-translate')
+    .map(option => ({ code: option.code, label: languageLabel(option.code, option.name, support) }));
+}
+
+export function fileLanguageSelection(provider: string | null | undefined, language: string): string {
+  if (provider === 'parakeet') return 'auto';
+  if (language === 'auto-translate' && languageSupport(provider) !== 'whisper') return 'auto';
+  return language;
 }
 
 export interface LanguageOption { code: string; label: string }

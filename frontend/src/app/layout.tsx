@@ -37,6 +37,7 @@ import { OnboardingFlow } from '@/components/onboarding'
 import { DownloadProgressToastProvider } from '@/components/shared/DownloadProgressToast'
 import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcessingProvider'
+import { RetranscriptionProvider } from '@/contexts/RetranscriptionProvider'
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
@@ -383,6 +384,7 @@ export default function RootLayout({
         <ThemeInitializer />
         {showOnboarding === false && <AppShortcuts />}
         <AppTitlebar />
+        <RetranscriptionProvider>
           <RecordingStateProvider>
             <TranscriptProvider>
               <ConfigProvider key={setupCompletedHere ? 'completed-setup' : 'startup'}>
@@ -431,6 +433,7 @@ export default function RootLayout({
               </ConfigProvider>
             </TranscriptProvider>
           </RecordingStateProvider>
+        </RetranscriptionProvider>
 
         <AppToaster />
       </body>

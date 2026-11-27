@@ -1,6 +1,7 @@
-import { useState, useCallback, useRef, useMemo } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useCloudTranscription } from '@/hooks/useCloudTranscription';
+import { errorText } from '@/lib/errorText';
 
 export interface RawModelInfo {
   name: string;
@@ -20,6 +21,53 @@ interface TranscriptModelConfig {
   model?: string;
 }
 
+export const isCloudModel = (provider?: string | null) => provider === 'cloud-whisper' || provider === 'mai-transcribe';
+
+export function modelOptionLabel(option: ModelOption): string {
+  return option.size_mb > 0 ? `${option.displayName} (${Math.round(option.size_mb)} MB)` : option.displayName;
+}
+
+export function modelLabel(provider: string, model: string): string {
+  switch (provider) {
+    case 'whisper':
+    case 'localWhisper': return `Whisper · ${model}`;
+    case 'parakeet': return `Parakeet · ${model}`;
+    case 'nemotron': return `Nemotron · ${model}`;
+    case 'cloud-whisper': return `Hosted Whisper · ${model}`;
+    case 'mai-transcribe': return 'Azure Speech';
+    default: return model || 'Unknown model';
+  }
+}
+
+export type CloudDestination = { endpoint: string; fingerprint: string };
+
+export function useFileCloudDestination(open: boolean, provider?: string, scope?: string) {
+  const [preview, setPreview] = useState<{ provider: string; scope?: string; destination?: CloudDestination; error?: string } | null>(null);
+  const [approved, setApproved] = useState<string | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    setPreview(null);
+    setApproved(null);
+    if (open && provider) {
+      void invoke<CloudDestination>('import_cloud_destination', { provider }).then(
+        destination => { if (!disposed) setPreview({ provider, scope, destination }); },
+        caught => { if (!disposed) setPreview({ provider, scope, error: errorText(caught, 'Could not read the cloud destination') }); },
+      );
+    }
+    return () => { disposed = true; };
+  }, [open, provider, scope]);
+
+  const current = open && preview?.provider === provider && preview?.scope === scope ? preview : null;
+  const destination = current?.destination;
+  return {
+    destination,
+    destinationError: current?.error,
+    approvedDestination: destination?.fingerprint === approved ? approved : null,
+    setApprovedDestination: setApproved,
+  };
+}
+
 /**
  * Custom hook for fetching and managing transcription models (Whisper and Parakeet).
  *
@@ -32,8 +80,8 @@ interface TranscriptModelConfig {
 export function useTranscriptionModels(transcriptModelConfig: TranscriptModelConfig | undefined) {
   const [localModels, setLocalModels] = useState<ModelOption[]>([]);
   const [manualSelection, setManualSelection] = useState('');
-  const [loadingModels, setLoadingModels] = useState(false);
-  const { enabled, loaded } = useCloudTranscription();
+  const [loadingModels, setLoadingModels] = useState(true);
+  const { enabled, loaded, failed } = useCloudTranscription();
   const revision = useRef(0);
   const fetchModels = useCallback(async () => {
     const request = ++revision.current;
@@ -118,7 +166,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     availableModels,
     selectedModelKey,
     setSelectedModelKey: setManualSelection,
-    loadingModels,
+    loadingModels: loadingModels || (!loaded && !failed),
     fetchModels,
     resetSelection,
   };

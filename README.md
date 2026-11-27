@@ -199,7 +199,9 @@ punctuation; single-letter keys such as C# and C++ are left unchanged.
 Cloud transcription requires explicit opt-in. Saved cloud settings remain visible
 when the opt-in is off. Settings explain which local engine and model live
 recordings use. Cloud APIs apply to Import and Enhance (whole-file), while live
-recordings stay on-device.
+recordings stay on-device. Both file dialogs show the upload destination and
+require approval before sending audio. Enhance can continue in the background
+and shows the model that actually produced the transcript.
 Hosted Whisper can provide word timestamps. Text-only responses use local
 speech boundaries to estimate passage timing. For OpenAI, ClawScribe converts
 large files to 16 kHz mono MP3 and splits them to fit the 25 MB upload limit.
