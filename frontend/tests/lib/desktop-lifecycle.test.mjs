@@ -154,7 +154,7 @@ test('finishing onboarding switches to the app through React state', () => {
   assert.match(layout, /\{showOnboarding === false && <AppShortcuts \/>\}/);
 });
 
-test('Home keeps recovery open for the next interrupted recording and clears its session flag after the last', async t => {
+function homeRecovery(t, initialMeetings, scan) {
   const hooks = createHookHarness();
   const previousStorage = globalThis.sessionStorage;
   const storage = new Map();
@@ -164,8 +164,14 @@ test('Home keeps recovery open for the next interrupted recording and clears its
   t.after(() => { hooks.unmount(); globalThis.sessionStorage = previousStorage; });
   const timeouts = [];
   t.mock.method(globalThis, 'setTimeout', callback => { timeouts.push(callback); });
-  let recoverableMeetings = [{ meetingId: 'first' }, { meetingId: 'second' }];
-  const check = async () => {};
+  let recoverableMeetings = initialMeetings;
+  let scanFailed = false;
+  const check = async () => {
+    if (!scan) return;
+    recoverableMeetings = [];
+    await scan();
+    scanFailed = true;
+  };
   const routes = [], recoveryErrors = [];
   const { default: Home } = loadTsModule('src/app/page.tsx', {
     ...primitives, react: hooks.react, 'framer-motion': { motion: { div: 'div' } },
@@ -190,7 +196,7 @@ test('Home keeps recovery open for the next interrupted recording and clears its
     '@/hooks/useRecordingStart': { useRecordingStart: () => ({}) },
     '@/hooks/useLiveTranscriptionReadiness': { useLiveTranscriptionReadiness: () => ({}) },
     '@/hooks/useTranscriptRecovery': { useTranscriptRecovery: () => ({
-      recoverableMeetings, checkForRecoverableTranscripts: check, recoverMeeting: async id => {
+      recoverableMeetings, scanFailed, checkForRecoverableTranscripts: check, recoverMeeting: async id => {
         if (id === 'failed') throw new Error('Fixture recovery failed');
         recoverableMeetings = recoverableMeetings.filter(meeting => meeting.meetingId !== id);
         return { success: true, meetingId: id, remainingCount: recoverableMeetings.length };
@@ -198,6 +204,11 @@ test('Home keeps recovery open for the next interrupted recording and clears its
     }) },
   });
   const recovery = () => nodes(hooks.render(Home)).find(node => node.type === 'TranscriptRecovery').props;
+  return { recovery, storage, timeouts, routes, recoveryErrors };
+}
+
+test('Home keeps recovery open for the next interrupted recording and clears its session flag after the last', async t => {
+  const { recovery, storage, timeouts, routes, recoveryErrors } = homeRecovery(t, [{ meetingId: 'first' }, { meetingId: 'second' }]);
   recovery();
   assert.equal(recovery().isOpen, true);
   await assert.rejects(recovery().onRecover('failed'), /Fixture recovery failed/);
@@ -211,4 +222,21 @@ test('Home keeps recovery open for the next interrupted recording and clears its
   assert.equal(timeouts.length, 1);
   timeouts[0]();
   assert.deepEqual(routes, ['/meeting-details?id=second']);
+});
+
+test('closing a failed recovery scan on Home keeps the dialog closed', async t => {
+  let scans = 0;
+  const { recovery } = homeRecovery(t, [], async () => { scans++; });
+  recovery();
+  await flush();
+  recovery();
+  const failed = recovery();
+  assert.equal(failed.scanFailed, true);
+  assert.equal(failed.isOpen, true);
+  failed.onClose();
+  assert.equal(recovery().isOpen, false);
+  await flush();
+  recovery();
+  assert.equal(recovery().isOpen, false);
+  assert.equal(scans, 1);
 });

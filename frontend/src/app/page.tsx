@@ -29,6 +29,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 export default function Home() {
   // Local page state (not moved to contexts)
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
+  const recoveryDialogOpen = useRef(false);
+  useEffect(() => { recoveryDialogOpen.current = showRecoveryDialog; }, [showRecoveryDialog]);
 
   // Use contexts for state management
   const { meetingTitle, setActiveRecordingTitle, transcripts } = useTranscripts();
@@ -76,7 +78,7 @@ export default function Home() {
     const performStartupChecks = async () => {
       try {
         // Offer recovery automatically when idle. An open dialog owns its scan.
-        if (showRecoveryDialog || recordingState.isRecording ||
+        if (recoveryDialogOpen.current || recordingState.isRecording ||
           status === RecordingStatus.STARTING ||
           status === RecordingStatus.STOPPING ||
           status === RecordingStatus.PROCESSING_TRANSCRIPTS ||
@@ -92,7 +94,7 @@ export default function Home() {
     };
 
     performStartupChecks();
-  }, [checkForRecoverableTranscripts, recordingState.isRecording, showRecoveryDialog, status]);
+  }, [checkForRecoverableTranscripts, recordingState.isRecording, status]);
 
   // Settings > General can ask for the dialog again ("Interrupted recordings").
   // A user-requested scan can also find older recordings during capture.
@@ -162,12 +164,10 @@ export default function Home() {
     }
   };
 
-  // Handle dialog close - clear session flag if no meetings left
   const handleDialogClose = () => {
     setShowRecoveryDialog(false);
-    // If user closes dialog and there are no more meetings, clear the flag
-    // This allows the dialog to show again next session if new meetings appear
-    if (recoverableMeetings.length === 0) {
+    // Keep a failed scan dismissed for this session. Settings can reopen it.
+    if (recoverableMeetings.length === 0 && !recoveryScanFailed) {
       sessionStorage.removeItem('recovery_dialog_shown');
     }
   };
