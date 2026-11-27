@@ -64,6 +64,44 @@ test('autosave debounces successive edits into one write', async () => {
   assert.equal(queue.state, 'saved');
 });
 
+test('closing drains the latest context draft without reading or writing a summary', async () => {
+  const calls = [];
+  const { meetingDraft, flushSummaryEditsBeforeExit } = loadTsModule('src/lib/meetingDrafts.ts', {
+    '@tauri-apps/api/core': { invoke: async (command, args) => { calls.push([command, args]); } },
+    '@/lib/meetingContext': { setMeetingContext: async (id, value) => { calls.push(['context', { id, value }]); } },
+    sonner: { toast: { error() {} } },
+  });
+  const draft = meetingDraft('saved-meeting');
+  draft.edit({ context: 'First keystrokes' });
+  draft.edit({ context: '' });
+  assert.equal(calls.length, 0);
+  await flushSummaryEditsBeforeExit(4);
+  assert.deepEqual(calls.map(([command]) => command).filter(command => command !== 'api_set_summary_edits_pending'), [
+    'context', 'api_finish_summary_edit_exit',
+  ]);
+  const [, saved] = calls.find(([command]) => command === 'context');
+  assert.deepEqual(saved, { id: 'saved-meeting', value: '' });
+});
+
+test('context autosave batches keystrokes and sends a single pending acknowledgement', async () => {
+  const saved = deferred();
+  const values = [];
+  const pending = [];
+  const { meetingDraft } = loadTsModule('src/lib/meetingDrafts.ts', {
+    '@tauri-apps/api/core': { invoke: async (_command, args) => { pending.push(args.pending); } },
+    '@/lib/meetingContext': { setMeetingContext: async (_id, value) => { values.push(value); saved.resolve(); } },
+    sonner: { toast: { error() {} } },
+  });
+  const draft = meetingDraft('saved-meeting');
+  draft.edit({ context: 'First keystrokes' });
+  draft.edit({ context: 'Latest context' });
+  assert.deepEqual(values, []);
+  await saved.promise;
+  await draft.drain();
+  assert.deepEqual(values, ['Latest context']);
+  assert.equal(pending.filter(value => value === true).length, 1);
+});
+
 test('generation blocks draft writes without discarding edits', async () => {
   let status = 'processing';
   const writes = [];

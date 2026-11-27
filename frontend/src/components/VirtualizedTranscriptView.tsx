@@ -16,6 +16,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import { splitForHighlight } from "@/lib/transcript-find";
 import { activePlaybackSegment, indexPlaybackRanges } from "@/hooks/transcript-playback";
+import { usePlaybackTime, type PlaybackClock } from "@/hooks/useAudioPlayer";
 
 export interface VirtualizedTranscriptViewProps {
     speakerSegments?: TranscriptSegmentData[];
@@ -51,6 +52,7 @@ export interface VirtualizedTranscriptViewProps {
     showSpeakerLabels?: boolean;
     /** Current playback position, in recording-relative seconds. */
     activeTime?: number;
+    playbackClock?: PlaybackClock;
     /** Seek recording playback to a transcript timestamp. */
     onSeekToTime?: (seconds: number) => void;
     /** Keep the segment being played in view. */
@@ -232,7 +234,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     showConfidence = true,
     disableAutoScroll = false,
     showSpeakerLabels = true,
-    activeTime,
+    activeTime: initialTime,
+    playbackClock,
     onSeekToTime,
     followPlayback = false,
     onUserScroll,
@@ -247,6 +250,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     onSpeakerChange,
     onApplySpeakerToMatching,
 }) => {
+    const activeTime = usePlaybackTime(playbackClock) ?? initialTime;
     const scrollRef = useRef<HTMLDivElement>(null);
     const headerRef = useRef<HTMLDivElement>(null);
     const leadingRef = useRef<HTMLDivElement>(null);

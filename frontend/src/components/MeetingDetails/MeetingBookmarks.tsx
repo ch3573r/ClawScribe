@@ -37,7 +37,7 @@ export function LiveBookmarkButton({ sessionId, disabled, className }: LiveBookm
   }}>{busy ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" /> : <BookmarkPlus size={16} />}</Button>;
 }
 
-export function MeetingBookmarks({ meetingId, focusedBookmark, currentTime, initialTime, duration, onSeek, addOpen = false, onAddOpenChange, onBookmarksChange, onReturnFocus }: { focusedBookmark?: string | null; addOpen?: boolean; onAddOpenChange?: (open: boolean) => void; onBookmarksChange?: (bookmarks: MeetingBookmark[]) => void; meetingId: string; currentTime?: number; initialTime?: number; duration?: number; onSeek?: (time: number) => void; onReturnFocus?: () => void }) {
+export function MeetingBookmarks({ meetingId, focusedBookmark, getPlaybackTime, initialTime, duration, onSeek, addOpen = false, onAddOpenChange, onBookmarksChange, onReturnFocus }: { focusedBookmark?: string | null; addOpen?: boolean; onAddOpenChange?: (open: boolean) => void; onBookmarksChange?: (bookmarks: MeetingBookmark[]) => void; meetingId: string; getPlaybackTime?: () => number; initialTime?: number; duration?: number; onSeek?: (time: number) => void; onReturnFocus?: () => void }) {
   const [bookmarks, setBookmarks] = useState<MeetingBookmark[]>([]);
   const [section, setSection] = useState('bookmarks');
   const hasBookmarks = bookmarks.length > 0;
@@ -80,7 +80,7 @@ export function MeetingBookmarks({ meetingId, focusedBookmark, currentTime, init
   useEffect(() => {
     if (addOpen && !wasOpen.current) {
       setLabel('');
-      setTime(initialTime !== undefined ? String(initialTime) : currentTime?.toFixed(1) ?? '0');
+      setTime(initialTime !== undefined ? String(initialTime) : getPlaybackTime?.().toFixed(1) ?? '0');
     }
     wasOpen.current = addOpen;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -138,7 +138,7 @@ export function MeetingBookmarks({ meetingId, focusedBookmark, currentTime, init
         </span>
       </div>
       <div className="flex flex-wrap justify-end gap-2">
-        {currentTime !== undefined && <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => setTime(currentTime.toFixed(1))}>Use playback time</Button>}
+        {getPlaybackTime && <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => setTime(getPlaybackTime().toFixed(1))}>Use playback time</Button>}
         <Button type="submit" size="sm" disabled={busy || seconds === null}>{busy ? 'Saving…' : 'Add bookmark'}</Button>
       </div>
     </form>

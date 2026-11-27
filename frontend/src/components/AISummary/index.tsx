@@ -6,6 +6,9 @@ import { Section } from './Section';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import { copyPlainText } from '@/lib/copy-plain-text';
+
+const copyBlocks = (content: string) => copyPlainText(content, 'Summary blocks copied', 'Could not copy the summary blocks');
 
 interface Props {
   summary: Summary | null;
@@ -416,17 +419,8 @@ export const AISummary = ({ summary, status, error, onSummaryChange }: Props) =>
             handleUndo();
           }
         } else if (e.key === 'c') {
-          const blockContents = selectedBlocks.map(blockId => {
-            for (const section of Object.values(currentSummary)) {
-              const block = section.blocks.find(b => b.id === blockId);
-              if (block) {
-                return block.content;
-              }
-            }
-            return '';
-          }).filter(Boolean);
-
-          navigator.clipboard.writeText(blockContents.join('\n'));
+          const content = getSelectedBlocksContent();
+          if (content) void copyBlocks(content);
         }
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBlocks.length > 1) {
         e.preventDefault();
@@ -440,7 +434,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange }: Props) =>
       document.removeEventListener('mouseup', handleMouseUp);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [selectedBlocks, currentSummary, handleUndo, handleRedo, handleDeleteSelectedBlocks]);
+  }, [selectedBlocks, getSelectedBlocksContent, handleUndo, handleRedo, handleDeleteSelectedBlocks]);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -494,10 +488,9 @@ export const AISummary = ({ summary, status, error, onSummaryChange }: Props) =>
     });
   };
 
-  const handleCopyBlocks = useCallback(() => {
-    const content = getSelectedBlocksContent();
-    navigator.clipboard.writeText(content);
+  const handleCopyBlocks = useCallback(async () => {
     setContextMenu(prev => ({ ...prev, visible: false }));
+    await copyBlocks(getSelectedBlocksContent());
   }, [getSelectedBlocksContent]);
 
   const handleDeleteBlocks = () => {

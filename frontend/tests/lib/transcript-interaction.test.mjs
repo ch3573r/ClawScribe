@@ -15,6 +15,7 @@ function createView(overrides = {}) {
     useMemo: compute => compute(),
     useCallback: callback => callback,
     useEffect() {},
+    useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
     startTransition: action => action(),
     useRef(value) { return slots[cursor++] ??= { current: value }; },
     useId() { const index = cursor++; return `speaker-${index}`; },

@@ -92,7 +92,6 @@ function caller(kind, failOffset = -1) {
     '@/lib/clipboard-format': { ...loadTsModule(sourcePath('lib/clipboard-format')), writeClipboard: async content => { copied.push(content.text); return 'text'; } },
     '@/lib/meetingCalendar': { getMeetingCalendar: () => null },
     '@/lib/summary-language-preferences': { readMeetingSummaryLanguage: async () => ({ language: 'de' }) },
-    '@/components/Sidebar/SidebarProvider': { useSidebar: () => ({ attachSummaryPolling: () => () => {}, stopSummaryPolling() {} }) },
   };
   const name = kind === 'copy' ? 'useCopyOperations' : 'useSummaryGeneration';
   // Supply the browser clipboard global while exercising the unchanged production hook.
@@ -109,6 +108,7 @@ function caller(kind, failOffset = -1) {
     console: { log() {}, warn() {}, error() {} },
   });
   const value = hooks.render(() => exports[name]({
+    subscribeToSummary: () => () => {},
     meeting: { id: 'synthetic-meeting', title: 'Synthetic meeting', created_at: '2026-01-01' },
     transcripts: rows.slice(0, 100), meetingTitle: 'Synthetic meeting', aiSummary: null, blockNoteSummaryRef: { current: null },
     modelConfig: { provider: 'synthetic-provider', model: 'synthetic-model' }, isModelConfigLoading: false,

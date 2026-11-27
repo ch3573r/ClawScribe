@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { EditorSummary, MeetingDetails, MeetingSummary, Summary, SummaryDataResponse } from '@/types';
 import { readMeetingSummary, summaryDetails } from '@/lib/meeting-summary';
-import { listen } from '@tauri-apps/api/event';
+import type { SummaryJobSnapshot } from '@/lib/summary-job-status';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
@@ -11,16 +11,19 @@ import { meetingDraft, reportSaveError, SummaryDraft } from '@/lib/meetingDrafts
 interface UseMeetingDataProps {
   meeting: MeetingDetails;
   summaryData: MeetingSummary | null;
-  onMeetingUpdated?: () => Promise<void>;
+  summaryJob: SummaryJobSnapshot | null;
 }
 
-export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
+export function useMeetingData({ meeting, summaryData, summaryJob }: UseMeetingDataProps) {
   const draft = useMemo(() => meetingDraft(meeting.id), [meeting.id]);
   const [meetingTitle, setMeetingTitle] = useState(draft.edits.title ?? meeting.title ?? '+ New Call');
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [aiSummary, setAiSummary] = useState<MeetingSummary | null>(() => readMeetingSummary(draft.edits.summary).summary ?? summaryData);
   const [hasPreviousSummary, setHasPreviousSummary] = useState(false);
-  const [details, setDetails] = useState(() => ({ ...summaryDetails(null), transcriptChanged: false }));
+  const details = useMemo(() => ({
+    ...summaryDetails(summaryJob?.data),
+    transcriptChanged: summaryJob?.transcript_changed === true,
+  }), [summaryJob?.data, summaryJob?.transcript_changed]);
   const [summaryRevision, setSummaryRevision] = useState(0);
   const [, refresh] = useState(0);
   const manualSave = useRef(false);
@@ -38,25 +41,8 @@ export function useMeetingData({ meeting, summaryData }: UseMeetingDataProps) {
     if (!draft.edits.summary) setAiSummary(summaryData);
   }, [summaryData, draft]);
   useEffect(() => {
-    let active = true;
-    let version = 0;
-    const refresh = async () => {
-      const request = ++version;
-      const result = await invoke<{ data?: SummaryDataResponse | string | null; transcript_changed?: boolean; has_previous_result: boolean }>('api_get_summary', { meetingId: meeting.id });
-      if (active && request === version) {
-        setHasPreviousSummary(result.has_previous_result);
-        setDetails({ ...summaryDetails(result.data), transcriptChanged: result.transcript_changed === true });
-      }
-    };
-    const summarySubscription = listen<string>('summary-job-changed', ({ payload }) => {
-      if (payload === meeting.id) void refresh().catch(() => {});
-    });
-    const subscriptions = ['transcript-text-edited', 'retranscription-complete', 'speaker-diarization-complete', 'transcript-speaker-updated'].map(event =>
-      listen<{ meeting_id: string }>(event, ({ payload }) => { if (payload.meeting_id === meeting.id) void refresh().catch(() => {}); }));
-    subscriptions.push(summarySubscription);
-    void Promise.allSettled(subscriptions).then(() => { if (active) void refresh().catch(() => {}); });
-    return () => { active = false; subscriptions.forEach(sub => void sub.then(off => off()).catch(() => {})); };
-  }, [meeting.id, aiSummary]);
+    setHasPreviousSummary(summaryJob?.has_previous_result === true);
+  }, [summaryJob]);
 
   const updateSidebar = useCallback((title: string) => {
     publishedTitle.current = { id: meeting.id, title };

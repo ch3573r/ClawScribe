@@ -1,6 +1,7 @@
 "use client";
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { getMeetingContext, setMeetingContext } from '@/lib/meetingContext';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { getMeetingContext } from '@/lib/meetingContext';
+import { meetingDraft, reportSaveError } from '@/lib/meetingDrafts';
 import { motion } from 'framer-motion';
 import type { MeetingDetails, MeetingSummary, TranscriptSegmentData } from '@/types';
 import Analytics from '@/lib/analytics';
@@ -35,6 +36,7 @@ import { Button } from '@/components/ui/button';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { isActiveSummary, type SummaryJobSnapshot } from '@/lib/summary-job-status';
+import type { SubscribeToSummary } from '@/lib/summary-updates';
 import { SERIES_REVIEW_CHANGED, type SeriesPreferences } from '@/lib/meeting-follow-through';
 import { getMeetingCalendar, MEETING_SERIES_TEMPLATE_CHANGED } from '@/lib/meetingCalendarStore';
 import { MICROSOFT_CALENDAR_CLEARED } from '@/lib/meetingCalendar';
@@ -48,6 +50,8 @@ export default function PageContent({
   actionId,
   summaryData,
   summaryJob,
+  subscribeToSummary,
+  refreshSummary,
   onMeetingUpdated,
   onRefetchTranscripts,
   onPatchTranscriptText,
@@ -74,6 +78,8 @@ export default function PageContent({
   actionId?: string | null;
   summaryData: MeetingSummary | null;
   summaryJob: SummaryJobSnapshot | null;
+  subscribeToSummary: SubscribeToSummary;
+  refreshSummary: () => void;
   onMeetingUpdated?: () => Promise<void>;
   onRevealTranscript?: (id: string, index: number) => Promise<void>;
   onRefetchTranscripts?: () => Promise<void>;
@@ -123,27 +129,25 @@ export default function PageContent({
   // is applied on every generate/regenerate.
   const [customPrompt, setCustomPrompt] = useState('');
   const [contextLoading, setContextLoading] = useState(true);
-  const contextMeeting = useRef(meeting.id);
-  contextMeeting.current = meeting.id;
+  const contextDraft = useMemo(() => meetingDraft(meeting.id), [meeting.id]);
   useEffect(() => {
     let active = true;
-    setCustomPrompt('');
+    setCustomPrompt(contextDraft.edits.context ?? '');
     setContextLoading(true);
     void getMeetingContext(meeting.id).then(context => {
-      if (active) setCustomPrompt(context);
+      if (active) setCustomPrompt(contextDraft.edits.context ?? context);
     }).catch(() => {
       if (active) toast.error('Could not load meeting context. Reopen the meeting to retry.');
     }).finally(() => { if (active) setContextLoading(false); });
     return () => { active = false; };
-  }, [meeting.id]);
+  }, [meeting.id, contextDraft]);
   const handlePromptChange = useCallback((value: string): void => {
     setCustomPrompt(value);
-    void setMeetingContext(meeting.id, value).catch(() => {
-      if (contextMeeting.current === meeting.id) toast.error('Could not save meeting context', {
-        action: { label: 'Retry', onClick: () => handlePromptChange(value) },
-      });
-    });
-  }, [meeting.id]);
+    contextDraft.edit({ context: value });
+  }, [contextDraft]);
+  const flushContext = useCallback(() => {
+    if (contextDraft.edits.context !== undefined) void contextDraft.flush().catch(reportSaveError);
+  }, [contextDraft]);
   const [isRecording] = useState(false);
   const [focusedSource, setFocusedSource] = useState<{ id: string; request: number }>();
   const evidenceFocusRequest = useRef(0);
@@ -221,7 +225,7 @@ export default function PageContent({
   }, [archiveAction]);
 
   // Custom hooks
-  const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
+  const meetingData = useMeetingData({ meeting, summaryData, summaryJob });
   const editorRef = meetingData.blockNoteSummaryRef;
   const getSummaryMarkdown = useCallback(async () => (await editorRef.current?.getMarkdown()) ?? '', [editorRef]);
   const hasSpeakerAttribution = shouldShowSpeakerAttribution(
@@ -301,6 +305,7 @@ export default function PageContent({
   };
 
   const summaryGeneration = useSummaryGeneration({
+    subscribeToSummary,
     hasExistingSummary: !!meetingData.aiSummary,
     beforeGeneration: meetingData.flushPendingChanges,
     meeting,
@@ -546,6 +551,7 @@ export default function PageContent({
           onRetryTranslation={summaryGeneration.handleRetryTranslation}
           onStopGeneration={summaryGeneration.handleStopGeneration}
           onPromptChange={handlePromptChange}
+          onPromptBlur={flushContext}
           contextLoading={contextLoading}
           customPrompt={customPrompt}
           onSaveSummary={meetingData.handleSaveSummary}
@@ -556,7 +562,8 @@ export default function PageContent({
           summaryRevision={meetingData.summaryRevision}
           onRestorePrevious={meetingData.restorePreviousSummary}
           summaryError={summaryGeneration.summaryError}
-          jobSnapshot={summaryGeneration.jobUpdate ?? summaryJob}
+           jobSnapshot={summaryJob?.status === 'unavailable' ? summaryJob : summaryGeneration.jobUpdate ?? summaryJob}
+           onRefreshSummary={refreshSummary}
           getSummaryStatusMessage={summaryGeneration.getSummaryStatusMessage}
           availableTemplates={templates.availableTemplates}
           selectedTemplate={templates.selectedTemplate}
