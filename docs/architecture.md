@@ -234,7 +234,8 @@ the available PCM spool in one pass with a duration-scaled deadline and recovers
 it into AAC when the encoder is available, with WAV as the fallback if the encoder is missing or fails. New capture chunks carry absolute sample positions, and a stop
 records the intended end. Both paths insert silence for known missing spans so
 later audio keeps its transcript position. Older spools still recover in
-sequence. Both paths accept a readable temporary tail at the next sequence
+sequence. Older builds can read new capture chunks and play them in sequence.
+Both paths accept a readable temporary tail at the next sequence
 position. Torn temporary writes record a gap without preventing spool cleanup;
 unreadable published chunks retain their originals. Playback uses scoped asset-protocol byte ranges and an HTML audio
 element. The speech worker delivers each completed decode directly to its

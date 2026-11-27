@@ -181,9 +181,10 @@ pub struct TranscriptionQueueReceiver {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ChunkKind {
     Audio = 0,
-    ClearSpeechSource = 0x80,
-    // For new mixed capture chunks, the ID is the exact starting sample.
-    PositionedCapture = 0x40,
+    // Speech uses this flag for a clear source. Capture uses it to mark an ID
+    // holding the exact starting sample. Older capture readers ignore this bit.
+    Tagged = 0x80,
+    PositionedCapturePreview = 0x40,
 }
 
 /// A bounded handoff keeps filesystem latency out of the capture/mixing task.
@@ -276,7 +277,7 @@ impl BufferedSpool {
         // Record the submitted end even when this chunk cannot enter the queue.
         self.capture_end
             .store(start + chunk.data.len() as u64, Ordering::Release);
-        self.send_entry(chunk, ChunkKind::PositionedCapture).await
+        self.send_entry(chunk, ChunkKind::Tagged).await
     }
 
     pub(crate) async fn send_with_source(
@@ -285,7 +286,7 @@ impl BufferedSpool {
         clear_source: bool,
     ) -> io::Result<()> {
         let kind = if clear_source {
-            ChunkKind::ClearSpeechSource
+            ChunkKind::Tagged
         } else {
             ChunkKind::Audio
         };
@@ -571,7 +572,7 @@ impl TranscriptionQueueReceiver {
         let audio_ms = chunk_audio_ms(&chunk);
         Ok(QueuedAudioChunk {
             chunk,
-            clear_source: kind == ChunkKind::ClearSpeechSource,
+            clear_source: !self.shared.retain_files && kind == ChunkKind::Tagged,
             audio_ms,
             spool_bytes,
         })
@@ -639,7 +640,7 @@ pub(crate) fn read_chunk(path: &Path) -> io::Result<AudioChunk> {
 
 pub(crate) fn read_capture_chunk(path: &Path) -> io::Result<(AudioChunk, Option<u64>)> {
     let (chunk, kind) = read_entry(path)?;
-    let position = (kind == ChunkKind::PositionedCapture).then_some(chunk.chunk_id);
+    let position = (kind != ChunkKind::Audio).then_some(chunk.chunk_id);
     Ok((chunk, position))
 }
 
@@ -675,8 +676,8 @@ fn read_entry(path: &Path) -> io::Result<(AudioChunk, ChunkKind)> {
     reader.read_exact(&mut device)?;
     let kind = match device[0] & 0xc0 {
         0 => ChunkKind::Audio,
-        0x80 => ChunkKind::ClearSpeechSource,
-        0x40 => ChunkKind::PositionedCapture,
+        0x80 => ChunkKind::Tagged,
+        0x40 => ChunkKind::PositionedCapturePreview,
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -744,7 +745,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (writer, mut reader, _) = transcription_queue_in(root.path()).unwrap();
         writer
-            .send_entry(chunk(1), ChunkKind::ClearSpeechSource)
+            .send_entry(chunk(1), ChunkKind::Tagged)
             .await
             .unwrap();
         writer.send(chunk(2)).await.unwrap();
@@ -846,6 +847,31 @@ mod tests {
         assert_eq!(receiver.recv().await.unwrap().unwrap().chunk.chunk_id, 1);
         assert!(state.is_recording() && state.capture_incomplete());
         buffered.finish().await;
+    }
+
+    #[tokio::test]
+    async fn positioned_capture_uses_a_header_older_capture_readers_can_decode() {
+        let folder = tempfile::tempdir().unwrap();
+        let (writer, mut reader, _) = recording_audio_queue(folder.path()).unwrap();
+        let mut buffered = BufferedSpool::new(
+            writer,
+            crate::audio::recording_state::RecordingState::new(),
+            true,
+        );
+        buffered.send_capture(chunk(0), 123).await.unwrap();
+        buffered.finish().await;
+
+        let path = queue_path(&folder.path().join(".audio-spool"), 0);
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(&bytes[..4], b"CSQ1");
+        assert_eq!(bytes[24] & 0x7f, 1);
+        assert!(!reader.recv().await.unwrap().unwrap().clear_source);
+        assert_eq!(read_capture_chunk(&path).unwrap().1, Some(123));
+
+        // Recovery also understands positioned chunks from the earlier PR.
+        bytes[24] = 0x40 | 1;
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(read_capture_chunk(&path).unwrap().1, Some(123));
     }
 
     fn chunk(id: u64) -> AudioChunk {
