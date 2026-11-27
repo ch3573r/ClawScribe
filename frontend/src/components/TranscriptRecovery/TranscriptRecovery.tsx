@@ -27,6 +27,7 @@ import { cn } from '@/lib/utils';
 
 interface TranscriptRecoveryProps {
   isOpen: boolean;
+  recordingActive: boolean;
   onClose: () => void;
   recoverableMeetings: RecoveryCandidate[];
   isScanning: boolean;
@@ -43,6 +44,7 @@ interface TranscriptRecoveryProps {
 
 export function TranscriptRecovery({
   isOpen,
+  recordingActive,
   onClose,
   recoverableMeetings,
   isScanning,
@@ -62,6 +64,7 @@ export function TranscriptRecovery({
   const isLoadingPreview = !!selectedMeetingId && preview?.meetingId !== selectedMeetingId;
   const previewTranscripts = preview?.meetingId === selectedMeetingId ? preview.rows : [];
   const [isRecovering, setIsRecovering] = useState(false);
+  const recovering = useRef(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isSavingTranscript, setIsSavingTranscript] = useState(false);
   const savingTranscript = useRef(false);
@@ -95,8 +98,9 @@ export function TranscriptRecovery({
   }, [isOpen, selectedMeetingId, onLoadPreview]);
 
   const handleRecover = async () => {
-    if (!selectedMeetingId) return;
+    if (!selectedMeetingId || busy || recovering.current) return;
 
+    recovering.current = true;
     setIsRecovering(true);
     try {
       await onRecover(selectedMeetingId);
@@ -106,6 +110,7 @@ export function TranscriptRecovery({
         description: errorText(error),
       });
     } finally {
+      recovering.current = false;
       setIsRecovering(false);
     }
   };
@@ -197,6 +202,7 @@ export function TranscriptRecovery({
           <DialogTitle className="text-2xl">Recover interrupted meetings</DialogTitle>
           <DialogDescription>
             We found {recoverableMeetings.length} meeting{recoverableMeetings.length !== 1 ? 's' : ''} that {recoverableMeetings.length !== 1 ? 'were' : 'was'} interrupted. Select a meeting to preview and recover it.
+            {recordingActive && ' You can recover an earlier meeting while recording.'}
           </DialogDescription>
           {(scanFailed || hasUnverifiedFolders) && (
             <div className="flex items-center justify-between gap-3">
@@ -426,7 +432,7 @@ export function TranscriptRecovery({
                 {isRecovering ? (
                   <>
                     <CheckCircle2 className="w-4 h-4 mr-2 animate-spin" />
-                    Recovering...
+                    Recovering…
                   </>
                 ) : (
                   <>

@@ -29,6 +29,7 @@ pub(crate) async fn restore_trashed_meeting<R: Runtime>(
     {
         return Err("The meeting is no longer in Trash.".into());
     }
+    let _ = app.emit("library-meeting-restored", &meeting_id);
     let _ = app.emit("library-changed", ());
     crate::audio::import::queue::notify(&app);
     tauri::async_runtime::spawn(crate::summary::automatic::resume_after_restore(

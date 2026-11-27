@@ -29,6 +29,16 @@ function find(node, predicate) {
 
 const toggle = node => find(node, item => item.type === 'Switch').props;
 
+test('settings search finds sign-in startup in General', () => {
+  const { filterSettingsGroups } = loadTsModule('src/components/settings/settings-sections.ts', {
+    'lucide-react': {}, '@/components/IntegrationIcons': {},
+  });
+  for (const query of ['startup', 'Windows sign-in']) {
+    const values = Array.from(filterSettingsGroups(query)).flatMap(group => Array.from(group.items, item => item.value));
+    assert.deepEqual(values, ['general']);
+  }
+});
+
 test('sign-in startup reads Windows state and changes it only after an explicit toggle', async () => {
   const status = deferred(), saving = deferred();
   const calls = [];

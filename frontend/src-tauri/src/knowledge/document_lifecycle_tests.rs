@@ -10,6 +10,27 @@ const FIRST: &str = "00000000-0000-4000-8000-000000000001";
 const SECOND: &str = "00000000-0000-4000-8000-000000000002";
 
 #[tokio::test]
+async fn trash_keeps_document_attached_even_if_a_stale_view_detaches_it() {
+    let pool = pool().await;
+    let attached = attach(&pool, "aster", FIRST).await;
+    let document = attached.attachment.id;
+    assert!(MeetingsRepository::move_to_trash(&pool, "aster", false)
+        .await
+        .unwrap());
+    assert_eq!(
+        store::detach(&pool, "aster", &document).await.unwrap(),
+        None
+    );
+    assert!(MeetingsRepository::restore_from_trash(&pool, "aster")
+        .await
+        .unwrap());
+    assert_eq!(
+        store::get(&pool, "aster", &document).await.unwrap().id,
+        document
+    );
+}
+
+#[tokio::test]
 async fn meeting_delete_reports_original_and_redacts_dependent_turns() {
     let pool = pool().await;
     let attached = attach(&pool, "aster", FIRST).await;

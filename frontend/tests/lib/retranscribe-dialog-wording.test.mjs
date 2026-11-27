@@ -110,6 +110,8 @@ async function setup(hasTranscript, editStateFails = false, cancelAccepted = tru
   await flush();
   return {
     props, calls, emit, messages, render, cancellations,
+    libraryEvent(event, meetingId) { listeners.get(event)?.({ payload: meetingId }); },
+    status() { render(); return contextValue.status; },
     remountDialog() { hooks.reset(); return render(); },
     hooks: { unmount() { hooks.unmount(); providerHooks.unmount(); } },
   };
@@ -264,6 +266,28 @@ test('a background failure is announced after the user opens a different meeting
   assert.match(text(view.remountDialog()), /Synthetic background failure/);
   view.hooks.unmount();
 });
+
+for (const event of ['library-meeting-trashed', 'library-meeting-deleted']) {
+  test(`${event} suppresses status and late announcements for the affected meeting`, async () => {
+    const view = await setup(true);
+    await findButton(view.render(), 'Replace transcript').props.onClick();
+    assert.equal(view.status().state, 'running');
+    view.libraryEvent(event, 'another-meeting');
+    assert.equal(view.status().state, 'running');
+    view.libraryEvent(event, 'synthetic-meeting');
+    assert.equal(view.status(), null);
+    view.emit('retranscription-progress', { payload: { meeting_id: 'synthetic-meeting' } });
+    view.emit('retranscription-error', { payload: { meeting_id: 'synthetic-meeting', error: 'Late failure' } });
+    assert.equal(view.status(), null);
+    assert.deepEqual(view.messages, []);
+    if (event === 'library-meeting-trashed') {
+      view.libraryEvent('library-meeting-restored', 'synthetic-meeting');
+      await findButton(view.remountDialog(), 'Replace transcript').props.onClick();
+      assert.equal(view.status().state, 'running');
+    }
+    view.hooks.unmount();
+  });
+}
 
 test('a reopened or reloaded dialog restores progress and cancels the native run it shows', async () => {
   const snapshot = {

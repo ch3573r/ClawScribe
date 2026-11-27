@@ -23,8 +23,21 @@ pub(crate) struct TrashedMeeting {
 
 const TRASH_RETENTION: &str = "+30 days";
 const EXPIRED: &str = "datetime(deleted_at, ?1) <= CURRENT_TIMESTAMP";
+pub(crate) const NOT_FOUND: &str = "Meeting not found.";
+// Serialize Trash with publication of transcript files and voice samples.
+pub(crate) static FILE_PUBLICATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl MeetingsRepository {
+    pub(crate) async fn is_active<'e>(
+        executor: impl sqlx::SqliteExecutor<'e>,
+        meeting_id: &str,
+    ) -> Result<bool, SqlxError> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM active_meetings WHERE id = ?)")
+            .bind(meeting_id)
+            .fetch_one(executor)
+            .await
+    }
+
     pub async fn get_meetings(pool: &SqlitePool) -> Result<Vec<MeetingModel>, sqlx::Error> {
         sqlx::query_as("SELECT id,title,created_at,updated_at,folder_path FROM active_meetings ORDER BY created_at DESC")
             .fetch_all(pool)
@@ -43,6 +56,7 @@ impl MeetingsRepository {
         meeting_id: &str,
         delete_files: bool,
     ) -> Result<bool, SqlxError> {
+        let _files = FILE_PUBLICATION_LOCK.lock().await;
         let result = sqlx::query(
             "UPDATE meetings SET deleted_at=CURRENT_TIMESTAMP, delete_recording_on_purge=?
              WHERE id=? AND deleted_at IS NULL",
@@ -51,7 +65,12 @@ impl MeetingsRepository {
         .bind(meeting_id)
         .execute(pool)
         .await?;
-        Ok(result.rows_affected() == 1)
+        let moved = result.rows_affected() == 1;
+        if moved {
+            crate::audio::retranscription::cancel_retranscription_for_meeting(meeting_id);
+            crate::speaker_profiles::forget_detection_sample(meeting_id);
+        }
+        Ok(moved)
     }
 
     pub(crate) async fn trash(pool: &SqlitePool) -> Result<Vec<TrashedMeeting>, SqlxError> {
@@ -69,14 +88,25 @@ impl MeetingsRepository {
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<bool, SqlxError> {
+        let mut tx = pool.begin().await?;
         let result = sqlx::query(
             "UPDATE meetings SET deleted_at=NULL, delete_recording_on_purge=1
              WHERE id=? AND deleted_at IS NOT NULL",
         )
         .bind(meeting_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() == 1)
+        if result.rows_affected() == 0 {
+            return Ok(false);
+        }
+        // A discarded completion cannot leave a restored meeting permanently busy.
+        super::summary::SummaryProcessesRepository::fail_interrupted_for(
+            &mut *tx,
+            Some(meeting_id),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub(crate) async fn expired_trash_ids(pool: &SqlitePool) -> Result<Vec<String>, SqlxError> {
@@ -351,13 +381,14 @@ impl MeetingsRepository {
 
         let now = Utc::now().naive_utc();
 
-        let rows_affected =
-            sqlx::query("UPDATE meetings SET title = ?, updated_at = ? WHERE id = ?")
-                .bind(new_title)
-                .bind(now)
-                .bind(meeting_id)
-                .execute(&mut *transaction)
-                .await?;
+        let rows_affected = sqlx::query(
+            "UPDATE meetings SET title = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(new_title)
+        .bind(now)
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
         if rows_affected.rows_affected() == 0 {
             transaction.rollback().await?;
             return Ok(false);
@@ -375,13 +406,14 @@ impl MeetingsRepository {
         let now = Utc::now();
 
         // Update meetings table
-        let meeting_update =
-            sqlx::query("UPDATE meetings SET title = ?, updated_at = ? WHERE id = ?")
-                .bind(new_title)
-                .bind(now)
-                .bind(meeting_id)
-                .execute(&mut *transaction)
-                .await?;
+        let meeting_update = sqlx::query(
+            "UPDATE meetings SET title = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(new_title)
+        .bind(now)
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
 
         if meeting_update.rows_affected() == 0 {
             transaction.rollback().await?;
@@ -406,7 +438,7 @@ impl MeetingsRepository {
         title: &str,
     ) -> Result<bool, SqlxError> {
         let mut transaction = pool.begin().await?;
-        let updated = sqlx::query("UPDATE meetings SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND title = ?")
+        let updated = sqlx::query("UPDATE meetings SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND title = ? AND deleted_at IS NULL")
             .bind(title).bind(meeting_id).bind(current).execute(&mut *transaction).await?;
         if updated.rows_affected() == 0 {
             return Ok(false);
@@ -498,6 +530,42 @@ async fn delete_meeting_with_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn trash_blocks_all_title_updates() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let id = "review-test";
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+            .await
+            .unwrap());
+        assert!(
+            !MeetingsRepository::update_meeting_title(&pool, id, "Edited")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !MeetingsRepository::update_meeting_name(&pool, id, "Renamed")
+                .await
+                .unwrap()
+        );
+        assert!(!MeetingsRepository::update_generated_meeting_name(
+            &pool,
+            id,
+            "Synthetic review",
+            "Generated"
+        )
+        .await
+        .unwrap());
+        assert!(MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
+        let title: String = sqlx::query_scalar("SELECT title FROM active_meetings WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(title, "Synthetic review");
+    }
 
     #[tokio::test]
     async fn moving_a_meeting_to_trash_hides_it_and_keeps_its_transcript() {

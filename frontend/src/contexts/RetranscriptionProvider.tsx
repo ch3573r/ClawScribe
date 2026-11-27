@@ -74,6 +74,7 @@ export function RetranscriptionProvider({ children }: { children: ReactNode }) {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const latest = useRef<RetranscriptionStatus | null>(null);
+  const hiddenMeetings = useRef(new Set<string>());
   const startingRequest = useRef(false);
   const lastAnnouncement = useRef(0);
 
@@ -83,6 +84,21 @@ export function RetranscriptionProvider({ children }: { children: ReactNode }) {
       .map(event => listen<{ status: RetranscriptionStatus }>(event, ({ payload }) => {
         if (!disposed) acceptStatus(payload.status, true);
       }));
+    for (const event of ['library-meeting-trashed', 'library-meeting-deleted']) {
+      subscriptions.push(listen<string>(event, ({ payload: id }) => {
+        if (disposed) return;
+        hiddenMeetings.current.add(id);
+        setStatus(current => current?.meeting_id === id ? null : current);
+        setStarting(current => current?.meetingId === id ? null : current);
+        const run = latest.current;
+        if (run?.meeting_id === id) {
+          setCancellingRunId(current => current === run.run_id ? null : current);
+        }
+      }));
+    }
+    subscriptions.push(listen<string>('library-meeting-restored', ({ payload: id }) => {
+      if (!disposed) hiddenMeetings.current.delete(id);
+    }));
 
     // Subscribe first so a run finishing during the query still produces an event.
     void Promise.all(subscriptions).then(() => invoke<RetranscriptionStatus | null>('get_retranscription_status'))
@@ -102,13 +118,15 @@ export function RetranscriptionProvider({ children }: { children: ReactNode }) {
   }, [attempt]);
 
   function acceptStatus(snapshot: RetranscriptionStatus, announce = false) {
+    const hidden = hiddenMeetings.current.has(snapshot.meeting_id);
     if (!latest.current || snapshot.revision > latest.current.revision) {
       latest.current = snapshot;
-      setStatus(snapshot);
+      setStatus(hidden ? null : snapshot);
       if (snapshot.state !== 'running') setCancellingRunId(id => id === snapshot.run_id ? null : id);
     }
-    if (!announce || snapshot.state === 'running' || snapshot.revision <= lastAnnouncement.current) return;
+    if (!announce || snapshot.state === 'running' || snapshot.revision !== latest.current.revision || snapshot.revision <= lastAnnouncement.current) return;
     lastAnnouncement.current = snapshot.revision;
+    if (hidden) return;
     const action = snapshot.replaces_transcript ? 'Retranscription' : 'Transcription';
     if (snapshot.state === 'complete') {
       const { segments_count } = snapshot.result;
@@ -129,8 +147,10 @@ export function RetranscriptionProvider({ children }: { children: ReactNode }) {
     try {
       acceptStatus(await invoke<RetranscriptionStatus>('start_retranscription_command', { ...request }));
     } catch (caught) {
-      const error = errorText(caught, 'Could not start transcription.');
-      toast.error(request.replacesTranscript ? 'Retranscription failed' : 'Transcription failed', { description: error });
+      if (!hiddenMeetings.current.has(request.meetingId)) {
+        const error = errorText(caught, 'Could not start transcription.');
+        toast.error(request.replacesTranscript ? 'Retranscription failed' : 'Transcription failed', { description: error });
+      }
       throw caught;
     } finally {
       startingRequest.current = false;
@@ -139,12 +159,13 @@ export function RetranscriptionProvider({ children }: { children: ReactNode }) {
   }
 
   async function cancel(runId: number) {
-    if (latest.current?.state !== 'running' || latest.current.run_id !== runId || cancellingRunId === runId) return;
+    const run = latest.current;
+    if (run?.state !== 'running' || run.run_id !== runId || cancellingRunId === runId || hiddenMeetings.current.has(run.meeting_id)) return;
     setCancellingRunId(runId);
     try {
       if (await invoke<boolean>('cancel_retranscription_command', { runId })) return;
     } catch {
-      if (latest.current?.run_id === runId && latest.current.state === 'running') {
+      if (latest.current?.run_id === runId && latest.current.state === 'running' && !hiddenMeetings.current.has(run.meeting_id)) {
         toast.error('Could not cancel transcription. Try again.');
       }
     }

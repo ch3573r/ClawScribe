@@ -131,6 +131,34 @@ test('recovering a selected entry leaves the dialog open for the next interrupte
   assert.match(render().map(text).join(' '), /Second/);
 });
 
+test('an interrupted meeting can be recovered during another recording', async t => {
+  const hooks = createHookHarness();
+  t.after(() => hooks.unmount());
+  const recovery = deferred();
+  const recovered = [];
+  const { TranscriptRecovery } = loadTsModule('src/components/TranscriptRecovery/TranscriptRecovery.tsx', {
+    ...primitives, react: hooks.react,
+  });
+  const props = {
+    isOpen: true, recordingActive: true, onClose: () => assert.fail('Recovery closed the dialog'),
+    recoverableMeetings: [{ meetingId: 'older', title: 'Earlier meeting', startTime: 1, lastUpdated: 2, transcriptCount: 1 }],
+    onLoadPreview: async () => [],
+    onRecover: id => { recovered.push(id); return recovery.promise; },
+  };
+  const render = () => hooks.render(() => TranscriptRecovery(props));
+  const button = label => nodes(render()).find(node => node.type === 'button' && text(node).trim() === label);
+  assert.match(text(render()), /You can recover an earlier meeting while recording/);
+  const recover = button('Recover');
+  assert.equal(recover.props.disabled, false);
+  const pending = recover.props.onClick();
+  await recover.props.onClick();
+  assert.equal(button('Recovering…').props.disabled, true);
+  assert.deepEqual(recovered, ['older']);
+  recovery.resolve();
+  await pending;
+  assert.equal(button('Recover').props.disabled, false);
+});
+
 test('a late recovery preview cannot replace the selected meeting', async () => {
   const hooks = createHookHarness();
   const first = deferred();

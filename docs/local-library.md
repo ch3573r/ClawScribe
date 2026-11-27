@@ -585,6 +585,8 @@ while running and permanently deletes them after 30 days.
 Portable backups include meetings in Trash and any recording files included
 by the backup settings. Restoring a copy from backup puts it back in Trash
 with a fresh 30-day window. An existing local meeting keeps its current state.
+Backups that include a meeting in Trash require a build with Trash support to
+restore. Backups with an empty Trash omit the default Trash fields for older builds.
 
 Permanent deletion removes the meeting's database records, including transcript revisions,
 previous summaries, context, notes, chat, tags, and bookmarks. App-managed export
@@ -633,6 +635,9 @@ capture. For an older setting that still points through a link, choose the actua
 folder again in **Settings → Recording**. This also makes earlier interrupted
 recordings in that target available to the disk scan. Folder deletion continues
 to require an unlinked path and verified ownership.
+
+Open **Interrupted recordings** in **Settings → General** to recover an earlier
+meeting while recording. The recovery list excludes the current recording.
 
 If a recovery scan cannot verify a draft's folder or read its recording marker,
 **Interrupted recordings** shows **Folder unverified** and lets you preview the

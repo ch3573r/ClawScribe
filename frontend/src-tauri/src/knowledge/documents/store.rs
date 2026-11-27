@@ -153,7 +153,8 @@ pub async fn detach(
 ) -> Result<Option<String>, DocumentError> {
     let mut tx = pool.begin().await?;
     let removed = sqlx::query(
-        "DELETE FROM knowledge_document_attachments WHERE meeting_id=? AND document_id=?",
+        "DELETE FROM knowledge_document_attachments
+         WHERE meeting_id = (SELECT id FROM active_meetings WHERE id = ?) AND document_id = ?",
     )
     .bind(meeting)
     .bind(id)

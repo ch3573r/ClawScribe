@@ -6,7 +6,7 @@ import { fetchRecoveryCandidates } from "@/hooks/useTranscriptRecovery";
 /**
  * How many interrupted recordings there are right now (browser data and the
  * core's scan of the recording folders), and whether a scan should be retried.
- * It does nothing while `enabled` is false, for example during a recording.
+ * The caller can defer the scan during recording startup or shutdown.
  */
 export function useInterruptedRecordings(enabled: boolean) {
   const [count, setCount] = useState(0);

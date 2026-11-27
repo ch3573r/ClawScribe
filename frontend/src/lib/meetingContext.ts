@@ -19,8 +19,12 @@ export function migrateLegacyMeetingContexts(): Promise<void> {
       for (const key of keys) {
         const context = storage.getItem(key);
         if (context === null) continue;
-        await invoke('set_meeting_context', { meetingId: key.slice(PREFIX.length), context, onlyIfMissing: true });
-        // A failed database save leaves the recovery value available for retry.
+        try {
+          await invoke('set_meeting_context', { meetingId: key.slice(PREFIX.length), context, onlyIfMissing: true });
+        } catch (error) {
+          if (error !== 'Meeting not found.') throw error;
+        }
+        // Only available meetings can receive legacy context.
         storage.removeItem(key);
       }
     })().catch(error => { migration = undefined; throw error; });

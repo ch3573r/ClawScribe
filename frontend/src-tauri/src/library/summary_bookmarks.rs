@@ -1,10 +1,11 @@
+use crate::database::repositories::meeting::MeetingsRepository;
 use crate::state::AppState;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager};
 
 async fn enabled(pool: &SqlitePool, meeting_id: &str) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM meeting_summary_bookmarks WHERE meeting_id = ?)",
+        "SELECT EXISTS(SELECT 1 FROM meeting_summary_bookmarks WHERE meeting_id = (SELECT id FROM active_meetings WHERE id = ?))",
     )
     .bind(meeting_id)
     .fetch_one(pool)
@@ -16,18 +17,22 @@ async fn set_enabled(
     meeting_id: &str,
     enabled: bool,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    if !MeetingsRepository::is_active(&mut *tx, meeting_id).await? {
+        return Err(sqlx::Error::RowNotFound);
+    }
     if enabled {
         sqlx::query("INSERT INTO meeting_summary_bookmarks (meeting_id) VALUES (?) ON CONFLICT (meeting_id) DO NOTHING")
             .bind(meeting_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
     } else {
         sqlx::query("DELETE FROM meeting_summary_bookmarks WHERE meeting_id = ?")
             .bind(meeting_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
     }
-    Ok(())
+    tx.commit().await
 }
 
 #[tauri::command]
@@ -65,7 +70,7 @@ pub(crate) async fn append_context(
     let notes: Vec<(f64, String)> = sqlx::query_as(
         "SELECT b.seconds, b.label FROM meeting_summary_bookmarks p
          JOIN meeting_bookmarks b ON b.meeting_id = p.meeting_id
-         WHERE p.meeting_id = ?
+         WHERE p.meeting_id = (SELECT id FROM active_meetings WHERE id = ?)
          ORDER BY b.seconds, b.id LIMIT 40",
     )
     .bind(meeting_id)
@@ -110,6 +115,22 @@ pub(crate) async fn append_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn trash_preserves_the_saved_bookmark_preference() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let id = "review-test";
+        set_enabled(&pool, id, true).await.unwrap();
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+            .await
+            .unwrap());
+        assert!(set_enabled(&pool, id, false).await.is_err());
+        assert!(!enabled(&pool, id).await.unwrap());
+        assert!(MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
+        assert!(enabled(&pool, id).await.unwrap());
+    }
 
     #[tokio::test]
     async fn summary_priorities_are_private_until_enabled_for_that_meeting() {

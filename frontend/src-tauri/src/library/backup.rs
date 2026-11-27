@@ -514,6 +514,13 @@ async fn snapshot_tables_impl(
                 .map(PathBuf::from),
         );
         row.insert("folder_path".into(), Value::Null);
+        // Preserve the older archive shape for active meetings with default Trash state.
+        if row.get("deleted_at").is_some_and(Value::is_null) {
+            row.remove("deleted_at");
+            if row.get("delete_recording_on_purge").and_then(Value::as_i64) == Some(1) {
+                row.remove("delete_recording_on_purge");
+            }
+        }
         if row
             .remove("saved_audio_removed_by_user")
             .and_then(|value| value.as_i64())
@@ -2731,6 +2738,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archive_without_trash_omits_new_columns_and_restores_latest_defaults() {
+        let source = crate::database::transcript_edits::tests::fixture().await;
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("backup.zip");
+        let records = records::SnapshotFiles::temporary(root.path()).unwrap();
+        let (manifest, folders) = snapshot_for_backup(&source, &records, None).await.unwrap();
+        prepare_archive(
+            archive_tempfile(&archive).unwrap(),
+            manifest,
+            folders,
+            None,
+            Some(&records),
+            None,
+            false,
+        )
+        .unwrap()
+        .publish(&archive, false)
+        .unwrap();
+        let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+        let meetings = &manifest.tables["meetings"];
+        assert_eq!(meetings.len(), 1);
+        assert!(!meetings[0].contains_key("deleted_at"));
+        assert!(!meetings[0].contains_key("delete_recording_on_purge"));
+
+        let destination = empty_conversation_destination().await;
+        import_manifest(&destination, manifest, stage)
+            .await
+            .unwrap();
+        let purge_flag: bool = sqlx::query_scalar(
+            "SELECT delete_recording_on_purge FROM active_meetings WHERE id = 'review-test'",
+        )
+        .fetch_one(&destination)
+        .await
+        .unwrap();
+        assert!(purge_flag);
+    }
+
+    #[tokio::test]
     async fn archive_round_trip_preserves_trash_and_restarts_retention() {
         use crate::database::repositories::meeting::MeetingsRepository;
         let source = crate::database::transcript_edits::tests::fixture().await;
@@ -2748,6 +2793,9 @@ mod tests {
         let archive = root.path().join("backup.zip");
         write_archive(&archive, manifest, folders).unwrap();
         let (manifest, stage) = unpack(&archive, root.path(), &HashSet::new()).unwrap();
+        let meeting = &manifest.tables["meetings"][0];
+        assert_eq!(meeting["deleted_at"], "2025-01-01 00:00:00");
+        assert_eq!(meeting["delete_recording_on_purge"], 0);
 
         let destination = empty_conversation_destination().await;
         import_manifest(&destination, manifest, stage)

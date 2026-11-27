@@ -147,7 +147,7 @@ async fn apply_generated_title(pool: &SqlitePool, meeting: &str, markdown: &str)
     }) else {
         return;
     };
-    let current = sqlx::query_scalar::<_, String>("SELECT title FROM meetings WHERE id = ?")
+    let current = sqlx::query_scalar::<_, String>("SELECT title FROM active_meetings WHERE id = ?")
         .bind(meeting)
         .fetch_optional(pool)
         .await;

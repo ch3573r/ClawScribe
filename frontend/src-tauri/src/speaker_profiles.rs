@@ -235,12 +235,22 @@ pub(crate) async fn get_meeting_speaker_voice_options(
     state: State<'_, AppState>,
     meeting_id: String,
 ) -> Result<Vec<SpeakerVoiceOption>, String> {
-    let mut tx = state
-        .db_manager
-        .pool()
-        .begin()
+    meeting_voice_options(state.db_manager.pool(), &meeting_id).await
+}
+
+async fn meeting_voice_options(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> Result<Vec<SpeakerVoiceOption>, String> {
+    use crate::database::repositories::meeting::{MeetingsRepository, NOT_FOUND};
+
+    let mut tx = pool.begin().await.map_err(|_| READ_ERROR)?;
+    if !MeetingsRepository::is_active(&mut *tx, meeting_id)
         .await
-        .map_err(|_| READ_ERROR)?;
+        .map_err(|_| READ_ERROR)?
+    {
+        return Err(NOT_FOUND.into());
+    }
     let preferences = read_preferences(&mut tx).await.map_err(|_| READ_ERROR)?;
     if !preferences.enabled {
         return Ok(Vec::new());
@@ -260,7 +270,7 @@ pub(crate) async fn get_meeting_speaker_voice_options(
             })
             .unwrap_or_default()
     };
-    let suggestions = current_suggestions(&mut tx, &meeting_id)
+    let suggestions = current_suggestions(&mut tx, meeting_id)
         .await
         .map_err(|_| READ_ERROR)?;
     let mut options: BTreeMap<String, SpeakerVoiceOption> = suggestions
@@ -277,7 +287,7 @@ pub(crate) async fn get_meeting_speaker_voice_options(
         })
         .collect();
     for (speaker, fingerprint) in cached_lanes {
-        if saved_fingerprint(&mut tx, &meeting_id, &speaker)
+        if saved_fingerprint(&mut tx, meeting_id, &speaker)
             .await
             .map_err(|_| READ_ERROR)?
             == Some(fingerprint)
@@ -398,9 +408,33 @@ async fn save_voice(
     Ok(())
 }
 
-pub(crate) fn offer_detection_sample(cache: Option<DetectionCache>) {
+fn offer_detection_sample(cache: Option<DetectionCache>) {
     let mut available = AVAILABLE.lock().unwrap_or_else(|err| err.into_inner());
     available.detection = cache.filter(|run| run.generation >= available.minimum_generation);
+}
+
+pub(crate) async fn offer_detection_sample_for_meeting(
+    pool: &SqlitePool,
+    meeting: &str,
+    cache: Option<DetectionCache>,
+) {
+    use crate::database::repositories::meeting::{MeetingsRepository, FILE_PUBLICATION_LOCK};
+
+    let _publication = FILE_PUBLICATION_LOCK.lock().await;
+    if matches!(MeetingsRepository::is_active(pool, meeting).await, Ok(true)) {
+        offer_detection_sample(cache);
+    }
+}
+
+pub(crate) fn forget_detection_sample(meeting: &str) {
+    let mut available = AVAILABLE.lock().unwrap_or_else(|err| err.into_inner());
+    if available
+        .detection
+        .as_ref()
+        .is_some_and(|run| run.meeting == meeting)
+    {
+        available.detection = None;
+    }
 }
 
 pub(crate) async fn finish_detection(

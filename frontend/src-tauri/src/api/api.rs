@@ -1197,6 +1197,11 @@ pub async fn api_update_transcript_speaker<R: Runtime>(
             );
             Ok(serde_json::json!({"updated": updated, "speaker": speaker}))
         }
+        Err(sqlx::Error::Protocol(message))
+            if message == crate::database::repositories::meeting::NOT_FOUND =>
+        {
+            Err(message)
+        }
         Err(e) => {
             log_error!("Failed to update speaker for transcript in meeting");
             Err(format!("Failed to update speaker label: {}", e))
@@ -1235,6 +1240,11 @@ pub async fn api_update_transcript_speakers_matching<R: Runtime>(
             }
             Ok(serde_json::json!({"updated": updated, "speaker": speaker}))
         }
+        Err(sqlx::Error::Protocol(message))
+            if message == crate::database::repositories::meeting::NOT_FOUND =>
+        {
+            Err(message)
+        }
         Err(e) => {
             log_error!("Failed to update matching speaker labels in meeting");
             if remember_voice == Some(true) {
@@ -1259,7 +1269,7 @@ pub async fn api_save_meeting_title<R: Runtime>(
     let pool = state.db_manager.pool();
     match MeetingsRepository::update_meeting_title(pool, &meeting_id, &title).await {
         Ok(true) => Ok(serde_json::json!({"message": "Meeting title saved successfully"})),
-        Ok(false) => Err("Meeting was not found".into()),
+        Ok(false) => Err(crate::database::repositories::meeting::NOT_FOUND.into()),
         Err(_) => {
             log_error!("Could not persist the meeting title");
             Err("Could not save the meeting title".into())

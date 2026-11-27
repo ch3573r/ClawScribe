@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
@@ -29,6 +29,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 export default function Home() {
   // Local page state (not moved to contexts)
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
+  const recoveryDialogOpen = useRef(false);
+  useEffect(() => { recoveryDialogOpen.current = showRecoveryDialog; }, [showRecoveryDialog]);
 
   // Use contexts for state management
   const { meetingTitle, setActiveRecordingTitle, transcripts } = useTranscripts();
@@ -45,6 +47,8 @@ export default function Home() {
     setIsMeetingActive, recordingActionReason } = useSidebar();
   const { modals, messages, showModal, hideModal, modelStartFailure, dismissModelStartFailure } = useModalState(transcriptModelConfig);
   const isRecordingDisabled = isStarting || isStopping || isProcessing || isSaving;
+  const recordingBusy = useRef(false);
+  useEffect(() => { recordingBusy.current = isRecording || isRecordingDisabled; }, [isRecording, isRecordingDisabled]);
   const { handleRecordingStart } = useRecordingStart(setIsMeetingActive);
   const startFromHome = async () => {
     if (recordingActionReason) return;
@@ -73,14 +77,12 @@ export default function Home() {
   useEffect(() => {
     const performStartupChecks = async () => {
       try {
-        // Skip recovery check if currently recording or processing stop
-        // This prevents the recovery dialog from showing when:
-        if (recordingState.isRecording ||
+        // Offer recovery automatically when idle. An open dialog owns its scan.
+        if (recoveryDialogOpen.current || recordingState.isRecording ||
           status === RecordingStatus.STARTING ||
           status === RecordingStatus.STOPPING ||
           status === RecordingStatus.PROCESSING_TRANSCRIPTS ||
           status === RecordingStatus.SAVING) {
-          console.log('Skipping recovery check - recording in progress or processing');
           return;
         }
 
@@ -95,7 +97,7 @@ export default function Home() {
   }, [checkForRecoverableTranscripts, recordingState.isRecording, status]);
 
   // Settings > General can ask for the dialog again ("Interrupted recordings").
-  // It opens only when there is something to recover and nothing is running.
+  // A user-requested scan can also find older recordings during capture.
   useEffect(() => {
     let requested: string | null = null;
     try {
@@ -153,21 +155,19 @@ export default function Home() {
         setShowRecoveryDialog(false);
         sessionStorage.removeItem('recovery_dialog_shown');
 
-        if (result.meetingId) {
+        if (result.meetingId && !recordingBusy.current) {
           setTimeout(() => {
-            router.push(`/meeting-details?id=${result.meetingId}`);
+            if (!recordingBusy.current) router.push(`/meeting-details?id=${result.meetingId}`);
           }, 2000);
         }
       }
     }
   };
 
-  // Handle dialog close - clear session flag if no meetings left
   const handleDialogClose = () => {
     setShowRecoveryDialog(false);
-    // If user closes dialog and there are no more meetings, clear the flag
-    // This allows the dialog to show again next session if new meetings appear
-    if (recoverableMeetings.length === 0) {
+    // Keep a failed scan dismissed for this session. Settings can reopen it.
+    if (recoverableMeetings.length === 0 && !recoveryScanFailed) {
       sessionStorage.removeItem('recovery_dialog_shown');
     }
   };
@@ -210,7 +210,8 @@ export default function Home() {
 
       {/* Recovery Dialog */}
       <TranscriptRecovery
-        isOpen={showRecoveryDialog && !isRecording && !isRecordingDisabled}
+        isOpen={showRecoveryDialog}
+        recordingActive={isRecording}
         onClose={handleDialogClose}
         recoverableMeetings={recoverableMeetings}
         isScanning={isRecoveryScanning}

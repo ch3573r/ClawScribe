@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::{database::repositories::meeting::NOT_FOUND, state::AppState};
 use sqlx::SqlitePool;
 
 pub(crate) async fn read(pool: &SqlitePool, meeting: &str) -> Result<String, String> {
@@ -21,20 +21,33 @@ pub(crate) async fn write(
 ) -> Result<(), String> {
     let context = (!context.trim().is_empty()).then_some(context);
     let query = if legacy {
-        "UPDATE meetings SET summary_context = COALESCE(summary_context, ?) WHERE id = ?"
+        "UPDATE meetings SET summary_context = COALESCE(summary_context, ?) WHERE id = ? AND deleted_at IS NULL"
     } else {
-        "UPDATE meetings SET summary_context = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        "UPDATE meetings SET summary_context = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
     };
+    let save_error = |_| "Could not save meeting context".to_string();
+    let mut tx = pool.begin().await.map_err(save_error)?;
     let result = sqlx::query(query)
         .bind(context)
         .bind(meeting)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
-        .map_err(|_| "Could not save meeting context".to_string())?;
-    if result.rows_affected() == 0 && !legacy {
-        return Err("Meeting not found".into());
+        .map_err(save_error)?;
+    if result.rows_affected() == 0 {
+        // Legacy migration can discard a context whose meeting is gone.
+        let unavailable = !legacy
+            || sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ? AND deleted_at IS NOT NULL)",
+            )
+            .bind(meeting)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(save_error)?;
+        if unavailable {
+            return Err(NOT_FOUND.into());
+        }
     }
-    Ok(())
+    tx.commit().await.map_err(save_error)
 }
 
 #[tauri::command]
@@ -64,6 +77,41 @@ pub async fn set_meeting_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn trash_rejects_context_writes_without_modifying_the_meeting() {
+        use crate::database::repositories::meeting::MeetingsRepository;
+
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        let id = "review-test";
+        assert!(MeetingsRepository::move_to_trash(&pool, id, false)
+            .await
+            .unwrap());
+        for legacy in [true, false] {
+            assert_eq!(
+                write(&pool, id, "Draft context", legacy).await.unwrap_err(),
+                NOT_FOUND
+            );
+        }
+        assert!(MeetingsRepository::restore_from_trash(&pool, id)
+            .await
+            .unwrap());
+        assert_eq!(read(&pool, id).await.unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn legacy_context_migration_skips_missing_meetings() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        write(&pool, "missing", "Stale context", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            write(&pool, "missing", "Draft context", false)
+                .await
+                .unwrap_err(),
+            NOT_FOUND
+        );
+    }
 
     #[tokio::test]
     async fn legacy_context_never_replaces_saved_context_and_clear_is_persisted() {

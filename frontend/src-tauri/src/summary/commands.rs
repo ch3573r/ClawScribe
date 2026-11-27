@@ -99,6 +99,11 @@ pub async fn api_save_meeting_summary<R: Runtime>(
             }))
         }
         Ok(false) => Err("Meeting or saved summary was not found".into()),
+        Err(sqlx::Error::Protocol(message))
+            if message == crate::database::repositories::meeting::NOT_FOUND =>
+        {
+            Err(message)
+        }
         Err(_) => {
             log_error!("Could not persist the meeting summary");
             Err("Could not save the meeting summary".into())

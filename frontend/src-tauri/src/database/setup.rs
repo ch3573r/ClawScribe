@@ -118,7 +118,7 @@ pub(crate) fn startup_failure_message(
          Log folder: {}\n\n\
          Choose Open recovery library to restart ClawScribe in a separate \
          workspace. A previous recovery workspace is reused when available. \
-         You can restore a ZIP from Meetings. \
+         You can restore a backup from Meetings. \
          Your current database, recovery files and recordings stay in place.\n\n\
          Choose Exit to close ClawScribe and check the log.",
         show(data_dir),
