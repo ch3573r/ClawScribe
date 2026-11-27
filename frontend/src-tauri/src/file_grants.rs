@@ -29,9 +29,9 @@ const CHOOSE_AGAIN: &str = "Choose the file again.";
 pub(crate) enum Purpose {
     /// An audio file to try a hosted transcription provider with.
     TestAudio,
-    /// Where to write a library backup (`.zip`).
+    /// Where to write a library backup.
     BackupSave,
-    /// A library backup to restore (`.zip`).
+    /// A library backup to restore.
     BackupOpen,
     /// Where to write a Word export (`.docx`).
     WordSave,
@@ -274,12 +274,19 @@ pub async fn pick_reference_document<R: Runtime>(
 pub async fn pick_backup_save_path<R: Runtime>(
     app: AppHandle<R>,
     suggested_name: String,
+    encrypted: Option<bool>,
 ) -> Result<Option<String>, String> {
-    let Some(chosen) = pick_save(app, "ClawScribe meeting archive", "zip", suggested_name).await?
+    let extension = if encrypted == Some(true) {
+        crate::library::backup::encryption::EXTENSION
+    } else {
+        "zip"
+    };
+    let Some(chosen) =
+        pick_save(app, "ClawScribe meeting archive", extension, suggested_name).await?
     else {
         return Ok(None);
     };
-    let path = with_extension(chosen, "zip")?;
+    let path = with_extension(chosen, extension)?;
     save_target_parent_exists(&path)?;
     grant(Purpose::BackupSave, &path)?;
     Ok(Some(path.to_string_lossy().into_owned()))
@@ -290,7 +297,8 @@ pub async fn pick_backup_save_path<R: Runtime>(
 pub async fn pick_backup_restore_path<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<Option<String>, String> {
-    let Some(path) = pick_file(app, "ClawScribe meeting archive", &["zip"]).await? else {
+    const EXTENSIONS: &[&str] = &["zip", crate::library::backup::encryption::EXTENSION];
+    let Some(path) = pick_file(app, "ClawScribe meeting archive", EXTENSIONS).await? else {
         return Ok(None);
     };
     grant(Purpose::BackupOpen, &path)?;

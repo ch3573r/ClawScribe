@@ -448,12 +448,14 @@ input and output and start off. [Local assistant access](docs/local-library.md#l
 recordings, custom templates, vocabulary, approved series notes, and linked
 calendar series preferences. It includes explicitly saved live answers when their
 recording supplied all the source material. Restore adds missing meetings and
-keeps existing meetings and preferences. Backups continue when recording
+can repair missing audio for a matching meeting. Existing audio, notes, and
+preferences are preserved. Backups continue when recording
 folders are missing and report affected meetings,
 excluded recovery files, unavailable audio, skipped custom template items, and
 excluded saved live answers.
-Archives exclude credentials and models and are not encrypted.
-Daily backups are optional and keep three recent copies in a chosen local folder.
+Archives exclude credentials and models. Manual backups can be encrypted with
+a passphrase. Optional daily backups keep three unencrypted copies in a chosen
+local folder.
 Recordings take priority over scheduled backups, which retry when the library is idle.
 If the database fails to open, a separate recovery library can import one of
 these archives while preserving the original files. From recovery, select

@@ -22,7 +22,7 @@ registered saved meeting folders, the library database and indexes, reference
 originals, and local database snapshots. Sizes use filesystem metadata and
 count each shared recording folder once. Unavailable recording folders and
 skipped files are reported. Unattached interrupted recordings, user-created
-backup ZIPs, and model downloads are outside these totals.
+portable backup files, and model downloads are outside these totals.
 
 **Settings → General → Storage** also opens **Library storage** and **Backup and
 restore**. Use **Show storage by meeting** for a paginated breakdown of audio,
@@ -401,7 +401,7 @@ the summary provider for that run. The switch applies to the whole meeting.
 
 ## Backup and restore
 
-Open **Meetings → Backup and restore** to save or restore a ZIP archive. Finish
+Open **Meetings → Backup and restore** to save or restore an archive. Finish
 active recording, import, retranscription, and Microsoft export work before
 starting a manual backup or restore. Keep the app open until it completes.
 
@@ -440,7 +440,14 @@ archive. Choosing a file for another operation clears the previous report;
 cancelling the file picker keeps it. Preserve a separate copy of source recording
 folders, including hidden files, if you need the recovery originals. Backup never
 removes them.
-Archives are not encrypted; keep them in trusted storage.
+Turn on **Encrypt this backup** for a passphrase-protected `.clawbackup` file.
+ClawScribe asks for the passphrase when you choose an encrypted archive to
+restore. Keep the passphrase somewhere safe. ClawScribe does not store it or
+have a way to recover it. Encryption uses Argon2id key derivation and
+authenticated XChaCha20-Poly1305 in chunks. Encrypted operations need local
+disk space for a temporary ZIP that is removed when the operation closes.
+Plain ZIP backups still work. Scheduled backups use plain ZIP, so keep
+unencrypted archives in trusted storage.
 
 Version 3 backups include explicitly saved live answers attached to an archived
 recording when ClawScribe can verify that every source came from that recording.
@@ -451,14 +458,15 @@ excluded. The backup reports their count, and restore reports omissions for
 meetings it adds. Unsaved live chat, pending answers from unfinished recordings,
 connection settings, and sharing approvals stay out of the archive.
 
-Restore adds meetings whose IDs are absent from the library and skips existing
-IDs without overwriting them. Restore validates the archive structure and checks
-existing IDs before extracting audio, so disk space is needed only for new
-meetings' recordings. Audio is staged in a new app-owned directory and database
-inserts commit together. If another operation adds a meeting during extraction,
-its staged files are removed before commit; cleanup failure rolls back the import.
-If a previously skipped meeting is deleted during restore, retry is required so
-its audio can be extracted. Invalid archives leave existing meetings alone.
+Restore adds meetings whose IDs are absent from the library. If a matching
+meeting is missing audio, restore copies available audio from the archive and
+reports the repaired meeting. Restore keeps existing audio, transcripts, notes,
+and other meeting data. For a missing or empty recording folder, ClawScribe attaches a
+new app-owned folder. An existing folder must be a verified, unshared ClawScribe
+recording folder without pending recovery files before audio can be added there.
+Restore validates the archive before extracting new or missing files. If a
+meeting or its recording folder changes during restore, retry the restore.
+Invalid archives leave existing meetings alone.
 Restore displays saved audio-omission warnings for imported meetings.
 Meetings whose recovery files were excluded retain a message directing recovery
 to the original computer.
