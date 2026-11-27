@@ -25,16 +25,29 @@ pub(crate) async fn write(
     } else {
         "UPDATE meetings SET summary_context = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
     };
+    let save_error = |_| "Could not save meeting context".to_string();
+    let mut tx = pool.begin().await.map_err(save_error)?;
     let result = sqlx::query(query)
         .bind(context)
         .bind(meeting)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
-        .map_err(|_| "Could not save meeting context".to_string())?;
+        .map_err(save_error)?;
     if result.rows_affected() == 0 {
-        return Err(NOT_FOUND.into());
+        // Legacy migration can discard a context whose meeting is gone.
+        let unavailable = !legacy
+            || sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ? AND deleted_at IS NOT NULL)",
+            )
+            .bind(meeting)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(save_error)?;
+        if unavailable {
+            return Err(NOT_FOUND.into());
+        }
     }
-    Ok(())
+    tx.commit().await.map_err(save_error)
 }
 
 #[tauri::command]
@@ -66,7 +79,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn trash_blocks_context_writes_and_keeps_legacy_context_pending() {
+    async fn trash_rejects_context_writes_without_modifying_the_meeting() {
         use crate::database::repositories::meeting::MeetingsRepository;
 
         let pool = crate::database::transcript_edits::tests::fixture().await;
@@ -84,6 +97,20 @@ mod tests {
             .await
             .unwrap());
         assert_eq!(read(&pool, id).await.unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn legacy_context_migration_skips_missing_meetings() {
+        let pool = crate::database::transcript_edits::tests::fixture().await;
+        write(&pool, "missing", "Stale context", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            write(&pool, "missing", "Draft context", false)
+                .await
+                .unwrap_err(),
+            NOT_FOUND
+        );
     }
 
     #[tokio::test]

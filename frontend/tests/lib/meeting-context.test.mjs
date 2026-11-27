@@ -60,3 +60,23 @@ test('context writes stay ordered and reads wait for the latest saved value', as
   await context.setMeetingContext('synthetic', '');
   assert.equal(await context.getMeetingContext('synthetic'), '');
 });
+
+test('legacy contexts for missing and trashed meetings are cleared without retry', async () => {
+  const legacy = new Map([
+    ['clawscribe.meetingContext.missing', 'Missing meeting context'],
+    ['clawscribe.meetingContext.trashed', 'Trashed meeting context'],
+    ['clawscribe.meetingContext.active', 'Active meeting context'],
+  ]);
+  const migrated = [];
+  const context = contextModule(async (command, args) => {
+    assert.equal(command, 'set_meeting_context');
+    assert.equal(args.onlyIfMissing, true);
+    migrated.push(args.meetingId);
+    if (args.meetingId === 'trashed') throw 'Meeting not found.';
+  }, legacy);
+
+  await context.migrateLegacyMeetingContexts();
+  await context.migrateLegacyMeetingContexts();
+  assert.equal(legacy.size, 0);
+  assert.deepEqual(migrated, ['missing', 'trashed', 'active']);
+});
