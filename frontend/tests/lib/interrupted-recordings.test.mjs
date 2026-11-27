@@ -120,7 +120,7 @@ function harness({ browserMeetings = [], scan = { recordings: [], truncated: fal
       deleteMeeting: async id => { calls.push(['deleteBrowser', id]); },
     } },
     '@/lib/summary-language-preferences': { applyPinnedSummaryLanguageToMeeting: async () => {} },
-    sonner: { toast: { warning: () => {} } },
+    sonner: { toast: { warning: () => {}, info: () => { calls.push(['deferredNotice']); } } },
   });
   const render = () => hooks.render(useTranscriptRecovery);
   const names = () => calls.map(call => call[0]);
@@ -463,5 +463,20 @@ test('a recording already saved in the library repairs that meeting and never sa
   assert.equal(h.saves[0].folder, 'C:\Rec\saved');
   assert.equal(h.saves[0].cached, null);
   assert.equal(h.render().recoverableMeetings.length, 0);
+  h.hooks.unmount();
+});
+
+test('a busy repair remains available for retry without showing a recovery failure', async () => {
+  const h = harness({
+    scan: { recordings: [disk('synthetic-saved-recording', { registeredMeetingId: 'meeting-7' })] },
+    audioStatus: 'deferred',
+  });
+  const [candidate] = await h.render().checkForRecoverableTranscripts();
+  const result = await h.render().recoverMeeting(candidate.meetingId);
+  assert.equal(result.success, false);
+  assert.equal(result.remainingCount, 1);
+  assert.equal(h.render().recoverableMeetings[0].meetingId, candidate.meetingId);
+  assert.ok(h.names().includes('deferredNotice'));
+  assert.ok(!h.names().includes('markSaved'));
   h.hooks.unmount();
 });

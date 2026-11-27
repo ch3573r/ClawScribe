@@ -456,11 +456,11 @@ fn recovered_covers_samples(path: &Path, samples: u64, sample_rate: u32) -> bool
 
 /// Release only a completely recovered spool, after the caller has saved the meeting.
 pub(super) async fn release_recovered_capture(folder: &Path) -> Result<(), String> {
-    if super::recording_commands::is_recording().await {
-        return Err("Stop recording before releasing recovery files".into());
-    }
     let folder = folder.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        if super::recording_commands::active_recording_folder().protects(&folder) {
+            return Err("Stop recording before releasing its recovery files".into());
+        }
         let spool = folder.join(".audio-spool");
         if !spool.is_dir() {
             return Ok(());

@@ -532,15 +532,27 @@ pub(crate) async fn recover_audio_in_folder(
     if super::recording_commands::is_starting() || super::recording_commands::capture_active() {
         return Err("Stop recording before recovering audio.".into());
     }
-    let spool_folder = PathBuf::from(&meeting_folder);
-    if spool_folder.join(".audio-spool").is_dir() {
-        return tokio::task::spawn_blocking(move || super::audio_spool::recover(&spool_folder))
-            .await
-            .map_err(|_| "Audio recovery task failed".to_string())?;
-    }
-    tokio::task::spawn_blocking(move || recover_legacy_checkpoints(&meeting_folder))
-        .await
-        .map_err(|_| "Audio recovery task failed".to_string())?
+    recover_interrupted_audio(meeting_folder).await
+}
+
+/// The interrupted-recordings command has verified folder ownership and
+/// serialized recovery with discard. Encoding only touches that folder.
+pub(super) async fn recover_interrupted_audio(
+    meeting_folder: String,
+) -> Result<AudioRecoveryStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        let folder = Path::new(&meeting_folder);
+        if super::recording_commands::active_recording_folder().protects(folder) {
+            return Err("Stop recording before recovering this recording's audio.".into());
+        }
+        if folder.join(".audio-spool").is_dir() {
+            super::audio_spool::recover(folder)
+        } else {
+            recover_legacy_checkpoints(&meeting_folder)
+        }
+    })
+    .await
+    .map_err(|_| "Audio recovery task failed".to_string())?
 }
 
 fn recover_legacy_checkpoints(meeting_folder: &str) -> Result<AudioRecoveryStatus, String> {

@@ -24,7 +24,7 @@ import { toast } from 'sonner';
 import { errorText } from '@/lib/errorText';
 
 interface AudioRecoveryStatus {
-  status: string; // "success" | "partial" | "failed" | "none"
+  status: 'success' | 'partial' | 'failed' | 'none' | 'deferred';
   chunk_count: number;
   estimated_duration_seconds: number;
   audio_file_path?: string;
@@ -295,6 +295,12 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         meetingTitle: metadata?.title ?? candidate.title,
         cached,
       });
+      if (recovered.audioRecoveryStatus.status === 'deferred') {
+        toast.info('Audio repair deferred', {
+          description: 'Try again when the current operation finishes. The saved meeting and recording files are kept.',
+        });
+        return { ...recovered, success: false, remainingCount: candidatesRef.current.length };
+      }
       if (!candidate.disk?.registeredMeetingId) await applyRecoverySummaryLanguage(recovered.meetingId);
       if (cached) await indexedDBService.markMeetingSaved(meetingId);
       setCandidates(previous => previous.filter(entry => entry.meetingId !== meetingId));

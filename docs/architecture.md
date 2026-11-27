@@ -256,6 +256,9 @@ before checking for recoverable content, so zero transcript rows do not block
 audio-only meetings. A single native recovery operation verifies the folder and
 its library ownership, computes the outcome, commits the meeting, then releases
 safe-to-remove originals. It continues through cleanup if the webview closes.
+New recovery saves can run alongside inference and capture on a different
+recording folder. Repairs to saved meetings use the inference job slot.
+A busy slot leaves the repair and its original files available for retry.
 Cached live rows still provide transcript recovery when available. The webview
 marks them saved only after the core returns success. A detached cache entry
 uses a durable meeting ID so a retry after a lost response returns the same meeting.

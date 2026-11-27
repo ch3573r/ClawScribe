@@ -4,8 +4,9 @@ use super::{
     snapshot_summary, verify_pending_audio_inputs, RecoveryCacheEntry, REGISTERED_BUDGET,
 };
 use crate::audio::{
-    incremental_saver::{recover_audio_in_folder, release_registered_capture, AudioRecoveryStatus},
-    inference,
+    incremental_saver::{
+        recover_interrupted_audio, release_registered_capture, AudioRecoveryStatus,
+    },
     outcome::RecordingOutcome,
     recording_commands, recording_mode, recording_preferences,
 };
@@ -61,9 +62,6 @@ pub(crate) async fn recover_interrupted_recording<R: Runtime>(
         let Some(folder) = folder else {
             return recover_detached(&pool, &meeting_title, cached.ok_or(NO_CONTENT)?).await;
         };
-        let job = inference::claim_job().map_err(|_| {
-            "Another operation is using the recorder. Try recovering again when it finishes."
-        })?;
         let roots = recording_preferences::recording_roots(&app).await;
         let rows = registered_rows(&pool).await?;
         let pending = pending_audio_ids(&pool).await?;
@@ -117,7 +115,6 @@ pub(crate) async fn recover_interrupted_recording<R: Runtime>(
         }
         if existing {
             let repaired = repair_saved_recording(&app, &pool, folder).await?;
-            drop(job);
             if repaired.wake_summary {
                 recording_commands::wake_saved_recording_summary(&app, repaired.meeting_id.clone());
             }
@@ -138,7 +135,6 @@ pub(crate) async fn recover_interrupted_recording<R: Runtime>(
             .ok_or("The recording folder is no longer available.")?;
         let (recovered, transcribes) =
             recover_new(&pool, folder, marker, meeting_title, cached).await?;
-        drop(job);
         if transcribes {
             recording_commands::wake_saved_recording_summary(&app, recovered.meeting_id.clone());
         }
@@ -283,7 +279,7 @@ async fn recover_new(
             "Could not verify the audio files. Keep the recording folder and retry.",
         )
     } else if from_cache || disk_has_audio {
-        recover_audio_in_folder(folder.clone())
+        recover_interrupted_audio(folder.clone())
             .await
             .unwrap_or_else(|error| audio_status("failed", &error))
     } else {
@@ -419,7 +415,11 @@ fn audio_status(status: &str, message: &str) -> AudioRecoveryStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::incremental_saver::recover_audio_in_folder;
+    use crate::audio::inference;
+    use crate::audio::recording_state::{AudioChunk, DeviceType};
     use serde_json::json;
+    use tauri::Manager;
 
     #[test]
     fn outcome_preserves_audio_only_partial_and_complete_handoff_cases() {
@@ -479,6 +479,273 @@ mod tests {
                 json!({"id":"synthetic-row", "text":"Synthetic words", "timestamp":"00:00"}),
             ],
         }
+    }
+
+    async fn test_app(root: &Path) -> tauri::App<tauri::test::MockRuntime> {
+        let db_manager = crate::database::manager::DatabaseManager::new_isolated(
+            root.join("library.sqlite").to_str().unwrap(),
+            root.join("absent.sqlite").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier =
+            format!("net.example.clawscribe.test.{}", uuid::Uuid::new_v4());
+        tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .manage(crate::state::AppState { db_manager })
+            .build(context)
+            .unwrap()
+    }
+
+    fn draft_folder(root: &Path, mode: &str) -> (String, PathBuf) {
+        let id = format!("meeting-{}", uuid::Uuid::new_v4());
+        let folder = root.join(&id);
+        std::fs::create_dir(&folder).unwrap();
+        meeting_files::register_core_folder(&folder);
+        let marker = json!({
+            "recording_id": id, "source": "recording", "status": "completed",
+            "created_at": "2026-01-01T12:00:00Z", "recording_mode": mode,
+            "version": "1.0", "transcript_file": "transcripts.json",
+        });
+        std::fs::write(folder.join("metadata.json"), marker.to_string()).unwrap();
+        std::fs::write(
+            folder.join("transcripts.json"),
+            json!({"segments": [{"id": "native-row", "text": "Synthetic words", "display_time": "00:01"}]}).to_string(),
+        ).unwrap();
+        (id, folder)
+    }
+
+    async fn recording_fixture(root: &Path, mode: &str, partial: bool) -> (String, PathBuf) {
+        let (id, folder) = draft_folder(root, mode);
+        let (sender, _, _) =
+            crate::audio::transcription::queue::recording_audio_queue(&folder).unwrap();
+        for index in 0..3 {
+            sender
+                .send(AudioChunk {
+                    data: vec![0.05; 4800],
+                    sample_rate: 48000,
+                    timestamp: index as f64 / 10.0,
+                    chunk_id: index,
+                    device_type: DeviceType::System,
+                })
+                .await
+                .unwrap();
+        }
+        drop(sender);
+        if partial {
+            std::fs::write(
+                folder.join(".audio-spool/00000000000000000001.chunk"),
+                b"torn capture",
+            )
+            .unwrap();
+        }
+        let checkpoints = folder.join(".checkpoints");
+        std::fs::create_dir(&checkpoints).unwrap();
+        crate::audio::encode::encode_single_audio(
+            bytemuck::cast_slice(&vec![0.05f32; 4800]),
+            48000,
+            1,
+            &checkpoints.join("audio_chunk_0.mp4"),
+        )
+        .unwrap();
+        (id, folder)
+    }
+
+    async fn run_recovery(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        folder: &Path,
+        cached: Option<CachedTranscript>,
+    ) -> Result<RecoveredMeeting, String> {
+        recover_interrupted_recording(
+            app.handle().clone(),
+            app.state(),
+            Some(folder.to_string_lossy().into_owned()),
+            "Recovered".into(),
+            cached,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn new_recovery_succeeds_while_an_inference_job_owns_the_slot() {
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let app = test_app(root.path()).await;
+        let (id, folder) = recording_fixture(root.path(), "audio_only", false).await;
+        let _job = inference::claim_job().unwrap();
+        let saved = run_recovery(&app, &folder, None).await.unwrap();
+        assert_eq!(saved.meeting_id, id);
+        assert_eq!(saved.audio_recovery_status.status, "success");
+        assert!(!inference::job_slot_idle());
+    }
+
+    #[tokio::test]
+    async fn another_recovery_succeeds_when_local_notes_take_the_slot_after_the_first_save() {
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let app = test_app(root.path()).await;
+        let (first_id, first) = recording_fixture(root.path(), "live", false).await;
+        let (second_id, second) = recording_fixture(root.path(), "audio_only", false).await;
+        assert_eq!(
+            run_recovery(&app, &first, None).await.unwrap().meeting_id,
+            first_id
+        );
+        // Take the same permit as the local automatic notes worker at its start,
+        // without depending on model files or inference timing.
+        let _notes = inference::claim_local_summary(None).await.unwrap();
+        assert_eq!(
+            run_recovery(&app, &second, None).await.unwrap().meeting_id,
+            second_id
+        );
+        assert!(!inference::job_slot_idle());
+    }
+
+    #[tokio::test]
+    async fn full_recovery_releases_originals_only_after_the_database_commits() {
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let app = test_app(root.path()).await;
+        let pool = app
+            .state::<crate::state::AppState>()
+            .db_manager
+            .pool()
+            .clone();
+        let (id, folder) = recording_fixture(root.path(), "audio_only", false).await;
+        sqlx::query("CREATE TRIGGER fail_recovery BEFORE INSERT ON meetings BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END")
+            .execute(&pool).await.unwrap();
+        assert!(run_recovery(&app, &folder, None).await.is_err());
+        assert!(folder.join("audio-recovered.mp4").is_file());
+        assert!(folder.join(".audio-spool").is_dir());
+        assert!(folder.join(".checkpoints").is_dir());
+        sqlx::query("DROP TRIGGER fail_recovery")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            run_recovery(&app, &folder, None).await.unwrap().meeting_id,
+            id
+        );
+        assert!(!folder.join(".audio-spool").exists());
+        assert!(!folder.join(".checkpoints").exists());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn partial_recovery_keeps_checkpoints_and_unreadable_originals() {
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let app = test_app(root.path()).await;
+        let (_, folder) = recording_fixture(root.path(), "audio_only", true).await;
+        let saved = run_recovery(&app, &folder, None).await.unwrap();
+        assert_eq!(saved.audio_recovery_status.status, "partial");
+        assert!(folder
+            .join(".audio-spool/00000000000000000001.chunk")
+            .is_file());
+        assert!(folder.join(".checkpoints/audio_chunk_0.mp4").is_file());
+    }
+
+    #[tokio::test]
+    async fn mismatched_cached_marker_rejects_the_command_before_recovery() {
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let app = test_app(root.path()).await;
+        let (_, folder) = recording_fixture(root.path(), "audio_only", false).await;
+        let error = run_recovery(&app, &folder, Some(cache(1)))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("folder changed"));
+        assert!(!folder.join("audio-recovered.mp4").exists());
+        assert!(folder.join(".audio-spool").is_dir());
+        let pool = app
+            .state::<crate::state::AppState>()
+            .db_manager
+            .pool()
+            .clone();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn cached_draft_with_missing_expected_audio_stays_unsaved() {
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let app = test_app(root.path()).await;
+        let (id, folder) = draft_folder(root.path(), "live");
+        let draft = CachedTranscript {
+            id,
+            had_audio: true,
+            ..cache(1)
+        };
+        let error = run_recovery(&app, &folder, Some(draft))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error, AUDIO_REQUIRED);
+        let pool = app
+            .state::<crate::state::AppState>()
+            .db_manager
+            .pool()
+            .clone();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn retry_after_commit_defers_busy_repair_and_reuses_the_saved_meeting() {
+        let _serial = inference::GLOBAL_JOB_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let app = test_app(root.path()).await;
+        let (id, folder) = recording_fixture(root.path(), "audio_only", false).await;
+        let pool = app
+            .state::<crate::state::AppState>()
+            .db_manager
+            .pool()
+            .clone();
+        let path = folder.to_string_lossy().into_owned();
+        let audio = recover_audio_in_folder(path.clone()).await.unwrap();
+        assert_eq!(audio.status, "success");
+        // Simulate the process stopping after the database commit, before the
+        // marker stamp, original release, or command reply.
+        let rows = crate::api::read_recording_snapshot(Some(&folder)).unwrap();
+        TranscriptsRepository::save_recording_handoff(
+            &pool,
+            &id,
+            "Recovered",
+            &rows,
+            path,
+            &RecordingOutcome::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        assert!(folder.join(".audio-spool").is_dir());
+        let job = inference::claim_job().unwrap();
+        let deferred = run_recovery(&app, &folder, None).await.unwrap();
+        assert_eq!(deferred.meeting_id, id);
+        assert_eq!(deferred.audio_recovery_status.status, "deferred");
+        assert!(folder.join(".audio-spool").is_dir());
+        drop(job);
+        let saved = run_recovery(&app, &folder, None).await.unwrap();
+        assert_eq!(saved.meeting_id, id);
+        assert!(!folder.join(".audio-spool").exists());
+        assert!(!folder.join(".checkpoints").exists());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]

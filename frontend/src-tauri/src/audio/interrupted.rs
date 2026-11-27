@@ -1116,7 +1116,7 @@ pub async fn keep_interrupted_recording<R: tauri::Runtime>(
 /// What repairing a saved recording achieved.
 struct RepairedRecording {
     meeting_id: String,
-    /// `success`, `partial`, `failed` or `none`, as audio recovery reports it.
+    /// An audio recovery status, or `deferred` while the repair job slot is busy.
     audio_status: String,
     audio_path: Option<String>,
     wake_summary: bool,
@@ -1255,6 +1255,16 @@ async fn repair_saved_recording<R: tauri::Runtime>(
     if !exists {
         return Err("This meeting is unavailable for recording repair.".into());
     }
+    // Only repair shares a saved folder with inference jobs. A busy slot
+    // leaves the existing meeting and its original files available for retry.
+    let Ok(_job) = super::inference::claim_job() else {
+        return Ok(RepairedRecording {
+            meeting_id,
+            audio_status: "deferred".into(),
+            audio_path: None,
+            wake_summary: false,
+        });
+    };
     if registered_path.is_some()
         && transcript_edits::import_file_stage(pool, &meeting_id)
             .await?
@@ -1394,8 +1404,12 @@ async fn remove_legacy_checkpoints(folder: &str, audio_path: Option<&str>) {
     let Some(audio_path) = audio_path.map(PathBuf::from) else {
         return;
     };
-    let checkpoints = Path::new(folder).join(".checkpoints");
+    let folder = PathBuf::from(folder);
     let _ = tokio::task::spawn_blocking(move || {
+        if super::recording_commands::active_recording_folder().protects(&folder) {
+            return;
+        }
+        let checkpoints = folder.join(".checkpoints");
         let Ok(metadata) = std::fs::symlink_metadata(&checkpoints) else {
             return;
         };
