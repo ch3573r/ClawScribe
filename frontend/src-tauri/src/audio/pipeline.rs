@@ -399,16 +399,61 @@ impl ProfessionalAudioMixer {
 
 type TimedPcm = (f64, Vec<f32>);
 
+#[derive(Default)]
+struct CaptureClockSlew {
+    error_samples: f64,
+    applied_samples: i64,
+    direction: i8,
+    since_edit: usize,
+}
+
+impl CaptureClockSlew {
+    fn observe(&mut self, timestamp_error: f64, packet_seconds: f64) {
+        let error = timestamp_error * f64::from(CAPTURE_SAMPLE_RATE) - self.applied_samples as f64;
+        let weight = packet_seconds / (0.5 + packet_seconds);
+        self.error_samples += weight * (error - self.error_samples);
+        // A 12 ms entry threshold and a 4 ms exit threshold keep jitter from
+        // triggering edits and keep the correction moving once drift is real.
+        if self.direction != 0 && self.error_samples * f64::from(self.direction) <= 192.0 {
+            self.direction = 0;
+        }
+        if self.direction == 0 && self.error_samples.abs() > 576.0 {
+            self.direction = if self.error_samples > 0.0 { 1 } else { -1 };
+        }
+    }
+
+    fn apply(&mut self, samples: &mut Vec<f32>) {
+        // At most one edit per 2,400 output samples, about 420 ppm. Interpolate
+        // the insertion or the splice to limit single-sample discontinuities.
+        const SLEW_INTERVAL: usize = 2_400;
+        self.since_edit = (self.since_edit + samples.len()).min(SLEW_INTERVAL);
+        if self.direction == 0 || self.since_edit < SLEW_INTERVAL || samples.len() < 3 {
+            return;
+        }
+        let middle = samples.len() / 2;
+        if self.direction > 0 {
+            let between = (samples[middle - 1] + samples[middle]) * 0.5;
+            samples.insert(middle, between);
+        } else {
+            samples[middle + 1] = (samples[middle] + samples[middle + 1]) * 0.5;
+            samples.remove(middle);
+        }
+        self.applied_samples += i64::from(self.direction);
+        self.since_edit = 0;
+    }
+}
+
 /// The first sample of a continuous source run anchors the resampler output.
-/// Later input timestamps can reveal a gap or clock drift, even if the number
-/// of samples emitted by the resampler differs from the size of the callback.
+/// Ordinary clock drift adjusts output gradually while the filter stays warm.
 struct CaptureResampler {
     engine: Option<SincFixedIn<f32>>,
     pending: Vec<f32>,
     start: Option<f64>,
     input_frames: usize,
+    resampled_frames: usize,
     output_frames: usize,
     revision: u64,
+    slew: CaptureClockSlew,
 }
 
 impl CaptureResampler {
@@ -418,8 +463,10 @@ impl CaptureResampler {
             pending: Vec::with_capacity(RESAMPLER_CHUNK_SIZE * 2),
             start: None,
             input_frames: 0,
+            resampled_frames: 0,
             output_frames: 0,
             revision: 0,
+            slew: CaptureClockSlew::default(),
         }
     }
 
@@ -430,7 +477,9 @@ impl CaptureResampler {
         self.pending.clear();
         self.start = None;
         self.input_frames = 0;
+        self.resampled_frames = 0;
         self.output_frames = 0;
+        self.slew = CaptureClockSlew::default();
     }
 
     fn process(
@@ -444,22 +493,26 @@ impl CaptureResampler {
         let mut tail = None;
         if let Some(start) = self.start {
             let expected = start + self.input_frames as f64 / f64::from(rate);
-            // Compare with the run's anchor rather than with the previous
-            // callback so small clock errors cannot accumulate indefinitely.
             let gap = missing_frames > 0 && revision == self.revision;
-            if gap || revision != self.revision || (expected - timestamp).abs() > 0.002 {
+            if gap || revision != self.revision {
                 tail = self.finish(rate);
+                let placed_end = start + self.output_frames as f64 / f64::from(CAPTURE_SAMPLE_RATE);
                 self.reset();
                 if gap {
-                    timestamp = timestamp.max(expected + missing_frames as f64 / f64::from(rate));
+                    timestamp = timestamp.max(placed_end + missing_frames as f64 / f64::from(rate));
+                } else {
+                    timestamp = timestamp.max(placed_end);
                 }
+            } else {
+                self.slew
+                    .observe(timestamp - expected, mono.len() as f64 / f64::from(rate));
             }
         }
 
         self.start.get_or_insert(timestamp);
         self.revision = revision;
         self.input_frames += mono.len();
-        let data = if let Some(engine) = &mut self.engine {
+        let mut data = if let Some(engine) = &mut self.engine {
             self.pending.extend(mono);
             let mut output = Vec::new();
             let mut processed = 0;
@@ -477,13 +530,15 @@ impl CaptureResampler {
         } else {
             super::audio_processing::resample_audio(&mono, rate, CAPTURE_SAMPLE_RATE)
         };
+        self.resampled_frames += data.len();
+        self.slew.apply(&mut data);
         [tail, self.place(data)]
     }
 
     fn finish(&mut self, rate: u32) -> Option<TimedPcm> {
         let engine = self.engine.as_mut()?;
         let expected = self.input_frames * CAPTURE_SAMPLE_RATE as usize / rate as usize;
-        let mut remaining = expected.saturating_sub(self.output_frames);
+        let mut remaining = expected.saturating_sub(self.resampled_frames);
         // At most one partial input block and the sinc filter's tail remain.
         let mut tail = Vec::new();
         let mut frame = [0.0; RESAMPLER_CHUNK_SIZE];
@@ -500,6 +555,7 @@ impl CaptureResampler {
             remaining -= count;
             frame.fill(0.0);
         }
+        self.resampled_frames += tail.len();
         self.place(tail)
     }
 
@@ -1900,16 +1956,61 @@ mod queue_failure_tests {
     }
 
     #[test]
-    fn source_clock_corrects_accumulated_drift_and_keeps_a_known_dropped_block() {
+    fn the_source_clock_keeps_a_known_dropped_block() {
         let mut capture = CaptureResampler::new(None);
-        let mut last = 0.0;
-        for tick in 0..=30 {
-            let [_, span] = capture.process(vec![0.1; 480], 48_000, tick as f64 * 0.0101, 0, 0);
-            last = span.unwrap().0;
+        capture.process(vec![0.1; 480], 48_000, 0.0, 0, 0);
+        let [_, span] = capture.process(vec![0.1; 480], 48_000, 0.01, 0, 48);
+        assert!((span.unwrap().0 - 0.011).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resampled_capture_slews_100_ppm_drift_without_resetting_or_losing_input() {
+        let rate = 8_000;
+        let params = SincInterpolationParameters {
+            sinc_len: 32,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 32,
+            window: WindowFunction::BlackmanHarris2,
+        };
+        let engine = SincFixedIn::<f32>::new(6.0, 2.0, params, RESAMPLER_CHUNK_SIZE, 1).unwrap();
+        let mut capture = CaptureResampler::new(Some(engine));
+        let mut output = 0;
+        let mut input = 0;
+        for tick in 0..2_400 {
+            let nominal = input as f64 / f64::from(rate);
+            let jitter = if tick % 3 == 1 {
+                0.003
+            } else if tick % 3 == 2 {
+                -0.003
+            } else {
+                0.0
+            };
+            let [tail, span] = capture.process(
+                vec![0.25; RESAMPLER_CHUNK_SIZE],
+                rate,
+                nominal * 1.0001 + jitter,
+                0,
+                0,
+            );
+            assert!(tail.is_none(), "clock correction reset the resampler");
+            let (start, audio) = span.unwrap();
+            assert_eq!((start * 48_000.0).round() as usize, output);
+            if tick > 0 {
+                assert!(audio.iter().all(|sample| *sample > 0.20));
+            }
+            output += audio.len();
+            input += RESAMPLER_CHUNK_SIZE;
         }
-        assert!((last - 0.303).abs() <= 0.002);
-        let [_, span] = capture.process(vec![0.1; 480], 48_000, last + 0.01, 0, 48);
-        assert!((span.unwrap().0 - last - 0.011).abs() < 1e-9);
+        let (start, tail) = capture.finish(rate).unwrap();
+        assert_eq!((start * 48_000.0).round() as usize, output);
+        output += tail.len();
+        assert_eq!(capture.input_frames, input);
+        assert_eq!(capture.resampled_frames, input * 6);
+        assert!(capture.slew.applied_samples > 0);
+        assert_eq!(output, input * 6 + capture.slew.applied_samples as usize);
+        let target = input as f64 / f64::from(rate) * 1.0001;
+        assert!((target - output as f64 / 48_000.0).abs() < 0.012);
     }
 
     #[tokio::test]

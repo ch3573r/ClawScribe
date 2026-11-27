@@ -62,6 +62,7 @@ struct CaptureInput<T> {
     samples: HeapProd<T>,
     status: Arc<CaptureHandoffStatus>,
     missing_frames: usize,
+    last_capture_end: Option<(u64, f64)>,
 }
 
 struct CaptureOutput<T> {
@@ -82,6 +83,7 @@ fn capture_handoff<T>(frames: usize, channels: usize) -> (CaptureInput<T>, Captu
             samples: sample_tx,
             status: status.clone(),
             missing_frames: 0,
+            last_capture_end: None,
         },
         CaptureOutput {
             ready: ready_rx,
@@ -105,6 +107,16 @@ impl<T: Copy> CaptureInput<T> {
         channels: usize,
     ) -> bool {
         let frames = samples.len() / channels;
+        // A source can disappear between callbacks, including normal WASAPI
+        // loopback silence. Only a substantial forward gap is a discontinuity.
+        if let Some((revision, last_end)) = self.last_capture_end {
+            let gap = timestamp - last_end;
+            if revision == resume_revision && gap > 0.150 {
+                self.missing_frames += (gap * f64::from(rate)).round() as usize;
+            }
+        }
+        let callback_end = timestamp + frames as f64 / f64::from(rate);
+        self.last_capture_end = Some((resume_revision, callback_end));
         let available = if self.ready.is_full() {
             0
         } else {
