@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  # The stage job looks up Native library tests runs for the build commit.
+  actions: read
 
 defaults:
   run:
