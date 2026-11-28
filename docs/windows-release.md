@@ -400,8 +400,13 @@ volume for large evaluation model caches when available.
 Stable builds publish release assets and advance the `latest` update channel.
 The workflow builds sidecars, verifies icons, runs frontend checks, creates both
 installers, and then runs the required native regression suites and the
-packaged-binary acceptance before staging release assets. A check-only run exercises those suites before packaging is
-attempted, so compile or behavioral failures can be resolved first.
+packaged-binary acceptance before staging release assets. When **Native library
+tests** already passed for the exact build commit on a `main` push, a
+`windows-gpu` build reuses that result instead of compiling the library tests a
+second time, and `BUILD-METRICS.json` links the reused run. To get that reuse,
+let the `main` run for the release commit finish before pushing the
+`release/**` branch; otherwise the release runs the suite itself. A
+check-only run exercises those suites before packaging is attempted, so compile or behavioral failures can be resolved first.
 
 **Stage Windows release candidate** runs on `release/**` pushes and can be run
 manually. It validates frontend code, uses the designated local Windows GPU build, and

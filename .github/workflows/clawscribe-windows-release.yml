@@ -99,6 +99,7 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: write # create/update GitHub Releases when publish=true
+      actions: read # find a passing Native library tests run for the build commit
 
     steps:
       - name: Require the designated local build machine
@@ -144,6 +145,66 @@ jobs:
           }
           $commit = (git rev-parse HEAD).Trim()
           "commit=$commit" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      # Native library tests runs the same release-profile suite through the
+      # same test script for every main push that touches native code. When it
+      # already passed for this exact commit with the same feature set, the
+      # release reuses that result instead of compiling the library a second
+      # time for its tests. Otherwise the release runs the suite itself.
+      - name: Find passing native library tests for the build commit
+        id: native_tests
+        if: ${{ !inputs['check-only'] }}
+        uses: actions/github-script@v7
+        env:
+          BUILD_COMMIT: ${{ steps.build_identity.outputs.commit }}
+          REQUESTED_FEATURE: ${{ inputs.feature }}
+        with:
+          script: |
+            const commit = process.env.BUILD_COMMIT;
+            const feature = process.env.REQUESTED_FEATURE;
+            const measuringMai = process.env.CLAWSCRIBE_MEASURE_MAI === 'true';
+            let runUrl = '';
+            try {
+              if (/^[0-9a-f]{40}$/.test(commit) && feature === 'windows-gpu' && !measuringMai) {
+                const { data } = await github.rest.actions.listWorkflowRuns({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: 'native-library-tests.yml',
+                  head_sha: commit,
+                  event: 'push',
+                  branch: 'main',
+                  status: 'success',
+                  per_page: 20,
+                });
+                for (const run of data.workflow_runs) {
+                  if (run.head_sha !== commit || run.conclusion !== 'success'
+                      || run.path !== '.github/workflows/native-library-tests.yml'
+                      || run.head_repository?.full_name !== `${context.repo.owner}/${context.repo.repo}`) continue;
+                  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: run.id,
+                    filter: 'latest',
+                    per_page: 100,
+                  });
+                  const testJob = jobs.find(job => job.name === 'Native library tests');
+                  const testStep = testJob?.steps?.find(step => step.name === 'Run the required native library test groups');
+                  if (testJob?.conclusion === 'success' && testStep?.conclusion === 'success') {
+                    runUrl = run.html_url;
+                    break;
+                  }
+                }
+              }
+            } catch (error) {
+              core.warning(`Could not look up Native library tests (${error.message}); the release runs the suite.`);
+              runUrl = '';
+            }
+            if (runUrl) {
+              core.info(`Native library tests passed for ${commit}: ${runUrl}`);
+            } else {
+              core.info(`No passing Native library tests run for ${commit} with ${feature}; the release runs the suite.`);
+            }
+            core.setOutput('passed_run', runUrl);
 
       - name: Require dual-source capture smoke before publishing
         if: ${{ inputs.publish }}
@@ -397,18 +458,6 @@ jobs:
           } else {
             pnpm exec tauri build --config $releaseConfig --no-bundle -- --locked
           }
-          # Packaging is mostly single-threaded compression, so compile the native
-          # test executables alongside it. The next step runs them; its cargo
-          # invocations then find the build up to date.
-          $nativeTestLog = Join-Path $env:RUNNER_TEMP "native-test-compile.log"
-          $nativeTestErr = Join-Path $env:RUNNER_TEMP "native-test-compile.err.log"
-          # One quoted string keeps an empty CPU feature list as an empty argument.
-          $nativeTestScript = (Resolve-Path -LiteralPath "scripts/test-windows-native.ps1").Path
-          $nativeTestArgs = "-NoProfile -File `"$nativeTestScript`" -CompileOnly -Features `"$features`" -ExecutableRecord `"$(Join-Path $env:RUNNER_TEMP "native-test-executable.txt")`""
-          $nativeTestCompile = Start-Process -FilePath "pwsh" -NoNewWindow -PassThru `
-            -RedirectStandardOutput $nativeTestLog -RedirectStandardError $nativeTestErr `
-            -ArgumentList $nativeTestArgs
-          $null = $nativeTestCompile.Handle
           if ($features) {
             pnpm exec tauri bundle --config $releaseConfig --features $features
           } else {
@@ -417,12 +466,9 @@ jobs:
           $buildElapsedSeconds = [Math]::Round(((Get-Date) - $buildStartedAt).TotalSeconds, 3)
           $buildElapsedSecondsText = $buildElapsedSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
           "build_elapsed_seconds=$buildElapsedSecondsText" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          $nativeTestCompile.WaitForExit()
-          Get-Content -LiteralPath $nativeTestLog, $nativeTestErr -ErrorAction SilentlyContinue
-          if ($nativeTestCompile.ExitCode -ne 0) { throw "Native test compilation failed." }
 
       - name: Run native summary and resource regression tests
-        if: ${{ !inputs['check-only'] }}
+        if: ${{ !inputs['check-only'] && steps.native_tests.outputs.passed_run == '' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -432,8 +478,7 @@ jobs:
           if ("${{ inputs.directml }}" -eq "true" -and "${{ inputs.feature }}" -notin @("windows-gpu", "directml")) { $featureList += "directml" }
           $featureArgs = @()
           if ($featureList.Count -gt 0) { $featureArgs = @("--features", ($featureList -join ",")) }
-          # The build step compiled these tests while packaging and recorded the executable.
-          .\frontend\scripts\test-windows-native.ps1 -Features ($featureList -join ",") -ExecutableRecord (Join-Path $env:RUNNER_TEMP "native-test-executable.txt")
+          .\frontend\scripts\test-windows-native.ps1 -Features ($featureList -join ",")
 
       # Unpacks both installers (nothing is installed), audits their VC++
       # dependencies, and runs the NSIS executable's self-test in two
@@ -562,6 +607,7 @@ jobs:
             sherpa_cache = "${{ steps.build_release.outputs.sherpa_cache }}"
             sherpa_elapsed_seconds = "${{ steps.build_release.outputs.sherpa_elapsed_seconds }}"
             build_elapsed_seconds = "${{ steps.build_release.outputs.build_elapsed_seconds }}"
+            native_tests_reused_from = "${{ steps.native_tests.outputs.passed_run }}"
           }
           $metrics | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $bundleRoot "BUILD-METRICS.json") -Encoding utf8
 
